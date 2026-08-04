@@ -1,0 +1,41 @@
+build/
+.cache/
+*.o
+*.a
+*.so
+*.dylib
+*.d
+*.out
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+.DS_Store
+*.swp
+*.swo
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+
+venv/
+
+# Real uploaded tenant documents (Knowledge Service storage) — user data,
+# not source.
+data/knowledge_documents/
+
+# Binary model weights — not source, and too large to version sensibly.
+# silero_vad.onnx and the kokoro cache are fetched on first use / via a
+# documented download step (see docs/setup.md) instead of being committed.
+models/
+
+# Personal Claude Code tool config (local permissions, scheduled-task
+# lock) — not project source.
+.claude/
+
+# Excluded from the first push at user request.
+samples/
+docs/cloud_deployment_architecture.md
+docs/transfer.md
+docs/warm_transfer_architecture.md

@@ -1,0 +1,358 @@
+syntax = "proto3";
+
+package voiceai.v1;
+
+option go_package = "github.com/voiceai/voiceai/gen/go/voiceai/v1";
+option java_package = "com.voiceai.v1";
+
+// ---------------------------------------------------------------------------
+// Shared enums / value objects
+// ---------------------------------------------------------------------------
+
+enum AudioCodec {
+  AUDIO_CODEC_UNSPECIFIED = 0;
+  AUDIO_CODEC_PCM_S16LE   = 1;  // 16-bit signed PCM, little-endian
+}
+
+// ---------------------------------------------------------------------------
+// ConversationService — single bidirectional stream per call-session
+// ---------------------------------------------------------------------------
+// Wire protocol:
+//   C→S  SessionOpenRequest      (first message, exactly once)
+//   C→S  AudioChunk*             (continuous inbound PCM while Recognizing)
+//   C→S  SpeechEndedNotification (once per utterance; triggers STT→LLM→TTS)
+//   C→S  CancelGeneration?       (optional, on barge-in)
+//   C→S  PlaybackFinished?       (after last TTS chunk is played out)
+//   S→C  ServiceReady        (exactly once; confirms session accepted)
+//   S→C  SttResult?          (transcript; drives Gateway FSM Recognizing→Thinking)
+//   S→C  TtsStarted?         (TTS beginning; drives Gateway FSM Thinking→Synthesizing)
+//   S→C  TtsChunk*           (TTS audio)
+//   S→C  CancelAck?          (optional, echoes barge-in cancel)
+//   Either side closes the stream to end the session.
+
+service ConversationService {
+  rpc Converse(stream GatewayMessage) returns (stream ServiceMessage);
+}
+
+// ---------------------------------------------------------------------------
+// C → S messages
+// ---------------------------------------------------------------------------
+
+message GatewayMessage {
+  oneof payload {
+    SessionOpenRequest      session_open       = 1;
+    AudioChunk              audio_chunk        = 2;
+    CancelGeneration        cancel_generation  = 3;
+    PlaybackFinished        playback_finished  = 4;
+    SpeechEndedNotification speech_ended       = 5;
+    TransferInitiated       transfer_initiated = 6;
+    TransferCompleted       transfer_completed = 7;
+    TransferFailed          transfer_failed    = 8;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// End-of-call signal (extends the wire protocol documented above)
+// ---------------------------------------------------------------------------
+//   S→C  EndCall?              (after the final TtsChunk of a turn; the agent
+//                                has decided the conversation is over)
+//
+// Sent once, after the last TtsChunk(is_final=true) of the turn in which the
+// agent's response ended the conversation.  The gateway waits for that TTS
+// audio to finish playing (PlaybackFinished, interrupted=false) before
+// tearing down the session, so the caller hears the full goodbye.  A
+// caller barge-in during that final playback cancels the pending end-call —
+// the caller talking means the conversation is not, in fact, over.
+
+// First message sent by the C++ gateway after connecting.
+// Carries per-session identity for routing and observability.
+message SessionOpenRequest {
+  // Semantic version of the wire protocol the client speaks.
+  // Server MUST reject unknown major versions.
+  string protocol_version = 1;   // e.g. "1.0"
+
+  // Immutable per-call identifiers (ObservabilityContext fields).
+  string session_id          = 2;
+  string tenant_id           = 3;
+  string trace_id            = 4;
+  string call_id             = 5;
+
+  // Telephony context (informational; may be empty in tests).
+  string caller_did          = 6;
+  string called_did          = 7;
+  string script_id           = 8;
+
+  // Audio format the gateway will send.
+  AudioCodec  codec          = 9;
+  uint32      sample_rate    = 10;  // Hz; must be 16000
+  uint32      channels       = 11;  // must be 1
+
+  // "inbound" | "outbound"; informational today, from the WS metadata frame.
+  string direction           = 12;
+}
+
+// Raw PCM inbound audio (microphone → gateway → service).
+message AudioChunk {
+  string   session_id    = 1;
+  string   trace_id      = 2;
+  uint64   sequence_num  = 3;
+  uint64   timestamp_us  = 4;  // wall-clock µs at capture
+  bytes    payload       = 5;  // raw L16 samples
+}
+
+// Gateway requests the service to discard any pending generation (barge-in).
+message CancelGeneration {
+  string session_id = 1;
+  string trace_id   = 2;
+}
+
+// Gateway notifies the service that the last TTS chunk has been played.
+// Signals the service that it may start the next turn (return to listening).
+message PlaybackFinished {
+  string session_id  = 1;
+  string trace_id    = 2;
+  bool   interrupted = 3;  // true when cancelled by barge-in
+}
+
+// Gateway notifies the service that the end of a speech utterance was detected.
+// The service should run STT on the accumulated audio buffer and begin the
+// STT → LLM → TTS pipeline.  Sent once per utterance after all AudioChunk
+// messages for that utterance have been delivered.
+message SpeechEndedNotification {
+  string session_id  = 1;
+  string trace_id    = 2;
+  uint32 duration_ms = 3;  // utterance duration in ms (from VAD)
+  float  energy_db   = 4;  // average energy of the utterance
+}
+
+// ---------------------------------------------------------------------------
+// Transfer lifecycle notifications (Phase 5B of AI-to-human transfer)
+// ---------------------------------------------------------------------------
+//   C→S  TransferInitiated?  (the gateway has issued uuid_transfer and is
+//                             now waiting for FreeSWITCH to confirm the
+//                             outcome — see EslClient::transfer()/
+//                             TransferCorrelator)
+//   C→S  TransferCompleted?  (confirmed: the destination answered and
+//                             bridged — a real CHANNEL_BRIDGE event, not
+//                             just uuid_transfer's "+OK")
+//   C→S  TransferFailed?     (confirmed or presumed: the channel hung up
+//                             before bridging, the transfer command itself
+//                             was never accepted, or CallFSM's own
+//                             TransferTimeout elapsed with no event ever
+//                             arriving)
+//
+// Sent by the gateway (see CallSession's on_transfer_requested/
+// on_transfer_completed FSM handlers); the Conversation Service only
+// reacts — driving its own ConversationFSM's TRANSFERRING state and
+// publishing observability events (see session.py). No LLM/prompt
+// change, no fallback speech, no workflow change — purely
+// gateway-to-service synchronization about what the telephony layer is
+// doing. At most one of TransferCompleted/TransferFailed follows a given
+// TransferInitiated, ever.
+
+// The gateway has begun executing a transfer for this session — the AI
+// session may be closed by the gateway at any point after this arrives
+// (see CallSession's Phase 5A on_transfer_completed handler), so this is
+// the Conversation Service's one chance to react before that happens.
+message TransferInitiated {
+  string session_id    = 1;
+  string transfer_type = 2;  // "warm" | "cold" | "none" — see TransferType (directives.py)
+  string destination   = 3;
+  string reason        = 4;
+  string transfer_id   = 5;  // observability-only correlation id (see TransferRequest)
+}
+
+// The transfer succeeded — the destination answered and bridged.
+message TransferCompleted {
+  string session_id  = 1;
+  string destination = 2;
+  string transfer_id = 3;  // observability-only correlation id (see TransferRequest)
+}
+
+// The transfer failed — hung up before bridging, the command was never
+// accepted, or it timed out with no confirming event.
+message TransferFailed {
+  string session_id  = 1;
+  string destination = 2;
+  string reason      = 3;  // e.g. "hangup_before_bridge", "esl_unreachable", "transfer_timeout"
+  string transfer_id = 4;  // observability-only correlation id (see TransferRequest)
+}
+
+// ---------------------------------------------------------------------------
+// S → C messages
+// ---------------------------------------------------------------------------
+
+message ServiceMessage {
+  oneof payload {
+    ServiceReady        service_ready        = 1;
+    TtsChunk            tts_chunk            = 2;
+    CancelAck           cancel_ack           = 3;
+    ServiceError        error                = 4;
+    SttResult           stt_result           = 5;
+    TtsStarted          tts_started          = 6;
+    EndCall             end_call             = 7;
+    TransferRequest     transfer_request     = 8;
+    ConversationFinalized conversation_finalized = 9;
+  }
+}
+
+// Sent once after SessionOpenRequest is accepted.
+// Signals that the session is live and audio may start flowing.
+message ServiceReady {
+  string session_id        = 1;
+  string protocol_version  = 2;   // server's protocol version
+}
+
+// STT transcript ready — service has finished recognising speech.
+// Drives Gateway FSM: Recognizing → Thinking.
+message SttResult {
+  string session_id  = 1;
+  string trace_id    = 2;
+  string text        = 3;   // recognised transcript
+  float  confidence  = 4;   // 0.0–1.0
+  bool   is_final    = 5;   // always true today; partial results reserved
+}
+
+// TTS audio is about to start — service has finished LLM inference.
+// Drives Gateway FSM: Thinking → Synthesizing.
+message TtsStarted {
+  string session_id = 1;
+  string trace_id   = 2;
+}
+
+// One chunk of synthesised speech (TTS outbound audio).
+message TtsChunk {
+  string     session_id   = 1;
+  string     trace_id     = 2;
+  uint64     sequence_num = 3;
+  AudioCodec codec        = 4;
+  uint32     sample_rate  = 5;
+  bytes      payload      = 6;  // raw L16 samples
+  bool       is_final     = 7;  // last chunk in this utterance
+}
+
+// Acknowledges a CancelGeneration — sent after generation is aborted.
+message CancelAck {
+  string session_id = 1;
+  string trace_id   = 2;
+}
+
+// Non-fatal or fatal error from the service.
+message ServiceError {
+  string session_id = 1;
+  string code       = 2;  // machine-readable, e.g. "STT_TIMEOUT"
+  string message    = 3;
+  bool   fatal      = 4;  // true → gateway should close the session
+}
+
+// The agent has decided the conversation is over.  Sent after the final
+// TtsChunk of the turn; the gateway ends the session once that audio has
+// finished playing (see wire-protocol comment above GatewayMessage).
+message EndCall {
+  string session_id      = 1;
+  string reason          = 2;  // e.g. "agent_ended_call"
+  // Grace period (ms) after playback finishes during which the gateway
+  // watches for the caller speaking up before actually hanging up (a
+  // caller barge-in cancels the pending hangup entirely, independent of
+  // this value).  0 = gateway uses its own configured default.
+  uint32 grace_period_ms = 3;
+}
+
+// The agent (or an escalation-threshold breach) has requested handing the
+// call to a human.
+//
+// ORDERING: the gateway executes the transfer (uuid_transfer over ESL)
+// the moment it receives this — there is no gateway-side "wait for
+// playback to drain" hold like EndCall's. The service therefore holds
+// this message until the acknowledgment turn's PlaybackFinished arrives
+// uninterrupted (see servicer.py), so the caller hears the spoken
+// "connecting you now" in full before the channel leaves the AI bridge.
+// A barge-in during that playback drops the pending transfer (the LLM
+// re-emits the directive if the caller still wants a human).
+//
+// On receipt the gateway moves CallFSM into Transferring, notifies the
+// service (TransferInitiated), issues uuid_transfer, and correlates
+// CHANNEL_BRIDGE/CHANNEL_HANGUP for the outcome
+// (TransferCompleted/TransferFailed).
+message TransferRequest {
+  string session_id      = 1;
+  string transfer_type   = 2;  // "warm" | "cold" | "none" — see TransferType (services/conversation/directives.py)
+  string destination     = 3;  // queue id or direct destination (opaque to the gateway today)
+  string reason          = 4;
+  // Observability-only correlation id, one fresh UUID per transfer attempt
+  // (generated in pipeline.py). Echoed back verbatim on TransferInitiated/
+  // Completed/Failed so both sides' logs join on it. Never affects protocol
+  // behavior; empty string from an older peer is valid.
+  string transfer_id     = 5;
+  // What caller ID the human agent sees on a warm transfer's agent leg —
+  // already fully resolved by the Conversation Service (agent.caller_id_
+  // policy/platform_did/custom_caller_id, see transfer_engine.py); the
+  // gateway never sees the policy, only this final value. Empty string
+  // from an older peer, or for cold transfer (no equivalent — uuid_
+  // transfer never originates a new leg), means "use the caller's own
+  // ANI" — the gateway's pre-existing behavior.
+  string caller_id       = 6;
+  // What the caller experiences while a warm transfer's agent leg is
+  // ringing: "announcement_moh" (default — transfer_announcement TTS,
+  // then FreeSWITCH hold music) or "announcement_silence" (announcement,
+  // then silence, no uuid_hold). Unlike caller_id above, this is NOT
+  // resolved by the Conversation Service — it's a telephony-execution
+  // detail, so the raw config value rides this field unresolved and
+  // WarmTransferCoordinator itself decides what to do with it. Empty
+  // string from an older peer, or an unrecognized value, means
+  // "announcement_moh" (the pre-existing behavior). No equivalent for
+  // cold transfer (the caller's own leg is redirected immediately — there
+  // is no waiting period to shape).
+  string waiting_experience = 7;
+}
+
+// Phase 5D of AI-to-human transfer — graceful session finalization.
+// Sent once, after a successful transfer (TransferCompleted), when the
+// Conversation Service has finished all post-call cleanup (see
+// session_finalizer.py: stopping the LLM/tool runtime, flushing memory,
+// generating a summary, persisting it, emitting final metrics). The
+// gateway waits for this before closing the gRPC stream and proceeding
+// with its own teardown (CallSession/MediaSession/AudioWorker release —
+// see CallFSM's Finalizing state) — it does NOT wait for it on a failed
+// transfer, which recovers on the Conversation Service's own side instead
+// (see TransferFailed) and never reaches this message.
+//
+// Deliberately not named "SessionFinalized": "session" means something
+// different in the gateway (a telephony/media session) than here (the
+// Conversation Service's own per-call state) — this message only means
+// "the Conversation Service's AI/business cleanup is done," not "the
+// gateway's resources are released" (that's the gateway's own internal
+// concern once it receives this).
+// Only TRANSFER_SUCCESS is emitted by anything built so far — the other
+// values are declared for schema completeness/forward-compatibility (the
+// review that requested this enum named them explicitly) but have no
+// producing code path yet: CALL_ENDED/AGENT_DISCONNECTED/SYSTEM_SHUTDOWN
+// would need a normal-hangup finalization flow this project hasn't built,
+// and TRANSFER_TIMEOUT/TRANSFER_FAILED describe outcomes that currently
+// never reach ConversationFinalized at all (a failed transfer recovers on
+// the Conversation Service's own side — see TransferFailed — and a
+// FinalizingTimeout on the gateway's side proceeds without ever getting an
+// acknowledgement to send in the first place).
+enum FinalizationReason {
+  FINALIZATION_REASON_UNSPECIFIED = 0;
+  TRANSFER_SUCCESS   = 1;
+  CALL_ENDED         = 2;
+  TRANSFER_TIMEOUT   = 3;
+  TRANSFER_FAILED    = 4;
+  AGENT_DISCONNECTED = 5;
+  SYSTEM_SHUTDOWN    = 6;
+}
+
+message ConversationFinalized {
+  string             session_id         = 1;
+  FinalizationReason reason             = 2;
+  // Whether SessionFinalizer's summary step actually produced one — false
+  // when the LLM call timed out or there was no history/LLM to summarize
+  // (see session_finalizer.py's SummaryStep). A false here with
+  // transcript_written=true means a fallback placeholder was persisted.
+  bool               summary_generated  = 3;
+  // Whether the summary (real or fallback) was actually written to the
+  // transcript store — false when no TranscriptBuilder is configured, or
+  // the write itself failed (logged, not fatal — see PersistSummaryStep).
+  bool               transcript_written = 4;
+}

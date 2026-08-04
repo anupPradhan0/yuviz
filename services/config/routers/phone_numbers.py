@@ -1,0 +1,94 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from .. import agents as agents_service
+from .. import carriers as carriers_service
+from .. import phone_numbers as phone_numbers_service
+from .. import tenants as tenants_service
+from ..auth import CurrentUser
+from ..deps import get_current_user, get_or_404, require_role, validate_id_exists
+from ..schemas import PhoneNumberCreate, PhoneNumberUpdate
+
+tenant_scoped_router = APIRouter(prefix="/tenants/{tenant_id}/phone-numbers", tags=["phone_numbers"])
+router = APIRouter(prefix="/phone-numbers", tags=["phone_numbers"])
+
+
+async def _resolve_tenant_id(tenant_id: str) -> None:
+    """Same shape as provider_configs router's _resolve_tenant_id — a clean
+    400/404 instead of an INSERT's FK violation reaching the client as a
+    raw 500."""
+    await validate_id_exists(tenant_id, tenants_service.get_tenant_by_id, "tenant")
+
+
+async def _resolve_agent_id(agent_id: str | None) -> None:
+    await validate_id_exists(agent_id, agents_service.get_agent_by_id, "agent")
+
+
+async def _resolve_carrier_id(carrier_id: str | None) -> None:
+    await validate_id_exists(carrier_id, carriers_service.get_carrier_by_id, "carrier")
+
+
+@tenant_scoped_router.get("")
+async def list_phone_numbers(tenant_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    return await phone_numbers_service.list_phone_numbers(tenant_id)
+
+
+@tenant_scoped_router.post("", status_code=201)
+async def create_phone_number(
+    tenant_id: str,
+    body: PhoneNumberCreate,
+    current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
+):
+    await _resolve_tenant_id(tenant_id)
+    await _resolve_agent_id(body.agent_id)
+    await _resolve_agent_id(body.fallback_agent_id)
+    await _resolve_carrier_id(body.carrier_id)
+    return await phone_numbers_service.create_phone_number(
+        tenant_id=tenant_id,
+        did=body.did,
+        agent_id=body.agent_id,
+        fallback_agent_id=body.fallback_agent_id,
+        carrier_id=body.carrier_id,
+        region=body.region,
+        status=body.status,
+        user_id=current_user.id,
+        user_email=current_user.email,
+    )
+
+
+@router.get("/{phone_number_id}")
+async def get_phone_number(phone_number_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    return await get_or_404(
+        phone_numbers_service.get_phone_number(phone_number_id),
+        f"phone_number {phone_number_id!r} not found",
+    )
+
+
+@router.patch("/{phone_number_id}")
+async def update_phone_number(
+    phone_number_id: str,
+    body: PhoneNumberUpdate,
+    current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
+):
+    fields = body.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=400, detail="request body has no fields to update")
+    if "agent_id" in fields:
+        await _resolve_agent_id(fields["agent_id"])
+    if "fallback_agent_id" in fields:
+        await _resolve_agent_id(fields["fallback_agent_id"])
+    if "carrier_id" in fields:
+        await _resolve_carrier_id(fields["carrier_id"])
+    return await phone_numbers_service.update_phone_number(
+        phone_number_id, user_id=current_user.id, user_email=current_user.email, **fields,
+    )
+
+
+@router.delete("/{phone_number_id}", status_code=204)
+async def delete_phone_number(
+    phone_number_id: str, current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
+):
+    await phone_numbers_service.soft_delete_phone_number(
+        phone_number_id, user_id=current_user.id, user_email=current_user.email,
+    )

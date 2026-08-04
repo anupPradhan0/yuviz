@@ -1,0 +1,91 @@
+"""
+Core Tool Execution Framework types — see the architecture design (Tool
+Execution Framework doc, 2026-07-22) for the full reasoning behind each of
+these shapes. Deliberately no dependency on anything in providers/ or
+pipeline.py: this module is the seam every other tools/ module and every
+executor imports, and it must stay importable on its own.
+
+ToolStatus is intentionally small (7 values) and shared by every tool,
+present and future — see the doc's §07/§12 reasoning for why "unavailable"
+is SUCCESS and "missing required field" reuses INVALID_ARGUMENT rather than
+each new tool inventing its own status vocabulary.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+
+class ToolStatus(str, Enum):
+    SUCCESS          = "success"
+    FAILED           = "failed"
+    TIMEOUT          = "timeout"
+    CANCELLED        = "cancelled"
+    UNAVAILABLE      = "unavailable"        # circuit breaker open — provider never even dialed
+    INVALID_ARGUMENT = "invalid_argument"   # schema- or business-rule-level; see missing_fields
+    RATE_LIMITED     = "rate_limited"
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    status:  ToolStatus
+    payload: dict[str, Any] = field(default_factory=dict)
+    error:   str | None = None
+
+
+@dataclass(frozen=True)
+class ToolDefinition:
+    """What the LLM is allowed to know about a tool — schema only, never an
+    executor reference (see ExecutorRegistry, kept deliberately separate)."""
+    name:              str
+    description:       str
+    parameters_schema: dict[str, Any]
+    category:          str = ""
+
+    def to_generic_schema(self) -> dict[str, Any]:
+        """Vendor-neutral {name, description, parameters} shape — every
+        IToolAwareLLM implementation wraps this into its own wire format
+        (OpenAI/Ollama: {"type":"function","function": this}; Gemini: this
+        goes straight into a functionDeclarations entry), the same way
+        LLMAdapter/each provider already bridges other vendor-specific
+        shape differences rather than pushing them onto callers."""
+        return {"name": self.name, "description": self.description, "parameters": self.parameters_schema}
+
+
+@dataclass(frozen=True)
+class ToolExecutionContext:
+    """Everything an executor needs without reaching back into
+    ConversationSession/pipeline state — an executor is a pure function of
+    (request, context)."""
+    tenant_id:                    str
+    agent_id:                     str
+    call_id:                      str
+    session_id:                   str
+    turn_id:                      str
+    tool_iteration:                int
+    deadline:                     float  # time.monotonic() deadline for this call
+    request_id:                   str
+    # The caller's real ANI (SIP caller ID), when this session has one — a
+    # webcall/browser test session has none (empty string). Booking uses
+    # this automatically as the attendee's phone number when present;
+    # cancel/reschedule deliberately never trust it (see
+    # cancel_appointment_executor.py's module docstring) — a caller phoning
+    # in to cancel may not be calling from the same number they booked
+    # with, so those always ask the caller to state a phone number instead.
+    caller_number:                 str = ""
+    conversation_history_snapshot: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ToolExecutionRequest:
+    tool_call_id:     str
+    tool_name:        str
+    arguments:        dict[str, Any]
+    context:          ToolExecutionContext
+    idempotency_key:  str = ""
+
+    def __post_init__(self) -> None:
+        if not self.idempotency_key:
+            object.__setattr__(self, "idempotency_key", self.tool_call_id)

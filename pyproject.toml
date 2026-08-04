@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "voiceai-services"
+version = "0.1.0"
+# Matches the actual tested venv (3.11.15) — was ">=3.12" here despite
+# nothing in this repo having ever run on 3.12, found live 2026-08-04 while
+# auditing what a fresh fork would actually need to get running.
+requires-python = ">=3.11"
+# This list is minimal packaging metadata (direct top-level imports), not a
+# complete runtime install — faster-whisper, onnxruntime, kokoro, httpx,
+# websockets, and everything else actually needed to run the services live
+# in requirements.txt instead, pinned to exact versions verified against a
+# real fresh install (see requirements.txt's own note).
+dependencies = [
+    "grpcio>=1.60",
+    "grpcio-tools>=1.60",
+    "protobuf>=5.0",
+    "asyncpg>=0.29",
+    "redis>=5.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Config Service tests share one process-wide asyncpg pool + Redis client
+# (matching production code) across test functions — they need a shared
+# event loop, not a fresh one per test, or the pool/client become unusable
+# after the first test's loop closes.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["services", "libs"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

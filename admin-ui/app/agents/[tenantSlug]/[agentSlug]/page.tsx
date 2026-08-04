@@ -1,0 +1,676 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { Agent, AgentStatus, AgentUpdate, ApiError, deleteAgent, getAgent, listProviders, ProviderConfig, updateAgent, updateProvider } from "@/lib/api";
+import { KnowledgeBasePanel } from "@/components/KnowledgeBasePanel";
+import { ToolsPanel } from "@/components/ToolsPanel";
+import { SipPanel } from "@/components/SipPanel";
+import { TestAgentPanel } from "@/components/TestAgentPanel";
+import { VoicePicker } from "@/components/VoicePicker";
+import { LANGUAGES, OTHER } from "@/lib/engineCatalog";
+
+type Tab = "overview" | "behaviour" | "escalation" | "sip" | "tools" | "knowledge-base";
+
+// Structured system-prompt editor — still writes to the single
+// agent.system_prompt TEXT field (no schema change), just gives Behaviour
+// a labeled-section editing view matching the Personality/Environment/Tone
+// composition pattern, parsed back out of the same three headers on load
+// so switching between Freeform and Structured round-trips losslessly.
+interface PromptSections {
+  personality: string;
+  environment: string;
+  tone: string;
+}
+
+function parsePromptSections(text: string): PromptSections | null {
+  const re = /^#\s*personality\s*\n([\s\S]*?)\n#\s*environment\s*\n([\s\S]*?)\n#\s*tone\s*\n([\s\S]*)$/i;
+  const m = text.trim().match(re);
+  if (!m) return null;
+  return { personality: m[1].trim(), environment: m[2].trim(), tone: m[3].trim() };
+}
+
+function composePromptSections(s: PromptSections): string {
+  return `# Personality\n${s.personality}\n\n# Environment\n${s.environment}\n\n# Tone\n${s.tone}`;
+}
+
+export default function AgentDetailPage() {
+  const params = useParams<{ tenantSlug: string; agentSlug: string }>();
+  const router = useRouter();
+  const { tenantSlug, agentSlug } = params;
+
+  const [agent, setAgent] = useState<Agent | null>(null);
+  const [providers, setProviders] = useState<ProviderConfig[]>([]);
+  const [tab, setTab] = useState<Tab>("overview");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [testingAgent, setTestingAgent] = useState(false);
+
+  const [form, setForm] = useState<AgentUpdate>({});
+  const [languageChoice, setLanguageChoice] = useState<string>("");
+  const [customLanguage, setCustomLanguage] = useState("");
+  const [promptMode, setPromptMode] = useState<"freeform" | "structured">("freeform");
+  const [promptSections, setPromptSections] = useState<PromptSections>({ personality: "", environment: "", tone: "" });
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLoading(true);
+    getAgent(tenantSlug, agentSlug)
+      .then(async (a) => {
+        setAgent(a);
+        setForm({
+          name: a.name,
+          greeting: a.greeting,
+          system_prompt: a.system_prompt,
+          goodbye_grace_ms: a.goodbye_grace_ms,
+          language: a.language,
+          stt_config_id: a.stt_config_id,
+          llm_config_id: a.llm_config_id,
+          tts_config_id: a.tts_config_id,
+          transfer_type: a.transfer_type,
+          transfer_destination: a.transfer_destination,
+          queue_id: a.queue_id,
+          escalation_threshold: a.escalation_threshold,
+          caller_id_policy: a.caller_id_policy,
+          platform_did: a.platform_did,
+          custom_caller_id: a.custom_caller_id,
+          transfer_waiting_experience: a.transfer_waiting_experience,
+          end_call_prompt: a.end_call_prompt,
+          transfer_prompt: a.transfer_prompt,
+          farewell_message: a.farewell_message,
+          transfer_announcement: a.transfer_announcement,
+          status: a.status,
+        });
+        if (a.language && LANGUAGES.some((l) => l.value === a.language)) {
+          setLanguageChoice(a.language);
+        } else if (a.language) {
+          setLanguageChoice(OTHER);
+          setCustomLanguage(a.language);
+        } else {
+          setLanguageChoice(""); // derive from STT/TTS provider — the pre-this-field behavior
+        }
+        const parsedSections = parsePromptSections(a.system_prompt || "");
+        if (parsedSections) {
+          setPromptMode("structured");
+          setPromptSections(parsedSections);
+        } else {
+          setPromptMode("freeform");
+        }
+        const provs = await listProviders(a.tenant_id);
+        setProviders(provs);
+      })
+      .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)))
+      .finally(() => setLoading(false));
+  }, [tenantSlug, agentSlug]);
+
+  const switchToStructured = () => {
+    const parsed = parsePromptSections(form.system_prompt || "");
+    const sections = parsed || { personality: form.system_prompt || "", environment: "", tone: "" };
+    setPromptSections(sections);
+    setForm({ ...form, system_prompt: composePromptSections(sections) });
+    setPromptMode("structured");
+  };
+
+  const updatePromptSection = (key: keyof PromptSections, value: string) => {
+    const next = { ...promptSections, [key]: value };
+    setPromptSections(next);
+    setForm({ ...form, system_prompt: composePromptSections(next) });
+  };
+
+  const handleSave = async () => {
+    if (!agent) return;
+    setSaving(true);
+    setSaveError(null);
+    setSaved(false);
+    try {
+      const language = languageChoice === "" ? null : languageChoice === OTHER ? customLanguage : languageChoice;
+      const updated = await updateAgent(tenantSlug, agent.id, { ...form, language });
+      setAgent(updated);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      setSaveError(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!agent) return;
+    if (!window.confirm(`Delete agent "${agent.name}"? Any DIDs still pointing at it will fall back to their fallback agent, or default.`)) return;
+    setDeleting(true);
+    try {
+      await deleteAgent(tenantSlug, agent.id);
+      router.push("/agents");
+    } catch (e) {
+      setSaveError(e instanceof ApiError ? e.detail : String(e));
+      setDeleting(false);
+    }
+  };
+
+  if (loading) return <div className="empty-state">Loading…</div>;
+  if (error) return <div className="error-banner">{error}</div>;
+  if (!agent) return null;
+
+  const byRole = (role: string) => providers.filter((p) => p.role === role);
+
+  return (
+    <>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <button className="btn btn-ghost btn-sm" onClick={() => router.push("/agents")}>
+          ← Back to Agents
+        </button>
+        <button className="btn btn-primary btn-sm" onClick={() => setTestingAgent(true)}>
+          🎙️ Test Agent
+        </button>
+      </div>
+
+      <TestAgentPanel
+        open={testingAgent}
+        onClose={() => setTestingAgent(false)}
+        tenantSlug={tenantSlug}
+        agentSlug={agentSlug}
+      />
+
+      <div className="tabs">
+        <button className={`tab${tab === "overview" ? " active" : ""}`} onClick={() => setTab("overview")}>
+          Overview
+        </button>
+        <button className={`tab${tab === "behaviour" ? " active" : ""}`} onClick={() => setTab("behaviour")}>
+          Behaviour
+        </button>
+        <button className={`tab${tab === "escalation" ? " active" : ""}`} onClick={() => setTab("escalation")}>
+          Escalation
+        </button>
+        <button className={`tab${tab === "sip" ? " active" : ""}`} onClick={() => setTab("sip")}>
+          SIP
+        </button>
+        <button className={`tab${tab === "tools" ? " active" : ""}`} onClick={() => setTab("tools")}>
+          Tools
+        </button>
+        <button className={`tab${tab === "knowledge-base" ? " active" : ""}`} onClick={() => setTab("knowledge-base")}>
+          Knowledge Base
+        </button>
+      </div>
+
+      {saveError && <div className="error-banner">{saveError}</div>}
+
+      {tab === "overview" && (
+        <div className="cols">
+          <div className="col-main">
+            <div className="card">
+              <div className="card-hdr">
+                <div className="card-title">Identity</div>
+                <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                  <span className="ver-badge">v{agent.config_version}</span>
+                  <span className={`badge ${agent.status === "active" ? "green" : "gray"}`}>{agent.status}</span>
+                </div>
+              </div>
+              <div className="card-body">
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">
+                      Display Name <span className="required">*</span>
+                    </label>
+                    <input className="form-input" value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">
+                      Goodbye Grace <span className="hint">ms</span>
+                    </label>
+                    <input
+                      className="form-input"
+                      style={{ fontFamily: "var(--mono)" }}
+                      value={form.goodbye_grace_ms ?? ""}
+                      onChange={(e) => setForm({ ...form, goodbye_grace_ms: Number(e.target.value) })}
+                    />
+                  </div>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">
+                    Status <span className="hint">inactive agents keep their config but stop resolving on calls</span>
+                  </label>
+                  <select
+                    className={`form-select status-select ${form.status || "active"}`}
+                    value={form.status || "active"}
+                    onChange={(e) => setForm({ ...form, status: e.target.value as AgentStatus })}
+                  >
+                    <option value="active">active</option>
+                    <option value="inactive">inactive</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">
+                    Language <span className="hint">overrides the STT/TTS provider&apos;s own language when set</span>
+                  </label>
+                  <select
+                    className="form-select"
+                    value={languageChoice}
+                    onChange={(e) => setLanguageChoice(e.target.value)}
+                  >
+                    <option value="">— derive from provider —</option>
+                    {LANGUAGES.map((l) => (
+                      <option key={l.value} value={l.value}>
+                        {l.label}
+                      </option>
+                    ))}
+                    <option value={OTHER}>Other (custom)…</option>
+                  </select>
+                  {languageChoice === OTHER && (
+                    <input
+                      className="form-input"
+                      style={{ marginTop: 6, fontFamily: "var(--mono)" }}
+                      value={customLanguage}
+                      onChange={(e) => setCustomLanguage(e.target.value)}
+                      placeholder="e.g. nl-BE"
+                    />
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="col-side">
+            <div className="card">
+              <div className="card-body" style={{ fontSize: ".75rem", color: "var(--text-3)" }}>
+                <div>
+                  Account: <b style={{ color: "var(--text)" }}>{tenantSlug}</b>
+                </div>
+                <div style={{ marginTop: 6 }}>
+                  Slug: <span className="mono">{agent.slug}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab === "behaviour" && (
+        <div className="cols">
+          <div className="col-main">
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-hdr">
+                <div className="card-title">Conversation Identity</div>
+              </div>
+              <div className="card-body">
+                <div className="form-group">
+                  <label className="form-label">
+                    Greeting <span className="required">*</span>
+                  </label>
+                  <textarea
+                    className="form-textarea"
+                    style={{ minHeight: 60 }}
+                    value={form.greeting || ""}
+                    onChange={(e) => setForm({ ...form, greeting: e.target.value })}
+                  />
+                </div>
+                <div className="form-group">
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <label className="form-label" style={{ marginBottom: 0 }}>
+                      System Prompt <span className="required">*</span>
+                    </label>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      <button
+                        type="button"
+                        className={`btn btn-sm ${promptMode === "freeform" ? "btn-primary" : "btn-ghost"}`}
+                        onClick={() => setPromptMode("freeform")}
+                      >
+                        Freeform
+                      </button>
+                      <button
+                        type="button"
+                        className={`btn btn-sm ${promptMode === "structured" ? "btn-primary" : "btn-ghost"}`}
+                        onClick={switchToStructured}
+                      >
+                        Structured
+                      </button>
+                    </div>
+                  </div>
+                  {promptMode === "freeform" ? (
+                    <textarea
+                      className="form-textarea"
+                      style={{ minHeight: 110, marginTop: 6 }}
+                      value={form.system_prompt || ""}
+                      onChange={(e) => setForm({ ...form, system_prompt: e.target.value })}
+                    />
+                  ) : (
+                    <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 10 }}>
+                      <div>
+                        <label className="form-label">
+                          Personality <span className="hint">who the agent is</span>
+                        </label>
+                        <textarea
+                          className="form-textarea"
+                          style={{ minHeight: 60 }}
+                          value={promptSections.personality}
+                          onChange={(e) => updatePromptSection("personality", e.target.value)}
+                          placeholder="You are Alex, a friendly, efficient, and highly organized personal assistant…"
+                        />
+                      </div>
+                      <div>
+                        <label className="form-label">
+                          Environment <span className="hint">the situation the agent is operating in</span>
+                        </label>
+                        <textarea
+                          className="form-textarea"
+                          style={{ minHeight: 60 }}
+                          value={promptSections.environment}
+                          onChange={(e) => updatePromptSection("environment", e.target.value)}
+                          placeholder="You are interacting with a caller over a phone call…"
+                        />
+                      </div>
+                      <div>
+                        <label className="form-label">
+                          Tone <span className="hint">how the agent should sound</span>
+                        </label>
+                        <textarea
+                          className="form-textarea"
+                          style={{ minHeight: 60 }}
+                          value={promptSections.tone}
+                          onChange={(e) => updatePromptSection("tone", e.target.value)}
+                          placeholder="Warm, professional, and concise, typically 1-2 sentences…"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <div className="form-group" style={{ marginTop: 12 }}>
+                  <label className="form-label">
+                    End Call Condition <span className="hint">WHEN to end — a &quot;When the caller…&quot; clause, not what to say. Blank = default.</span>
+                  </label>
+                  <textarea
+                    className="form-textarea"
+                    style={{ minHeight: 48 }}
+                    value={form.end_call_prompt || ""}
+                    onChange={(e) => setForm({ ...form, end_call_prompt: e.target.value || null })}
+                    placeholder="When the conversation is genuinely finished (the caller says goodbye, has no more questions, or the issue is resolved)"
+                  />
+                </div>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">
+                    Farewell Message <span className="hint">exact words spoken when ending the call — verbatim, never paraphrased. Blank = AI chooses the wording.</span>
+                  </label>
+                  <textarea
+                    className="form-textarea"
+                    style={{ minHeight: 48 }}
+                    value={form.farewell_message || ""}
+                    onChange={(e) => setForm({ ...form, farewell_message: e.target.value || null })}
+                    placeholder="Thank you for calling. Have a wonderful day. Goodbye!"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-hdr">
+                <div className="card-title">Voice</div>
+                <div className="card-sub">local engines only — sets the same TTS assignment as below</div>
+              </div>
+              <div className="card-body">
+                <VoicePicker
+                  tenantId={agent.tenant_id}
+                  providers={providers}
+                  value={form.tts_config_id}
+                  onChange={(id) => setForm({ ...form, tts_config_id: id })}
+                  onProviderCreated={(p) => setProviders([...providers, p])}
+                />
+                {(() => {
+                  const selectedTts = providers.find((p) => p.id === form.tts_config_id);
+                  const speed = Number((selectedTts?.extra as Record<string, unknown> | null)?.speed ?? 1.0);
+                  return (
+                    <div className="form-group" style={{ marginTop: 12, marginBottom: 0 }}>
+                      <label className="form-label">
+                        Speaking Speed <span className="hint">0.7 (slower) – 1.2 (faster), default 1.0 — saved on the selected voice, applies immediately to the next call</span>
+                      </label>
+                      <select
+                        className="form-select"
+                        style={{ width: 140 }}
+                        value={String(speed)}
+                        disabled={!selectedTts}
+                        onChange={async (e) => {
+                          if (!selectedTts) return;
+                          const v = Number(e.target.value);
+                          try {
+                            const updated = await updateProvider(selectedTts.id, {
+                              extra: { ...((selectedTts.extra as Record<string, unknown>) || {}), speed: v },
+                            });
+                            setProviders(providers.map((p) => (p.id === updated.id ? updated : p)));
+                          } catch (err) {
+                            setError(err instanceof ApiError ? err.detail : String(err));
+                          }
+                        }}
+                      >
+                        {[0.7, 0.8, 0.9, 1.0, 1.1, 1.2].map((v) => (
+                          <option key={v} value={String(v)}>
+                            {v.toFixed(1)}{v === 1.0 ? " (default)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+
+            <div className="card">
+              <div className="card-hdr">
+                <div className="card-title">Provider Assignments</div>
+                <div className="card-sub">prod-first, dev warns</div>
+              </div>
+              <div className="card-body">
+                <div className="form-row">
+                  {(["stt", "llm", "tts"] as const).map((role) => {
+                    const key = `${role}_config_id` as const;
+                    return (
+                      <div className="form-group" key={role}>
+                        <label className="form-label">{role.toUpperCase()}</label>
+                        <select
+                          className="form-select"
+                          value={form[key] || ""}
+                          onChange={(e) => setForm({ ...form, [key]: e.target.value || null })}
+                        >
+                          <option value="">— none —</option>
+                          {byRole(role).map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name} {p.environment !== "prod" ? "⚠ " + p.environment : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab === "escalation" && (
+        <div className="cols">
+          <div className="col-main">
+            <div className="card">
+              <div className="card-hdr">
+                <div className="card-title">Human Escalation</div>
+                <div className="card-sub">AI-to-human transfer</div>
+              </div>
+              <div className="card-body">
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">Transfer Type</label>
+                    <select
+                      className="form-select"
+                      value={form.transfer_type || "none"}
+                      onChange={(e) => setForm({ ...form, transfer_type: e.target.value as AgentUpdate["transfer_type"] })}
+                    >
+                      <option value="none">Never Escalate</option>
+                      <option value="cold">Cold Transfer</option>
+                      {/* Warm transfer is fully implemented and live-verified
+                          (bridge-based attended transfer via the gateway's
+                          WarmTransferCoordinator) — see project's transfer
+                          architecture phases. */}
+                      <option value="warm">Warm Transfer</option>
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">
+                      Transfer Destination <span className="hint">phone number or SIP URI</span>
+                    </label>
+                    <input
+                      className="form-input"
+                      style={{ fontFamily: "var(--mono)", fontSize: ".75rem" }}
+                      value={form.transfer_destination || ""}
+                      onChange={(e) => setForm({ ...form, transfer_destination: e.target.value || null })}
+                      placeholder="+18005550100 or sip:agent@example.com"
+                      disabled={(form.transfer_type || "none") === "none"}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">
+                      Transfer Condition <span className="hint">WHEN to transfer — an &quot;If the caller…&quot; clause, not what to say. Blank = default.</span>
+                    </label>
+                    <textarea
+                      className="form-textarea"
+                      style={{ minHeight: 48 }}
+                      value={form.transfer_prompt || ""}
+                      onChange={(e) => setForm({ ...form, transfer_prompt: e.target.value || null })}
+                      placeholder="If the caller explicitly asks to speak to a human agent or representative"
+                      disabled={(form.transfer_type || "none") === "none"}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">
+                      Transfer Announcement <span className="hint">exact words spoken before transferring — verbatim, never paraphrased. Blank = AI chooses the wording.</span>
+                    </label>
+                    <textarea
+                      className="form-textarea"
+                      style={{ minHeight: 48 }}
+                      value={form.transfer_announcement || ""}
+                      onChange={(e) => setForm({ ...form, transfer_announcement: e.target.value || null })}
+                      placeholder="Please hold while I transfer your call."
+                      disabled={(form.transfer_type || "none") === "none"}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">
+                      Queue ID <span className="hint">reserved — not yet used by any routing logic</span>
+                    </label>
+                    <input
+                      className="form-input"
+                      style={{ fontFamily: "var(--mono)", fontSize: ".75rem" }}
+                      value={form.queue_id || ""}
+                      onChange={(e) => setForm({ ...form, queue_id: e.target.value || null })}
+                    />
+                  </div>
+                </div>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">
+                    Escalate after <span className="hint">consecutive guardrail triggers — requires a guardrail detector (not yet built) to actually fire</span>
+                  </label>
+                  <input
+                    className="form-input"
+                    style={{ fontFamily: "var(--mono)", width: 80 }}
+                    value={form.escalation_threshold ?? ""}
+                    onChange={(e) => setForm({ ...form, escalation_threshold: e.target.value === "" ? null : Number(e.target.value) })}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {form.transfer_type === "warm" && (
+              <div className="card" style={{ marginTop: 16 }}>
+                <div className="card-hdr">
+                  <div className="card-title">Warm Transfer Options</div>
+                  <div className="card-sub">No equivalent for cold transfer</div>
+                </div>
+                <div className="card-body">
+                  <div className="form-row">
+                    <div className="form-group">
+                      <label className="form-label">
+                        Caller ID <span className="hint">what the human agent sees on their phone</span>
+                      </label>
+                      <select
+                        className="form-select"
+                        value={form.caller_id_policy || "original"}
+                        onChange={(e) =>
+                          setForm({ ...form, caller_id_policy: e.target.value as AgentUpdate["caller_id_policy"] })
+                        }
+                      >
+                        <option value="original">Original Caller</option>
+                        <option value="platform">Platform DID</option>
+                        <option value="custom">Custom</option>
+                      </select>
+                    </div>
+                    {form.caller_id_policy === "platform" && (
+                      <div className="form-group">
+                        <label className="form-label">Platform DID</label>
+                        <input
+                          className="form-input"
+                          style={{ fontFamily: "var(--mono)", fontSize: ".75rem" }}
+                          value={form.platform_did || ""}
+                          onChange={(e) => setForm({ ...form, platform_did: e.target.value || null })}
+                          placeholder="+18005550100"
+                        />
+                      </div>
+                    )}
+                    {form.caller_id_policy === "custom" && (
+                      <div className="form-group">
+                        <label className="form-label">Custom Caller ID</label>
+                        <input
+                          className="form-input"
+                          style={{ fontFamily: "var(--mono)", fontSize: ".75rem" }}
+                          value={form.custom_caller_id || ""}
+                          onChange={(e) => setForm({ ...form, custom_caller_id: e.target.value || null })}
+                          placeholder="+18005550100"
+                        />
+                      </div>
+                    )}
+                    <div className="form-group">
+                      <label className="form-label">
+                        Waiting Experience <span className="hint">what the caller hears while the agent&apos;s phone is ringing</span>
+                      </label>
+                      <select
+                        className="form-select"
+                        value={form.transfer_waiting_experience || "announcement_moh"}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            transfer_waiting_experience: e.target.value as AgentUpdate["transfer_waiting_experience"],
+                          })
+                        }
+                      >
+                        <option value="announcement_moh">Announcement + Hold Music</option>
+                        <option value="announcement_silence">Announcement + Silence</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === "sip" && <SipPanel tenantId={agent.tenant_id} agentId={agent.id} />}
+
+      {tab === "tools" && <ToolsPanel tenantId={agent.tenant_id} agentId={agent.id} />}
+
+      {tab === "knowledge-base" && <KnowledgeBasePanel tenantId={agent.tenant_id} agentId={agent.id} />}
+
+      {tab !== "knowledge-base" && tab !== "tools" && (
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+          {saved && <span style={{ alignSelf: "center", fontSize: ".76rem", color: "var(--green)" }}>Saved ✓</span>}
+          <button className="btn btn-danger btn-sm" onClick={handleDelete} disabled={deleting}>
+            {deleting ? "Deleting…" : "Delete Agent"}
+          </button>
+          <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving}>
+            {saving ? "Saving…" : "Save Changes"}
+          </button>
+        </div>
+      )}
+    </>
+  );
+}

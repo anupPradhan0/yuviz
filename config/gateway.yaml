@@ -1,0 +1,59 @@
+gateway:
+  websocket:
+    host: "0.0.0.0"
+    port: 8080
+    max_connections: 1000
+    timeout_ms: 30000
+    # Bounded wait for mod_audio_fork's metadata text frame (DID/ANI) —
+    # bumped from the 300ms default after two live warm-transfer test
+    # calls both landed right at that boundary and fell back to the
+    # {"default","default"} tenant/agent (no transfer capability at all).
+    metadata_wait_ms: 1500
+
+  logging:
+    level: "debug"
+    console: true
+
+  conversation:
+    type: "grpc"
+    endpoint: "localhost:10000"    # Envoy gRPC proxy, LEAST_REQUEST across :50051/:50052
+    connect_timeout_ms: 5000
+
+  media:
+    sample_rate: 16000             # 16 kHz — matches FasterWhisper native rate and TTS output
+    channels: 1
+    frame_ms: 20
+    ring_buffer_ms: 500
+
+  metrics:
+    enabled: true
+    port: 9090
+    path: "/metrics"
+
+  esl:
+    # FreeSWITCH Event Socket — lets the gateway hang up the SIP leg when the
+    # agent ends the call (marker-driven, see PipelineConversationHandler).
+    # Disabled by default: leaving it off just means the SIP call lingers
+    # until the caller hangs up manually (today's behavior), not a crash.
+    enabled: true
+    host: "127.0.0.1"
+    port: 8022    # FreeSWITCH event_socket.conf.xml uses 8022, not the ESL default 8021
+    password: "ClueCon"          # FreeSWITCH default — override in production
+    connect_timeout_ms: 2000
+    # Warm transfer's plain-extension destinations dial straight at this
+    # SIP proxy/registrar (Kamailio) rather than FreeSWITCH's own directory
+    # — see EslClient::originate_async()'s doc comment for why.
+    sip_proxy_host: "192.168.0.116"
+    sip_proxy_port: 5060
+
+  redis:
+    # Phase 5 config-plane cache — same Redis + key shape services/config/
+    # writes to (tenant:{tenant_id}). Disabled by default: TenantConfig::
+    # from_redis() degrades to from_default() on any failure, so leaving
+    # this off just means every session uses process-level defaults, not a
+    # crash or rejected call.
+    enabled: true
+    host: "127.0.0.1"
+    port: 6379
+    connect_timeout_ms: 200
+    command_timeout_ms: 100

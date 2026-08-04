@@ -1,0 +1,9 @@
+version: v1
+breaking:
+  use:
+    - FILE
+lint:
+  use:
+    - DEFAULT
+  except:
+    - PACKAGE_VERSION_SUFFIX   # we use "v1" as a dir, not in the package name suffix

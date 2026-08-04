@@ -1,0 +1,50 @@
+from __future__ import annotations
+
+from services.knowledge.chunking import chunk_text
+
+
+def test_empty_text_returns_no_chunks():
+    assert chunk_text("") == []
+    assert chunk_text("   \n\n  ") == []
+
+
+def test_short_text_is_a_single_chunk():
+    chunks = chunk_text("Refunds take 30 days to process.", chunk_size=200)
+    assert len(chunks) == 1
+    assert chunks[0].content == "Refunds take 30 days to process."
+    assert chunks[0].token_count == 6
+
+
+def test_paragraphs_pack_until_chunk_size_exceeded():
+    para_a = " ".join(f"wordA{i}" for i in range(50))
+    para_b = " ".join(f"wordB{i}" for i in range(50))
+    para_c = " ".join(f"wordC{i}" for i in range(50))
+    text = f"{para_a}\n\n{para_b}\n\n{para_c}"
+
+    # a+b together (100 words) fit under 120; adding c would exceed it.
+    chunks = chunk_text(text, chunk_size=120, chunk_overlap=0)
+
+    assert len(chunks) == 2
+    assert "wordA0" in chunks[0].content and "wordB0" in chunks[0].content
+    assert "wordC0" in chunks[1].content
+
+
+def test_overlap_repeats_trailing_words_into_next_chunk():
+    para_a = " ".join(f"a{i}" for i in range(50))
+    para_b = " ".join(f"b{i}" for i in range(50))
+    text = f"{para_a}\n\n{para_b}"
+
+    chunks = chunk_text(text, chunk_size=80, chunk_overlap=10)
+
+    assert len(chunks) == 2
+    tail_of_first = chunks[0].content.split()[-10:]
+    head_of_second = chunks[1].content.split()[:10]
+    assert tail_of_first == head_of_second
+
+
+def test_single_paragraph_longer_than_chunk_size_still_splits():
+    text = " ".join(f"word{i}" for i in range(500))
+    chunks = chunk_text(text, chunk_size=100, chunk_overlap=0)
+    assert len(chunks) >= 5
+    for chunk in chunks:
+        assert chunk.token_count <= 100
