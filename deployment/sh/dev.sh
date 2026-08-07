@@ -244,15 +244,29 @@ fi
 # fallback, so an empty JWT_SECRET silently becomes the signing key.
 for secret in CONFIG_SERVICE_PASSWORD:32 JWT_SECRET:48; do
     key=${secret%:*}; len=${secret#*:}
-    if [ -z "$(grep "^${key}=" "$ENV_FILE" | cut -d= -f2-)" ]; then
-        sed -i.bak "s|^${key}=.*|${key}=$(rand "$len")|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
-        ok "generated ${key}"
+    if [ -n "$(grep "^${key}=" "$ENV_FILE" | cut -d= -f2-)" ]; then continue; fi
+    value=$(rand "$len")
+    if [ "${#value}" -ne "$len" ]; then
+        fail "could not generate ${key} (got ${#value} of ${len} chars)"
+        exit 1
     fi
+    if ! sed -i.bak "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"; then
+        fail "could not write ${key} to ${ENV_FILE}"
+        exit 1
+    fi
+    rm -f "$ENV_FILE.bak"
+    ok "generated ${key}"
 done
 
 # Re-derived each run so toggling USE_HOST_OLLAMA needs no hand-editing.
-sed -i.bak "s|^OLLAMA_BASE_URL=.*|OLLAMA_BASE_URL=${OLLAMA_URL}|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+if ! sed -i.bak "s|^OLLAMA_BASE_URL=.*|OLLAMA_BASE_URL=${OLLAMA_URL}|" "$ENV_FILE"; then
+    fail "could not write OLLAMA_BASE_URL to ${ENV_FILE}"
+    exit 1
+fi
+rm -f "$ENV_FILE.bak"
 ok "ollama URL: ${OLLAMA_URL}"
+
+set -a; . "$ENV_FILE"; set +a
 
 if [ "$OLLAMA_MODE" = "host" ] && ! curl -fsS -m 5 http://localhost:11434/api/tags >/dev/null 2>&1; then
     fail "USE_HOST_OLLAMA=1 but nothing answers on localhost:11434 — run: ollama serve"

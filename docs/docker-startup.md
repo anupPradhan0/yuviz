@@ -121,15 +121,19 @@ copies of PyTorch.
 `3000` admin UI · `5432` postgres · `6379` redis · `8000` config ·
 `8100` knowledge · `8300` webcall · `11434` ollama · `50051` conversation
 
-All eight bind to **127.0.0.1** by default — postgres ships with default
-credentials and redis/ollama/conversation have no authentication, so on a
-shared network anyone reaching the host could read and write the dev database.
-Set `BIND_ADDR=0.0.0.0` in `deployment/.env` to expose them, and change the
-credentials first.
+All eight bind to **127.0.0.1** by default. Postgres ships with default
+credentials, and **redis, ollama and the conversation gRPC port have no
+authentication at all** — no password exists to set. Anyone who can reach the
+host on those ports has full read/write access.
 
-`dev.sh` checks all eight are free before building, reading any `*_PORT`
-overrides from `deployment/.env` so it checks the ports compose will actually
-publish.
+`BIND_ADDR=0.0.0.0` is therefore not something a stronger password makes safe.
+Only set it behind a private network, firewall, VPN or authenticated reverse
+proxy that restricts who can reach these ports.
+
+`dev.sh` checks the ports compose will publish, reading any `*_PORT` overrides
+from `deployment/.env`. In the default containerized mode that is all eight;
+with `USE_HOST_OLLAMA=1` it checks the seven compose ports and instead verifies
+that a host Ollama is answering on 11434.
 
 ---
 
@@ -243,10 +247,14 @@ value breaks the stack **silently**:
   Envoy on `:10000`, which this stack does not run.
 
 **Security note:** `admin123` ships in `.env.example`, so every clone has the
-same password, and postgres defaults to `voiceai`/`voiceai`. All ports bind to
-loopback by default for that reason. Before setting `BIND_ADDR=0.0.0.0`, change
-`ADMIN_PASSWORD`, `POSTGRES_PASSWORD` and `POSTGRES_DSN` — redis, ollama and
-the conversation gRPC port have no authentication at all.
+same password, and postgres defaults to `voiceai`/`voiceai`. Change
+`ADMIN_PASSWORD`, `POSTGRES_PASSWORD` and `POSTGRES_DSN` before this stack
+leaves your machine.
+
+Credentials alone are not enough to expose it, though: redis, ollama and the
+conversation gRPC port have no authentication to configure. Keep `BIND_ADDR` at
+`127.0.0.1` unless a firewall, VPN or authenticated proxy controls access to
+those ports.
 
 ---
 

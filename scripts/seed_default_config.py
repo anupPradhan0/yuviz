@@ -20,6 +20,7 @@ Requires: POSTGRES_DSN, REDIS_URL (see services/config/db.py, cache.py)
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -42,10 +43,10 @@ SYSTEM_PROMPT = (
 
 # Under docker-compose the Conversation Service is a container, where
 # "localhost" is itself.
-OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434"
 
 # Must match what the Conversation Service loads, or a second model is fetched.
-STT_MODEL = os.environ.get("VOICEAI_STT_MODEL", "small")
+STT_MODEL = os.environ.get("VOICEAI_STT_MODEL") or "small"
 
 # Matches PipelineConfig's defaults (services/conversation/pipeline_config.py).
 PROVIDER_DEFAULTS = [
@@ -82,6 +83,12 @@ async def main() -> None:
             # Skipping outright would pin an existing install to stale values.
             drift = {k: spec[k] for k in ("model", "voice")
                      if spec.get(k) is not None and match.get(k) != spec[k]}
+            want_extra = spec.get("extra") or {}
+            have_extra = match.get("extra") or {}
+            if isinstance(have_extra, str):
+                have_extra = json.loads(have_extra)
+            if any(have_extra.get(k) != v for k, v in want_extra.items()):
+                drift["extra"] = {**have_extra, **want_extra}
             if drift:
                 await provider_configs.update_provider_config(match["id"], **drift)
                 print(f"updated provider_config: {spec['role']}/{spec['engine']} {drift}")
