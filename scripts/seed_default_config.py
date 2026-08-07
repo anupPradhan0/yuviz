@@ -20,6 +20,7 @@ Requires: POSTGRES_DSN, REDIS_URL (see services/config/db.py, cache.py)
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -39,12 +40,17 @@ SYSTEM_PROMPT = (
     "speech only - no markdown, no bullet points, no numbered lists."
 )
 
+# Ollama as seen by the Conversation Service, which under docker-compose is a
+# container where "localhost" is itself. Read back from provider_configs.extra
+# by ai_provider_manager.py at call time.
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+
 # Matches PipelineConfig's defaults (services/conversation/pipeline_config.py).
 PROVIDER_DEFAULTS = [
     {"role": "stt", "engine": "faster_whisper", "name": "FasterWhisper (default)",
      "model": "small", "extra": {"device": "cpu", "compute_type": "int8"}},
     {"role": "llm", "engine": "ollama", "name": "Ollama llama3.2 (default)",
-     "model": "llama3.2", "extra": {"temperature": 0.7, "base_url": "http://localhost:11434"}},
+     "model": "llama3.2", "extra": {"temperature": 0.7, "base_url": OLLAMA_BASE_URL}},
     # Kokoro, not macOS's `say` — found live 2026-08-04 while auditing
     # fork-reproducibility: `engine="macos"` shells out to a macOS-only
     # binary and silently can't work at all on Linux (or even reliably as

@@ -1,0 +1,201 @@
+# Local dev stack. Run ./dev.sh rather than `docker compose up` directly.
+
+x-python-service: &python-service
+  build:
+    context: .
+    dockerfile: deployment/docker/Dockerfile.python
+    args:
+      SPACY_MODEL_URL: ${SPACY_MODEL_URL:-}
+  image: yuviz-python:dev
+  restart: unless-stopped
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+services:
+  postgres:
+    # pgvector, not postgres:14 — knowledge_schema.sql needs CREATE EXTENSION vector.
+    image: pgvector/pgvector:pg14
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-voiceai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voiceai}
+      POSTGRES_DB: ${POSTGRES_DB:-voiceai}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-voiceai} -d ${POSTGRES_DB:-voiceai}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    # Skipped when USE_HOST_OLLAMA=1; dev.sh drops the profile.
+    profiles: ["ollama-container"]
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  init:
+    <<: *python-service
+    restart: "no"
+    command: ["bash", "/app/deployment/sh/init.sh"]
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      REDIS_URL: ${REDIS_URL}
+      CONFIG_SERVICE_EMAIL: ${CONFIG_SERVICE_EMAIL}
+      CONFIG_SERVICE_PASSWORD: ${CONFIG_SERVICE_PASSWORD}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  config:
+    <<: *python-service
+    command: ["python", "-m", "uvicorn", "services.config.app:app",
+              "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      REDIS_URL: ${REDIS_URL}
+      JWT_SECRET: ${JWT_SECRET}
+    ports:
+      - "${CONFIG_PORT:-8000}:8000"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  knowledge:
+    <<: *python-service
+    command: ["python", "-m", "uvicorn", "services.knowledge.app:app",
+              "--host", "0.0.0.0", "--port", "8100"]
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      REDIS_URL: ${REDIS_URL}
+      KNOWLEDGE_STORAGE_ROOT: /app/data/knowledge_documents
+    ports:
+      - "${KNOWLEDGE_PORT:-8100}:8100"
+    volumes:
+      - knowledge-docs:/app/data/knowledge_documents
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8100/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  conversation:
+    <<: *python-service
+    command: ["python", "-m", "services.conversation",
+              "--port", "50051", "--mode", "pipeline", "--log-level", "INFO"]
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      REDIS_URL: ${REDIS_URL}
+      CONFIG_SERVICE_URL: http://config:8000
+      CONFIG_SERVICE_EMAIL: ${CONFIG_SERVICE_EMAIL}
+      CONFIG_SERVICE_PASSWORD: ${CONFIG_SERVICE_PASSWORD}
+      KNOWLEDGE_SERVICE_URL: http://knowledge:8100
+      # pipeline_config.py defaults to "macos", which needs the macOS `say` binary.
+      VOICEAI_TTS_ENGINE: kokoro
+      VOICEAI_TTS_VOICE: af_sarah
+      VOICEAI_LLM_URL: ${OLLAMA_BASE_URL}
+    ports:
+      - "${CONVERSATION_PORT:-50051}:50051"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    depends_on:
+      config:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import sys,grpc;from grpc_health.v1 import health_pb2,health_pb2_grpc;sys.exit(0 if health_pb2_grpc.HealthStub(grpc.insecure_channel('localhost:50051')).Check(health_pb2.HealthCheckRequest(),timeout=5).status==1 else 1)"]
+      interval: 15s
+      timeout: 10s
+      retries: 60
+      # First run downloads whisper + kokoro before it can serve.
+      start_period: 300s
+
+  webcall:
+    <<: *python-service
+    command: ["python", "-m", "services.webcall", "--port", "8300"]
+    environment:
+      # Direct to conversation — this stack runs no Envoy, which webcall's :10000 default expects.
+      CONVERSATION_SVC_TARGET: conversation:50051
+      LOG_LEVEL: INFO
+    ports:
+      - "${WEBCALL_PORT:-8300}:8300"
+    depends_on:
+      conversation:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import socket;socket.create_connection(('localhost',8300),3).close()"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  admin-ui:
+    build:
+      context: .
+      dockerfile: deployment/docker/Dockerfile.adminui
+    image: yuviz-adminui:dev
+    restart: unless-stopped
+    # Baked into the browser bundle, so these must resolve from the host.
+    environment:
+      NEXT_PUBLIC_CONFIG_SERVICE_URL: http://localhost:${CONFIG_PORT:-8000}
+      NEXT_PUBLIC_KNOWLEDGE_SERVICE_URL: http://localhost:${KNOWLEDGE_PORT:-8100}
+      NEXT_PUBLIC_WEBCALL_URL: ws://localhost:${WEBCALL_PORT:-8300}
+    ports:
+      - "${ADMIN_UI_PORT:-3000}:3000"
+    volumes:
+      - ./admin-ui:/app/admin-ui
+      - /app/admin-ui/node_modules
+    depends_on:
+      config:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:3000"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  pgdata:
+  ollama-models:
+  hf-cache:
+  knowledge-docs:
