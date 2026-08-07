@@ -69,3 +69,31 @@ async def test_synthesize_stream_http_error_yields_nothing_not_raises():
     chunks = [c async for c in provider.synthesize_stream("Hello.", 16_000)]
 
     assert chunks == []
+
+
+class _RawByteChunks(httpx.AsyncByteStream):
+    """Async-iterable of exact byte chunks, bypassing httpx's own buffering —
+    simulates real HTTP chunk boundaries landing mid-sample."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+
+    async def __aiter__(self):
+        for chunk in self._chunks:
+            yield chunk
+
+
+async def test_synthesize_stream_realigns_odd_length_chunk_boundaries():
+    # A 5-byte chunk followed by a 3-byte chunk: neither is 16-bit-sample
+    # aligned on its own, but every *yielded* chunk must be, and the
+    # concatenated bytes (all 8 of them) must be unchanged and in order.
+    full = b"\x01\x02\x03\x04\x05\x06\x07\x08"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_RawByteChunks([full[:5], full[5:]]))
+
+    provider = _make_provider(handler)
+    chunks = [c async for c in provider.synthesize_stream("Hello there.", 16_000)]
+
+    assert all(len(c) % 2 == 0 for c in chunks)
+    assert b"".join(chunks) == full

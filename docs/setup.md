@@ -23,8 +23,11 @@ please report it rather than assuming it's expected.
   has been tested on 3.12+.
 - **Node.js** — for admin-ui (Next.js).
 - **Ollama** — only if you want fully local STT/LLM/TTS with no API keys
-  (the seed script's default: `faster_whisper` + `llama3.2` + `kokoro`).
-  Skip it if you'd rather wire in a cloud provider (Deepgram, Gemini,
+  (the seed script's default: `faster_whisper` + `llama3.2` + `kokoro`). If
+  using Ollama, also pull the model before starting the stack — the seed
+  script only registers `llama3.2` as the tenant's default, it doesn't
+  download it: `ollama pull llama3.2`. Skip both if you'd rather wire in a
+  cloud provider (Deepgram, Gemini,
   ElevenLabs — see `services/conversation/providers/`) through the admin
   UI after setup.
 
