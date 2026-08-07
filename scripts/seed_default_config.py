@@ -40,14 +40,11 @@ SYSTEM_PROMPT = (
     "speech only - no markdown, no bullet points, no numbered lists."
 )
 
-# Ollama as seen by the Conversation Service, which under docker-compose is a
-# container where "localhost" is itself. Read back from provider_configs.extra
-# by ai_provider_manager.py at call time.
+# Under docker-compose the Conversation Service is a container, where
+# "localhost" is itself.
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
-# Must match whatever the Conversation Service loads (VOICEAI_STT_MODEL, see
-# pipeline_config.py), otherwise the first real call pulls a second ~500 MB
-# model at call time.
+# Must match what the Conversation Service loads, or a second model is fetched.
 STT_MODEL = os.environ.get("VOICEAI_STT_MODEL", "small")
 
 # Matches PipelineConfig's defaults (services/conversation/pipeline_config.py).
@@ -82,10 +79,7 @@ async def main() -> None:
         match = next((p for p in existing if p["engine"] == spec["engine"]), None)
         if match is not None:
             provider_ids[spec["role"]] = match["id"]
-            # Skipping outright would pin an existing install to whatever was
-            # seeded first — e.g. an STT model that no longer matches
-            # VOICEAI_STT_MODEL, so the service loads one model and downloads
-            # another at call time.
+            # Skipping outright would pin an existing install to stale values.
             drift = {k: spec[k] for k in ("model", "voice")
                      if spec.get(k) is not None and match.get(k) != spec[k]}
             if drift:

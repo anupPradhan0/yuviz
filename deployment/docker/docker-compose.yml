@@ -1,8 +1,5 @@
 # Local dev stack. Run ./dev.sh rather than `docker compose up` directly.
-#
-# Ports bind to 127.0.0.1 by default: postgres ships with default credentials,
-# and redis/ollama/conversation have no authentication at all. Set BIND_ADDR
-# in deployment/.env to expose them further, and change the credentials first.
+# Ports bind to 127.0.0.1 — default credentials, and no auth on redis/ollama.
 
 x-python-service: &python-service
   build:

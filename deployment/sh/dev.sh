@@ -240,11 +240,8 @@ else
     ok "deployment/.env created"
 fi
 
-# Fill any secret that is missing or blank. This has to run for both paths:
-# .env.example ships these keys empty, so the backfill above would otherwise
-# copy an empty value in. An empty JWT_SECRET is silently accepted by
-# services/config/auth.py (os.environ.get returns "", so its insecure-default
-# fallback never fires) and becomes the actual signing key.
+# Blank counts as missing: auth.py's os.environ.get returns "" rather than its
+# fallback, so an empty JWT_SECRET silently becomes the signing key.
 for secret in CONFIG_SERVICE_PASSWORD:32 JWT_SECRET:48; do
     key=${secret%:*}; len=${secret#*:}
     if [ -z "$(grep "^${key}=" "$ENV_FILE" | cut -d= -f2-)" ]; then
