@@ -1,6 +1,6 @@
 # Setup — Web-Testing Path (Fork & Run)
 
-> **Most people should run `./dev.sh` instead** — one command, Docker the only
+> **Most people should run `./deployment/sh/dev.sh` instead** — one command, Docker the only
 > prerequisite, works on macOS/Linux/Windows (WSL2 or Git Bash). See the
 > Quickstart in [README.md](../README.md). This document covers the **native**
 > install, which is useful for debugging a service directly against your own

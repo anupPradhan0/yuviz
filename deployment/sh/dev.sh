@@ -183,11 +183,13 @@ printf '  %-11s %s\n' "RAM:"       "$RAM_H"
 printf '  %-11s %s\n' "Free disk:" "$DISK_H"
 printf '  %-11s %s\n' "Ollama:"    "$OLLAMA_MODE"
 
-if [ -n "$AVAIL_GB" ] && [ "$AVAIL_GB" -lt 10 ]; then
-    fail "only ${AVAIL_GB} GB free on ${DF_TARGET} — need at least 10 GB"
+if [ -n "$AVAIL_GB" ] && [ "$AVAIL_GB" -lt 16 ]; then
+    fail "only ${AVAIL_GB} GB free on ${DF_TARGET} — need at least 16 GB"
     echo "    Reclaim some with: docker system prune -a" >&2
     exit 1
 fi
+
+if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
 
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 if [ -z "$(compose "${COMPOSE_PROFILE[@]}" ps -q 2>/dev/null)" ]; then
@@ -198,14 +200,14 @@ if [ -z "$(compose "${COMPOSE_PROFILE[@]}" ps -q 2>/dev/null)" ]; then
             conflict=1
         fi
     }
-    check_port 3000  "set ADMIN_UI_PORT in deployment/.env"
-    check_port 8000  "set CONFIG_PORT"
-    check_port 8100  "set KNOWLEDGE_PORT"
-    check_port 8300  "set WEBCALL_PORT"
-    check_port 50051 "set CONVERSATION_PORT"
-    check_port 5432  "a local Postgres is running; stop it or set POSTGRES_PORT"
-    check_port 6379  "a local Redis is running; stop it or set REDIS_PORT"
-    [ "$OLLAMA_MODE" = "container" ] && check_port 11434 "a host Ollama is running; use USE_HOST_OLLAMA=1"
+    check_port "${ADMIN_UI_PORT:-3000}"      "set ADMIN_UI_PORT in deployment/.env"
+    check_port "${CONFIG_PORT:-8000}"        "set CONFIG_PORT"
+    check_port "${KNOWLEDGE_PORT:-8100}"     "set KNOWLEDGE_PORT"
+    check_port "${WEBCALL_PORT:-8300}"       "set WEBCALL_PORT"
+    check_port "${CONVERSATION_PORT:-50051}" "set CONVERSATION_PORT"
+    check_port "${POSTGRES_PORT:-5432}"      "a local Postgres is running; stop it or set POSTGRES_PORT"
+    check_port "${REDIS_PORT:-6379}"         "a local Redis is running; stop it or set REDIS_PORT"
+    [ "$OLLAMA_MODE" = "container" ] && check_port "${OLLAMA_PORT:-11434}" "a host Ollama is running; use USE_HOST_OLLAMA=1"
     if [ "$conflict" = "1" ]; then
         fail "free the ports above, or override them in deployment/.env"
         exit 1
@@ -235,11 +237,21 @@ if [ -f "$ENV_FILE" ]; then
     done < "$ENV_EXAMPLE"
 else
     cp "$ENV_EXAMPLE" "$ENV_FILE"
-    sed -i.bak "s|^CONFIG_SERVICE_PASSWORD=.*|CONFIG_SERVICE_PASSWORD=$(rand 32)|" "$ENV_FILE"
-    sed -i.bak "s|^JWT_SECRET=.*|JWT_SECRET=$(rand 48)|" "$ENV_FILE"
-    rm -f "$ENV_FILE.bak"
-    ok "deployment/.env created with random secrets"
+    ok "deployment/.env created"
 fi
+
+# Fill any secret that is missing or blank. This has to run for both paths:
+# .env.example ships these keys empty, so the backfill above would otherwise
+# copy an empty value in. An empty JWT_SECRET is silently accepted by
+# services/config/auth.py (os.environ.get returns "", so its insecure-default
+# fallback never fires) and becomes the actual signing key.
+for secret in CONFIG_SERVICE_PASSWORD:32 JWT_SECRET:48; do
+    key=${secret%:*}; len=${secret#*:}
+    if [ -z "$(grep "^${key}=" "$ENV_FILE" | cut -d= -f2-)" ]; then
+        sed -i.bak "s|^${key}=.*|${key}=$(rand "$len")|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+        ok "generated ${key}"
+    fi
+done
 
 # Re-derived each run so toggling USE_HOST_OLLAMA needs no hand-editing.
 sed -i.bak "s|^OLLAMA_BASE_URL=.*|OLLAMA_BASE_URL=${OLLAMA_URL}|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"

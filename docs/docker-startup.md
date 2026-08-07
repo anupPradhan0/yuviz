@@ -12,7 +12,7 @@ Works on **Linux, macOS and Windows**. Verified end-to-end on Linux
 ## 1. Quick start
 
 ```bash
-git clone git@github.com:yuviz-ai/yuviz.git
+git clone https://github.com/yuviz-ai/yuviz.git
 cd yuviz
 ./deployment/sh/dev.sh
 ```
@@ -41,11 +41,14 @@ Every run after that takes **~75 seconds**.
 | Free disk | 16 GB | 25 GB+ |
 | CPU | 4 cores | 8+ cores |
 
-The stack idles at **~4.9 GB RAM**. `dev.sh` refuses to start below **10 GB
-free disk** rather than failing halfway through a download.
+The stack idles at **~4.9 GB RAM**. `dev.sh` refuses to start below **16 GB
+free disk** rather than failing halfway through a download — the images and
+models come to ~15.6 GB (see §4).
 
-No GPU is needed — everything runs on CPU, including a CPU-only build of
-PyTorch. A GPU is not used even when present (see §9).
+No GPU is needed. In the default containerized mode everything runs on CPU,
+including a CPU-only build of PyTorch, and a host GPU is not used even when
+present. The one exception is `USE_HOST_OLLAMA=1` (see §8), which runs the LLM
+on the host and can use its GPU; STT and TTS stay on CPU either way.
 
 ### Software
 
@@ -118,8 +121,15 @@ copies of PyTorch.
 `3000` admin UI · `5432` postgres · `6379` redis · `8000` config ·
 `8100` knowledge · `8300` webcall · `11434` ollama · `50051` conversation
 
-`dev.sh` checks all eight are free before building, and tells you which is
-occupied and what usually owns it. Override any of them in `deployment/.env`.
+All eight bind to **127.0.0.1** by default — postgres ships with default
+credentials and redis/ollama/conversation have no authentication, so on a
+shared network anyone reaching the host could read and write the dev database.
+Set `BIND_ADDR=0.0.0.0` in `deployment/.env` to expose them, and change the
+credentials first.
+
+`dev.sh` checks all eight are free before building, reading any `*_PORT`
+overrides from `deployment/.env` so it checks the ports compose will actually
+publish.
 
 ---
 
@@ -135,7 +145,10 @@ occupied and what usually owns it. Override any of them in `deployment/.env`.
 | Volume `ollama-models` (llama3.2) | 2.02 GB |
 | Volume `hf-cache` (whisper + kokoro) | 815 MB |
 | Volume `pgdata` | 54 MB |
+| Volume `knowledge-docs` (uploads) | 0 B until used |
 | **Total** | **≈ 15.6 GB** |
+
+This is why `dev.sh` gates on 16 GB free.
 
 Docker also accumulates **build cache** (tens of GB over time). Reclaim it with
 `docker builder prune` — the next build is slower but nothing is lost.
@@ -214,6 +227,8 @@ Everything lives in `deployment/.env`, generated on first run.
 | `JWT_SECRET` | random | Signs Config Service tokens |
 | `POSTGRES_DSN` | `postgresql://voiceai:voiceai@postgres:5432/voiceai` | Host is the compose service name |
 | `OLLAMA_BASE_URL` | `http://ollama:11434` | Set automatically from `USE_HOST_OLLAMA` |
+| `BIND_ADDR` | `127.0.0.1` | Host interface for every published port |
+| `VOICEAI_STT_MODEL` | `small.en` | Used by both conversation and the seed — they must agree |
 | `*_PORT` (×8) | see §3 | Override on collision |
 | `SPACY_MODEL_URL` | empty | Mirror for the spaCy model if github.com is unreachable |
 
@@ -228,8 +243,10 @@ value breaks the stack **silently**:
   Envoy on `:10000`, which this stack does not run.
 
 **Security note:** `admin123` ships in `.env.example`, so every clone has the
-same password. Fine on localhost; change it before exposing this stack on any
-network.
+same password, and postgres defaults to `voiceai`/`voiceai`. All ports bind to
+loopback by default for that reason. Before setting `BIND_ADDR=0.0.0.0`, change
+`ADMIN_PASSWORD`, `POSTGRES_PASSWORD` and `POSTGRES_DSN` — redis, ollama and
+the conversation gRPC port have no authentication at all.
 
 ---
 

@@ -1,4 +1,8 @@
 # Local dev stack. Run ./dev.sh rather than `docker compose up` directly.
+#
+# Ports bind to 127.0.0.1 by default: postgres ships with default credentials,
+# and redis/ollama/conversation have no authentication at all. Set BIND_ADDR
+# in deployment/.env to expose them further, and change the credentials first.
 
 x-python-service: &python-service
   build:
@@ -21,7 +25,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voiceai}
       POSTGRES_DB: ${POSTGRES_DB:-voiceai}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -34,7 +38,7 @@ services:
     image: redis:7-alpine
     restart: unless-stopped
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "${BIND_ADDR:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -47,7 +51,7 @@ services:
     # Skipped when USE_HOST_OLLAMA=1; dev.sh drops the profile.
     profiles: ["ollama-container"]
     ports:
-      - "${OLLAMA_PORT:-11434}:11434"
+      - "${BIND_ADDR:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ollama-models:/root/.ollama
     healthcheck:
@@ -69,6 +73,7 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
+      VOICEAI_STT_MODEL: ${VOICEAI_STT_MODEL:-small.en}
     depends_on:
       postgres:
         condition: service_healthy
@@ -84,7 +89,7 @@ services:
       REDIS_URL: ${REDIS_URL}
       JWT_SECRET: ${JWT_SECRET}
     ports:
-      - "${CONFIG_PORT:-8000}:8000"
+      - "${BIND_ADDR:-127.0.0.1}:${CONFIG_PORT:-8000}:8000"
     depends_on:
       init:
         condition: service_completed_successfully
@@ -104,7 +109,7 @@ services:
       REDIS_URL: ${REDIS_URL}
       KNOWLEDGE_STORAGE_ROOT: /app/data/knowledge_documents
     ports:
-      - "${KNOWLEDGE_PORT:-8100}:8100"
+      - "${BIND_ADDR:-127.0.0.1}:${KNOWLEDGE_PORT:-8100}:8100"
     volumes:
       - knowledge-docs:/app/data/knowledge_documents
     depends_on:
@@ -131,9 +136,10 @@ services:
       # pipeline_config.py defaults to "macos", which needs the macOS `say` binary.
       VOICEAI_TTS_ENGINE: kokoro
       VOICEAI_TTS_VOICE: af_sarah
+      VOICEAI_STT_MODEL: ${VOICEAI_STT_MODEL:-small.en}
       VOICEAI_LLM_URL: ${OLLAMA_BASE_URL}
     ports:
-      - "${CONVERSATION_PORT:-50051}:50051"
+      - "${BIND_ADDR:-127.0.0.1}:${CONVERSATION_PORT:-50051}:50051"
     volumes:
       - hf-cache:/root/.cache/huggingface
     depends_on:
@@ -156,7 +162,7 @@ services:
       CONVERSATION_SVC_TARGET: conversation:50051
       LOG_LEVEL: INFO
     ports:
-      - "${WEBCALL_PORT:-8300}:8300"
+      - "${BIND_ADDR:-127.0.0.1}:${WEBCALL_PORT:-8300}:8300"
     depends_on:
       conversation:
         condition: service_healthy
@@ -180,7 +186,7 @@ services:
       NEXT_PUBLIC_KNOWLEDGE_SERVICE_URL: http://localhost:${KNOWLEDGE_PORT:-8100}
       NEXT_PUBLIC_WEBCALL_URL: ws://localhost:${WEBCALL_PORT:-8300}
     ports:
-      - "${ADMIN_UI_PORT:-3000}:3000"
+      - "${BIND_ADDR:-127.0.0.1}:${ADMIN_UI_PORT:-3000}:3000"
     volumes:
       - ./admin-ui:/app/admin-ui
       - /app/admin-ui/node_modules

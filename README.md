@@ -10,7 +10,7 @@ and testing without any telephony infra, directly from a browser.
 Docker is the only prerequisite. On Windows, run this from WSL2 or Git Bash.
 
 ```bash
-git clone <this repo> && cd yuviz
+git clone https://github.com/yuviz-ai/yuviz.git && cd yuviz
 ./deployment/sh/dev.sh
 ```
 
@@ -20,8 +20,9 @@ Then open <http://localhost:3000>, pick the `default` agent, and click
 `./deployment/sh/dev.sh` checks your environment, generates `deployment/.env` with random secrets,
 builds the images, pulls the models, waits for every service to report
 healthy, and then verifies STT, LLM and TTS actually work end to end before
-telling you it's ready. First run downloads ~3 GB of models and needs ~10 GB
-of free disk; later runs skip anything already cached.
+telling you it's ready. First run downloads ~3 GB of models and needs **16 GB
+of free disk** (~15.6 GB of images and models); later runs skip anything
+already cached.
 
 ```bash
 ./deployment/sh/dev.sh --logs        # tail logs
