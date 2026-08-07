@@ -41,6 +41,10 @@ ollama serve                      # in another terminal
 USE_HOST_OLLAMA=1 ./deployment/sh/dev.sh
 ```
 
+Full details — container list, resource requirements, configuration reference
+and troubleshooting — are in
+[docs/docker-startup.md](docs/docker-startup.md).
+
 Prefer a native install without Docker? [docs/setup.md](docs/setup.md) covers
 that path. Note it was only ever verified on macOS.
 
