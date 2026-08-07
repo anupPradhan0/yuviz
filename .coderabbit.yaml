@@ -1,0 +1,72 @@
+# CodeRabbit configuration for yuviz — see https://docs.coderabbit.ai/configuration
+
+language: en-US
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+
+  path_filters:
+    - "!venv/**"
+    - "!admin-ui/node_modules/**"
+    - "!admin-ui/.next/**"
+    - "!build/**"
+    - "!**/*.pyc"
+    - "!services/conversation/generated/**"
+
+  path_instructions:
+    - path: "services/**/*.py"
+      instructions: >
+        This is the Python backend (Config/Knowledge/Conversation/webcall/vobiz
+        services). Flag any synchronous Postgres/Redis/HTTP call added to a
+        real-time call path (services/conversation/pipeline.py, servicer.py,
+        the Gateway-facing gRPC handlers) — hot-path code must stay
+        Redis-only or in-memory; cold-path config changes belong in
+        services/config. Flag missing error handling around external
+        provider calls (STT/LLM/TTS/calendar) that could leave a live call
+        hanging. Comments should explain non-obvious WHY only, not restate
+        WHAT the code does — flag comments that just narrate the next line.
+
+    - path: "gateway/**/*.{cpp,h}"
+      instructions: >
+        This is the C++ media gateway sitting between FreeSWITCH and the
+        Python AI services (CallFSM-driven, RAII, no global mutable state
+        except the signal-handler atomic flag). Flag anything that could
+        block the media/audio thread (blocking I/O, locks held across
+        awaits-equivalent boundaries) — the SPSC ring buffer + dispatcher
+        pattern exists specifically to keep receive and transport
+        decoupled. Flag new raw owning pointers where unique_ptr/RAII
+        would do.
+
+    - path: "admin-ui/**/*.{ts,tsx}"
+      instructions: >
+        Next.js/React admin UI. Flag new `useEffect` bodies that call
+        setState synchronously without justification (react-hooks
+        set-state-in-effect). Flag any change to TestAgentPanel.tsx's
+        audio/WebSocket teardown logic especially carefully — barge-in and
+        end_call timing bugs here have shipped before and are easy to
+        reintroduce. Comments should stay minimal — flag unnecessary ones.
+
+    - path: "database/*.sql"
+      instructions: >
+        Schema changes must stay additive/idempotent (CREATE TABLE IF NOT
+        EXISTS, ADD COLUMN IF NOT EXISTS) — this project has no migration
+        framework, schema files are re-applied directly.
+
+  tools:
+    ruff:
+      enabled: true
+    ast-grep:
+      essential_rules: true
+    ansible-lint:
+      enabled: false
+
+chat:
+  auto_reply: true
