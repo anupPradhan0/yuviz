@@ -5,7 +5,8 @@ the only prerequisite — no Python, Node, Postgres, Redis or Ollama install
 required on the host.
 
 Works on **Linux, macOS and Windows**. Verified end-to-end on Linux
-(Arch, x86_64, Docker 29.6, Compose 5.3).
+(Arch, x86_64, Docker 29.6, Compose 5.3); the macOS and Windows paths are
+written but not yet run on those platforms.
 
 ---
 
@@ -56,7 +57,7 @@ on the host and can use its GPU; STT and TTS stay on CPU either way.
 |---|---|---|
 | Docker Engine | 20.10 | — |
 | Docker Compose | **2.20** | Needs `depends_on` conditions and `service_completed_successfully`. Compose **v1 (`docker-compose`) will not work.** |
-| bash | 3.2 | Windows: use WSL2 or Git Bash |
+| bash | 3.2 | Supplied by Git Bash or WSL2 on Windows — see §2.1 |
 
 Check yours:
 
@@ -129,9 +130,43 @@ brew install --cask docker
 brew install colima docker docker-compose && colima start --cpu 4 --memory 10 --disk 60
 ```
 
-**Windows** — install Docker Desktop with the WSL2 backend, then run
-`./deployment/sh/dev.sh` **from inside WSL2 or Git Bash**. A `.sh` script
-cannot run in `cmd.exe` or PowerShell, and Colima does not run on Windows.
+**Windows** — install Docker Desktop with the WSL2 backend. Colima does not run
+on Windows. See §2.1 for which shell to use.
+
+### 2.1 Windows
+
+Every shell works, but through different entry points:
+
+| Shell | Command |
+|---|---|
+| PowerShell | `.\deployment\sh\dev.ps1` |
+| Command Prompt | `deployment\sh\dev.cmd` |
+| Git Bash | `./deployment/sh/dev.sh` |
+| WSL2 | `./deployment/sh/dev.sh` |
+
+`dev.cmd` and `dev.ps1` are thin wrappers — they locate Git Bash (preferred) or
+WSL and re-invoke `dev.sh`. All logic lives in the one bash script, so the
+wrappers cannot drift out of sync with it. Flags pass straight through:
+`.\deployment\sh\dev.ps1 --version` works exactly like the bash form.
+
+In **VS Code**, the integrated terminal defaults to PowerShell, which is fine
+with `dev.ps1`. To use the bash form instead: `Ctrl+Shift+P` →
+*Terminal: Select Default Profile* → **Git Bash** or **WSL**.
+
+Three Windows-specific things that will otherwise cost you time:
+
+- **Enable WSL integration in Docker Desktop** — Settings → Resources → WSL
+  Integration → toggle your distro on. Without it `docker` is invisible inside
+  WSL even though Docker Desktop is running.
+- **Clone inside the WSL filesystem** (`~/yuviz`), not `/mnt/c/Users/...`.
+  Building across the Windows↔Linux filesystem boundary is dramatically slower.
+  This does not apply to Git Bash, which uses the Windows filesystem natively.
+- **Line endings are handled for you.** `.gitattributes` pins `.sh`, Dockerfiles
+  and YAML to LF, and `.cmd`/`.ps1` to CRLF. Without it, Windows git's default
+  `core.autocrlf=true` rewrites `dev.sh` with CRLF and bash fails with
+  `bad interpreter: /usr/bin/env bash^M`. If you hit that, your checkout
+  predates the `.gitattributes` — re-clone, or run
+  `git add --renormalize . && git checkout -- .`
 
 ---
 
@@ -254,7 +289,9 @@ deployment/
 │   ├── Dockerfile.python        shared image for the 4 Python services
 │   └── Dockerfile.adminui       Next.js dev image
 └── sh/
-    ├── dev.sh                   entry point
+    ├── dev.sh                   entry point — all logic lives here
+    ├── dev.ps1                  PowerShell wrapper → dev.sh
+    ├── dev.cmd                  Command Prompt wrapper → dev.ps1
     └── init.sh                  schemas → admin user → seed agent
 ```
 

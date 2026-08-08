@@ -5,3 +5,7 @@ Dockerfile*     text eol=lf
 *.yml           text eol=lf
 *.yaml          text eol=lf
 .env.example    text eol=lf
+
+# Windows-native launchers must keep CRLF — cmd.exe mis-parses LF-only .cmd files.
+*.cmd           text eol=crlf
+*.ps1           text eol=crlf

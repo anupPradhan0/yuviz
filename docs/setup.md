@@ -1,7 +1,8 @@
 # Setup — Web-Testing Path (Fork & Run)
 
 > **Most people should run `./deployment/sh/dev.sh` instead** — one command, Docker the only
-> prerequisite, works on macOS/Linux/Windows (WSL2 or Git Bash). See the
+> prerequisite, works on macOS/Linux/Windows (PowerShell, Command Prompt,
+> Git Bash or WSL2). See the
 > Quickstart in [README.md](../README.md). This document covers the **native**
 > install, which is useful for debugging a service directly against your own
 > Python environment but has more moving parts and was only verified on macOS.

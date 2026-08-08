@@ -7,12 +7,17 @@ and testing without any telephony infra, directly from a browser.
 
 ## Quickstart
 
-Docker is the only prerequisite. On Windows, run this from WSL2 or Git Bash.
+Docker is the only prerequisite — and if you don't have it, the script offers to
+install Docker or Colima for you.
 
 ```bash
 git clone https://github.com/yuviz-ai/yuviz.git && cd yuviz
 ./deployment/sh/dev.sh
 ```
+
+On Windows use `.\deployment\sh\dev.ps1` (PowerShell) or
+`deployment\sh\dev.cmd` (Command Prompt) — both re-invoke the same script
+through Git Bash or WSL.
 
 Then open <http://localhost:3000>, pick the `default` agent, and click
 **Test Agent** to talk to it in your browser.
