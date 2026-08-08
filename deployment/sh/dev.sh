@@ -124,9 +124,95 @@ if [ "$ACTION" = "version" ]; then
     exit 0
 fi
 
+runtime_options() {
+    local os; os=$(uname -s)
+    cat <<EOF
+
+  ${BOLD}No container runtime found.${RESET} This stack needs one — nothing else.
+
+  ${BOLD}1) Docker${RESET}$([ "$os" = "Darwin" ] && echo " Desktop" || echo " Engine")
+     $([ "$os" = "Darwin" ] \
+       && echo "Official app with a GUI. Bundles Compose. Free for personal use and
+     small companies, but needs a paid licence at >250 employees or >\$10M
+     revenue." \
+       || echo "Runs natively, no VM, no licence restrictions. The normal choice
+     on Linux.")
+
+  ${BOLD}2) Colima${RESET}
+     $([ "$os" = "Darwin" ] \
+       && echo "Open source, CLI only, no licence restrictions at any company size.
+     Runs a small Linux VM. You size it yourself and start it per session." \
+       || echo "Open source, runs Docker inside a VM. On Linux this adds a VM you
+     do not need — pick 1 unless you have a specific reason.")
+
+EOF
+}
+
+install_docker() {
+    case "$(uname -s)" in
+        Linux)
+            info "Will run:"
+            dim "curl -fsSL https://get.docker.com | sudo sh"
+            dim "sudo systemctl enable --now docker"
+            dim "sudo usermod -aG docker $USER"
+            printf '\n  Continue? [y/N] '; read -r yn
+            case "$yn" in [Yy]*) ;; *) info "Cancelled."; return 1 ;; esac
+            curl -fsSL https://get.docker.com | sudo sh || return 1
+            sudo systemctl enable --now docker || return 1
+            sudo usermod -aG docker "$USER" || return 1
+            ok "Docker installed"
+            warn "Log out and back in (group membership), then re-run this script."
+            ;;
+        Darwin)
+            command -v brew >/dev/null 2>&1 || {
+                fail "Homebrew not found. Install it first: https://brew.sh"
+                return 1
+            }
+            info "Will run: brew install --cask docker"
+            printf '\n  Continue? [y/N] '; read -r yn
+            case "$yn" in [Yy]*) ;; *) info "Cancelled."; return 1 ;; esac
+            brew install --cask docker || return 1
+            ok "Docker Desktop installed"
+            warn "Open Docker Desktop once to start the daemon, then re-run this script."
+            ;;
+        *)
+            fail "Automatic install is not supported here. See https://docs.docker.com/get-docker/"
+            return 1
+            ;;
+    esac
+}
+
+install_colima() {
+    command -v brew >/dev/null 2>&1 || {
+        fail "Colima installs via Homebrew, which was not found. See https://brew.sh"
+        return 1
+    }
+    info "Will run: brew install colima docker docker-compose"
+    dim "then: colima start --cpu 4 --memory 10 --disk 60"
+    printf '\n  Continue? [y/N] '; read -r yn
+    case "$yn" in [Yy]*) ;; *) info "Cancelled."; return 1 ;; esac
+    brew install colima docker docker-compose || return 1
+    # Defaults are 2 CPU / 2 GB, and this stack idles at ~4.9 GB.
+    colima start --cpu 4 --memory 10 --disk 60 || return 1
+    ok "Colima running"
+    warn "Colima's disk lives inside its VM, so the free-space check below reads your host disk."
+    info "Re-run this script to start the stack."
+}
+
 if ! have_docker; then
-    fail "docker not found: https://docs.docker.com/get-docker/"
-    exit 1
+    fail "docker not found"
+    runtime_options
+    if [ ! -t 0 ]; then
+        info "Not an interactive terminal — install one of the above, then re-run."
+        exit 1
+    fi
+    printf '  Install which? [1/2/n] '; read -r choice
+    case "$choice" in
+        1) install_docker || exit 1 ;;
+        2) install_colima || exit 1 ;;
+        *) info "Nothing installed. See https://docs.docker.com/get-docker/"; exit 1 ;;
+    esac
+    exit 0
 fi
 
 case "$ACTION" in

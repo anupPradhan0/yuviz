@@ -66,6 +66,48 @@ Check yours:
 
 ### Installing Docker
 
+**You don't have to do this by hand.** Run `./deployment/sh/dev.sh` with no
+container runtime installed and it offers to install one for you:
+
+```
+✗ docker not found
+
+  No container runtime found. This stack needs one — nothing else.
+
+  1) Docker Desktop
+     Official app with a GUI. Bundles Compose. Free for personal use and
+     small companies, but needs a paid licence at >250 employees or >$10M
+     revenue.
+
+  2) Colima
+     Open source, CLI only, no licence restrictions at any company size.
+     Runs a small Linux VM. You size it yourself and start it per session.
+
+  Install which? [1/2/n]
+```
+
+The wording adapts to your OS — on Linux, option 1 is Docker Engine, which runs
+natively with no VM and no licence restrictions, and Colima is flagged as
+unnecessary there.
+
+Whichever you pick, the exact commands are printed and you confirm a second time
+before anything runs — these need `sudo` (Linux) or Homebrew (macOS). Nothing is
+installed silently. In a non-interactive shell such as CI the script prints the
+options and exits `1` rather than waiting on input.
+
+After installing, the script stops and asks you to re-run it. That is
+deliberate: on Linux the new `docker` group does not apply to your current
+shell until you log out and back in, and on macOS Docker Desktop has to be
+opened once to start its daemon.
+
+Colima is started as `colima start --cpu 4 --memory 10 --disk 60`. Its defaults
+(2 CPU / 2 GB) are too small — this stack idles at ~4.9 GB. One caveat: Colima's
+disk lives inside its VM, so the free-space check in phase 1 reads your *host*
+disk and can pass while the VM is full. The same limitation applies to Docker
+Desktop on macOS.
+
+#### Doing it manually
+
 **Linux (Debian/Ubuntu)**
 ```bash
 curl -fsSL https://get.docker.com | sh
@@ -80,14 +122,16 @@ sudo systemctl enable --now docker
 sudo usermod -aG docker $USER      # then log out and back in
 ```
 
-**macOS** — install Docker Desktop, or:
+**macOS** — Docker Desktop, or Colima:
 ```bash
 brew install --cask docker
+# or
+brew install colima docker docker-compose && colima start --cpu 4 --memory 10 --disk 60
 ```
 
 **Windows** — install Docker Desktop with the WSL2 backend, then run
 `./deployment/sh/dev.sh` **from inside WSL2 or Git Bash**. A `.sh` script
-cannot run in `cmd.exe` or PowerShell.
+cannot run in `cmd.exe` or PowerShell, and Colima does not run on Windows.
 
 ---
 
@@ -276,12 +320,22 @@ nothing is listening there.
 
 ## 9. Troubleshooting
 
-**"Compose 1.x is too old"** — you have `docker-compose` v1. This stack needs
-Compose v2 (`docker compose`, no hyphen). Upgrade Docker.
+**"docker not found"** — the script offers to install Docker or Colima; pick
+one and confirm, or install manually (§2). In CI it exits `1` instead of
+prompting.
 
-**"only N GB free — need at least 10 GB"** — free space, or run
+**"the Docker daemon is not running"** — `sudo systemctl start docker` on Linux,
+or open Docker Desktop. With Colima: `colima start`.
+
+**"Compose 1.x is too old"** — you have `docker-compose` v1. This stack needs
+Compose v2 (`docker compose`, no hyphen). Upgrade Docker. On Colima, install it
+separately: `brew install docker-compose`.
+
+**"only N GB free — need at least 16 GB"** — free space, or run
 `docker system prune -a` (removes unused images from *all* projects) or
-`docker builder prune` (build cache only, safer).
+`docker builder prune` (build cache only, safer). On Colima or Docker Desktop
+this check reads your host disk, not the VM's — if it passes but the build still
+runs out of space, grow the VM.
 
 **"port NNNN in use"** — a local Postgres/Redis/dev server is running. Stop it,
 or override that `*_PORT` in `deployment/.env`.

@@ -1,0 +1,7 @@
+# Windows git defaults to core.autocrlf=true, which rewrites these with CRLF on
+# checkout. bash then fails on the shebang with "bad interpreter: ...^M".
+*.sh            text eol=lf
+Dockerfile*     text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+.env.example    text eol=lf
