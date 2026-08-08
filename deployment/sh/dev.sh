@@ -133,8 +133,8 @@ runtime_options() {
   ${BOLD}1) Docker${RESET}$([ "$os" = "Darwin" ] && echo " Desktop" || echo " Engine")
      $([ "$os" = "Darwin" ] \
        && echo "Official app with a GUI. Bundles Compose. Free for personal use and
-     small companies, but needs a paid licence at >250 employees or >\$10M
-     revenue." \
+     small companies, but needs a paid licence at 250+ employees or
+     \$10M+ annual revenue." \
        || echo "Runs natively, no VM, no licence restrictions. The normal choice
      on Linux.")
 
@@ -148,30 +148,66 @@ runtime_options() {
 EOF
 }
 
+# Prints every step, takes one confirmation, then runs them in order.
+run_steps() {
+    local step
+    info "Will run:"
+    for step in "$@"; do dim "$step"; done
+    printf '\n  Continue? [y/N] '; read -r yn
+    case "$yn" in [Yy]*) ;; *) info "Cancelled."; return 1 ;; esac
+    for step in "$@"; do
+        bash -c "$step" || { fail "failed: $step"; return 1; }
+    done
+}
+
+# Distro packages, not `curl https://get.docker.com | sudo sh`. Piping a remote
+# response straight into a root shell means a compromised endpoint owns the
+# machine; these paths verify signatures through the package manager instead.
+install_docker_linux() {
+    local id; id=$(. /etc/os-release 2>/dev/null && echo "${ID:-}")
+    if command -v pacman >/dev/null 2>&1; then
+        run_steps \
+            "sudo pacman -S --needed --noconfirm docker docker-compose" \
+            "sudo systemctl enable --now docker" \
+            "sudo usermod -aG docker $USER" || return 1
+    elif command -v apt-get >/dev/null 2>&1; then
+        case "$id" in ubuntu|debian) ;; *) id=debian ;; esac
+        run_steps \
+            "sudo apt-get update" \
+            "sudo apt-get install -y ca-certificates curl gnupg" \
+            "sudo install -m 0755 -d /etc/apt/keyrings" \
+            "curl -fsSL https://download.docker.com/linux/$id/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg" \
+            "sudo chmod a+r /etc/apt/keyrings/docker.gpg" \
+            "echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$id \$(. /etc/os-release && echo \\\$VERSION_CODENAME) stable\" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null" \
+            "sudo apt-get update" \
+            "sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin" \
+            "sudo systemctl enable --now docker" \
+            "sudo usermod -aG docker $USER" || return 1
+    elif command -v dnf >/dev/null 2>&1; then
+        run_steps \
+            "sudo dnf -y install dnf-plugins-core" \
+            "sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo" \
+            "sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin" \
+            "sudo systemctl enable --now docker" \
+            "sudo usermod -aG docker $USER" || return 1
+    else
+        fail "No supported package manager found (pacman, apt-get, dnf)."
+        info "Install Docker Engine for your distro: https://docs.docker.com/engine/install/"
+        return 1
+    fi
+    ok "Docker installed"
+    warn "Log out and back in (group membership), then re-run this script."
+}
+
 install_docker() {
     case "$(uname -s)" in
-        Linux)
-            info "Will run:"
-            dim "curl -fsSL https://get.docker.com | sudo sh"
-            dim "sudo systemctl enable --now docker"
-            dim "sudo usermod -aG docker $USER"
-            printf '\n  Continue? [y/N] '; read -r yn
-            case "$yn" in [Yy]*) ;; *) info "Cancelled."; return 1 ;; esac
-            curl -fsSL https://get.docker.com | sudo sh || return 1
-            sudo systemctl enable --now docker || return 1
-            sudo usermod -aG docker "$USER" || return 1
-            ok "Docker installed"
-            warn "Log out and back in (group membership), then re-run this script."
-            ;;
+        Linux) install_docker_linux || return 1 ;;
         Darwin)
             command -v brew >/dev/null 2>&1 || {
                 fail "Homebrew not found. Install it first: https://brew.sh"
                 return 1
             }
-            info "Will run: brew install --cask docker"
-            printf '\n  Continue? [y/N] '; read -r yn
-            case "$yn" in [Yy]*) ;; *) info "Cancelled."; return 1 ;; esac
-            brew install --cask docker || return 1
+            run_steps "brew install --cask docker" || return 1
             ok "Docker Desktop installed"
             warn "Open Docker Desktop once to start the daemon, then re-run this script."
             ;;
@@ -187,13 +223,9 @@ install_colima() {
         fail "Colima installs via Homebrew, which was not found. See https://brew.sh"
         return 1
     }
-    info "Will run: brew install colima docker docker-compose"
-    dim "then: colima start --cpu 4 --memory 10 --disk 60"
-    printf '\n  Continue? [y/N] '; read -r yn
-    case "$yn" in [Yy]*) ;; *) info "Cancelled."; return 1 ;; esac
-    brew install colima docker docker-compose || return 1
     # Defaults are 2 CPU / 2 GB, and this stack idles at ~4.9 GB.
-    colima start --cpu 4 --memory 10 --disk 60 || return 1
+    run_steps "brew install colima docker docker-compose" \
+              "colima start --cpu 4 --memory 10 --disk 60" || return 1
     ok "Colima running"
     warn "Colima's disk lives inside its VM, so the free-space check below reads your host disk."
     info "Re-run this script to start the stack."

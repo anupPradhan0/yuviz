@@ -1,5 +1,5 @@
-# PowerShell entry point. Runs deployment/sh/dev.sh through Git Bash or WSL —
-# all logic lives in dev.sh so the two cannot drift.
+# PowerShell entry point. Runs deployment/sh/dev.sh through Git Bash or WSL.
+# All logic lives in dev.sh so the two cannot drift.
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
@@ -18,7 +18,7 @@ try {
         exit $LASTEXITCODE
     }
     if (Get-Command wsl -ErrorAction SilentlyContinue) {
-        Write-Host 'Git Bash not found — using WSL.' -ForegroundColor DarkGray
+        Write-Host 'Git Bash not found - using WSL.' -ForegroundColor DarkGray
         wsl bash 'deployment/sh/dev.sh' @args
         exit $LASTEXITCODE
     }

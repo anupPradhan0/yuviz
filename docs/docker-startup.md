@@ -70,15 +70,15 @@ Check yours:
 **You don't have to do this by hand.** Run `./deployment/sh/dev.sh` with no
 container runtime installed and it offers to install one for you:
 
-```
+```text
 ✗ docker not found
 
   No container runtime found. This stack needs one — nothing else.
 
   1) Docker Desktop
      Official app with a GUI. Bundles Compose. Free for personal use and
-     small companies, but needs a paid licence at >250 employees or >$10M
-     revenue.
+     small companies, but needs a paid licence at 250+ employees or
+     $10M+ annual revenue.
 
   2) Colima
      Open source, CLI only, no licence restrictions at any company size.
