@@ -255,6 +255,16 @@ body {
   border-radius: var(--rs); color: var(--text); font-family: var(--font); font-size: .83rem; outline: none;
 }
 .login-input:focus { border-color: var(--cyan); }
+/* Reveal toggle sits inside the field; the input pads right so text can't
+   run under it. */
+.login-input-wrap { position: relative; }
+.login-input-wrap .login-input { padding-right: 38px; }
+.login-reveal {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  display: flex; padding: 5px; background: none; border: none; border-radius: var(--rs);
+  color: var(--text-3); cursor: pointer;
+}
+.login-reveal:hover { color: var(--text); }
 .login-btn {
   width: 100%; padding: 10px; background: var(--cyan); color: #fff; border: none; border-radius: var(--rs);
   font-size: .85rem; font-weight: 700; cursor: pointer; margin-top: 6px;

@@ -5,6 +5,16 @@ import { useRouter } from "next/navigation";
 import { ApiError, bootstrap } from "@/lib/api";
 import { setToken } from "@/lib/auth";
 
+function EyeIcon({ off }: { off: boolean }) {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <path d="M1 8s2.5-4.5 7-4.5S15 8 15 8s-2.5 4.5-7 4.5S1 8 1 8z" />
+      <circle cx="8" cy="8" r="2" />
+      {off && <path d="M2.5 13.5l11-11" />}
+    </svg>
+  );
+}
+
 // First-run only: AppShell routes here while /auth/setup-status reports
 // setup_required. Reuses the login page's .login-* styles on purpose.
 export default function SetupPage() {
@@ -14,6 +24,8 @@ export default function SetupPage() {
   const [confirm, setConfirm] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // One toggle for both fields — you check them against each other.
+  const [reveal, setReveal] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -77,21 +89,33 @@ export default function SetupPage() {
             </div>
             <div className="login-field">
               <label className="login-label">Password</label>
-              <input
-                className="login-input"
-                type="password"
-                autoComplete="new-password"
-                minLength={8}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
+              <div className="login-input-wrap">
+                <input
+                  className="login-input"
+                  type={reveal ? "text" : "password"}
+                  autoComplete="new-password"
+                  minLength={8}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                />
+                <button
+                  type="button"
+                  className="login-reveal"
+                  onClick={() => setReveal((r) => !r)}
+                  aria-label={reveal ? "Hide passwords" : "Show passwords"}
+                  aria-pressed={reveal}
+                  title={reveal ? "Hide passwords" : "Show passwords"}
+                >
+                  <EyeIcon off={reveal} />
+                </button>
+              </div>
             </div>
             <div className="login-field">
               <label className="login-label">Confirm password</label>
               <input
                 className="login-input"
-                type="password"
+                type={reveal ? "text" : "password"}
                 autoComplete="new-password"
                 value={confirm}
                 onChange={(e) => setConfirm(e.target.value)}
