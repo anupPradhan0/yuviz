@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { getCurrentUser, getSetupStatus, User } from "@/lib/api";
+import { getCurrentUser, User } from "@/lib/api";
 import { clearToken, getToken } from "@/lib/auth";
 
 // Icons match the original "Yuviz.ai — Admin Console" artifact's nav icon
@@ -98,54 +98,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
 
-  // Auth guard: /login and /setup render standalone (no sidebar, nothing to
-  // guard — see the early return below). Every other route requires a token;
-  // a missing one redirects immediately, a present-but-invalid/expired one is
-  // caught by getCurrentUser() itself (api.ts's request() already redirects
-  // to /login on any 401, so this only needs to handle "no token at all").
-  // The setup check runs first: with no superadmin there is nothing to log
-  // into, so /setup is the only reachable page. Routing only — the real gate
-  // is /auth/bootstrap, which 409s once a superadmin exists.
+  // Auth guard: /login renders standalone (no sidebar, nothing to guard —
+  // see the early return below; it also hosts first-run account creation).
+  // Every other route requires a token; a missing one redirects immediately,
+  // a present-but-invalid/expired one is caught by getCurrentUser() itself
+  // (api.ts's request() already redirects to /login on any 401, so this only
+  // needs to handle "no token at all").
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      let setupRequired = false;
-      try {
-        setupRequired = (await getSetupStatus()).setup_required;
-      } catch {
-        // Config Service unreachable — fall through to the token guard
-        // rather than stranding the user on an unverifiable setup page.
-      }
-      if (cancelled) return;
-      if (setupRequired) {
-        if (pathname !== "/setup") router.replace("/setup");
-        else setAuthChecked(true);
-        return;
-      }
-      if (pathname === "/setup") {
-        router.replace("/login");
-        return;
-      }
-      if (pathname === "/login") {
-        setAuthChecked(true);
-        return;
-      }
-      if (!getToken()) {
-        router.replace("/login");
-        return;
-      }
-      try {
-        const u = await getCurrentUser();
-        if (!cancelled) setUser(u);
-      } catch {
+    if (pathname === "/login") return;
+    if (!getToken()) {
+      router.push("/login");
+      return;
+    }
+    getCurrentUser()
+      .then(setUser)
+      .catch(() => {
         // api.ts's request() already redirects to /login on 401; nothing
         // extra to do here.
-      }
-      if (!cancelled) setAuthChecked(true);
-    })();
-    return () => {
-      cancelled = true;
-    };
+      })
+      .finally(() => setAuthChecked(true));
   }, [pathname, router]);
 
   const handleLogout = () => {
@@ -153,9 +124,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     router.push("/login");
   };
 
-  // Gated on authChecked too, or a fresh install flashes the login form
-  // before bouncing to /setup.
-  if (pathname === "/login" || pathname === "/setup") return authChecked ? <>{children}</> : null;
+  if (pathname === "/login") return <>{children}</>;
   if (!authChecked) return null;
 
   const matches = (label: string) => label.toLowerCase().includes(search.trim().toLowerCase());

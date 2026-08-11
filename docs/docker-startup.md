@@ -18,13 +18,13 @@ cd yuviz
 ./deployment/sh/dev.sh
 ```
 
-Then open <http://localhost:3000>. On a fresh database the UI shows
+Then open <http://localhost:3000>. On a fresh database the login page opens on
 **Create your administrator account** — enter your own email and a password of
 at least 8 characters. That account becomes the first superadmin and you are
-signed in immediately; every run after that shows the normal login page.
+signed in immediately; every run after that shows the normal sign-in form.
 
-There is no default username or password. The setup screen is served only
-while the database has no superadmin: `POST /auth/bootstrap` rejects (409)
+There is no default username or password. The account-creation form is offered
+only while the database has no superadmin: `POST /auth/bootstrap` rejects (409)
 once one exists, so it cannot be used a second time.
 
 Select the `default` agent → click **Test Agent** → allow microphone → talk.

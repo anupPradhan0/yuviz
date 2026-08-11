@@ -145,11 +145,11 @@ check against Conversation Service, not just a TCP connect.
 
 ## 8. Test an agent
 
-Open `http://localhost:3000`. On a database that has no superadmin yet the UI
-shows **Create your administrator account** instead of the login page — enter
-your own email and a password of at least 8 characters (minimum enforced by
+Open `http://localhost:3000`. On a database that has no superadmin yet the
+login page opens on **Create your administrator account** — enter your own
+email and a password of at least 8 characters (minimum enforced by
 `services/config/schemas.py`), and you are signed in as the first superadmin.
-The screen disappears for good once that account exists; `scripts/
+The form reverts to plain sign-in for good once that account exists; `scripts/
 create_superadmin.py` is the headless equivalent if you would rather not use
 the browser.
 
