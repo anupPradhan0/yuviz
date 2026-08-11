@@ -397,9 +397,10 @@ does not.
 
 **Forgot the admin password** — there is no reset flow and no default
 credential to fall back on. Create another superadmin from the host with
-`python3 scripts/create_superadmin.py <email> <password>` (needs
-`POSTGRES_DSN` pointing at the stack's database), or wipe and start over with
-`./deployment/sh/dev.sh --clean`, which brings the setup screen back.
+`POSTGRES_DSN=postgresql://voiceai:voiceai@127.0.0.1:5432/voiceai python3
+scripts/create_superadmin.py <email> <password>` — from the host, use
+`127.0.0.1`, not the compose service name `postgres`. Or wipe and start over
+with `./deployment/sh/dev.sh --clean`, which brings the setup screen back.
 
 **The setup screen appears again unexpectedly** — it is shown whenever the
 `users` table has no live superadmin row, so a wiped volume or a deleted last
