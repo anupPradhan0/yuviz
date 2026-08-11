@@ -14,6 +14,12 @@ from . import audit, auth, db
 
 _UPDATABLE_FIELDS = {"role", "tenant_id"}
 
+_SUPERADMIN_EXISTS = (
+    "SELECT EXISTS (SELECT 1 FROM users WHERE role = 'superadmin' AND deleted_at IS NULL)"
+)
+
+_BOOTSTRAP_LOCK_KEY = 7749012026
+
 
 def to_public_dict(user: dict[str, Any]) -> dict[str, Any]:
     """Strips password_hash — never returned to a client, in a login
@@ -49,6 +55,37 @@ async def list_users(tenant_id: Any | None = None) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+async def _insert_user(
+    conn: Any,
+    *,
+    email: str,
+    password: str,
+    role: str,
+    tenant_id: Any | None,
+    creator_user_id: Any | None,
+    creator_user_email: str | None,
+) -> dict[str, Any]:
+    """Insert + audit on a caller-supplied connection, already inside a
+    transaction — so bootstrap_first_superadmin() can share its lock-holding
+    transaction, which create_user()'s own connection could not."""
+    row = await conn.fetchrow(
+        "INSERT INTO users (email, password_hash, role, tenant_id) "
+        "VALUES ($1, $2, $3, $4) RETURNING *",
+        email, auth.hash_password(password), role, tenant_id,
+    )
+    result = dict(row)
+    await audit.write_audit(
+        conn,
+        entity_type="user",
+        entity_id=result["id"],
+        action="created",
+        user_id=creator_user_id,
+        user_email=creator_user_email,
+        new_value=result,
+    )
+    return result
+
+
 async def create_user(
     *,
     email: str,
@@ -58,26 +95,50 @@ async def create_user(
     creator_user_id: Any | None = None,
     creator_user_email: str | None = None,
 ) -> dict[str, Any]:
-    password_hash = auth.hash_password(password)
     pool = await db.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            row = await conn.fetchrow(
-                "INSERT INTO users (email, password_hash, role, tenant_id) "
-                "VALUES ($1, $2, $3, $4) RETURNING *",
-                email, password_hash, role, tenant_id,
-            )
-            result = dict(row)
-            await audit.write_audit(
+            return await _insert_user(
                 conn,
-                entity_type="user",
-                entity_id=result["id"],
-                action="created",
-                user_id=creator_user_id,
-                user_email=creator_user_email,
-                new_value=result,
+                email=email,
+                password=password,
+                role=role,
+                tenant_id=tenant_id,
+                creator_user_id=creator_user_id,
+                creator_user_email=creator_user_email,
             )
-    return result
+
+
+async def superadmin_exists() -> bool:
+    """False == first-time setup, so /auth/bootstrap is open."""
+    pool = await db.get_pool()
+    return await pool.fetchval(_SUPERADMIN_EXISTS)
+
+
+async def bootstrap_first_superadmin(*, email: str, password: str) -> dict[str, Any] | None:
+    """Creates the very first superadmin. Returns None (no write) if one
+    already exists — the caller turns that into a 409.
+
+    Check and insert share one advisory-locked transaction, so two concurrent
+    requests can't both see "no superadmin" and both insert. A partial unique
+    index would do it too, but would also forbid the legal second superadmin
+    created later via POST /users."""
+    pool = await db.get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1)", _BOOTSTRAP_LOCK_KEY)
+            if await conn.fetchval(_SUPERADMIN_EXISTS):
+                return None
+            # creator_user_id NULL: no authenticated actor created this one.
+            return await _insert_user(
+                conn,
+                email=email,
+                password=password,
+                role="superadmin",
+                tenant_id=None,
+                creator_user_id=None,
+                creator_user_email=email,
+            )
 
 
 async def authenticate(email: str, password: str) -> dict[str, Any] | None:

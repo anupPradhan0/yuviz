@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Creates the first superadmin user. Necessary because POST /users itself
-requires an existing superadmin/admin (see services/config/routers/users.py)
-— there is no other way to get the very first account into a fresh
-database. Not idempotent in the sense of "safe to re-run for the same
+Creates a superadmin user from the command line. The normal path for the
+*first* account is the Admin UI's "Create your administrator account" screen
+(POST /auth/bootstrap, open only while no superadmin exists); this script is
+the headless equivalent, and the recovery path when every superadmin is
+locked out — POST /users itself requires an existing superadmin/admin (see
+services/config/routers/users.py). Not idempotent in the sense of "safe to re-run for the same
 email": users.email is UNIQUE, so a second run for the same address fails
 loudly (asyncpg.UniqueViolationError) rather than silently doing nothing —
 correct here, unlike seed_default_config.py's config rows, because a second

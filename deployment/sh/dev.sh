@@ -552,8 +552,6 @@ fi
 
 # ── [7/7] ─────────────────────────────────────────────────────────────────────
 phase 7 "Ready!"
-ADMIN_EMAIL_V=$(grep '^ADMIN_EMAIL=' "$ENV_FILE" | cut -d= -f2-)
-ADMIN_PASSWORD_V=$(grep '^ADMIN_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)
 cat <<EOF
 
   ${GREEN}✓${RESET} All services healthy
@@ -564,7 +562,8 @@ cat <<EOF
   ${GREEN}✓${RESET} TTS verified
 
   ${BOLD}Open: http://localhost:3000${RESET}
-  Login:  ${ADMIN_EMAIL_V}  /  ${ADMIN_PASSWORD_V}
+  First run shows "Create your administrator account" — pick your own
+  email and password there; this stack ships with no default login.
   Then select the "default" agent → Click "Test Agent"
 
   ${DIM}./deployment/sh/dev.sh --logs    tail logs

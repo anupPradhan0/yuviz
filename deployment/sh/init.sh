@@ -21,33 +21,9 @@ else
     exit 1
 fi
 
-echo "→ admin user"
-# Create, or reset the password if the account already exists. Skipping the
-# reset would leave a stale password while dev.sh prints the one from .env —
-# credentials that are printed but do not work are worse than none.
-python3 - <<'PY'
-import asyncio, os, sys
-sys.path.insert(0, "/app")
-from services.config import auth, db, users
-
-async def main():
-    email = os.environ["ADMIN_EMAIL"]
-    password = os.environ["ADMIN_PASSWORD"]
-    if await users.get_user_by_email(email) is None:
-        await users.create_user(email=email, password=password,
-                                role="superadmin", tenant_id=None)
-        print(f"  ✓ created {email}")
-    else:
-        pool = await db.get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE users SET password_hash = $2, role = 'superadmin', "
-                "updated_at = now() WHERE email = $1",
-                email, auth.hash_password(password))
-        print(f"  ✓ {email} password synced with deployment/.env")
-
-asyncio.run(main())
-PY
+# No admin user is seeded — the first superadmin is created from the Admin
+# UI's setup screen (POST /auth/bootstrap), so no clone ships with a known
+# password.
 
 echo "→ seeding default agent (ollama at ${OLLAMA_BASE_URL})"
 python3 /app/scripts/seed_default_config.py

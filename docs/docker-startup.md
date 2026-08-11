@@ -18,12 +18,14 @@ cd yuviz
 ./deployment/sh/dev.sh
 ```
 
-Then open <http://localhost:3000> and log in:
+Then open <http://localhost:3000>. On a fresh database the UI shows
+**Create your administrator account** — enter your own email and a password of
+at least 8 characters. That account becomes the first superadmin and you are
+signed in immediately; every run after that shows the normal login page.
 
-| Field | Value |
-|---|---|
-| Email | `admin@yuviz.local` |
-| Password | `admin123` |
+There is no default username or password. The setup screen is served only
+while the database has no superadmin: `POST /auth/bootstrap` rejects (409)
+once one exists, so it cannot be used a second time.
 
 Select the `default` agent → click **Test Agent** → allow microphone → talk.
 
@@ -185,8 +187,9 @@ Three Windows-specific things that will otherwise cost you time:
 | | | | **Total** | **≈ 4.9 GB** | |
 
 Plus a 9th short-lived container, `init`, which applies schemas, creates the
-admin user and seeds the default agent, then exits. Everything else waits for
-it to finish successfully.
+internal service account and seeds the default agent, then exits. It creates
+no admin login — that is done once from the UI (see §1). Everything else waits
+for it to finish successfully.
 
 Three services account for 96% of the memory. The other five are nearly free.
 
@@ -292,7 +295,7 @@ deployment/
     ├── dev.sh                   entry point — all logic lives here
     ├── dev.ps1                  PowerShell wrapper → dev.sh
     ├── dev.cmd                  Command Prompt wrapper → dev.ps1
-    └── init.sh                  schemas → admin user → seed agent
+    └── init.sh                  schemas → service account → seed agent
 ```
 
 `.dockerignore` stays at the repo root — Docker only reads it from the build
@@ -306,8 +309,6 @@ Everything lives in `deployment/.env`, generated on first run.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `ADMIN_EMAIL` | `admin@yuviz.local` | Admin UI login |
-| `ADMIN_PASSWORD` | `admin123` | Re-synced to the database every run — change it here and re-run |
 | `CONFIG_SERVICE_PASSWORD` | random | Internal service account, not a UI login |
 | `JWT_SECRET` | random | Signs Config Service tokens |
 | `POSTGRES_DSN` | `postgresql://voiceai:voiceai@postgres:5432/voiceai` | Host is the compose service name |
@@ -327,10 +328,10 @@ value breaks the stack **silently**:
 - `CONVERSATION_SVC_TARGET=conversation:50051` — webcall otherwise defaults to
   Envoy on `:10000`, which this stack does not run.
 
-**Security note:** `admin123` ships in `.env.example`, so every clone has the
-same password, and postgres defaults to `voiceai`/`voiceai`. Change
-`ADMIN_PASSWORD`, `POSTGRES_PASSWORD` and `POSTGRES_DSN` before this stack
-leaves your machine.
+**Security note:** the Admin UI account is yours, chosen at first run — no
+credential for it ships in this repo. Postgres still defaults to
+`voiceai`/`voiceai`, so change `POSTGRES_PASSWORD` and `POSTGRES_DSN` before
+this stack leaves your machine.
 
 Credentials alone are not enough to expose it, though: redis, ollama and the
 conversation gRPC port have no authentication to configure. Keep `BIND_ADDR` at
@@ -394,8 +395,15 @@ DNS64; test with `getent ahosts github.com`.
 `COPY . /app`. `dev.sh` always rebuilds, but a manual `docker compose up init`
 does not.
 
-**Login fails** — `dev.sh` re-syncs `ADMIN_PASSWORD` from `deployment/.env` on
-every run, so re-running fixes a stale password.
+**Forgot the admin password** — there is no reset flow and no default
+credential to fall back on. Create another superadmin from the host with
+`python3 scripts/create_superadmin.py <email> <password>` (needs
+`POSTGRES_DSN` pointing at the stack's database), or wipe and start over with
+`./deployment/sh/dev.sh --clean`, which brings the setup screen back.
+
+**The setup screen appears again unexpectedly** — it is shown whenever the
+`users` table has no live superadmin row, so a wiped volume or a deleted last
+superadmin brings it back.
 
 ---
 
