@@ -20,6 +20,8 @@ Requires: POSTGRES_DSN, REDIS_URL (see services/config/db.py, cache.py)
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -39,12 +41,19 @@ SYSTEM_PROMPT = (
     "speech only - no markdown, no bullet points, no numbered lists."
 )
 
+# Under docker-compose the Conversation Service is a container, where
+# "localhost" is itself.
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434"
+
+# Must match what the Conversation Service loads, or a second model is fetched.
+STT_MODEL = os.environ.get("VOICEAI_STT_MODEL") or "small"
+
 # Matches PipelineConfig's defaults (services/conversation/pipeline_config.py).
 PROVIDER_DEFAULTS = [
     {"role": "stt", "engine": "faster_whisper", "name": "FasterWhisper (default)",
-     "model": "small", "extra": {"device": "cpu", "compute_type": "int8"}},
+     "model": STT_MODEL, "extra": {"device": "cpu", "compute_type": "int8"}},
     {"role": "llm", "engine": "ollama", "name": "Ollama llama3.2 (default)",
-     "model": "llama3.2", "extra": {"temperature": 0.7, "base_url": "http://localhost:11434"}},
+     "model": "llama3.2", "extra": {"temperature": 0.7, "base_url": OLLAMA_BASE_URL}},
     # Kokoro, not macOS's `say` — found live 2026-08-04 while auditing
     # fork-reproducibility: `engine="macos"` shells out to a macOS-only
     # binary and silently can't work at all on Linux (or even reliably as
@@ -71,7 +80,20 @@ async def main() -> None:
         match = next((p for p in existing if p["engine"] == spec["engine"]), None)
         if match is not None:
             provider_ids[spec["role"]] = match["id"]
-            print(f"provider_config already exists: {spec['role']}/{spec['engine']} ({match['id']})")
+            # Skipping outright would pin an existing install to stale values.
+            drift = {k: spec[k] for k in ("model", "voice")
+                     if spec.get(k) is not None and match.get(k) != spec[k]}
+            want_extra = spec.get("extra") or {}
+            have_extra = match.get("extra") or {}
+            if isinstance(have_extra, str):
+                have_extra = json.loads(have_extra)
+            if any(have_extra.get(k) != v for k, v in want_extra.items()):
+                drift["extra"] = {**have_extra, **want_extra}
+            if drift:
+                await provider_configs.update_provider_config(match["id"], **drift)
+                print(f"updated provider_config: {spec['role']}/{spec['engine']} {drift}")
+            else:
+                print(f"provider_config already exists: {spec['role']}/{spec['engine']} ({match['id']})")
             continue
         created = await provider_configs.create_provider_config(
             tenant_id=tenant["id"], name=spec["name"], role=spec["role"], engine=spec["engine"],

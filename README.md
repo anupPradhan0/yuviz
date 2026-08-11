@@ -5,12 +5,59 @@ booking, RAG, AI-to-human transfer) → TTS, reachable either over real SIP
 telephony (via the C++ Gateway described below) or, for local development
 and testing without any telephony infra, directly from a browser.
 
-**New to this repo?** See [docs/setup.md](docs/setup.md) — it covers the
-web-testing path (Postgres/Redis + the Python services + admin-ui's "Test
-Agent" browser panel), which is what a fresh fork can actually run without
-any native SIP/telephony install. The rest of this file documents the C++
-Gateway specifically, which is the piece that handles real phone calls
-(Kamailio/FreeSWITCH) and is not part of that fork-and-run path.
+## Quickstart
+
+Docker is the only prerequisite — and if you don't have it, the script offers to
+install Docker or Colima for you.
+
+```bash
+git clone https://github.com/yuviz-ai/yuviz.git && cd yuviz
+./deployment/sh/dev.sh
+```
+
+On Windows use `.\deployment\sh\dev.ps1` (PowerShell) or
+`deployment\sh\dev.cmd` (Command Prompt) — both re-invoke the same script
+through Git Bash or WSL.
+
+Then open <http://localhost:3000>, pick the `default` agent, and click
+**Test Agent** to talk to it in your browser.
+
+`./deployment/sh/dev.sh` checks your environment, generates `deployment/.env` with random secrets,
+builds the images, pulls the models, waits for every service to report
+healthy, and then verifies STT, LLM and TTS actually work end to end before
+telling you it's ready. First run downloads ~3 GB of models and needs **16 GB
+of free disk** (~15.6 GB of images and models); later runs skip anything
+already cached.
+
+```bash
+./deployment/sh/dev.sh --logs        # tail logs
+./deployment/sh/dev.sh --down        # stop, keep data
+./deployment/sh/dev.sh --clean       # stop and wipe volumes
+./deployment/sh/dev.sh --verbose     # full build/pull output
+./deployment/sh/dev.sh --timeout 600 # slower machines / CI
+./deployment/sh/dev.sh --version     # versions, for bug reports
+```
+
+**Using a Mac with Apple Silicon?** Containers can't reach Metal, so the
+containerized Ollama runs the LLM on CPU. For GPU speed, run Ollama on the
+host and point the stack at it:
+
+```bash
+ollama serve                      # in another terminal
+USE_HOST_OLLAMA=1 ./deployment/sh/dev.sh
+```
+
+Full details — container list, resource requirements, configuration reference
+and troubleshooting — are in
+[docs/docker-startup.md](docs/docker-startup.md).
+
+Prefer a native install without Docker? [docs/setup.md](docs/setup.md) covers
+that path. Note it was only ever verified on macOS.
+
+Both paths cover the **web-testing** subset — the Python services plus
+admin-ui's browser call panel. The rest of this file documents the C++
+Gateway, which handles real phone calls (Kamailio/FreeSWITCH) and is not part
+of the fork-and-run path.
 
 ## Voice AI Gateway (C++)
 

@@ -1,0 +1,44 @@
+# One image for all four Python services; compose picks the entrypoint.
+FROM python:3.11-slim
+
+# curl for the healthchecks; libsndfile/espeak-ng for the audio stack.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        libsndfile1 \
+        espeak-ng \
+        postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# CPU torch (~200 MB) instead of the default CUDA wheel (~532 MB + GB of nvidia-*).
+ARG TORCH_VERSION=2.12.1
+RUN pip install --no-cache-dir "torch==${TORCH_VERSION}" \
+        --index-url https://download.pytorch.org/whl/cpu
+
+# requirements.txt pulls en_core_web_sm from a GitHub release, which some
+# networks cannot reach; kokoro TTS needs it via misaki -> spacy.load().
+#   docker compose build --build-arg SPACY_MODEL_URL=https://...
+ARG SPACY_MODEL_URL=""
+COPY requirements.txt ./
+RUN if [ -n "$SPACY_MODEL_URL" ]; then \
+        grep -v '^en_core_web_sm @' requirements.txt > /tmp/req.txt && \
+        pip install --no-cache-dir -r /tmp/req.txt && \
+        pip install --no-cache-dir --no-deps "en_core_web_sm @ ${SPACY_MODEL_URL}" ; \
+    else \
+        pip install --no-cache-dir -r requirements.txt ; \
+    fi
+
+# libs/vad_sdk resolves models/silero_vad.onnx from the repo root; faster-whisper
+# already ships a byte-identical copy.
+RUN mkdir -p /app/models && \
+    cp /usr/local/lib/python3.11/site-packages/faster_whisper/assets/silero_vad_v6.onnx \
+       /app/models/silero_vad.onnx
+
+COPY . /app
+
+ENV HF_HOME=/root/.cache/huggingface \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+CMD ["python", "-c", "print('set a command: in docker-compose.yml')"]
