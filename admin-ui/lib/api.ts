@@ -684,6 +684,12 @@ export interface LoginResponse {
 export const login = (email: string, password: string) =>
   request<LoginResponse>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
 
+export const getSetupStatus = () =>
+  request<{ setup_required: boolean }>("/auth/setup-status");
+
+export const bootstrap = (email: string, password: string) =>
+  request<LoginResponse>("/auth/bootstrap", { method: "POST", body: JSON.stringify({ email, password }) });
+
 export const getCurrentUser = () => request<User>("/auth/me");
 
 export const changePassword = (currentPassword: string, newPassword: string) =>

@@ -145,7 +145,15 @@ check against Conversation Service, not just a TCP connect.
 
 ## 8. Test an agent
 
-Open `http://localhost:3000`, navigate to the `default` agent, and click
+Open `http://localhost:3000`. On a database that has no superadmin yet the
+login page opens on **Create your administrator account** — enter your own
+email and a password of at least 8 characters (minimum enforced by
+`services/config/schemas.py`), and you are signed in as the first superadmin.
+The form reverts to plain sign-in for good once that account exists; `scripts/
+create_superadmin.py` is the headless equivalent if you would rather not use
+the browser.
+
+Then navigate to the `default` agent and click
 **Test Agent** — this opens `admin-ui/components/TestAgentPanel.tsx`,
 which talks directly to the webcall bridge over WebSocket and does its own
 in-browser VAD (calibrated noise floor, barge-in support). Speak into your

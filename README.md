@@ -19,7 +19,9 @@ On Windows use `.\deployment\sh\dev.ps1` (PowerShell) or
 `deployment\sh\dev.cmd` (Command Prompt) — both re-invoke the same script
 through Git Bash or WSL.
 
-Then open <http://localhost:3000>, pick the `default` agent, and click
+Then open <http://localhost:3000>. The first run asks you to
+**create your administrator account** — there are no default credentials
+shipped with this repo. After that, pick the `default` agent and click
 **Test Agent** to talk to it in your browser.
 
 `./deployment/sh/dev.sh` checks your environment, generates `deployment/.env` with random secrets,

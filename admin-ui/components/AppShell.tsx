@@ -99,10 +99,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [theme]);
 
   // Auth guard: /login renders standalone (no sidebar, nothing to guard —
-  // see the early return below). Every other route requires a token; a
-  // missing one redirects immediately, a present-but-invalid/expired one is
-  // caught by getCurrentUser() itself (api.ts's request() already redirects
-  // to /login on any 401, so this only needs to handle "no token at all").
+  // see the early return below; it also hosts first-run account creation).
+  // Every other route requires a token; a missing one redirects immediately,
+  // a present-but-invalid/expired one is caught by getCurrentUser() itself
+  // (api.ts's request() already redirects to /login on any 401, so this only
+  // needs to handle "no token at all").
   useEffect(() => {
     if (pathname === "/login") return;
     if (!getToken()) {

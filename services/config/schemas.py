@@ -200,6 +200,11 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class BootstrapRequest(BaseModel):
+    email:    str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    password: str = Field(min_length=8)
+
+
 class UserCreate(BaseModel):
     email:     str
     password:  str
