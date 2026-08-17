@@ -45,6 +45,7 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
   const [customVoice, setCustomVoice] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [refVisible, setRefVisible] = useState(false);
 
   useEffect(() => {
     listTenants().then((ts) => {
@@ -92,11 +93,13 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
 
   const openCreate = () => {
     resetForm();
+    setRefVisible(false);
     setModalOpen(true);
   };
 
   const openEdit = (p: ProviderConfig) => {
     setEditing(p);
+    setRefVisible(false);
     setForm({ name: p.name, role: p.role, engine: p.engine, environment: p.environment, api_key_ref: p.api_key_ref || undefined });
     const models = MODELS_BY_ENGINE[p.engine];
     if (p.model) setModelChoice(models && models.includes(p.model) ? p.model : OTHER);
@@ -373,15 +376,37 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
 
         <div className="form-group">
           <label className="form-label">
-            API Key Ref <span className="hint">env:VAR_NAME or k8s:namespace/secret — never a raw key</span>
+            API Key Ref{" "}
+            <span className="hint">env:VAR_NAME, k8s:namespace/secret, or vault:path#field — never a raw key</span>
           </label>
-          <input
-            className="form-input"
-            style={{ fontFamily: "var(--mono)" }}
-            value={form.api_key_ref || ""}
-            onChange={(e) => setForm({ ...form, api_key_ref: e.target.value })}
-            placeholder="env:DEEPGRAM_API_KEY"
-          />
+          <div style={{ position: "relative" }}>
+            <input
+              className="form-input"
+              style={{ fontFamily: "var(--mono)", paddingRight: "2.5rem" }}
+              type={refVisible ? "text" : "password"}
+              value={form.api_key_ref || ""}
+              onChange={(e) => setForm({ ...form, api_key_ref: e.target.value })}
+              placeholder="env:DEEPGRAM_API_KEY"
+            />
+            <button
+              type="button"
+              onClick={() => setRefVisible((v) => !v)}
+              aria-label={refVisible ? "Hide ref" : "Show ref"}
+              style={{
+                position: "absolute",
+                right: "0.5rem",
+                top: "50%",
+                transform: "translateY(-50%)",
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontSize: "0.85rem",
+                color: "var(--muted, #888)",
+              }}
+            >
+              {refVisible ? "Hide" : "Show"}
+            </button>
+          </div>
         </div>
       </Modal>
     </>
