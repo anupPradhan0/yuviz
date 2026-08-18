@@ -89,9 +89,20 @@ class DeepgramTTS:
                 json={"text": text},
             ) as resp:
                 resp.raise_for_status()
+                # aiter_bytes() yields at arbitrary HTTP chunk boundaries, not
+                # 16-bit-sample boundaries — an odd-length chunk here becomes
+                # an invalid Int16Array downstream (browser/Gateway both treat
+                # this as PCM16). Carry any trailing odd byte over to the next
+                # chunk instead of yielding misaligned bytes.
+                pending = b""
                 async for chunk in resp.aiter_bytes():
-                    if chunk:
-                        yield chunk
+                    if not chunk:
+                        continue
+                    data = pending + chunk
+                    even_len = len(data) - (len(data) % 2)
+                    pending = data[even_len:]
+                    if even_len:
+                        yield data[:even_len]
         except httpx.HTTPError:
             log.exception("DeepgramTTS streaming request failed")
 

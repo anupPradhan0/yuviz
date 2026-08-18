@@ -32,6 +32,9 @@ const CALIBRATION_MS = 600;
 // the VAD's own silence detection somehow fails to release, force the
 // utterance to end anyway rather than letting audio accumulate forever.
 const MAX_UTTERANCE_MS = 15_000;
+// Backstop for the end_call teardown delay (below), in case the playhead
+// math is ever off for some reason — never wait longer than this.
+const MAX_END_CALL_WAIT_MS = 10_000;
 
 type CallState = "idle" | "connecting" | "ready" | "talking" | "thinking" | "speaking" | "ended" | "error";
 
@@ -52,6 +55,11 @@ export function TestAgentPanel({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [micLevelPct, setMicLevelPct] = useState(0);
 
+  // Incremented on every handleStart(); the end_call teardown delay
+  // captures the value at schedule time and checks it before firing, so a
+  // quick "Start New Test" click during that delay can't let a stale timer
+  // tear down the new call's live resources instead of the old one's.
+  const sessionGenRef = useRef<number>(0);
   const wsRef = useRef<WebSocket | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -191,6 +199,7 @@ export function TestAgentPanel({
   };
 
   const handleStart = async () => {
+    sessionGenRef.current += 1;
     setState("connecting");
     setErrorMsg(null);
     try {
@@ -250,16 +259,25 @@ export function TestAgentPanel({
           case "tts_chunk_final":
             setState((s) => (s === "talking" ? s : "ready"));
             break;
-          case "end_call":
+          case "end_call": {
             // Found live 2026-08-02: this only updated the status label —
             // the mic and WebSocket stayed open indefinitely after the
-            // server had already tried to hang up (it sends EndCall then
-            // waits out its own grace period, but nothing on this side
-            // ever closed anything). teardown() doesn't touch React state
-            // itself, so calling it here is safe alongside setState.
-            teardown();
+            // server had already tried to hang up. Fixed by tearing down
+            // here — but found live 2026-08-04: the server sends end_call
+            // right after the final tts_chunk, not after it's actually
+            // played, so an immediate teardown() cut the farewell audio
+            // off mid-sentence (stopAgentPlayback() kills queued Web Audio
+            // sources synchronously). Wait for the scheduled audio to
+            // actually finish playing before tearing down.
+            const ctx = audioCtxRef.current;
+            const remainingMs = ctx ? Math.max(0, (playheadRef.current - ctx.currentTime) * 1000) : 0;
+            const gen = sessionGenRef.current;
             setState("ended");
+            window.setTimeout(() => {
+              if (sessionGenRef.current === gen) teardown();
+            }, Math.min(remainingMs, MAX_END_CALL_WAIT_MS));
             break;
+          }
           case "no_response":
             // The agent heard nothing recognizable (silence/noise/unclear
             // audio) and never replied at all — without this, the UI would
