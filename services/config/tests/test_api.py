@@ -564,6 +564,20 @@ class TestUserEndpoints:
         assert body["tenant_id"] == str(test_tenant["id"])
         await pool.execute("DELETE FROM users WHERE id = $1", body["id"])
 
+    async def test_admin_cannot_update_another_user(self, admin_client, test_viewer):
+        resp = await admin_client.patch(f"/users/{test_viewer['user']['id']}", json={"role": "admin"})
+        assert resp.status_code == 403
+
+    async def test_admin_cannot_delete_another_user(self, admin_client, test_viewer):
+        resp = await admin_client.delete(f"/users/{test_viewer['user']['id']}")
+        assert resp.status_code == 403
+
+    async def test_viewer_cannot_update_or_delete_users(self, viewer_client, test_admin):
+        resp = await viewer_client.patch(f"/users/{test_admin['user']['id']}", json={"role": "viewer"})
+        assert resp.status_code == 403
+        resp = await viewer_client.delete(f"/users/{test_admin['user']['id']}")
+        assert resp.status_code == 403
+
 
 class TestHealthEndpoint:
     async def test_health_check(self, client):
