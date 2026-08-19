@@ -96,6 +96,7 @@ struct RedisConfig {
     uint16_t    port{6379};
     uint32_t    connect_timeout_ms{200};
     uint32_t    command_timeout_ms{100};
+    uint32_t    pool_size{4};
 };
 
 struct GatewayConfig {

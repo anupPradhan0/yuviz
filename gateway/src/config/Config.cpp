@@ -71,6 +71,7 @@ void Config::load(const std::string& path) {
         if (redis["port"])               config_.redis.port               = redis["port"].as<uint16_t>();
         if (redis["connect_timeout_ms"]) config_.redis.connect_timeout_ms = redis["connect_timeout_ms"].as<uint32_t>();
         if (redis["command_timeout_ms"]) config_.redis.command_timeout_ms = redis["command_timeout_ms"].as<uint32_t>();
+        if (redis["pool_size"])          config_.redis.pool_size          = redis["pool_size"].as<uint32_t>();
     }
 }
 
