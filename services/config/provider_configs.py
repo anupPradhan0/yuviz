@@ -154,6 +154,10 @@ async def update_provider_config(
             )
             new = dict(new_row)
 
+            # Scoped to the written columns, not the full row — otherwise
+            # api_key_ref (redacted either way) rides along on every update
+            # and the UI can't tell "redacted, unchanged" from "redacted,
+            # changed."
             await audit.write_audit(
                 conn,
                 entity_type="provider_config",
@@ -161,8 +165,8 @@ async def update_provider_config(
                 action="updated",
                 user_id=user_id,
                 user_email=user_email,
-                old_value=old,
-                new_value=new,
+                old_value={col: old[col] for col in columns},
+                new_value={col: new[col] for col in columns},
             )
 
     await cache.invalidate(_cache_key(provider_id))

@@ -1,15 +1,50 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ApiError, changePassword, getCurrentUser, User } from "@/lib/api";
+import {
+  ApiError,
+  AuditLogEntry,
+  changePassword,
+  createUser,
+  deleteUser,
+  getCurrentUser,
+  listAuditLog,
+  listTenants,
+  listUsers,
+  Tenant,
+  updateUser,
+  User,
+  UserRole,
+  UserUpdate,
+} from "@/lib/api";
+import { Modal } from "@/components/Modal";
 
-type SettingsSection = "profile" | "sessions" | "security";
+type SettingsSection = "profile" | "sessions" | "security" | "users" | "audit-log";
 
 const YOUR_ACCOUNT: { id: SettingsSection; label: string }[] = [
   { id: "profile", label: "Profile" },
   { id: "sessions", label: "Sessions" },
   { id: "security", label: "Security" },
 ];
+
+const ORGANIZATION: { id: SettingsSection; label: string }[] = [
+  { id: "users", label: "Users" },
+  { id: "audit-log", label: "Audit Log" },
+];
+
+const ENTITY_TYPES = [
+  "agent",
+  "agent_tool_policy",
+  "carrier",
+  "phone_number",
+  "provider_config",
+  "telephony_config",
+  "tenant",
+  "tool_provider_config",
+  "user",
+];
+
+const ACTION_BADGE: Record<string, string> = { created: "green", updated: "amber", deleted: "red" };
 
 function ProfilePanel() {
   const [user, setUser] = useState<User | null>(null);
@@ -42,6 +77,350 @@ function ProfilePanel() {
   );
 }
 
+const ROLE_BADGE: Record<UserRole, string> = { superadmin: "red", admin: "indigo", viewer: "gray" };
+
+function UsersPanel() {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [users, setUsers] = useState<User[]>([]);
+  const [tenants, setTenants] = useState<Tenant[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState<User | null>(null);
+  const [deactivatingId, setDeactivatingId] = useState<string | null>(null);
+
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [role, setRole] = useState<UserRole>("admin");
+  const [tenantId, setTenantId] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+
+  const [editForm, setEditForm] = useState<UserUpdate>({});
+  const [resetPassword, setResetPassword] = useState("");
+  const [editSubmitting, setEditSubmitting] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  const isSuperadmin = currentUser?.role === "superadmin";
+  const canCreate = currentUser?.role === "superadmin" || currentUser?.role === "admin";
+
+  const refresh = () => {
+    setLoading(true);
+    setError(null);
+    Promise.all([getCurrentUser(), listUsers()])
+      .then(async ([me, us]) => {
+        setCurrentUser(me);
+        setUsers(us);
+        if (me.role === "superadmin") setTenants(await listTenants());
+      })
+      .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)))
+      .finally(() => setLoading(false));
+  };
+
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(refresh, []);
+
+  const tenantName = (id: string | null) => (id ? tenants.find((t) => t.id === id)?.name ?? id : "— platform —");
+
+  const openCreate = () => {
+    setEmail("");
+    setPassword("");
+    setRole("admin");
+    setTenantId(isSuperadmin ? "" : currentUser?.tenant_id ?? "");
+    setFormError(null);
+    setModalOpen(true);
+  };
+
+  const handleCreate = async () => {
+    setSubmitting(true);
+    setFormError(null);
+    try {
+      await createUser({
+        email,
+        password,
+        role,
+        tenant_id: isSuperadmin ? tenantId || null : currentUser?.tenant_id ?? null,
+      });
+      setModalOpen(false);
+      refresh();
+    } catch (e) {
+      setFormError(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const openEdit = (u: User) => {
+    setEditTarget(u);
+    setEditForm({ role: u.role, tenant_id: u.tenant_id });
+    setResetPassword("");
+    setEditError(null);
+  };
+
+  const handleEditSave = async () => {
+    if (!editTarget) return;
+    if (
+      editTarget.id === currentUser?.id &&
+      currentUser?.role === "superadmin" &&
+      editForm.role !== "superadmin" &&
+      !window.confirm(
+        "This removes your own superadmin access. You won't be able to manage users again until another superadmin restores it. Continue?",
+      )
+    ) {
+      return;
+    }
+    if (resetPassword && resetPassword.length < 8) {
+      setEditError("New password must be at least 8 characters.");
+      return;
+    }
+    setEditSubmitting(true);
+    setEditError(null);
+    try {
+      await updateUser(editTarget.id, { ...editForm, ...(resetPassword ? { password: resetPassword } : {}) });
+      setEditTarget(null);
+      refresh();
+    } catch (e) {
+      setEditError(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setEditSubmitting(false);
+    }
+  };
+
+  const handleDeactivate = async (u: User) => {
+    if (deactivatingId === u.id) return;
+    if (!window.confirm(`Deactivate ${u.email}? They will no longer be able to sign in.`)) return;
+    setDeactivatingId(u.id);
+    try {
+      await deleteUser(u.id);
+      refresh();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setDeactivatingId(null);
+    }
+  };
+
+  const createRoleOptions: UserRole[] = isSuperadmin ? ["superadmin", "admin", "viewer"] : ["admin", "viewer"];
+
+  return (
+    <>
+      {canCreate && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
+          <button className="btn btn-primary btn-sm" onClick={openCreate}>
+            + New User
+          </button>
+        </div>
+      )}
+
+      {error && <div className="error-banner">{error}</div>}
+
+      <div className="card">
+        {loading ? (
+          <div className="empty-state">Loading…</div>
+        ) : users.length === 0 ? (
+          <div className="empty-state">No users found.</div>
+        ) : (
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Role</th>
+                {isSuperadmin && <th>Tenant</th>}
+                <th>Created</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((u) => (
+                <tr key={u.id}>
+                  <td className="bold">
+                    {u.email}
+                    {u.id === currentUser?.id && (
+                      <span className="badge indigo" style={{ marginLeft: 6 }}>
+                        You
+                      </span>
+                    )}
+                  </td>
+                  <td>
+                    <span className={`badge ${ROLE_BADGE[u.role]}`}>{u.role}</span>
+                  </td>
+                  {isSuperadmin && <td>{tenantName(u.tenant_id)}</td>}
+                  <td style={{ fontSize: ".71rem", color: "var(--text-3)" }}>
+                    {new Date(u.created_at).toLocaleDateString()}
+                  </td>
+                  <td style={{ display: "flex", gap: 6 }}>
+                    {isSuperadmin ? (
+                      <>
+                        <button className="btn btn-ghost btn-sm" onClick={() => openEdit(u)}>
+                          Edit
+                        </button>
+                        <button
+                          className="btn btn-danger btn-sm"
+                          onClick={() => handleDeactivate(u)}
+                          disabled={u.id === currentUser?.id || deactivatingId === u.id}
+                          title={u.id === currentUser?.id ? "You can't deactivate your own account" : undefined}
+                        >
+                          {deactivatingId === u.id ? "Deactivating…" : "Deactivate"}
+                        </button>
+                      </>
+                    ) : (
+                      <span style={{ fontSize: ".71rem", color: "var(--text-3)" }}>—</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {!isSuperadmin && !loading && users.length > 0 && (
+          <div className="form-hint" style={{ padding: "0 16px 16px" }}>
+            Editing roles or deactivating users requires a superadmin.
+          </div>
+        )}
+      </div>
+
+      <Modal
+        open={modalOpen}
+        title="New User"
+        onClose={() => setModalOpen(false)}
+        footer={
+          <>
+            <button className="btn btn-ghost btn-sm" onClick={() => setModalOpen(false)}>
+              Cancel
+            </button>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={handleCreate}
+              disabled={submitting || !email || password.length < 8}
+            >
+              {submitting ? "Creating…" : "Create User"}
+            </button>
+          </>
+        }
+      >
+        {formError && <div className="error-banner">{formError}</div>}
+        <div className="form-group">
+          <label className="form-label" htmlFor="new-user-email">
+            Email <span className="required">*</span>
+          </label>
+          <input
+            id="new-user-email"
+            className="form-input"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="teammate@company.com"
+          />
+        </div>
+        <div className="form-group">
+          <label className="form-label" htmlFor="new-user-password">
+            Password <span className="required">*</span>
+            <span className="hint">at least 8 characters</span>
+          </label>
+          <input
+            id="new-user-password"
+            className="form-input"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="new-password"
+          />
+        </div>
+        <div className="form-group">
+          <label className="form-label" htmlFor="new-user-role">Role</label>
+          <select id="new-user-role" className="form-input" value={role} onChange={(e) => setRole(e.target.value as UserRole)}>
+            {createRoleOptions.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+        </div>
+        {isSuperadmin && (
+          <div className="form-group">
+            <label className="form-label" htmlFor="new-user-tenant">
+              Tenant <span className="hint">blank = platform-wide (superadmin scope)</span>
+            </label>
+            <select id="new-user-tenant" className="form-input" value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
+              <option value="">— Platform (no tenant) —</option>
+              {tenants.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        open={editTarget !== null}
+        title={`Edit User — ${editTarget?.email ?? ""}`}
+        onClose={() => setEditTarget(null)}
+        footer={
+          <>
+            <button className="btn btn-ghost btn-sm" onClick={() => setEditTarget(null)}>
+              Cancel
+            </button>
+            <button className="btn btn-primary btn-sm" onClick={handleEditSave} disabled={editSubmitting}>
+              {editSubmitting ? "Saving…" : "Save Changes"}
+            </button>
+          </>
+        }
+      >
+        {editError && <div className="error-banner">{editError}</div>}
+        <div className="form-group">
+          <label className="form-label" htmlFor="edit-user-role">Role</label>
+          <select
+            id="edit-user-role"
+            className="form-input"
+            value={editForm.role ?? ""}
+            onChange={(e) => setEditForm({ ...editForm, role: e.target.value as UserRole })}
+          >
+            {(["superadmin", "admin", "viewer"] as UserRole[]).map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="form-group">
+          <label className="form-label" htmlFor="edit-user-tenant">
+            Tenant <span className="hint">blank = platform-wide (superadmin scope)</span>
+          </label>
+          <select
+            id="edit-user-tenant"
+            className="form-input"
+            value={editForm.tenant_id ?? ""}
+            onChange={(e) => setEditForm({ ...editForm, tenant_id: e.target.value || null })}
+          >
+            <option value="">— Platform (no tenant) —</option>
+            {tenants.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="form-group">
+          <label className="form-label" htmlFor="edit-user-reset-password">
+            Reset Password <span className="hint">leave blank to keep their current one</span>
+          </label>
+          <input
+            id="edit-user-reset-password"
+            className="form-input"
+            type="password"
+            value={resetPassword}
+            onChange={(e) => setResetPassword(e.target.value)}
+            placeholder="At least 8 characters"
+            autoComplete="new-password"
+          />
+        </div>
+      </Modal>
+    </>
+  );
+}
+
 function SessionsPanel() {
   return (
     <div className="card">
@@ -64,6 +443,275 @@ function SessionsPanel() {
         </div>
       </div>
     </div>
+  );
+}
+
+function AuditDiff({ oldValue, newValue }: { oldValue: string | null; newValue: string | null }) {
+  const parse = (v: string | null) => {
+    if (!v) return null;
+    try {
+      return JSON.parse(v) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  };
+  const before = parse(oldValue);
+  const after = parse(newValue);
+
+  const keys = new Set([...(before ? Object.keys(before) : []), ...(after ? Object.keys(after) : [])]);
+  const changed = [...keys].filter(
+    (k) => before?.[k] === "[redacted]" || after?.[k] === "[redacted]" || JSON.stringify(before?.[k]) !== JSON.stringify(after?.[k]),
+  );
+
+  if (changed.length === 0) {
+    return <div className="form-hint">No field-level diff available.</div>;
+  }
+
+  return (
+    <table className="tbl">
+      <thead>
+        <tr>
+          <th>Field</th>
+          <th>Before</th>
+          <th>After</th>
+        </tr>
+      </thead>
+      <tbody>
+        {changed.map((k) => {
+          const isRedacted = before?.[k] === "[redacted]" || after?.[k] === "[redacted]";
+          return (
+            <tr key={k}>
+              <td className="mono">{k}</td>
+              <td className="mono" style={{ color: "var(--text-3)" }}>
+                {before ? JSON.stringify(before[k]) : "—"}
+              </td>
+              <td className="mono">
+                {after ? JSON.stringify(after[k]) : "—"}
+                {isRedacted && (
+                  <div style={{ fontSize: ".68rem", color: "var(--text-3)", fontFamily: "var(--font)" }}>
+                    value changed — redacted, can&apos;t show what
+                  </div>
+                )}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function AuditLogPanel() {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [entries, setEntries] = useState<AuditLogEntry[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [detail, setDetail] = useState<AuditLogEntry | null>(null);
+
+  const [entityType, setEntityType] = useState("");
+  const [action, setAction] = useState("");
+  const [userEmail, setUserEmail] = useState("");
+  const [debouncedEmail, setDebouncedEmail] = useState("");
+  const [offset, setOffset] = useState(0);
+  const limit = 25;
+
+  const isSuperadmin = currentUser?.role === "superadmin";
+
+  useEffect(() => {
+    getCurrentUser()
+      .then((me) => setCurrentUser(me))
+      .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)));
+  }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedEmail(userEmail), 300);
+    return () => clearTimeout(t);
+  }, [userEmail]);
+
+  useEffect(() => {
+    if (!currentUser || currentUser.role !== "superadmin") return;
+    let ignore = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLoading(true);
+    setError(null);
+    listAuditLog({
+      entity_type: entityType || undefined,
+      action: (action || undefined) as AuditLogEntry["action"] | undefined,
+      user_email: debouncedEmail || undefined,
+      limit,
+      offset,
+    })
+      .then((result) => {
+        if (ignore) return;
+        setEntries(result.items);
+        setTotal(result.total);
+      })
+      .catch((e) => {
+        if (!ignore) setError(e instanceof ApiError ? e.detail : String(e));
+      })
+      .finally(() => {
+        if (!ignore) setLoading(false);
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [currentUser, entityType, action, debouncedEmail, offset]);
+
+  if (currentUser && !isSuperadmin) {
+    return (
+      <div className="card">
+        <div className="card-body">
+          <div className="empty-state">Viewing the audit log requires a superadmin.</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="card-body" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <div className="form-group" style={{ margin: 0 }}>
+            <label className="form-label">Entity Type</label>
+            <select
+              className="form-input"
+              value={entityType}
+              onChange={(e) => {
+                setOffset(0);
+                setEntityType(e.target.value);
+              }}
+            >
+              <option value="">All</option>
+              {ENTITY_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="form-group" style={{ margin: 0 }}>
+            <label className="form-label">Action</label>
+            <select
+              className="form-input"
+              value={action}
+              onChange={(e) => {
+                setOffset(0);
+                setAction(e.target.value);
+              }}
+            >
+              <option value="">All</option>
+              <option value="created">created</option>
+              <option value="updated">updated</option>
+              <option value="deleted">deleted</option>
+            </select>
+          </div>
+          <div className="form-group" style={{ margin: 0, flex: 1, minWidth: 200 }}>
+            <label className="form-label">User Email</label>
+            <input
+              className="form-input"
+              value={userEmail}
+              onChange={(e) => {
+                setOffset(0);
+                setUserEmail(e.target.value);
+              }}
+              placeholder="search by email…"
+            />
+          </div>
+        </div>
+      </div>
+
+      {error && <div className="error-banner">{error}</div>}
+
+      <div className="card">
+        {loading ? (
+          <div className="empty-state">Loading…</div>
+        ) : entries.length === 0 ? (
+          <div className="empty-state">No matching audit entries.</div>
+        ) : (
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Entity</th>
+                <th>Action</th>
+                <th>By</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((e) => (
+                <tr key={e.id}>
+                  <td style={{ fontSize: ".71rem", color: "var(--text-3)" }}>
+                    {new Date(e.changed_at).toLocaleString()}
+                  </td>
+                  <td>
+                    <span className="mono">{e.entity_type}</span>
+                    <span style={{ color: "var(--text-3)", fontSize: ".7rem", marginLeft: 6 }}>
+                      {e.entity_id.slice(0, 8)}…
+                    </span>
+                  </td>
+                  <td>
+                    <span className={`badge ${ACTION_BADGE[e.action] ?? "gray"}`}>{e.action}</span>
+                  </td>
+                  <td>{e.user_email ?? <span style={{ color: "var(--text-3)" }}>system</span>}</td>
+                  <td>
+                    <button className="btn btn-ghost btn-sm" onClick={() => setDetail(e)}>
+                      View
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {total > limit && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
+          <span style={{ fontSize: ".75rem", color: "var(--text-3)" }}>
+            {offset + 1}–{Math.min(offset + limit, total)} of {total}
+          </span>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              className="btn btn-ghost btn-sm"
+              disabled={offset === 0}
+              onClick={() => setOffset(Math.max(0, offset - limit))}
+            >
+              Previous
+            </button>
+            <button
+              className="btn btn-ghost btn-sm"
+              disabled={offset + limit >= total}
+              onClick={() => setOffset(offset + limit)}
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
+
+      <Modal
+        open={detail !== null}
+        title={detail ? `${detail.entity_type} ${detail.action} — ${detail.entity_id.slice(0, 8)}…` : ""}
+        onClose={() => setDetail(null)}
+        footer={
+          <button className="btn btn-ghost btn-sm" onClick={() => setDetail(null)}>
+            Close
+          </button>
+        }
+      >
+        {detail && (
+          <>
+            <div className="form-hint" style={{ marginBottom: 10 }}>
+              {detail.user_email ?? "system"} · {new Date(detail.changed_at).toLocaleString()}
+              {detail.ip_address ? ` · ${detail.ip_address}` : ""}
+            </div>
+            <AuditDiff oldValue={detail.old_value} newValue={detail.new_value} />
+          </>
+        )}
+      </Modal>
+    </>
   );
 }
 
@@ -189,14 +837,29 @@ export default function SettingsPage() {
             Your Account
           </div>
           {YOUR_ACCOUNT.map((item) => (
-            <div
+            <button
               key={item.id}
+              type="button"
               className={`nav-item${section === item.id ? " active" : ""}`}
               onClick={() => setSection(item.id)}
-              style={{ cursor: "pointer" }}
+              style={{ background: "none", borderTop: "none", borderRight: "none", borderBottom: "none", width: "100%", textAlign: "left", font: "inherit" }}
             >
               {item.label}
-            </div>
+            </button>
+          ))}
+          <div className="nav-section" style={{ paddingTop: 6 }}>
+            Organization
+          </div>
+          {ORGANIZATION.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={`nav-item${section === item.id ? " active" : ""}`}
+              onClick={() => setSection(item.id)}
+              style={{ background: "none", borderTop: "none", borderRight: "none", borderBottom: "none", width: "100%", textAlign: "left", font: "inherit" }}
+            >
+              {item.label}
+            </button>
           ))}
         </div>
       </div>
@@ -204,6 +867,8 @@ export default function SettingsPage() {
         {section === "profile" && <ProfilePanel />}
         {section === "sessions" && <SessionsPanel />}
         {section === "security" && <SecurityPanel />}
+        {section === "users" && <UsersPanel />}
+        {section === "audit-log" && <AuditLogPanel />}
       </div>
     </div>
   );

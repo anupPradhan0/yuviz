@@ -43,13 +43,14 @@ async def get_user_by_id(user_id: Any) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
-async def list_users(tenant_id: Any | None = None) -> list[dict[str, Any]]:
+async def list_users(*, tenant_id: Any | None, is_superadmin: bool) -> list[dict[str, Any]]:
     pool = await db.get_pool()
-    if tenant_id is None:
+    if is_superadmin:
         rows = await pool.fetch("SELECT * FROM users WHERE deleted_at IS NULL ORDER BY email")
     else:
         rows = await pool.fetch(
-            "SELECT * FROM users WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY email",
+            "SELECT * FROM users WHERE tenant_id IS NOT DISTINCT FROM $1 "
+            "AND role != 'superadmin' AND deleted_at IS NULL ORDER BY email",
             tenant_id,
         )
     return [dict(row) for row in rows]
@@ -162,9 +163,18 @@ async def update_user(
 ) -> dict[str, Any]:
     if not fields:
         raise ValueError("update_user() called with no fields to update")
+
+    new_password = fields.pop("password", None)
+
     unknown = set(fields) - _UPDATABLE_FIELDS
     if unknown:
         raise ValueError(f"update_user() got non-updatable field(s): {unknown}")
+
+    if new_password is not None:
+        fields["password_hash"] = auth.hash_password(new_password)
+
+    if not fields:
+        raise ValueError("update_user() called with no fields to update")
 
     pool = await db.get_pool()
     async with pool.acquire() as conn:
@@ -184,6 +194,10 @@ async def update_user(
             )
             new = dict(new_row)
 
+            # old_value/new_value cover only the columns actually written, not
+            # the full row — otherwise password_hash (redacted either way)
+            # rides along on every role/tenant_id-only update and the UI
+            # can't tell "redacted, unchanged" from "redacted, changed."
             await audit.write_audit(
                 conn,
                 entity_type="user",
@@ -191,8 +205,8 @@ async def update_user(
                 action="updated",
                 user_id=actor_user_id,
                 user_email=actor_user_email,
-                old_value=old,
-                new_value=new,
+                old_value={col: old[col] for col in columns},
+                new_value={col: new[col] for col in columns},
             )
     return new
 

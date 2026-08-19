@@ -168,6 +168,18 @@ async def update_telephony_config(
             )
             new = dict(new_row)
 
+            # Scoped to the written columns, not the full row (same reason
+            # as provider_configs.py/users.py). credentials additionally
+            # gets the shared "[redacted]" marker rather than a constant
+            # "<redacted in audit trail>" string — a constant compares equal
+            # to itself on both sides of a genuine credentials change and
+            # the UI would read that as "nothing changed," hiding it.
+            old_value = {col: old[col] for col in columns}
+            new_value = {col: new[col] for col in columns}
+            if "credentials" in columns:
+                old_value["credentials"] = "[redacted]"
+                new_value["credentials"] = "[redacted]"
+
             await audit.write_audit(
                 conn,
                 entity_type="telephony_config",
@@ -175,8 +187,8 @@ async def update_telephony_config(
                 action="updated",
                 user_id=user_id,
                 user_email=user_email,
-                old_value={**old, "credentials": "<redacted in audit trail>"},
-                new_value={**new, "credentials": "<redacted in audit trail>"},
+                old_value=old_value,
+                new_value=new_value,
             )
 
     await cache.invalidate(_cache_key(config_id))

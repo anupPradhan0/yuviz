@@ -215,6 +215,7 @@ class UserCreate(BaseModel):
 class UserUpdate(BaseModel):
     role:      Literal["superadmin", "admin", "viewer"] | None = None
     tenant_id: str | None = None
+    password:  str | None = Field(default=None, min_length=8)
 
 
 class ChangePasswordRequest(BaseModel):
