@@ -720,6 +720,51 @@ export const updateUser = (userId: string, body: UserUpdate) =>
 export const deleteUser = (userId: string) =>
   request<void>(`/users/${userId}`, { method: "DELETE" });
 
+// ── Audit Log ────────────────────────────────────────────────────────────
+
+export type AuditAction = "created" | "updated" | "deleted";
+
+export interface AuditLogEntry {
+  id: number;
+  entity_type: string;
+  entity_id: string;
+  user_id: string | null;
+  user_email: string | null;
+  action: AuditAction;
+  // Raw JSON text, not parsed — matches how every other JSONB column comes
+  // back from this API (asyncpg has no codec registered); JSON.parse()
+  // these when actually rendering a diff.
+  old_value: string | null;
+  new_value: string | null;
+  changed_at: string;
+  ip_address: string | null;
+}
+
+export interface AuditLogFilters {
+  entity_type?: string;
+  entity_id?: string;
+  user_email?: string;
+  action?: AuditAction;
+  limit?: number;
+  offset?: number;
+}
+
+export interface AuditLogResult {
+  total: number;
+  limit: number;
+  offset: number;
+  items: AuditLogEntry[];
+}
+
+export const listAuditLog = (filters: AuditLogFilters = {}) => {
+  const params = new URLSearchParams();
+  Object.entries(filters).forEach(([k, v]) => {
+    if (v !== undefined && v !== "") params.set(k, String(v));
+  });
+  const qs = params.toString();
+  return request<AuditLogResult>(`/audit-log${qs ? `?${qs}` : ""}`);
+};
+
 // ── DID Service (services/did/, port 8200) ──────────────────────────────
 // A separate service/port from Config Service — carrier search/purchase is
 // cold-path, cost-affecting admin action, deliberately kept out of Config

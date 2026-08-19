@@ -1,0 +1,33 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, Query
+
+from .. import audit
+from ..auth import CurrentUser
+from ..deps import require_role
+
+router = APIRouter(prefix="/audit-log", tags=["audit-log"])
+
+
+@router.get("")
+async def list_audit_log(
+    entity_type: str | None = Query(default=None),
+    entity_id: str | None = Query(default=None),
+    user_email: str | None = Query(default=None),
+    action: str | None = Query(default=None, pattern="^(created|updated|deleted)$"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    # Superadmin only: this spans every tenant, and old_value/new_value can
+    # include another tenant's non-secret config details — the same
+    # platform-wide visibility as /tenants and /users' write endpoints, not
+    # something a tenant-scoped admin should see about other tenants.
+    current_user: CurrentUser = Depends(require_role("superadmin")),
+):
+    return await audit.list_audit_log(
+        entity_type=entity_type,
+        entity_id=entity_id,
+        user_email=user_email,
+        action=action,
+        limit=limit,
+        offset=offset,
+    )

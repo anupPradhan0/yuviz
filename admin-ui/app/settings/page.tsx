@@ -3,10 +3,12 @@
 import { useEffect, useState } from "react";
 import {
   ApiError,
+  AuditLogEntry,
   changePassword,
   createUser,
   deleteUser,
   getCurrentUser,
+  listAuditLog,
   listTenants,
   listUsers,
   Tenant,
@@ -17,7 +19,7 @@ import {
 } from "@/lib/api";
 import { Modal } from "@/components/Modal";
 
-type SettingsSection = "profile" | "sessions" | "security" | "users";
+type SettingsSection = "profile" | "sessions" | "security" | "users" | "audit-log";
 
 const YOUR_ACCOUNT: { id: SettingsSection; label: string }[] = [
   { id: "profile", label: "Profile" },
@@ -27,7 +29,22 @@ const YOUR_ACCOUNT: { id: SettingsSection; label: string }[] = [
 
 const ORGANIZATION: { id: SettingsSection; label: string }[] = [
   { id: "users", label: "Users" },
+  { id: "audit-log", label: "Audit Log" },
 ];
+
+const ENTITY_TYPES = [
+  "agent",
+  "agent_tool_policy",
+  "carrier",
+  "phone_number",
+  "provider_config",
+  "telephony_config",
+  "tenant",
+  "tool_provider_config",
+  "user",
+];
+
+const ACTION_BADGE: Record<string, string> = { created: "green", updated: "amber", deleted: "red" };
 
 function ProfilePanel() {
   const [user, setUser] = useState<User | null>(null);
@@ -411,6 +428,247 @@ function SessionsPanel() {
   );
 }
 
+function AuditDiff({ oldValue, newValue }: { oldValue: string | null; newValue: string | null }) {
+  const parse = (v: string | null) => {
+    if (!v) return null;
+    try {
+      return JSON.parse(v) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  };
+  const before = parse(oldValue);
+  const after = parse(newValue);
+
+  // Only the fields that actually changed — a full before/after dump of
+  // every column buries the one or two that matter on every "updated" row.
+  const keys = new Set([...(before ? Object.keys(before) : []), ...(after ? Object.keys(after) : [])]);
+  const changed = [...keys].filter((k) => JSON.stringify(before?.[k]) !== JSON.stringify(after?.[k]));
+
+  if (changed.length === 0) {
+    return <div className="form-hint">No field-level diff available.</div>;
+  }
+
+  return (
+    <table className="tbl">
+      <thead>
+        <tr>
+          <th>Field</th>
+          <th>Before</th>
+          <th>After</th>
+        </tr>
+      </thead>
+      <tbody>
+        {changed.map((k) => (
+          <tr key={k}>
+            <td className="mono">{k}</td>
+            <td className="mono" style={{ color: "var(--text-3)" }}>
+              {before ? JSON.stringify(before[k]) : "—"}
+            </td>
+            <td className="mono">{after ? JSON.stringify(after[k]) : "—"}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function AuditLogPanel() {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [entries, setEntries] = useState<AuditLogEntry[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [detail, setDetail] = useState<AuditLogEntry | null>(null);
+
+  const [entityType, setEntityType] = useState("");
+  const [action, setAction] = useState("");
+  const [userEmail, setUserEmail] = useState("");
+  const [offset, setOffset] = useState(0);
+  const limit = 25;
+
+  const isSuperadmin = currentUser?.role === "superadmin";
+
+  const refresh = () => {
+    setLoading(true);
+    getCurrentUser()
+      .then(async (me) => {
+        setCurrentUser(me);
+        if (me.role !== "superadmin") return;
+        const result = await listAuditLog({
+          entity_type: entityType || undefined,
+          action: (action || undefined) as AuditLogEntry["action"] | undefined,
+          user_email: userEmail || undefined,
+          limit,
+          offset,
+        });
+        setEntries(result.items);
+        setTotal(result.total);
+      })
+      .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)))
+      .finally(() => setLoading(false));
+  };
+
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(refresh, [entityType, action, userEmail, offset]);
+
+  if (currentUser && !isSuperadmin) {
+    return (
+      <div className="card">
+        <div className="card-body">
+          <div className="empty-state">Viewing the audit log requires a superadmin.</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="card-body" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <div className="form-group" style={{ margin: 0 }}>
+            <label className="form-label">Entity Type</label>
+            <select
+              className="form-input"
+              value={entityType}
+              onChange={(e) => {
+                setOffset(0);
+                setEntityType(e.target.value);
+              }}
+            >
+              <option value="">All</option>
+              {ENTITY_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="form-group" style={{ margin: 0 }}>
+            <label className="form-label">Action</label>
+            <select
+              className="form-input"
+              value={action}
+              onChange={(e) => {
+                setOffset(0);
+                setAction(e.target.value);
+              }}
+            >
+              <option value="">All</option>
+              <option value="created">created</option>
+              <option value="updated">updated</option>
+              <option value="deleted">deleted</option>
+            </select>
+          </div>
+          <div className="form-group" style={{ margin: 0, flex: 1, minWidth: 200 }}>
+            <label className="form-label">User Email</label>
+            <input
+              className="form-input"
+              value={userEmail}
+              onChange={(e) => {
+                setOffset(0);
+                setUserEmail(e.target.value);
+              }}
+              placeholder="search by email…"
+            />
+          </div>
+        </div>
+      </div>
+
+      {error && <div className="error-banner">{error}</div>}
+
+      <div className="card">
+        {loading ? (
+          <div className="empty-state">Loading…</div>
+        ) : entries.length === 0 ? (
+          <div className="empty-state">No matching audit entries.</div>
+        ) : (
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Entity</th>
+                <th>Action</th>
+                <th>By</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((e) => (
+                <tr key={e.id}>
+                  <td style={{ fontSize: ".71rem", color: "var(--text-3)" }}>
+                    {new Date(e.changed_at).toLocaleString()}
+                  </td>
+                  <td>
+                    <span className="mono">{e.entity_type}</span>
+                    <span style={{ color: "var(--text-3)", fontSize: ".7rem", marginLeft: 6 }}>
+                      {e.entity_id.slice(0, 8)}…
+                    </span>
+                  </td>
+                  <td>
+                    <span className={`badge ${ACTION_BADGE[e.action] ?? "gray"}`}>{e.action}</span>
+                  </td>
+                  <td>{e.user_email ?? <span style={{ color: "var(--text-3)" }}>system</span>}</td>
+                  <td>
+                    <button className="btn btn-ghost btn-sm" onClick={() => setDetail(e)}>
+                      View
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {total > limit && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 12 }}>
+          <span style={{ fontSize: ".75rem", color: "var(--text-3)" }}>
+            {offset + 1}–{Math.min(offset + limit, total)} of {total}
+          </span>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              className="btn btn-ghost btn-sm"
+              disabled={offset === 0}
+              onClick={() => setOffset(Math.max(0, offset - limit))}
+            >
+              Previous
+            </button>
+            <button
+              className="btn btn-ghost btn-sm"
+              disabled={offset + limit >= total}
+              onClick={() => setOffset(offset + limit)}
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
+
+      <Modal
+        open={detail !== null}
+        title={detail ? `${detail.entity_type} ${detail.action} — ${detail.entity_id.slice(0, 8)}…` : ""}
+        onClose={() => setDetail(null)}
+        footer={
+          <button className="btn btn-ghost btn-sm" onClick={() => setDetail(null)}>
+            Close
+          </button>
+        }
+      >
+        {detail && (
+          <>
+            <div className="form-hint" style={{ marginBottom: 10 }}>
+              {detail.user_email ?? "system"} · {new Date(detail.changed_at).toLocaleString()}
+              {detail.ip_address ? ` · ${detail.ip_address}` : ""}
+            </div>
+            <AuditDiff oldValue={detail.old_value} newValue={detail.new_value} />
+          </>
+        )}
+      </Modal>
+    </>
+  );
+}
+
 function SecurityPanel() {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -562,6 +820,7 @@ export default function SettingsPage() {
         {section === "sessions" && <SessionsPanel />}
         {section === "security" && <SecurityPanel />}
         {section === "users" && <UsersPanel />}
+        {section === "audit-log" && <AuditLogPanel />}
       </div>
     </div>
   );
