@@ -698,6 +698,28 @@ export const changePassword = (currentPassword: string, newPassword: string) =>
     body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
   });
 
+// ── Users ────────────────────────────────────────────────────────────────
+
+export interface UserCreate {
+  email: string;
+  password: string;
+  role: UserRole;
+  tenant_id?: string | null;
+}
+
+export interface UserUpdate {
+  role?: UserRole;
+  tenant_id?: string | null;
+}
+
+export const listUsers = () => request<User[]>("/users");
+export const createUser = (body: UserCreate) =>
+  request<User>("/users", { method: "POST", body: JSON.stringify(body) });
+export const updateUser = (userId: string, body: UserUpdate) =>
+  request<User>(`/users/${userId}`, { method: "PATCH", body: JSON.stringify(body) });
+export const deleteUser = (userId: string) =>
+  request<void>(`/users/${userId}`, { method: "DELETE" });
+
 // ── DID Service (services/did/, port 8200) ──────────────────────────────
 // A separate service/port from Config Service — carrier search/purchase is
 // cold-path, cost-affecting admin action, deliberately kept out of Config
