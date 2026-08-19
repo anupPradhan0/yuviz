@@ -25,11 +25,17 @@ async def list_users(current_user: CurrentUser = Depends(get_current_user)):
 async def create_user(
     body: UserCreate, current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
+    if current_user.role != "superadmin":
+        if body.role == "superadmin":
+            raise HTTPException(status_code=403, detail="only a superadmin can create a superadmin")
+        if body.tenant_id is not None and body.tenant_id != current_user.tenant_id:
+            raise HTTPException(status_code=403, detail="cannot create a user in another tenant")
+
     user = await users_service.create_user(
         email=body.email,
         password=body.password,
         role=body.role,
-        tenant_id=body.tenant_id,
+        tenant_id=body.tenant_id if current_user.role == "superadmin" else current_user.tenant_id,
         creator_user_id=current_user.id,
         creator_user_email=current_user.email,
     )

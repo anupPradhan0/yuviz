@@ -46,6 +46,14 @@ async def viewer_client(test_viewer):
         yield c
 
 
+@pytest.fixture
+async def admin_client(test_admin):
+    transport = ASGITransport(app=app)
+    headers = {"Authorization": f"Bearer {test_admin['token']}"}
+    async with AsyncClient(transport=transport, base_url="http://test", headers=headers) as c:
+        yield c
+
+
 class TestTenantEndpoints:
     async def test_create_and_get_tenant(self, client):
         slug = f"test-{uuid.uuid4().hex[:8]}"
@@ -522,6 +530,39 @@ class TestUserEndpoints:
 
         del_resp = await client.delete(f"/users/{body['id']}")
         assert del_resp.status_code == 204
+
+    async def test_admin_cannot_create_superadmin(self, admin_client):
+        resp = await admin_client.post(
+            "/users", json={"email": "escalate@example.com", "password": "a-real-password", "role": "superadmin"},
+        )
+        assert resp.status_code == 403
+
+    async def test_admin_cannot_create_user_in_another_tenant(self, admin_client, test_tenant, pool):
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other Tenant", f"other-{uuid.uuid4().hex[:8]}",
+        )
+        try:
+            resp = await admin_client.post(
+                "/users",
+                json={
+                    "email": "cross-tenant@example.com", "password": "a-real-password",
+                    "role": "admin", "tenant_id": str(other["id"]),
+                },
+            )
+            assert resp.status_code == 403
+        finally:
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_admin_create_user_is_pinned_to_own_tenant(self, admin_client, test_admin, test_tenant, pool):
+        email = f"test-pinned-{uuid.uuid4().hex[:8]}@example.com"
+        resp = await admin_client.post(
+            "/users", json={"email": email, "password": "a-real-password", "role": "viewer"},
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["tenant_id"] == str(test_tenant["id"])
+        await pool.execute("DELETE FROM users WHERE id = $1", body["id"])
 
 
 class TestHealthEndpoint:

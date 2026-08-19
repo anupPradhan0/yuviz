@@ -63,6 +63,11 @@ async def test_tenant(pool):
     await pool.execute("DELETE FROM tool_provider_configs WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM provider_configs WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM carriers WHERE tenant_id = $1", tenant["id"])
+    # test_admin (soft-deleted, not hard-deleted, by its own teardown — see
+    # its fixture comment) still FK-references this tenant at this point,
+    # and can't be hard-deleted itself (it's an audit_log actor too, same
+    # constraint as test_superadmin). Detach it instead of deleting it.
+    await pool.execute("UPDATE users SET tenant_id = NULL WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM tenants WHERE id = $1", tenant["id"])
 
 
@@ -80,6 +85,24 @@ async def test_superadmin(pool):
     # audit_log row the test just wrote (real user_id now flows through, see
     # every router's require_role()/get_current_user() usage) — audit_log's
     # user_id FK correctly refuses to let a referenced user be hard-deleted.
+    await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def test_admin(pool, test_tenant):
+    """Tenant-scoped admin (not superadmin) — for asserting the create_user()
+    escalation guard: can create admin/viewer users in its own tenant, not
+    superadmins or users in another tenant. Soft-deleted like test_superadmin,
+    not hard-deleted like test_viewer: unlike a pure viewer, an admin can
+    perform real audited writes (e.g. create_user()), which leave it as the
+    actor on an audit_log row — the same FK constraint test_superadmin's
+    comment explains."""
+    email = f"test-admin-{uuid.uuid4().hex[:8]}@example.com"
+    user = await users_service.create_user(
+        email=email, password="test-password-not-real", role="admin", tenant_id=test_tenant["id"],
+    )
+    token = auth.create_access_token(user)
+    yield {"user": user, "token": token}
     await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])
 
 
