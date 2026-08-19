@@ -87,6 +87,7 @@ function UsersPanel() {
   const [error, setError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<User | null>(null);
+  const [deactivatingId, setDeactivatingId] = useState<string | null>(null);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -186,12 +187,16 @@ function UsersPanel() {
   };
 
   const handleDeactivate = async (u: User) => {
+    if (deactivatingId === u.id) return;
     if (!window.confirm(`Deactivate ${u.email}? They will no longer be able to sign in.`)) return;
+    setDeactivatingId(u.id);
     try {
       await deleteUser(u.id);
       refresh();
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setDeactivatingId(null);
     }
   };
 
@@ -252,10 +257,10 @@ function UsersPanel() {
                         <button
                           className="btn btn-danger btn-sm"
                           onClick={() => handleDeactivate(u)}
-                          disabled={u.id === currentUser?.id}
+                          disabled={u.id === currentUser?.id || deactivatingId === u.id}
                           title={u.id === currentUser?.id ? "You can't deactivate your own account" : undefined}
                         >
-                          Deactivate
+                          {deactivatingId === u.id ? "Deactivating…" : "Deactivate"}
                         </button>
                       </>
                     ) : (
@@ -295,10 +300,11 @@ function UsersPanel() {
       >
         {formError && <div className="error-banner">{formError}</div>}
         <div className="form-group">
-          <label className="form-label">
+          <label className="form-label" htmlFor="new-user-email">
             Email <span className="required">*</span>
           </label>
           <input
+            id="new-user-email"
             className="form-input"
             type="email"
             value={email}
@@ -307,11 +313,12 @@ function UsersPanel() {
           />
         </div>
         <div className="form-group">
-          <label className="form-label">
+          <label className="form-label" htmlFor="new-user-password">
             Password <span className="required">*</span>
             <span className="hint">at least 8 characters</span>
           </label>
           <input
+            id="new-user-password"
             className="form-input"
             type="password"
             value={password}
@@ -320,8 +327,8 @@ function UsersPanel() {
           />
         </div>
         <div className="form-group">
-          <label className="form-label">Role</label>
-          <select className="form-input" value={role} onChange={(e) => setRole(e.target.value as UserRole)}>
+          <label className="form-label" htmlFor="new-user-role">Role</label>
+          <select id="new-user-role" className="form-input" value={role} onChange={(e) => setRole(e.target.value as UserRole)}>
             {createRoleOptions.map((r) => (
               <option key={r} value={r}>
                 {r}
@@ -331,10 +338,10 @@ function UsersPanel() {
         </div>
         {isSuperadmin && (
           <div className="form-group">
-            <label className="form-label">
+            <label className="form-label" htmlFor="new-user-tenant">
               Tenant <span className="hint">blank = platform-wide (superadmin scope)</span>
             </label>
-            <select className="form-input" value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
+            <select id="new-user-tenant" className="form-input" value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
               <option value="">— Platform (no tenant) —</option>
               {tenants.map((t) => (
                 <option key={t.id} value={t.id}>
@@ -363,8 +370,9 @@ function UsersPanel() {
       >
         {editError && <div className="error-banner">{editError}</div>}
         <div className="form-group">
-          <label className="form-label">Role</label>
+          <label className="form-label" htmlFor="edit-user-role">Role</label>
           <select
+            id="edit-user-role"
             className="form-input"
             value={editForm.role ?? ""}
             onChange={(e) => setEditForm({ ...editForm, role: e.target.value as UserRole })}
@@ -377,10 +385,11 @@ function UsersPanel() {
           </select>
         </div>
         <div className="form-group">
-          <label className="form-label">
+          <label className="form-label" htmlFor="edit-user-tenant">
             Tenant <span className="hint">blank = platform-wide (superadmin scope)</span>
           </label>
           <select
+            id="edit-user-tenant"
             className="form-input"
             value={editForm.tenant_id ?? ""}
             onChange={(e) => setEditForm({ ...editForm, tenant_id: e.target.value || null })}
@@ -394,10 +403,11 @@ function UsersPanel() {
           </select>
         </div>
         <div className="form-group">
-          <label className="form-label">
+          <label className="form-label" htmlFor="edit-user-reset-password">
             Reset Password <span className="hint">leave blank to keep their current one</span>
           </label>
           <input
+            id="edit-user-reset-password"
             className="form-input"
             type="password"
             value={resetPassword}
@@ -502,34 +512,51 @@ function AuditLogPanel() {
   const [entityType, setEntityType] = useState("");
   const [action, setAction] = useState("");
   const [userEmail, setUserEmail] = useState("");
+  const [debouncedEmail, setDebouncedEmail] = useState("");
   const [offset, setOffset] = useState(0);
   const limit = 25;
 
   const isSuperadmin = currentUser?.role === "superadmin";
 
-  const refresh = () => {
+  useEffect(() => {
+    getCurrentUser()
+      .then((me) => setCurrentUser(me))
+      .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)));
+  }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedEmail(userEmail), 300);
+    return () => clearTimeout(t);
+  }, [userEmail]);
+
+  useEffect(() => {
+    if (!currentUser || currentUser.role !== "superadmin") return;
+    let ignore = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     setError(null);
-    getCurrentUser()
-      .then(async (me) => {
-        setCurrentUser(me);
-        if (me.role !== "superadmin") return;
-        const result = await listAuditLog({
-          entity_type: entityType || undefined,
-          action: (action || undefined) as AuditLogEntry["action"] | undefined,
-          user_email: userEmail || undefined,
-          limit,
-          offset,
-        });
+    listAuditLog({
+      entity_type: entityType || undefined,
+      action: (action || undefined) as AuditLogEntry["action"] | undefined,
+      user_email: debouncedEmail || undefined,
+      limit,
+      offset,
+    })
+      .then((result) => {
+        if (ignore) return;
         setEntries(result.items);
         setTotal(result.total);
       })
-      .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)))
-      .finally(() => setLoading(false));
-  };
-
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(refresh, [entityType, action, userEmail, offset]);
+      .catch((e) => {
+        if (!ignore) setError(e instanceof ApiError ? e.detail : String(e));
+      })
+      .finally(() => {
+        if (!ignore) setLoading(false);
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [currentUser, entityType, action, debouncedEmail, offset]);
 
   if (currentUser && !isSuperadmin) {
     return (
@@ -810,27 +837,29 @@ export default function SettingsPage() {
             Your Account
           </div>
           {YOUR_ACCOUNT.map((item) => (
-            <div
+            <button
               key={item.id}
+              type="button"
               className={`nav-item${section === item.id ? " active" : ""}`}
               onClick={() => setSection(item.id)}
-              style={{ cursor: "pointer" }}
+              style={{ background: "none", borderTop: "none", borderRight: "none", borderBottom: "none", width: "100%", textAlign: "left", font: "inherit" }}
             >
               {item.label}
-            </div>
+            </button>
           ))}
           <div className="nav-section" style={{ paddingTop: 6 }}>
             Organization
           </div>
           {ORGANIZATION.map((item) => (
-            <div
+            <button
               key={item.id}
+              type="button"
               className={`nav-item${section === item.id ? " active" : ""}`}
               onClick={() => setSection(item.id)}
-              style={{ cursor: "pointer" }}
+              style={{ background: "none", borderTop: "none", borderRight: "none", borderBottom: "none", width: "100%", textAlign: "left", font: "inherit" }}
             >
               {item.label}
-            </div>
+            </button>
           ))}
         </div>
       </div>

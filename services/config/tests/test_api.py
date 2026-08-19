@@ -578,6 +578,10 @@ class TestUserEndpoints:
         resp = await viewer_client.delete(f"/users/{test_admin['user']['id']}")
         assert resp.status_code == 403
 
+    async def test_update_user_rejects_explicit_null_password_with_no_other_fields(self, client, test_viewer):
+        resp = await client.patch(f"/users/{test_viewer['user']['id']}", json={"password": None})
+        assert resp.status_code == 400
+
 
 class TestHealthEndpoint:
     async def test_health_check(self, client):

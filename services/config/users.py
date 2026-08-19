@@ -173,6 +173,9 @@ async def update_user(
     if new_password is not None:
         fields["password_hash"] = auth.hash_password(new_password)
 
+    if not fields:
+        raise ValueError("update_user() called with no fields to update")
+
     pool = await db.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -191,6 +194,10 @@ async def update_user(
             )
             new = dict(new_row)
 
+            # old_value/new_value cover only the columns actually written, not
+            # the full row — otherwise password_hash (redacted either way)
+            # rides along on every role/tenant_id-only update and the UI
+            # can't tell "redacted, unchanged" from "redacted, changed."
             await audit.write_audit(
                 conn,
                 entity_type="user",
@@ -198,8 +205,8 @@ async def update_user(
                 action="updated",
                 user_id=actor_user_id,
                 user_email=actor_user_email,
-                old_value=old,
-                new_value=new,
+                old_value={col: old[col] for col in columns},
+                new_value={col: new[col] for col in columns},
             )
     return new
 
