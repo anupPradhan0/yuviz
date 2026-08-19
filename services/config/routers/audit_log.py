@@ -17,10 +17,6 @@ async def list_audit_log(
     action: str | None = Query(default=None, pattern="^(created|updated|deleted)$"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    # Superadmin only: this spans every tenant, and old_value/new_value can
-    # include another tenant's non-secret config details — the same
-    # platform-wide visibility as /tenants and /users' write endpoints, not
-    # something a tenant-scoped admin should see about other tenants.
     current_user: CurrentUser = Depends(require_role("superadmin")),
 ):
     return await audit.list_audit_log(

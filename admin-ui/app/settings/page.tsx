@@ -133,10 +133,6 @@ function UsersPanel() {
     setSubmitting(true);
     setFormError(null);
     try {
-      // Non-superadmins are pinned to their own tenant_id here — the backend
-      // trusts whatever tenant_id/role the caller sends (create_user() has
-      // no escalation check of its own), so this is a real guard, not a
-      // convenience default.
       await createUser({
         email,
         password,
@@ -161,12 +157,6 @@ function UsersPanel() {
 
   const handleEditSave = async () => {
     if (!editTarget) return;
-    // Editing your own row out of superadmin removes the Edit/Deactivate
-    // actions from every row, including your own, for the rest of this
-    // session — the same permission check that hides them for any other
-    // admin/viewer. Not blocked outright (you may genuinely be handing off
-    // control to another superadmin), but confirmed explicitly so it can't
-    // happen as a stray click.
     if (
       editTarget.id === currentUser?.id &&
       currentUser?.role === "superadmin" &&
@@ -204,8 +194,6 @@ function UsersPanel() {
     }
   };
 
-  // The create form never offers "superadmin" to a non-superadmin creator —
-  // same reasoning as the tenant_id pin above: nothing server-side stops it.
   const createRoleOptions: UserRole[] = isSuperadmin ? ["superadmin", "admin", "viewer"] : ["admin", "viewer"];
 
   return (
@@ -459,14 +447,6 @@ function AuditDiff({ oldValue, newValue }: { oldValue: string | null; newValue: 
   const before = parse(oldValue);
   const after = parse(newValue);
 
-  // Only the fields that actually changed — a full before/after dump of
-  // every column buries the one or two that matter on every "updated" row.
-  // Redacted fields (api_key_ref/auth_token_ref/password_hash — see
-  // audit.py's _redact()) are the one exception: "[redacted]" reads as
-  // equal to "[redacted]" even when the real underlying values genuinely
-  // differed, so equality here can never actually rule out a change —
-  // always show them rather than silently dropping a real password/secret
-  // change because its redacted display happens to match on both sides.
   const keys = new Set([...(before ? Object.keys(before) : []), ...(after ? Object.keys(after) : [])]);
   const changed = [...keys].filter(
     (k) => before?.[k] === "[redacted]" || after?.[k] === "[redacted]" || JSON.stringify(before?.[k]) !== JSON.stringify(after?.[k]),

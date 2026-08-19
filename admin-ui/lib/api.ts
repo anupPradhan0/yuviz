@@ -732,9 +732,6 @@ export interface AuditLogEntry {
   user_id: string | null;
   user_email: string | null;
   action: AuditAction;
-  // Raw JSON text, not parsed — matches how every other JSONB column comes
-  // back from this API (asyncpg has no codec registered); JSON.parse()
-  // these when actually rendering a diff.
   old_value: string | null;
   new_value: string | null;
   changed_at: string;

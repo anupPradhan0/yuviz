@@ -67,8 +67,6 @@ async def list_audit_log(
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """Superadmin-only reader — see routers/audit_log.py. Filters are ANDed;
-    user_email is a substring match (ILIKE), everything else exact."""
     pool = await db.get_pool()
     where: list[str] = []
     params: list[Any] = []
