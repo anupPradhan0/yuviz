@@ -63,7 +63,17 @@ start_knowledge_worker() {
   python3 -m services.knowledge --log-level INFO
 }
 
-# ── Block 8/9: Python ConversationService instances (ports 50051/50052) ──────
+# ── Block 8: Campaigns Service (REST API, port 8400) — outbound calling ──────
+# worker.py's pacing loop runs inside this same process (see its own
+# docstring), not a separate process like the Knowledge worker — no extra
+# block needed for it.
+start_campaigns_service() {
+  export POSTGRES_DSN="postgresql://satish@localhost:5432/voiceai"
+  cd "$REPO"
+  python3 -m uvicorn services.campaigns.app:app --host 0.0.0.0 --port 8400
+}
+
+# ── Block 9/10: Python ConversationService instances (ports 50051/50052) ─────
 _conv_env() {
   export POSTGRES_DSN="postgresql://satish@localhost:5432/voiceai"
   export REDIS_URL="redis://localhost:6379/0"
@@ -83,25 +93,25 @@ start_conv2() {
   python3 -m services.conversation --port 50052 --mode pipeline --log-level INFO
 }
 
-# ── Block 10: Envoy gRPC proxy ────────────────────────────────────────────────
+# ── Block 11: Envoy gRPC proxy ────────────────────────────────────────────────
 start_envoy() {
   # Install func-e if missing: brew install func-e
   func-e run -c "$REPO/config/envoy.yaml"
 }
 
-# ── Block 11: C++ Gateway ──────────────────────────────────────────────────────
+# ── Block 12: C++ Gateway ──────────────────────────────────────────────────────
 start_gateway() {
   cd "$REPO"
   ./build/gateway/voice_ai_gateway config/gateway.yaml
 }
 
-# ── Block 12: FreeSWITCH (registers with Kamailio from Block 2) ──────────────
+# ── Block 13: FreeSWITCH (registers with Kamailio from Block 2) ──────────────
 start_freeswitch() {
   cd "$REPO"
   ./freeswitch
 }
 
-# ── Block 13: Admin UI (Next.js, port 3000) ───────────────────────────────────
+# ── Block 14: Admin UI (Next.js, port 3000) ───────────────────────────────────
 start_admin_ui() {
   cd "$REPO/admin-ui"
   npm run dev
@@ -110,15 +120,17 @@ start_admin_ui() {
 # ── Verify: check all services are healthy ───────────────────────────────────
 verify() {
   echo "=== Port check ==="
-  for port in 3306 5060 5080 5432 6379 11434 8000 8100 50051 50052 10000 8080 3000; do
+  for port in 3306 5060 5080 5432 6379 11434 8000 8100 8400 50051 50052 10000 8080 3000; do
     nc -z localhost "$port" 2>/dev/null && echo "  :$port  OPEN" || echo "  :$port  CLOSED"
   done
 
   echo ""
-  echo "=== Config / Knowledge Service health ==="
+  echo "=== Config / Knowledge / Campaigns Service health ==="
   curl -s http://localhost:8000/health || echo "  Config Service not reachable"
   echo ""
   curl -s http://localhost:8100/health || echo "  Knowledge Service not reachable"
+  echo ""
+  curl -s http://localhost:8400/health || echo "  Campaigns Service not reachable"
 
   echo ""
   echo "=== Envoy upstream health ==="
@@ -142,6 +154,7 @@ portmap() {
   :11434  Ollama     — local LLM + embedding provider
   :8000   Config Service    — REST API
   :8100   Knowledge Service — REST API (RAG)
+  :8400   Campaigns Service — REST API (outbound calling)
   :50051  ConvSvc-1  — gRPC ConversationService
   :50052  ConvSvc-2  — gRPC ConversationService
   :10000  Envoy      — gRPC load balancer (upstream -> 50051, 50052)
@@ -152,4 +165,4 @@ portmap() {
 EOF
 }
 
-echo "start_local.sh loaded. Functions: start_mysql, start_kamailio, start_data, start_ollama, start_config_service, start_knowledge_service, start_knowledge_worker, start_conv1, start_conv2, start_envoy, start_gateway, start_freeswitch, start_admin_ui, verify, portmap"
+echo "start_local.sh loaded. Functions: start_mysql, start_kamailio, start_data, start_ollama, start_config_service, start_knowledge_service, start_knowledge_worker, start_campaigns_service, start_conv1, start_conv2, start_envoy, start_gateway, start_freeswitch, start_admin_ui, verify, portmap"
