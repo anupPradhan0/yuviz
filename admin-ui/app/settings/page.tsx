@@ -461,8 +461,16 @@ function AuditDiff({ oldValue, newValue }: { oldValue: string | null; newValue: 
 
   // Only the fields that actually changed — a full before/after dump of
   // every column buries the one or two that matter on every "updated" row.
+  // Redacted fields (api_key_ref/auth_token_ref/password_hash — see
+  // audit.py's _redact()) are the one exception: "[redacted]" reads as
+  // equal to "[redacted]" even when the real underlying values genuinely
+  // differed, so equality here can never actually rule out a change —
+  // always show them rather than silently dropping a real password/secret
+  // change because its redacted display happens to match on both sides.
   const keys = new Set([...(before ? Object.keys(before) : []), ...(after ? Object.keys(after) : [])]);
-  const changed = [...keys].filter((k) => JSON.stringify(before?.[k]) !== JSON.stringify(after?.[k]));
+  const changed = [...keys].filter(
+    (k) => before?.[k] === "[redacted]" || after?.[k] === "[redacted]" || JSON.stringify(before?.[k]) !== JSON.stringify(after?.[k]),
+  );
 
   if (changed.length === 0) {
     return <div className="form-hint">No field-level diff available.</div>;
@@ -478,15 +486,25 @@ function AuditDiff({ oldValue, newValue }: { oldValue: string | null; newValue: 
         </tr>
       </thead>
       <tbody>
-        {changed.map((k) => (
-          <tr key={k}>
-            <td className="mono">{k}</td>
-            <td className="mono" style={{ color: "var(--text-3)" }}>
-              {before ? JSON.stringify(before[k]) : "—"}
-            </td>
-            <td className="mono">{after ? JSON.stringify(after[k]) : "—"}</td>
-          </tr>
-        ))}
+        {changed.map((k) => {
+          const isRedacted = before?.[k] === "[redacted]" || after?.[k] === "[redacted]";
+          return (
+            <tr key={k}>
+              <td className="mono">{k}</td>
+              <td className="mono" style={{ color: "var(--text-3)" }}>
+                {before ? JSON.stringify(before[k]) : "—"}
+              </td>
+              <td className="mono">
+                {after ? JSON.stringify(after[k]) : "—"}
+                {isRedacted && (
+                  <div style={{ fontSize: ".68rem", color: "var(--text-3)", fontFamily: "var(--font)" }}>
+                    value changed — redacted, can&apos;t show what
+                  </div>
+                )}
+              </td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );
