@@ -12,7 +12,7 @@ from typing import Any
 
 from . import audit, auth, db
 
-_UPDATABLE_FIELDS = {"role", "tenant_id", "password_hash"}
+_UPDATABLE_FIELDS = {"role", "tenant_id"}
 
 _SUPERADMIN_EXISTS = (
     "SELECT EXISTS (SELECT 1 FROM users WHERE role = 'superadmin' AND deleted_at IS NULL)"
@@ -43,13 +43,28 @@ async def get_user_by_id(user_id: Any) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
-async def list_users(tenant_id: Any | None = None) -> list[dict[str, Any]]:
+async def list_users(*, tenant_id: Any | None, is_superadmin: bool) -> list[dict[str, Any]]:
+    """is_superadmin, not "tenant_id is None", decides whether this sees
+    every user — tenant_id IS NULL means "platform-scoped", not "this
+    caller is a superadmin" (role and tenant_id aren't DB-coupled; a
+    non-superadmin service account can be platform-scoped too, e.g.
+    conversation-service@internal.yuviz.ai). Passing a None tenant_id
+    for a non-superadmin caller here previously fell through to the
+    "no filter" branch, showing every user including every superadmin
+    to whoever's own account happened to have a NULL tenant_id."""
     pool = await db.get_pool()
-    if tenant_id is None:
+    if is_superadmin:
         rows = await pool.fetch("SELECT * FROM users WHERE deleted_at IS NULL ORDER BY email")
     else:
+        # tenant_id = $1 is NULL-unsafe (NULL never equals NULL in SQL), so
+        # IS NOT DISTINCT FROM here — a platform-scoped non-superadmin
+        # caller (tenant_id NULL) sees other platform-scoped rows, not
+        # every tenant's users. role != 'superadmin' is the actual
+        # security boundary: never show a superadmin row to a non-
+        # superadmin caller, regardless of tenant_id.
         rows = await pool.fetch(
-            "SELECT * FROM users WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY email",
+            "SELECT * FROM users WHERE tenant_id IS NOT DISTINCT FROM $1 "
+            "AND role != 'superadmin' AND deleted_at IS NULL ORDER BY email",
             tenant_id,
         )
     return [dict(row) for row in rows]
@@ -162,14 +177,24 @@ async def update_user(
 ) -> dict[str, Any]:
     if not fields:
         raise ValueError("update_user() called with no fields to update")
-    if "password" in fields:
-        # A superadmin-issued reset, not the caller proving they know the
-        # old one — that's change_password()'s job, this is the "they
-        # forgot it entirely" path. Same hash_password() either way.
-        fields["password_hash"] = auth.hash_password(fields.pop("password"))
+
+    # Popped before the unknown-field check, not added to _UPDATABLE_FIELDS:
+    # "password" (plaintext, hashed below) is the only accepted spelling.
+    # password_hash is deliberately never in _UPDATABLE_FIELDS, so a caller
+    # passing it directly still hits the unknown-field check below and gets
+    # rejected — the only way this method ever writes password_hash is via
+    # its own hash_password() call, never a raw string a caller supplied.
+    new_password = fields.pop("password", None)
+
     unknown = set(fields) - _UPDATABLE_FIELDS
     if unknown:
         raise ValueError(f"update_user() got non-updatable field(s): {unknown}")
+
+    if new_password is not None:
+        # A superadmin-issued reset, not the caller proving they know the
+        # old one — that's change_password()'s job, this is the "they
+        # forgot it entirely" path. Same hash_password() either way.
+        fields["password_hash"] = auth.hash_password(new_password)
 
     pool = await db.get_pool()
     async with pool.acquire() as conn:

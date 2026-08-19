@@ -14,9 +14,12 @@ router = APIRouter(prefix="/users", tags=["users"])
 async def list_users(current_user: CurrentUser = Depends(get_current_user)):
     # Superadmin sees every user; a tenant-scoped admin/viewer sees only
     # their own tenant's users — same scoping principle as every other
-    # tenant-owned resource in this API.
-    tenant_id = None if current_user.role == "superadmin" else current_user.tenant_id
-    users = await users_service.list_users(tenant_id)
+    # tenant-owned resource in this API. is_superadmin is passed explicitly
+    # rather than inferred from tenant_id being None — see list_users()'s
+    # own docstring for why that inference was wrong.
+    users = await users_service.list_users(
+        tenant_id=current_user.tenant_id, is_superadmin=(current_user.role == "superadmin"),
+    )
     return [users_service.to_public_dict(u) for u in users]
 
 
