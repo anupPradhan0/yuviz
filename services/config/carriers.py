@@ -102,6 +102,10 @@ async def update_carrier(
             )
             new = dict(new_row)
 
+            # Scoped to the written columns, not the full row — otherwise
+            # auth_token_ref (redacted either way) rides along on every
+            # update and the UI can't tell "redacted, unchanged" from
+            # "redacted, changed."
             await audit.write_audit(
                 conn,
                 entity_type="carrier",
@@ -109,8 +113,8 @@ async def update_carrier(
                 action="updated",
                 user_id=user_id,
                 user_email=user_email,
-                old_value=old,
-                new_value=new,
+                old_value={col: old[col] for col in columns},
+                new_value={col: new[col] for col in columns},
             )
     return new
 
