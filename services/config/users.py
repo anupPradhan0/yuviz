@@ -12,7 +12,7 @@ from typing import Any
 
 from . import audit, auth, db
 
-_UPDATABLE_FIELDS = {"role", "tenant_id"}
+_UPDATABLE_FIELDS = {"role", "tenant_id", "password_hash"}
 
 _SUPERADMIN_EXISTS = (
     "SELECT EXISTS (SELECT 1 FROM users WHERE role = 'superadmin' AND deleted_at IS NULL)"
@@ -162,6 +162,11 @@ async def update_user(
 ) -> dict[str, Any]:
     if not fields:
         raise ValueError("update_user() called with no fields to update")
+    if "password" in fields:
+        # A superadmin-issued reset, not the caller proving they know the
+        # old one — that's change_password()'s job, this is the "they
+        # forgot it entirely" path. Same hash_password() either way.
+        fields["password_hash"] = auth.hash_password(fields.pop("password"))
     unknown = set(fields) - _UPDATABLE_FIELDS
     if unknown:
         raise ValueError(f"update_user() got non-updatable field(s): {unknown}")

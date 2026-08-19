@@ -710,6 +710,7 @@ export interface UserCreate {
 export interface UserUpdate {
   role?: UserRole;
   tenant_id?: string | null;
+  password?: string;
 }
 
 export const listUsers = () => request<User[]>("/users");

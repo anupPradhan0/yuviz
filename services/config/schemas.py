@@ -215,6 +215,10 @@ class UserCreate(BaseModel):
 class UserUpdate(BaseModel):
     role:      Literal["superadmin", "admin", "viewer"] | None = None
     tenant_id: str | None = None
+    # A superadmin-issued reset for a user who forgot their password —
+    # distinct from POST /auth/change-password, which requires knowing the
+    # current one. Same 8-character minimum as account creation.
+    password:  str | None = Field(default=None, min_length=8)
 
 
 class ChangePasswordRequest(BaseModel):

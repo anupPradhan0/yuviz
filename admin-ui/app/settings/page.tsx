@@ -96,6 +96,7 @@ function UsersPanel() {
   const [formError, setFormError] = useState<string | null>(null);
 
   const [editForm, setEditForm] = useState<UserUpdate>({});
+  const [resetPassword, setResetPassword] = useState("");
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
@@ -154,6 +155,7 @@ function UsersPanel() {
   const openEdit = (u: User) => {
     setEditTarget(u);
     setEditForm({ role: u.role, tenant_id: u.tenant_id });
+    setResetPassword("");
     setEditError(null);
   };
 
@@ -175,10 +177,14 @@ function UsersPanel() {
     ) {
       return;
     }
+    if (resetPassword && resetPassword.length < 8) {
+      setEditError("New password must be at least 8 characters.");
+      return;
+    }
     setEditSubmitting(true);
     setEditError(null);
     try {
-      await updateUser(editTarget.id, editForm);
+      await updateUser(editTarget.id, { ...editForm, ...(resetPassword ? { password: resetPassword } : {}) });
       setEditTarget(null);
       refresh();
     } catch (e) {
@@ -397,6 +403,19 @@ function UsersPanel() {
               </option>
             ))}
           </select>
+        </div>
+        <div className="form-group">
+          <label className="form-label">
+            Reset Password <span className="hint">leave blank to keep their current one</span>
+          </label>
+          <input
+            className="form-input"
+            type="password"
+            value={resetPassword}
+            onChange={(e) => setResetPassword(e.target.value)}
+            placeholder="At least 8 characters"
+            autoComplete="new-password"
+          />
         </div>
       </Modal>
     </>
