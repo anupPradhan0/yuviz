@@ -105,6 +105,7 @@ function UsersPanel() {
 
   const refresh = () => {
     setLoading(true);
+    setError(null);
     Promise.all([getCurrentUser(), listUsers()])
       .then(async ([me, us]) => {
         setCurrentUser(me);
@@ -508,6 +509,7 @@ function AuditLogPanel() {
 
   const refresh = () => {
     setLoading(true);
+    setError(null);
     getCurrentUser()
       .then(async (me) => {
         setCurrentUser(me);
