@@ -130,7 +130,7 @@ verify() {
   echo ""
   curl -s http://localhost:8100/health || echo "  Knowledge Service not reachable"
   echo ""
-  curl -s http://localhost:8400/health || echo "  Campaigns Service not reachable"
+  curl -sf http://localhost:8400/health || echo "  Campaigns Service not reachable"
 
   echo ""
   echo "=== Envoy upstream health ==="
