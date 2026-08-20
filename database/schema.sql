@@ -233,7 +233,7 @@ ALTER TABLE users ALTER COLUMN password_hash SET NOT NULL;
 -- application code (services/config/users.py), not by a DB constraint —
 -- the flag is what that code checks.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_service_account BOOLEAN NOT NULL DEFAULT false;
-UPDATE users SET is_service_account = true WHERE email LIKE '%@internal.%' AND is_service_account = false;
+UPDATE users SET is_service_account = true WHERE lower(email) LIKE '%@internal.%' AND is_service_account = false;
 
 -- ── audit_log — append-only, written in the same transaction as the mutation ─
 CREATE TABLE IF NOT EXISTS audit_log (
