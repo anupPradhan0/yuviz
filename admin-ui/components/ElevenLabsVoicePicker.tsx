@@ -28,7 +28,11 @@ export function ElevenLabsVoicePicker({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
-  const [languageFilter, setLanguageFilter] = useState("all");
+  // null = no explicit choice yet — defaults to English when the account
+  // has it, matching ElevenLabs' own agent builder ("Default language is
+  // English").
+  const [languageFilter, setLanguageFilter] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     if (!provider) return;
@@ -102,6 +106,7 @@ export function ElevenLabsVoicePicker({
     try {
       const updated = await updateProvider(provider.id, { voice: voiceId });
       onVoicePicked(updated);
+      setExpanded(false);
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : String(e));
     } finally {
@@ -118,15 +123,49 @@ export function ElevenLabsVoicePicker({
   // the filter options are whatever languages this account's voices
   // actually have.
   const languages = Array.from(new Set(voices.map((v) => v.labels.language).filter((l): l is string => !!l))).sort();
-  const filteredVoices = languageFilter === "all" ? voices : voices.filter((v) => v.labels.language === languageFilter);
+  const activeLanguageFilter = languageFilter ?? (languages.includes("en") ? "en" : "all");
+  const filteredVoices = activeLanguageFilter === "all" ? voices : voices.filter((v) => v.labels.language === activeLanguageFilter);
+  const selectedVoice = voices.find((v) => v.voice_id === provider.voice);
+
+  if (!expanded) {
+    return (
+      <button
+        type="button"
+        className="kb-row"
+        style={{ width: "100%", textAlign: "left", cursor: "pointer", background: "none", border: "1px solid var(--border-2)", borderRadius: "var(--rs)" }}
+        onClick={() => setExpanded(true)}
+      >
+        {selectedVoice ? (
+          <>
+            <span style={{ color: "var(--green)", marginRight: 8 }}>✓</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 500 }}>{selectedVoice.name}</div>
+              <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>Primary voice</div>
+            </div>
+          </>
+        ) : (
+          <div style={{ flex: 1, color: "var(--text-3)" }}>Select a voice…</div>
+        )}
+        <span style={{ color: "var(--text-3)" }}>▾</span>
+      </button>
+    );
+  }
 
   return (
     <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <div style={{ fontSize: ".78rem", fontWeight: 500 }}>
+          {selectedVoice ? `Selected: ${selectedVoice.name}` : "Select a voice"}
+        </div>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setExpanded(false)}>
+          Close
+        </button>
+      </div>
       {languages.length > 1 && (
         <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
           <button
             type="button"
-            className={`btn btn-sm ${languageFilter === "all" ? "btn-primary" : "btn-ghost"}`}
+            className={`btn btn-sm ${activeLanguageFilter === "all" ? "btn-primary" : "btn-ghost"}`}
             onClick={() => setLanguageFilter("all")}
           >
             All Languages
@@ -135,10 +174,10 @@ export function ElevenLabsVoicePicker({
             <button
               key={lang}
               type="button"
-              className={`btn btn-sm ${languageFilter === lang ? "btn-primary" : "btn-ghost"}`}
+              className={`btn btn-sm ${activeLanguageFilter === lang ? "btn-primary" : "btn-ghost"}`}
               onClick={() => setLanguageFilter(lang)}
             >
-              {lang}
+              {lang === "en" ? "English (Default)" : lang}
             </button>
           ))}
         </div>

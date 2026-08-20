@@ -414,7 +414,15 @@ export default function AgentDetailPage() {
               <div className="card-body">
                 {(() => {
                   const selectedTts = providers.find((p) => p.id === form.tts_config_id);
-                  const elevenLabsProvider = providers.find((p) => p.role === "tts" && p.engine === "elevenlabs") ?? null;
+                  // Prefer the provider actually assigned to this agent —
+                  // falling back to "any ElevenLabs provider on the tenant"
+                  // only when the agent isn't currently on one — otherwise
+                  // a tenant with multiple connected accounts could show a
+                  // different agent's selected voice here.
+                  const elevenLabsProvider =
+                    (selectedTts?.engine === "elevenlabs" ? selectedTts : undefined) ??
+                    providers.find((p) => p.role === "tts" && p.engine === "elevenlabs") ??
+                    null;
                   const defaultTab = selectedTts?.engine === "elevenlabs" ? "elevenlabs" : "local";
                   const tab = voiceTab ?? defaultTab;
 
