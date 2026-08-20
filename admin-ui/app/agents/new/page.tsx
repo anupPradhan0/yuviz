@@ -180,6 +180,7 @@ export default function NewAgentPage() {
           className={`tab${step === "tools" ? " active" : ""}`}
           onClick={() => createdAgent && setStep("tools")}
           disabled={!createdAgent}
+          title={createdAgent ? undefined : "Create the agent in Setup first"}
         >
           Tools
         </button>
@@ -187,6 +188,7 @@ export default function NewAgentPage() {
           className={`tab${step === "knowledge-base" ? " active" : ""}`}
           onClick={() => createdAgent && setStep("knowledge-base")}
           disabled={!createdAgent}
+          title={createdAgent ? undefined : "Create the agent in Setup first"}
         >
           Knowledge Base
         </button>
@@ -194,10 +196,17 @@ export default function NewAgentPage() {
           className={`tab${step === "sip" ? " active" : ""}`}
           onClick={() => createdAgent && setStep("sip")}
           disabled={!createdAgent}
+          title={createdAgent ? undefined : "Create the agent in Setup first"}
         >
           SIP
         </button>
       </div>
+
+      {!createdAgent && (
+        <div className="form-hint" style={{ marginTop: -10, marginBottom: 14 }}>
+          Tools, Knowledge Base, and SIP unlock after you create the agent below — fill in Setup, then click &quot;Create Agent&quot;.
+        </div>
+      )}
 
       {createError && <div className="error-banner">{createError}</div>}
       {partialWarning && <div className="error-banner">{partialWarning}</div>}

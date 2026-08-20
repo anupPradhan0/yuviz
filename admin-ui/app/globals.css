@@ -204,6 +204,8 @@ body {
 }
 .tab:hover { color: var(--text-2); }
 .tab.active { color: var(--cyan); border-bottom-color: var(--cyan); font-weight: 600; }
+.tab:disabled { color: var(--text-3); opacity: .4; cursor: not-allowed; }
+.tab:disabled:hover { color: var(--text-3); }
 
 .cols { display: flex; gap: 14px; }
 .col-main { flex: 1; min-width: 0; }
