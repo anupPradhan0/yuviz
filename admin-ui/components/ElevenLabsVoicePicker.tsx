@@ -14,11 +14,13 @@ export function ElevenLabsVoicePicker({
   provider,
   onProviderCreated,
   onVoicePicked,
+  onLanguageDetected,
 }: {
   tenantId: string;
   provider: ProviderConfig | null;
   onProviderCreated: (provider: ProviderConfig) => void;
   onVoicePicked: (provider: ProviderConfig) => void;
+  onLanguageDetected: (language: string) => void;
 }) {
   const [apiKeyRef, setApiKeyRef] = useState("");
   const [connecting, setConnecting] = useState(false);
@@ -100,12 +102,13 @@ export function ElevenLabsVoicePicker({
     );
   }
 
-  const handlePick = async (voiceId: string) => {
+  const handlePick = async (voiceId: string, language: string | null) => {
     setSaving(voiceId);
     setError(null);
     try {
       const updated = await updateProvider(provider.id, { voice: voiceId });
       onVoicePicked(updated);
+      if (language) onLanguageDetected(language);
       setExpanded(false);
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : String(e));
@@ -202,7 +205,7 @@ export function ElevenLabsVoicePicker({
               <button
                 type="button"
                 className={`btn btn-sm ${isSelected ? "btn-primary" : "btn-ghost"}`}
-                onClick={() => handlePick(v.voice_id)}
+                onClick={() => handlePick(v.voice_id, v.labels.language ?? null)}
                 disabled={isSaving}
               >
                 {isSaving ? "…" : isSelected ? "Selected" : "Select"}

@@ -78,32 +78,37 @@ export const EMBEDDING_MODELS_BY_ENGINE: Record<string, string[] | null> = {
 export type VoiceGender = "female" | "male" | "neutral";
 
 export interface VoiceOption {
-  id:     string;
-  label:  string;
-  gender: VoiceGender;
+  id:       string;
+  label:    string;
+  gender:   VoiceGender;
+  // Matches LANGUAGES' value format below — lets a voice pick drive
+  // agent.language automatically. Real macOS system-voice locales (not
+  // guessed): Samantha/Alex are en-US, Karen is en-AU, Moira is en-IE,
+  // Daniel is en-GB.
+  language: string;
 }
 
 export const VOICES_BY_ENGINE: Record<string, VoiceOption[] | null> = {
   macos: [
-    { id: "Samantha", label: "Samantha", gender: "female" },
-    { id: "Karen",    label: "Karen",    gender: "female" },
-    { id: "Moira",    label: "Moira",    gender: "female" },
-    { id: "Alex",     label: "Alex",     gender: "male" },
-    { id: "Daniel",   label: "Daniel",   gender: "male" },
+    { id: "Samantha", label: "Samantha", gender: "female", language: "en-US" },
+    { id: "Karen",    label: "Karen",    gender: "female", language: "en-AU" },
+    { id: "Moira",    label: "Moira",    gender: "female", language: "en-IE" },
+    { id: "Alex",     label: "Alex",     gender: "male",   language: "en-US" },
+    { id: "Daniel",   label: "Daniel",   gender: "male",   language: "en-GB" },
   ],
   // af_/bf_ = American/British female, am_/bm_ = American/British male
   // (Kokoro's own naming convention) — full set of voices shipped with
   // the installed model, not just the original 5.
   kokoro: [
-    { id: "af_sarah",  label: "Sarah (US)",   gender: "female" },
-    { id: "af_bella",  label: "Bella (US)",   gender: "female" },
-    { id: "af_nicole", label: "Nicole (US)",  gender: "female" },
-    { id: "bf_emma",   label: "Emma (UK)",    gender: "female" },
-    { id: "bf_isabella", label: "Isabella (UK)", gender: "female" },
-    { id: "am_adam",   label: "Adam (US)",    gender: "male" },
-    { id: "am_michael", label: "Michael (US)", gender: "male" },
-    { id: "bm_george", label: "George (UK)",  gender: "male" },
-    { id: "bm_lewis",  label: "Lewis (UK)",   gender: "male" },
+    { id: "af_sarah",  label: "Sarah (US)",   gender: "female", language: "en-US" },
+    { id: "af_bella",  label: "Bella (US)",   gender: "female", language: "en-US" },
+    { id: "af_nicole", label: "Nicole (US)",  gender: "female", language: "en-US" },
+    { id: "bf_emma",   label: "Emma (UK)",    gender: "female", language: "en-GB" },
+    { id: "bf_isabella", label: "Isabella (UK)", gender: "female", language: "en-GB" },
+    { id: "am_adam",   label: "Adam (US)",    gender: "male",   language: "en-US" },
+    { id: "am_michael", label: "Michael (US)", gender: "male",  language: "en-US" },
+    { id: "bm_george", label: "George (UK)",  gender: "male",   language: "en-GB" },
+    { id: "bm_lewis",  label: "Lewis (UK)",   gender: "male",   language: "en-GB" },
   ],
   elevenlabs: null, // account-specific voice_id — never guessed, always free text
 };

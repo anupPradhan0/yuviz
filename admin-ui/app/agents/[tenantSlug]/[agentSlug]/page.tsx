@@ -7,7 +7,7 @@ import { KnowledgeBasePanel } from "@/components/KnowledgeBasePanel";
 import { ToolsPanel } from "@/components/ToolsPanel";
 import { SipPanel } from "@/components/SipPanel";
 import { TestAgentPanel } from "@/components/TestAgentPanel";
-import { VoicePicker } from "@/components/VoicePicker";
+import { LocalVoicePicker } from "@/components/LocalVoicePicker";
 import { ElevenLabsVoicePicker } from "@/components/ElevenLabsVoicePicker";
 import { LANGUAGES, OTHER } from "@/lib/engineCatalog";
 
@@ -56,7 +56,14 @@ export default function AgentDetailPage() {
   const [customLanguage, setCustomLanguage] = useState("");
   const [promptMode, setPromptMode] = useState<"freeform" | "structured">("freeform");
   const [promptSections, setPromptSections] = useState<PromptSections>({ personality: "", environment: "", tone: "" });
-  const [voiceTab, setVoiceTab] = useState<"local" | "elevenlabs" | null>(null);
+  // Explicit override once the user picks an engine from the chooser (or
+  // clicks "Change engine") — null defers to whatever engine the agent's
+  // current tts_config_id actually points at, so the Voice card only ever
+  // shows the picker matching the configured provider, never an unrelated
+  // engine's voices (picking one there would silently swap tts_config_id
+  // to a different provider without it being obvious that happened).
+  const [chosenEngine, setChosenEngine] = useState<"macos" | "kokoro" | "elevenlabs" | null>(null);
+  const [showEngineChooser, setShowEngineChooser] = useState(false);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -108,6 +115,20 @@ export default function AgentDetailPage() {
       .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)))
       .finally(() => setLoading(false));
   }, [tenantSlug, agentSlug]);
+
+  // Picking a voice sets the agent's language to match it, rather than the
+  // other way around — a voice is a concrete, single-language artifact,
+  // while agent.language is a looser override (see its own "derive from
+  // provider" default), so syncing from voice -> language is the direction
+  // that can't produce a contradiction.
+  const applyDetectedLanguage = (language: string) => {
+    if (LANGUAGES.some((l) => l.value === language)) {
+      setLanguageChoice(language);
+    } else {
+      setLanguageChoice(OTHER);
+      setCustomLanguage(language);
+    }
+  };
 
   const switchToStructured = () => {
     const parsed = parsePromptSections(form.system_prompt || "");
@@ -414,58 +435,88 @@ export default function AgentDetailPage() {
               <div className="card-body">
                 {(() => {
                   const selectedTts = providers.find((p) => p.id === form.tts_config_id);
-                  // Prefer the provider actually assigned to this agent —
-                  // falling back to "any ElevenLabs provider on the tenant"
-                  // only when the agent isn't currently on one — otherwise
-                  // a tenant with multiple connected accounts could show a
-                  // different agent's selected voice here.
-                  const elevenLabsProvider =
-                    (selectedTts?.engine === "elevenlabs" ? selectedTts : undefined) ??
-                    providers.find((p) => p.role === "tts" && p.engine === "elevenlabs") ??
-                    null;
-                  const defaultTab = selectedTts?.engine === "elevenlabs" ? "elevenlabs" : "local";
-                  const tab = voiceTab ?? defaultTab;
+                  const engine = chosenEngine ?? (selectedTts?.engine as "macos" | "kokoro" | "elevenlabs" | undefined) ?? null;
 
-                  return (
-                    <>
-                      <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
-                        <button
-                          type="button"
-                          className={`btn btn-sm ${tab === "local" ? "btn-primary" : "btn-ghost"}`}
-                          onClick={() => setVoiceTab("local")}
-                        >
-                          Local Voices
-                        </button>
-                        <button
-                          type="button"
-                          className={`btn btn-sm ${tab === "elevenlabs" ? "btn-primary" : "btn-ghost"}`}
-                          onClick={() => setVoiceTab("elevenlabs")}
-                        >
-                          ElevenLabs
-                        </button>
+                  if (showEngineChooser || !engine) {
+                    return (
+                      <div>
+                        <div className="form-hint" style={{ marginBottom: 8 }}>
+                          Choose a TTS engine to browse its voices.
+                        </div>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          {(["macos", "kokoro", "elevenlabs"] as const).map((e) => (
+                            <button
+                              key={e}
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => {
+                                setChosenEngine(e);
+                                setShowEngineChooser(false);
+                              }}
+                            >
+                              {e === "macos" ? "macOS say" : e === "kokoro" ? "Kokoro" : "ElevenLabs"}
+                            </button>
+                          ))}
+                        </div>
                       </div>
-                      {tab === "local" ? (
-                        <VoicePicker
-                          tenantId={agent.tenant_id}
-                          providers={providers}
-                          value={form.tts_config_id}
-                          onChange={(id) => setForm({ ...form, tts_config_id: id })}
-                          onProviderCreated={(p) => setProviders([...providers, p])}
-                        />
-                      ) : (
+                    );
+                  }
+
+                  const changeEngineButton = (
+                    <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowEngineChooser(true)}>
+                        Change engine
+                      </button>
+                    </div>
+                  );
+
+                  if (engine === "elevenlabs") {
+                    // Prefer the provider actually assigned to this agent —
+                    // falling back to "any ElevenLabs provider on the
+                    // tenant" only when the agent isn't currently on one —
+                    // otherwise a tenant with multiple connected accounts
+                    // could show a different agent's selected voice here.
+                    const elevenLabsProvider =
+                      (selectedTts?.engine === "elevenlabs" ? selectedTts : undefined) ??
+                      providers.find((p) => p.role === "tts" && p.engine === "elevenlabs") ??
+                      null;
+                    return (
+                      <>
                         <ElevenLabsVoicePicker
                           tenantId={agent.tenant_id}
                           provider={elevenLabsProvider}
                           onProviderCreated={(p) => {
                             setProviders([...providers, p]);
                             setForm({ ...form, tts_config_id: p.id });
+                            setChosenEngine(null);
                           }}
                           onVoicePicked={(updated) => {
                             setProviders(providers.map((p) => (p.id === updated.id ? updated : p)));
                             setForm({ ...form, tts_config_id: updated.id });
+                            setChosenEngine(null);
                           }}
+                          onLanguageDetected={applyDetectedLanguage}
                         />
-                      )}
+                        {changeEngineButton}
+                      </>
+                    );
+                  }
+
+                  return (
+                    <>
+                      <LocalVoicePicker
+                        engine={engine}
+                        tenantId={agent.tenant_id}
+                        providers={providers}
+                        value={form.tts_config_id}
+                        onChange={(id) => {
+                          setForm({ ...form, tts_config_id: id });
+                          setChosenEngine(null);
+                        }}
+                        onProviderCreated={(p) => setProviders([...providers, p])}
+                        onLanguageDetected={applyDetectedLanguage}
+                      />
+                      {changeEngineButton}
                     </>
                   );
                 })()}
