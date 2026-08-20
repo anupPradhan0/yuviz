@@ -56,6 +56,7 @@ export default function AgentDetailPage() {
   const [customLanguage, setCustomLanguage] = useState("");
   const [promptMode, setPromptMode] = useState<"freeform" | "structured">("freeform");
   const [promptSections, setPromptSections] = useState<PromptSections>({ personality: "", environment: "", tone: "" });
+  const [voiceTab, setVoiceTab] = useState<"local" | "elevenlabs" | null>(null);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -413,22 +414,51 @@ export default function AgentDetailPage() {
               <div className="card-body">
                 {(() => {
                   const selectedTts = providers.find((p) => p.id === form.tts_config_id);
-                  if (selectedTts?.engine === "elevenlabs") {
-                    return (
-                      <ElevenLabsVoicePicker
-                        provider={selectedTts}
-                        onUpdated={(updated) => setProviders(providers.map((p) => (p.id === updated.id ? updated : p)))}
-                      />
-                    );
-                  }
+                  const elevenLabsProvider = providers.find((p) => p.role === "tts" && p.engine === "elevenlabs") ?? null;
+                  const defaultTab = selectedTts?.engine === "elevenlabs" ? "elevenlabs" : "local";
+                  const tab = voiceTab ?? defaultTab;
+
                   return (
-                    <VoicePicker
-                      tenantId={agent.tenant_id}
-                      providers={providers}
-                      value={form.tts_config_id}
-                      onChange={(id) => setForm({ ...form, tts_config_id: id })}
-                      onProviderCreated={(p) => setProviders([...providers, p])}
-                    />
+                    <>
+                      <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
+                        <button
+                          type="button"
+                          className={`btn btn-sm ${tab === "local" ? "btn-primary" : "btn-ghost"}`}
+                          onClick={() => setVoiceTab("local")}
+                        >
+                          Local Voices
+                        </button>
+                        <button
+                          type="button"
+                          className={`btn btn-sm ${tab === "elevenlabs" ? "btn-primary" : "btn-ghost"}`}
+                          onClick={() => setVoiceTab("elevenlabs")}
+                        >
+                          ElevenLabs
+                        </button>
+                      </div>
+                      {tab === "local" ? (
+                        <VoicePicker
+                          tenantId={agent.tenant_id}
+                          providers={providers}
+                          value={form.tts_config_id}
+                          onChange={(id) => setForm({ ...form, tts_config_id: id })}
+                          onProviderCreated={(p) => setProviders([...providers, p])}
+                        />
+                      ) : (
+                        <ElevenLabsVoicePicker
+                          tenantId={agent.tenant_id}
+                          provider={elevenLabsProvider}
+                          onProviderCreated={(p) => {
+                            setProviders([...providers, p]);
+                            setForm({ ...form, tts_config_id: p.id });
+                          }}
+                          onVoicePicked={(updated) => {
+                            setProviders(providers.map((p) => (p.id === updated.id ? updated : p)));
+                            setForm({ ...form, tts_config_id: updated.id });
+                          }}
+                        />
+                      )}
+                    </>
                   );
                 })()}
                 {(() => {

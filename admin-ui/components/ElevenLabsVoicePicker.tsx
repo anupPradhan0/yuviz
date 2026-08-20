@@ -1,25 +1,36 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ApiError, ElevenLabsVoice, ProviderConfig, listElevenLabsVoices, updateProvider } from "@/lib/api";
+import { ApiError, ElevenLabsVoice, ProviderConfig, createProvider, listElevenLabsVoices, updateProvider } from "@/lib/api";
 
 // Unlike VoicePicker (macOS/Kokoro): ElevenLabs voices belong to one
-// account, so there's no "browse then create" — the provider_config with
-// its api_key_ref must already exist, and picking a voice PATCHes that
-// same config's `voice` field rather than resolving/creating a new one.
+// account, so there's no "browse then create per voice" — a provider_config
+// with a real api_key_ref must exist first. If the tenant doesn't have one
+// yet, this renders a one-time "connect" step (api_key_ref only, no voice)
+// before it can show any voices — same zero-friction feel as local voices
+// once that's done: pick a voice, it's saved immediately.
 export function ElevenLabsVoicePicker({
+  tenantId,
   provider,
-  onUpdated,
+  onProviderCreated,
+  onVoicePicked,
 }: {
-  provider: ProviderConfig;
-  onUpdated: (provider: ProviderConfig) => void;
+  tenantId: string;
+  provider: ProviderConfig | null;
+  onProviderCreated: (provider: ProviderConfig) => void;
+  onVoicePicked: (provider: ProviderConfig) => void;
 }) {
+  const [apiKeyRef, setApiKeyRef] = useState("");
+  const [connecting, setConnecting] = useState(false);
+  const [connectError, setConnectError] = useState<string | null>(null);
+
   const [voices, setVoices] = useState<ElevenLabsVoice[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!provider) return;
     let ignore = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
@@ -37,14 +48,59 @@ export function ElevenLabsVoicePicker({
     return () => {
       ignore = true;
     };
-  }, [provider.id]);
+  }, [provider]);
+
+  const handleConnect = async () => {
+    setConnecting(true);
+    setConnectError(null);
+    try {
+      const created = await createProvider(tenantId, {
+        name: "ElevenLabs", role: "tts", engine: "elevenlabs", api_key_ref: apiKeyRef,
+      });
+      onProviderCreated(created);
+    } catch (e) {
+      setConnectError(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  if (!provider) {
+    return (
+      <div>
+        {connectError && <div className="error-banner">{connectError}</div>}
+        <div className="form-group" style={{ marginBottom: 0 }}>
+          <label className="form-label">
+            ElevenLabs API Key Reference <span className="hint">e.g. env:ELEVENLABS_API_KEY — never a raw key, see Secret Manager</span>
+          </label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              className="form-input"
+              style={{ fontFamily: "var(--mono)" }}
+              value={apiKeyRef}
+              onChange={(e) => setApiKeyRef(e.target.value)}
+              placeholder="env:ELEVENLABS_API_KEY"
+            />
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={handleConnect}
+              disabled={connecting || !apiKeyRef.trim()}
+            >
+              {connecting ? "Connecting…" : "Connect"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const handlePick = async (voiceId: string) => {
     setSaving(voiceId);
     setError(null);
     try {
       const updated = await updateProvider(provider.id, { voice: voiceId });
-      onUpdated(updated);
+      onVoicePicked(updated);
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : String(e));
     } finally {
