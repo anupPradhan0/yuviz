@@ -147,14 +147,28 @@ class TestAgentEndpoints:
             f"/tenants/{test_tenant['id']}/providers",
             json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
         )
-        stt_id = stt.json()["id"]
+        llm = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Ollama", "role": "llm", "engine": "ollama"},
+        )
+        tts = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Kokoro", "role": "tts", "engine": "kokoro"},
+        )
+        stt_id, llm_id, tts_id = stt.json()["id"], llm.json()["id"], tts.json()["id"]
 
         resp = await client.post(
             f"/tenants/{test_tenant['slug']}/agents",
-            json={"slug": "support-agent", "name": "Support", "stt_config_id": stt_id},
+            json={
+                "slug": "support-agent", "name": "Support",
+                "stt_config_id": stt_id, "llm_config_id": llm_id, "tts_config_id": tts_id,
+            },
         )
         assert resp.status_code == 201
-        assert resp.json()["stt_config_id"] == stt_id
+        body = resp.json()
+        assert body["stt_config_id"] == stt_id
+        assert body["llm_config_id"] == llm_id
+        assert body["tts_config_id"] == tts_id
 
     async def test_create_agent_with_nonexistent_provider_config_id_is_400(self, client, test_tenant):
         resp = await client.post(
@@ -163,6 +177,52 @@ class TestAgentEndpoints:
                 "slug": "support-agent", "name": "Support",
                 "stt_config_id": "00000000-0000-0000-0000-000000000000",
             },
+        )
+        assert resp.status_code == 400
+
+    async def test_create_agent_rejects_wrong_role_provider_config(self, client, test_tenant):
+        tts = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Kokoro", "role": "tts", "engine": "kokoro"},
+        )
+        resp = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "support-agent", "name": "Support", "stt_config_id": tts.json()["id"]},
+        )
+        assert resp.status_code == 400
+
+    async def test_create_agent_rejects_cross_tenant_provider_config(self, client, test_tenant, pool):
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other Tenant", f"other-{uuid.uuid4().hex[:8]}",
+        )
+        try:
+            other_stt = await client.post(
+                f"/tenants/{other['id']}/providers",
+                json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+            )
+            resp = await client.post(
+                f"/tenants/{test_tenant['slug']}/agents",
+                json={"slug": "support-agent", "name": "Support", "stt_config_id": other_stt.json()["id"]},
+            )
+            assert resp.status_code == 400
+        finally:
+            await pool.execute("DELETE FROM provider_configs WHERE tenant_id = $1", other["id"])
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_update_agent_rejects_wrong_role_provider_config(self, client, test_tenant):
+        create = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "support-agent", "name": "Support"},
+        )
+        agent_id = create.json()["id"]
+        tts = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Kokoro", "role": "tts", "engine": "kokoro"},
+        )
+        resp = await client.patch(
+            f"/tenants/{test_tenant['slug']}/agents/{agent_id}",
+            json={"stt_config_id": tts.json()["id"]},
         )
         assert resp.status_code == 400
 

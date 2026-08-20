@@ -44,12 +44,14 @@ export function VoicePicker({
   value,
   onChange,
   onProviderCreated,
+  disabled = false,
 }: {
   tenantId: string;
   providers: ProviderConfig[];
   value: string | null | undefined;
   onChange: (providerId: string) => void;
   onProviderCreated: (provider: ProviderConfig) => void;
+  disabled?: boolean;
 }) {
   const [creatingKey, setCreatingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -92,6 +94,7 @@ export function VoicePicker({
             type="button"
             className={`btn btn-sm ${genderFilter === f.value ? "btn-primary" : "btn-ghost"}`}
             onClick={() => setGenderFilter(f.value)}
+            disabled={disabled}
           >
             {f.value !== "all" && <span style={{ marginRight: 4 }}>{GENDER_BADGE[f.value]}</span>}
             {f.label}
@@ -117,7 +120,7 @@ export function VoicePicker({
                     type="button"
                     className={`btn btn-sm ${isSelected ? "btn-primary" : "btn-ghost"}`}
                     onClick={() => handlePick(engine, voiceId)}
-                    disabled={isCreating}
+                    disabled={isCreating || disabled}
                     title={voiceId}
                   >
                     {isCreating ? "…" : (

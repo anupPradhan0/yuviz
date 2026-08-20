@@ -66,6 +66,33 @@ async def list_agents(tenant_id: Any) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+_PROVIDER_ROLE_BY_FIELD = {
+    "stt_config_id": "stt", "llm_config_id": "llm", "tts_config_id": "tts",
+}
+
+
+async def _validate_provider_assignments(conn: Any, tenant_id: Any, fields: dict[str, Any]) -> None:
+    """FK existence alone lets stt_config_id point at another tenant's
+    provider, or at a real provider_configs row with the wrong role (e.g.
+    an llm engine assigned as tts_config_id) — either silently breaks the
+    agent at call time rather than at config time. Checked here instead of
+    relying on the caller, so both create_agent() and update_agent() get
+    the same guarantee."""
+    for field, expected_role in _PROVIDER_ROLE_BY_FIELD.items():
+        config_id = fields.get(field)
+        if config_id is None:
+            continue
+        row = await conn.fetchrow(
+            "SELECT tenant_id, role FROM provider_configs WHERE id = $1", config_id,
+        )
+        if row is None:
+            raise ValueError(f"{field}={config_id!r} does not exist")
+        if row["tenant_id"] != tenant_id:
+            raise ValueError(f"{field}={config_id!r} belongs to a different tenant")
+        if row["role"] != expected_role:
+            raise ValueError(f"{field}={config_id!r} has role {row['role']!r}, expected {expected_role!r}")
+
+
 async def create_agent(
     *,
     tenant_id: Any,
@@ -83,6 +110,10 @@ async def create_agent(
     pool = await db.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await _validate_provider_assignments(
+                conn, tenant_id,
+                {"stt_config_id": stt_config_id, "llm_config_id": llm_config_id, "tts_config_id": tts_config_id},
+            )
             row = await conn.fetchrow(
                 "INSERT INTO agents "
                 "(tenant_id, slug, name, greeting, system_prompt, "
@@ -150,6 +181,7 @@ async def update_agent(
             if old_row is None:
                 raise LookupError(f"agent {agent_id} not found under tenant {tenant_slug!r}")
             old = dict(old_row)
+            await _validate_provider_assignments(conn, old["tenant_id"], fields)
 
             columns = list(fields.keys())
             set_clause = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(columns))

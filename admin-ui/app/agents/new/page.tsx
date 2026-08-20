@@ -87,13 +87,23 @@ export default function NewAgentPage() {
   }, []);
 
   useEffect(() => {
+    let ignore = false;
     const tenant = tenants.find((t) => t.slug === tenantSlug);
     if (!tenant) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setProviders([]);
       return;
     }
-    listProviders(tenant.id).then(setProviders).catch(() => setProviders([]));
+    listProviders(tenant.id)
+      .then((provs) => {
+        if (!ignore) setProviders(provs);
+      })
+      .catch(() => {
+        if (!ignore) setProviders([]);
+      });
+    return () => {
+      ignore = true;
+    };
   }, [tenantSlug, tenants]);
 
   const byRole = (role: string) => providers.filter((p) => p.role === role);
@@ -254,9 +264,15 @@ export default function NewAgentPage() {
                     </label>
                     <input
                       className="form-input"
+                      type="number"
+                      min={0}
+                      step={1}
                       style={{ fontFamily: "var(--mono)" }}
                       value={goodbyeGraceMs}
-                      onChange={(e) => setGoodbyeGraceMs(Number(e.target.value))}
+                      onChange={(e) => {
+                        const v = Math.trunc(Number(e.target.value));
+                        if (Number.isFinite(v) && v >= 0) setGoodbyeGraceMs(v);
+                      }}
                       disabled={!!createdAgent}
                     />
                   </div>
@@ -426,7 +442,8 @@ export default function NewAgentPage() {
                     providers={providers}
                     value={ttsConfigId}
                     onChange={setTtsConfigId}
-                    onProviderCreated={(p) => setProviders([...providers, p])}
+                    onProviderCreated={(p) => setProviders((prev) => [...prev, p])}
+                    disabled={!!createdAgent}
                   />
                   {(() => {
                     const selectedTts = providers.find((p) => p.id === ttsConfigId);
@@ -647,7 +664,11 @@ export default function NewAgentPage() {
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
         {step === "setup" && !createdAgent && (
-          <button className="btn btn-primary btn-sm" onClick={handleCreate} disabled={creating || !slug || !name}>
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={handleCreate}
+            disabled={creating || !tenantSlug || !slug || !name || !greeting.trim() || !systemPrompt.trim()}
+          >
             {creating ? "Creating…" : "Create Agent"}
           </button>
         )}
