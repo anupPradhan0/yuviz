@@ -39,10 +39,13 @@ class TenantUpdate(BaseModel):
 
 
 class AgentCreate(BaseModel):
-    slug:          str
-    name:          str
-    greeting:      str = ""
-    system_prompt: str = ""
+    slug:           str
+    name:           str
+    greeting:       str = ""
+    system_prompt:  str = ""
+    stt_config_id:  str | None = None
+    llm_config_id:  str | None = None
+    tts_config_id:  str | None = None
 
 
 class AgentUpdate(BaseModel):

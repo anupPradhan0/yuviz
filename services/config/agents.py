@@ -73,6 +73,9 @@ async def create_agent(
     name: str,
     greeting: str = "",
     system_prompt: str = "",
+    stt_config_id: Any | None = None,
+    llm_config_id: Any | None = None,
+    tts_config_id: Any | None = None,
     tenant_slug: str | None = None,
     user_id: Any | None = None,
     user_email: str | None = None,
@@ -81,9 +84,12 @@ async def create_agent(
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
-                "INSERT INTO agents (tenant_id, slug, name, greeting, system_prompt) "
-                "VALUES ($1, $2, $3, $4, $5) RETURNING *",
+                "INSERT INTO agents "
+                "(tenant_id, slug, name, greeting, system_prompt, "
+                "stt_config_id, llm_config_id, tts_config_id) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *",
                 tenant_id, slug, name, greeting, system_prompt,
+                stt_config_id, llm_config_id, tts_config_id,
             )
             result = dict(row)
             await audit.write_audit(

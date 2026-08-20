@@ -142,6 +142,30 @@ class TestAgentEndpoints:
         assert resp.status_code == 200
         assert resp.json()["transfer_type"] == "warm"
 
+    async def test_create_agent_with_inline_provider_config_ids(self, client, test_tenant):
+        stt = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+        )
+        stt_id = stt.json()["id"]
+
+        resp = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "support-agent", "name": "Support", "stt_config_id": stt_id},
+        )
+        assert resp.status_code == 201
+        assert resp.json()["stt_config_id"] == stt_id
+
+    async def test_create_agent_with_nonexistent_provider_config_id_is_400(self, client, test_tenant):
+        resp = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={
+                "slug": "support-agent", "name": "Support",
+                "stt_config_id": "00000000-0000-0000-0000-000000000000",
+            },
+        )
+        assert resp.status_code == 400
+
     async def test_update_agent_invalid_transfer_type_is_422(self, client, test_tenant):
         create = await client.post(
             f"/tenants/{test_tenant['slug']}/agents",
