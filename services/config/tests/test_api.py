@@ -221,6 +221,67 @@ class TestProviderConfigEndpoints:
         resp = await client.get(f"/providers/{provider_id}")
         assert resp.status_code == 404
 
+    async def test_voices_requires_elevenlabs_engine(self, client, test_tenant):
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Kokoro", "role": "tts", "engine": "kokoro"},
+        )
+        resp = await client.get(f"/providers/{create.json()['id']}/voices")
+        assert resp.status_code == 400
+
+    async def test_voices_requires_api_key_ref(self, client, test_tenant):
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "EL", "role": "tts", "engine": "elevenlabs"},
+        )
+        resp = await client.get(f"/providers/{create.json()['id']}/voices")
+        assert resp.status_code == 400
+
+    async def test_voices_unknown_provider_is_404(self, client):
+        resp = await client.get("/providers/00000000-0000-0000-0000-000000000000/voices")
+        assert resp.status_code == 404
+
+    async def test_voices_success(self, client, test_tenant, monkeypatch):
+        import httpx
+
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "EL", "role": "tts", "engine": "elevenlabs", "api_key_ref": "env:TEST_EL_KEY"},
+        )
+        provider_id = create.json()["id"]
+        monkeypatch.setenv("TEST_EL_KEY", "fake-key-for-test")
+
+        canned = {
+            "voices": [
+                {
+                    "voice_id": "abc123", "name": "Rachel", "category": "premade",
+                    "labels": {"gender": "female", "accent": "american"},
+                    "preview_url": "https://example.com/preview.mp3",
+                },
+            ],
+        }
+
+        real_get = httpx.AsyncClient.get
+
+        async def fake_get(self, url, headers=None, **kwargs):
+            if "elevenlabs.io" not in str(url):
+                return await real_get(self, url, headers=headers, **kwargs)
+            assert headers["xi-api-key"] == "fake-key-for-test"
+            return httpx.Response(200, json=canned, request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+        resp = await client.get(f"/providers/{provider_id}/voices")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body == [
+            {
+                "voice_id": "abc123", "name": "Rachel", "category": "premade",
+                "labels": {"gender": "female", "accent": "american"},
+                "preview_url": "https://example.com/preview.mp3",
+            },
+        ]
+
 
 class TestToolProviderConfigEndpoints:
     """Regression coverage for the blank api_key_ref gap (2026-07-23): a

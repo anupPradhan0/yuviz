@@ -12,7 +12,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
+
 from . import audit, cache, db
+from .secret_resolver import SecretResolver
 
 _UPDATABLE_FIELDS = {
     "name", "engine", "model", "voice", "language", "region", "environment",
@@ -202,3 +205,41 @@ async def soft_delete_provider_config(
 
     await cache.invalidate(_cache_key(provider_id))
     await cache.publish(PROVIDER_CONFIG_CHANGED_CHANNEL, str(provider_id))
+
+
+_ELEVENLABS_VOICES_URL = "https://api.elevenlabs.io/v1/voices"
+
+
+async def list_elevenlabs_voices(provider_id: Any, *, secret_resolver: SecretResolver) -> list[dict[str, Any]]:
+    """Calls ElevenLabs' own Voices API server-side using provider_id's
+    api_key_ref — the resolved key is used for this one outbound call and
+    never returned to the caller (see secret_resolver.py's module
+    docstring: this is the one place Config Service resolves a secret,
+    specifically so the admin-ui never has to)."""
+    cfg = await get_provider_config(provider_id)
+    if cfg is None:
+        raise LookupError(f"provider_config {provider_id} not found")
+    if cfg["role"] != "tts" or cfg["engine"] != "elevenlabs":
+        raise ValueError(
+            f"provider_config {provider_id} is role={cfg['role']!r} engine={cfg['engine']!r}, "
+            "expected role='tts' engine='elevenlabs'"
+        )
+    if not cfg["api_key_ref"]:
+        raise ValueError(f"provider_config {provider_id} has no api_key_ref configured")
+
+    api_key = await secret_resolver.resolve(cfg["api_key_ref"])
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(_ELEVENLABS_VOICES_URL, headers={"xi-api-key": api_key})
+    if resp.status_code != 200:
+        raise ValueError(f"ElevenLabs Voices API returned {resp.status_code}: {resp.text[:200]}")
+
+    return [
+        {
+            "voice_id": v["voice_id"],
+            "name": v["name"],
+            "category": v.get("category"),
+            "labels": v.get("labels") or {},
+            "preview_url": v.get("preview_url"),
+        }
+        for v in resp.json().get("voices", [])
+    ]

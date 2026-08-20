@@ -27,9 +27,9 @@ const GENDER_FILTERS: { value: VoiceGender | "all"; label: string }[] = [
 // voice still resolves to one (find-or-create by engine+voice, then set
 // agent.tts_config_id — the exact same field the raw provider dropdown in
 // Provider Assignments sets). ElevenLabs isn't listed here: its voices are
-// account-specific voice_ids with no catalog to browse (see
-// VOICES_BY_ENGINE's null entry) — those stay managed via the Providers
-// settings page instead.
+// account-specific, with no static catalog to browse (see VOICES_BY_ENGINE's
+// null entry) — see ElevenLabsVoicePicker instead, which fetches the real
+// account's voices live rather than picking from a fixed list.
 //
 // Gender filter/badges are a picker-only convenience (see engineCatalog.ts's
 // VoiceGender docstring) — never sent to any TTS engine; the voice id

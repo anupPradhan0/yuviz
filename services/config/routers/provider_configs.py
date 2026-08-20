@@ -9,9 +9,11 @@ from .. import tenants as tenants_service
 from ..auth import CurrentUser
 from ..deps import get_current_user, get_or_404, require_role, validate_id_exists
 from ..schemas import ProviderConfigCreate, ProviderConfigUpdate
+from ..secret_resolver import CompositeSecretResolver
 
 tenant_scoped_router = APIRouter(prefix="/tenants/{tenant_id}/providers", tags=["provider_configs"])
 router = APIRouter(prefix="/providers", tags=["provider_configs"])
+_secret_resolver = CompositeSecretResolver()
 
 
 async def _resolve_tenant_id(tenant_id: str) -> None:
@@ -85,4 +87,11 @@ async def delete_provider_config(
 ):
     await provider_configs_service.soft_delete_provider_config(
         provider_id, user_id=current_user.id, user_email=current_user.email,
+    )
+
+
+@router.get("/{provider_id}/voices")
+async def list_provider_voices(provider_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    return await provider_configs_service.list_elevenlabs_voices(
+        provider_id, secret_resolver=_secret_resolver,
     )

@@ -8,6 +8,7 @@ import { ToolsPanel } from "@/components/ToolsPanel";
 import { SipPanel } from "@/components/SipPanel";
 import { TestAgentPanel } from "@/components/TestAgentPanel";
 import { VoicePicker } from "@/components/VoicePicker";
+import { ElevenLabsVoicePicker } from "@/components/ElevenLabsVoicePicker";
 import { LANGUAGES, OTHER } from "@/lib/engineCatalog";
 
 type Tab = "overview" | "behaviour" | "escalation" | "sip" | "tools" | "knowledge-base";
@@ -407,16 +408,29 @@ export default function AgentDetailPage() {
             <div className="card" style={{ marginBottom: 14 }}>
               <div className="card-hdr">
                 <div className="card-title">Voice</div>
-                <div className="card-sub">local engines only — sets the same TTS assignment as below</div>
+                <div className="card-sub">sets the same TTS assignment as below</div>
               </div>
               <div className="card-body">
-                <VoicePicker
-                  tenantId={agent.tenant_id}
-                  providers={providers}
-                  value={form.tts_config_id}
-                  onChange={(id) => setForm({ ...form, tts_config_id: id })}
-                  onProviderCreated={(p) => setProviders([...providers, p])}
-                />
+                {(() => {
+                  const selectedTts = providers.find((p) => p.id === form.tts_config_id);
+                  if (selectedTts?.engine === "elevenlabs") {
+                    return (
+                      <ElevenLabsVoicePicker
+                        provider={selectedTts}
+                        onUpdated={(updated) => setProviders(providers.map((p) => (p.id === updated.id ? updated : p)))}
+                      />
+                    );
+                  }
+                  return (
+                    <VoicePicker
+                      tenantId={agent.tenant_id}
+                      providers={providers}
+                      value={form.tts_config_id}
+                      onChange={(id) => setForm({ ...form, tts_config_id: id })}
+                      onProviderCreated={(p) => setProviders([...providers, p])}
+                    />
+                  );
+                })()}
                 {(() => {
                   const selectedTts = providers.find((p) => p.id === form.tts_config_id);
                   const speed = Number((selectedTts?.extra as Record<string, unknown> | null)?.speed ?? 1.0);

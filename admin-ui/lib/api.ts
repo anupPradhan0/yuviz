@@ -156,6 +156,17 @@ export const updateProvider = (providerId: string, body: ProviderConfigUpdate) =
 export const deleteProvider = (providerId: string) =>
   request<void>(`/providers/${providerId}`, { method: "DELETE" });
 
+export interface ElevenLabsVoice {
+  voice_id: string;
+  name: string;
+  category: string | null;
+  labels: Record<string, string>;
+  preview_url: string | null;
+}
+
+export const listElevenLabsVoices = (providerId: string) =>
+  request<ElevenLabsVoice[]>(`/providers/${providerId}/voices`);
+
 // ── Agents ───────────────────────────────────────────────────────────────
 
 export type AgentStatus = "active" | "inactive";
