@@ -89,11 +89,7 @@ export default function NewAgentPage() {
   useEffect(() => {
     let ignore = false;
     const tenant = tenants.find((t) => t.slug === tenantSlug);
-    if (!tenant) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setProviders([]);
-      return;
-    }
+    if (!tenant) return;
     listProviders(tenant.id)
       .then((provs) => {
         if (!ignore) setProviders(provs);
