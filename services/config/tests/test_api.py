@@ -226,6 +226,46 @@ class TestAgentEndpoints:
         )
         assert resp.status_code == 400
 
+    async def test_create_agent_rejects_elevenlabs_provider_with_no_voice(self, client, test_tenant):
+        tts = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "EL", "role": "tts", "engine": "elevenlabs", "api_key_ref": "env:FAKE"},
+        )
+        resp = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "support-agent", "name": "Support", "tts_config_id": tts.json()["id"]},
+        )
+        assert resp.status_code == 400
+        assert "no voice selected" in resp.json()["detail"]
+
+    async def test_update_agent_rejects_elevenlabs_provider_with_no_voice(self, client, test_tenant):
+        create = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "support-agent", "name": "Support"},
+        )
+        agent_id = create.json()["id"]
+        tts = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "EL", "role": "tts", "engine": "elevenlabs", "api_key_ref": "env:FAKE"},
+        )
+        resp = await client.patch(
+            f"/tenants/{test_tenant['slug']}/agents/{agent_id}",
+            json={"tts_config_id": tts.json()["id"]},
+        )
+        assert resp.status_code == 400
+        assert "no voice selected" in resp.json()["detail"]
+
+    async def test_elevenlabs_provider_with_voice_is_accepted(self, client, test_tenant):
+        tts = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "EL", "role": "tts", "engine": "elevenlabs", "api_key_ref": "env:FAKE", "voice": "abc123"},
+        )
+        resp = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "support-agent", "name": "Support", "tts_config_id": tts.json()["id"]},
+        )
+        assert resp.status_code == 201
+
     async def test_update_agent_invalid_transfer_type_is_422(self, client, test_tenant):
         create = await client.post(
             f"/tenants/{test_tenant['slug']}/agents",
