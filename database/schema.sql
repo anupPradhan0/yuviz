@@ -224,14 +224,6 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 -- real legacy rows would need those backfilled before this line can run.
 ALTER TABLE users ALTER COLUMN password_hash SET NOT NULL;
 
--- is_service_account added 2026-08-20 after a real incident: an admin
--- soft-deleted conversation-service@internal.yuviz.ai through the ordinary
--- Users panel — indistinguishable there from any other viewer account —
--- which silently broke RuntimeConfig resolution for every call on every
--- tenant until the deletion was noticed and undone. Service accounts are
--- filtered out of list_users() and protected from delete/deactivate in
--- application code (services/config/users.py), not by a DB constraint —
--- the flag is what that code checks.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_service_account BOOLEAN NOT NULL DEFAULT false;
 UPDATE users SET is_service_account = true WHERE lower(email) LIKE '%@internal.%' AND is_service_account = false;
 
