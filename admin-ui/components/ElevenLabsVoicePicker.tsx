@@ -28,6 +28,7 @@ export function ElevenLabsVoicePicker({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
+  const [languageFilter, setLanguageFilter] = useState("all");
 
   useEffect(() => {
     if (!provider) return;
@@ -112,10 +113,39 @@ export function ElevenLabsVoicePicker({
   if (error) return <div className="error-banner">{error}</div>;
   if (!voices || voices.length === 0) return <div className="empty-state">No voices on this ElevenLabs account.</div>;
 
+  // Languages come from each voice's own labels — ElevenLabs has no fixed
+  // list to draw from (unlike local engines' static VOICES_BY_ENGINE), so
+  // the filter options are whatever languages this account's voices
+  // actually have.
+  const languages = Array.from(new Set(voices.map((v) => v.labels.language).filter((l): l is string => !!l))).sort();
+  const filteredVoices = languageFilter === "all" ? voices : voices.filter((v) => v.labels.language === languageFilter);
+
   return (
     <div>
+      {languages.length > 1 && (
+        <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            className={`btn btn-sm ${languageFilter === "all" ? "btn-primary" : "btn-ghost"}`}
+            onClick={() => setLanguageFilter("all")}
+          >
+            All Languages
+          </button>
+          {languages.map((lang) => (
+            <button
+              key={lang}
+              type="button"
+              className={`btn btn-sm ${languageFilter === lang ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setLanguageFilter(lang)}
+            >
+              {lang}
+            </button>
+          ))}
+        </div>
+      )}
+      {filteredVoices.length === 0 && <div className="empty-state">No voices match this language.</div>}
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {voices.map((v) => {
+        {filteredVoices.map((v) => {
           const isSelected = provider.voice === v.voice_id;
           const isSaving = saving === v.voice_id;
           return (
@@ -126,6 +156,7 @@ export function ElevenLabsVoicePicker({
                   {v.category}
                   {v.labels.gender ? ` · ${v.labels.gender}` : ""}
                   {v.labels.accent ? ` · ${v.labels.accent}` : ""}
+                  {v.labels.language ? ` · ${v.labels.language}` : ""}
                 </div>
               </div>
               {v.preview_url && <audio controls src={v.preview_url} style={{ height: 30, maxWidth: 200 }} />}
