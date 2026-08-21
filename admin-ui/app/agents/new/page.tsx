@@ -507,6 +507,7 @@ export default function NewAgentPage() {
                           <ElevenLabsVoicePicker
                             tenantId={selectedTenant.id}
                             provider={elevenLabsProvider}
+                            isCurrentAssignment={selectedTts?.engine === "elevenlabs"}
                             onProviderCreated={(p) => {
                               setProviders((prev) => [...prev, p]);
                               setTtsConfigId(p.id);

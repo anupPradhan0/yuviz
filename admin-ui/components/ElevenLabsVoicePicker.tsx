@@ -34,6 +34,7 @@ export function ElevenLabsVoicePicker({
   onVoicePicked,
   onLanguageDetected,
   disabled = false,
+  isCurrentAssignment = true,
 }: {
   tenantId: string;
   provider: ProviderConfig | null;
@@ -43,6 +44,17 @@ export function ElevenLabsVoicePicker({
   // Locks the whole picker (can't connect, can't expand/reselect) — see
   // LocalVoicePicker's disabled prop for why this exists.
   disabled?: boolean;
+  // False when `provider` is a fallback ("any ElevenLabs provider on the
+  // tenant") shown because the agent isn't actually assigned to an
+  // ElevenLabs provider yet — see the Voice card's engine-chooser callers.
+  // `provider.voice` can be non-empty in that case purely from unrelated
+  // past use (another agent, earlier testing), which is real data but NOT
+  // this agent's current voice — confirmed live 2026-08-21: a fallback
+  // provider showing a stale "✓ Primary voice" checkmark was mistaken for
+  // an actual (and wrong) agent assignment. Default true so a caller that
+  // always passes the genuinely-assigned provider (or none) doesn't need
+  // to think about this.
+  isCurrentAssignment?: boolean;
 }) {
   const [apiKeyRef, setApiKeyRef] = useState("");
   const [connecting, setConnecting] = useState(false);
@@ -242,10 +254,14 @@ export function ElevenLabsVoicePicker({
       >
         {selectedVoice ? (
           <>
-            <span style={{ color: "var(--green)", marginRight: 8 }}>✓</span>
+            <span style={{ color: isCurrentAssignment ? "var(--green)" : "var(--text-3)", marginRight: 8 }}>
+              {isCurrentAssignment ? "✓" : "•"}
+            </span>
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 500 }}>{selectedVoice.name}</div>
-              <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>Primary voice</div>
+              <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>
+                {isCurrentAssignment ? "Primary voice" : "Already set on this account — not yet assigned to this agent"}
+              </div>
             </div>
           </>
         ) : (
@@ -260,7 +276,11 @@ export function ElevenLabsVoicePicker({
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
         <div style={{ fontSize: ".78rem", fontWeight: 500 }}>
-          {selectedVoice ? `Selected: ${selectedVoice.name}` : "Select a voice"}
+          {selectedVoice
+            ? isCurrentAssignment
+              ? `Selected: ${selectedVoice.name}`
+              : `${selectedVoice.name} is set on this account — pick a voice below to assign it to this agent`
+            : "Select a voice"}
         </div>
         <div style={{ display: "flex", gap: 6 }}>
           <button type="button" className="btn btn-ghost btn-sm" onClick={handleRefresh} disabled={loading}>
