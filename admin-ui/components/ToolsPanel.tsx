@@ -13,6 +13,7 @@ import {
   listToolCatalog,
   updateAgentToolPolicy,
 } from "@/lib/api";
+import { SecretRefInput } from "./SecretRefInput";
 import { Modal } from "@/components/Modal";
 
 export function ToolsPanel({ tenantId, agentId }: { tenantId: string; agentId: string }) {
@@ -200,11 +201,9 @@ export function ToolsPanel({ tenantId, agentId }: { tenantId: string; agentId: s
                 API Key Reference <span className="required">*</span>{" "}
                 <span className="hint">e.g. env:CAL_API_KEY — never a raw key, see Secret Manager</span>
               </label>
-              <input
-                className="form-input"
-                style={{ fontFamily: "var(--mono)" }}
+              <SecretRefInput
                 value={configApiKeyRef}
-                onChange={(e) => setConfigApiKeyRef(e.target.value)}
+                onChange={setConfigApiKeyRef}
                 placeholder="env:CAL_API_KEY"
               />
             </div>

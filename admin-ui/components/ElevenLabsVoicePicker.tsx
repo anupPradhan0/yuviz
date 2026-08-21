@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiError, ElevenLabsVoice, ProviderConfig, createProvider, listElevenLabsVoices, updateProvider } from "@/lib/api";
 import { ELEVENLABS_LANGUAGES } from "@/lib/engineCatalog";
+import { SecretRefInput } from "./SecretRefInput";
 
 // Module-level, not component state — survives the component unmounting
 // (e.g. navigating away from Behaviour and back), so re-opening the Voice
@@ -171,14 +172,14 @@ export function ElevenLabsVoicePicker({
             ElevenLabs API Key Reference <span className="hint">e.g. env:ELEVENLABS_API_KEY — never a raw key, see Secret Manager</span>
           </label>
           <div style={{ display: "flex", gap: 8 }}>
-            <input
-              className="form-input"
-              style={{ fontFamily: "var(--mono)" }}
-              value={apiKeyRef}
-              onChange={(e) => setApiKeyRef(e.target.value)}
-              placeholder="env:ELEVENLABS_API_KEY"
-              disabled={disabled}
-            />
+            <div style={{ flex: 1 }}>
+              <SecretRefInput
+                value={apiKeyRef}
+                onChange={setApiKeyRef}
+                placeholder="env:ELEVENLABS_API_KEY"
+                disabled={disabled}
+              />
+            </div>
             <button
               type="button"
               className="btn btn-primary btn-sm"
