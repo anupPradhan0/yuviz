@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!--
+  Yuviz.ai Voice AI — Human Caller Simulation
+  ============================================
+  3-turn human simulation using PCAP RTP injection.
+  Requires SIPp built with PCAP support (v3.7.7-TLS-PCAP ✓)
+
+  combined_audio.pcap timeline:
+    0-6s   : silence  (human listens to bot greeting)
+    6-7.5s : speech   "My name is Rahul"
+    7.5-17s: silence  (STT + LLM + TTS + bot speaks)
+    17-19s : speech   "I have a billing issue"
+    19-29s : silence  (STT + LLM + TTS + bot speaks)
+    29-30s : speech   "Thank you goodbye"
+    30-31s : silence  (trailing before BYE)
+
+  Run:
+    sudo sipp 192.168.0.116:5060 \
+        -sf uac.xml -s 788 \
+        -r 1 -l 3 -m 20 \
+        -mp 6000 \
+        -trace_msg -trace_err
+-->
+
+<scenario name="Yuviz.ai Human Caller Simulation">
+
+  <!-- ═══════════════════════════════════════════════════════
+       STEP 1 — INVITE with RTP media offer
+       ═══════════════════════════════════════════════════════ -->
+  <send start_txn="invite" retrans="500">
+<![CDATA[
+INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+From: "Rahul Kumar" <sip:+919876543210@[local_ip]>;tag=[call_number]
+To: <sip:[service]@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 INVITE
+Contact: <sip:+919876543210@[local_ip]:[local_port]>
+Max-Forwards: 70
+Subject: Yuviz.ai Human Simulation
+Content-Type: application/sdp
+Content-Length: [len]
+
+v=0
+o=SIPp 53655765 2353687637 IN IP4 [local_ip]
+s=HumanSim
+c=IN IP4 [local_ip]
+t=0 0
+m=audio [media_port] RTP/AVP 0 101
+a=rtpmap:0 PCMU/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-15
+a=ptime:20
+a=sendrecv
+]]>
+  </send>
+
+  <recv response="100" optional="true" response_txn="invite"/>
+  <recv response="180" optional="true" response_txn="invite"/>
+  <recv response="183" optional="true" response_txn="invite"/>
+
+  <!-- ═══════════════════════════════════════════════════════
+       STEP 2 — 200 OK: capture Contact URI for ACK/BYE
+       ═══════════════════════════════════════════════════════ -->
+  <recv response="200" response_txn="invite" rtd="true">
+    <action>
+      <ereg regexp="sip:[^&gt; ]+"
+            search_in="hdr"
+            header="Contact"
+            assign_to="contact_uri"/>
+    </action>
+  </recv>
+
+  <!-- ═══════════════════════════════════════════════════════
+       STEP 3 — ACK
+       ═══════════════════════════════════════════════════════ -->
+  <send ack_txn="invite">
+<![CDATA[
+ACK [$contact_uri] SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+Route: <sip:[remote_ip];lr>
+From: "Rahul Kumar" <sip:+919876543210@[local_ip]>;tag=[call_number]
+[last_To:]
+Call-ID: [call_id]
+CSeq: 1 ACK
+Max-Forwards: 70
+Content-Length: 0
+]]>
+  </send>
+
+  <!-- ═══════════════════════════════════════════════════════
+       STEP 4 — Start PCAP audio injection
+       play_pcap_audio fires asynchronously and streams the
+       full 31s PCAP (silence + speech + silence...) as RTP.
+       SIPp must be built with PCAP support — confirmed:
+       v3.7.7-TLS-PCAP-SHA256 ✓
+       ═══════════════════════════════════════════════════════ -->
+  <nop>
+    <action>
+      <exec play_pcap_audio="combined_audio.pcap"/>
+    </action>
+  </nop>
+
+  <!-- ═══════════════════════════════════════════════════════
+       STEP 5 — Wait for the far end to hang up first. The common,
+       expected case: the agent hears the caller's request, responds,
+       and proactively ends the call itself (the [[END_CALL]]
+       directive flow — see docs/ architecture, §04 teardown). A
+       plain <pause> here has no way to accept that inbound BYE
+       gracefully, so SIPp flags a perfectly correct call as an
+       "unexpected message" failure. This <recv> fixes that: on
+       timeout (no BYE arrived — e.g. an agent that never proactively
+       hangs up), jump to do_own_bye and fall back to the original
+       caller-hangs-up-last behavior.
+
+       60s, not the PCAP's own length: this timer runs independently
+       of play_pcap_audio's outbound audio (which can be much shorter
+       — silence continues fine once the file finishes, the SIP dialog
+       stays up). It has to cover the full round trip after the
+       caller's audio ends — STT, then the LLM generating a reply,
+       then TTS, then the agent actually speaking it. On local
+       providers (Ollama/FasterWhisper/Kokoro) that round trip alone
+       measured 5-11s per turn in manual testing; a fixed 31s from
+       call start left as little as ~13s of margin after a longer
+       recording, which cut the call before the agent could ever
+       respond. 60s gives real headroom for slower local-model turns
+       without meaningfully slowing down a test run that ends earlier
+       whenever the agent's own BYE arrives.
+       ═══════════════════════════════════════════════════════ -->
+  <!-- Deliberately NOT optional="true" — ontimeout already handles
+       the "far end never hangs up" case by jumping to do_own_bye, so
+       adding optional="true" on top of that is redundant and is
+       actually what SIPp's validator was rejecting (two ambiguous
+       "optional" signals stacked on adjacent elements), not the
+       <send> below. -->
+  <recv request="BYE" ontimeout="do_own_bye" timeout="60000"/>
+
+  <!-- Far end hung up first — the expected case. Reply 200 OK and
+       skip straight to the end; sending our own BYE for an
+       already-terminated dialog would be pointless. -->
+  <send>
+<![CDATA[
+SIP/2.0 200 OK
+[last_Via:]
+[last_From:]
+[last_To:]
+[last_Call-ID:]
+[last_CSeq:]
+Content-Length: 0
+]]>
+  </send>
+  <nop next="scenario_end"/>
+
+  <!-- ═══════════════════════════════════════════════════════
+       STEP 6 — Fallback: no BYE arrived within 31s, we hang up.
+       ═══════════════════════════════════════════════════════ -->
+  <label id="do_own_bye"/>
+  <send retrans="500">
+<![CDATA[
+BYE [$contact_uri] SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch]
+Route: <sip:[remote_ip];lr>
+From: "Rahul Kumar" <sip:+919876543210@[local_ip]>;tag=[call_number]
+[last_To:]
+Call-ID: [call_id]
+CSeq: 2 BYE
+Max-Forwards: 70
+Content-Length: 0
+]]>
+  </send>
+
+  <recv response="200" optional="true"/>
+
+  <label id="scenario_end"/>
+
+</scenario>
