@@ -3,6 +3,14 @@
 import { useEffect, useState } from "react";
 import { ApiError, ElevenLabsVoice, ProviderConfig, createProvider, listElevenLabsVoices, updateProvider } from "@/lib/api";
 
+// Module-level, not component state — survives the component unmounting
+// (e.g. navigating away from Behaviour and back), so re-opening the Voice
+// card doesn't re-hit the real ElevenLabs API every time. Resets on a full
+// page reload, and explicitly on the Refresh action below. Voice lists
+// change rarely enough that this is a reasonable tradeoff over either a
+// TTL or no caching at all.
+const voicesCache = new Map<string, ElevenLabsVoice[]>();
+
 // Unlike VoicePicker (macOS/Kokoro): ElevenLabs voices belong to one
 // account, so there's no "browse then create per voice" — a provider_config
 // with a real api_key_ref must exist first. If the tenant doesn't have one
@@ -38,13 +46,21 @@ export function ElevenLabsVoicePicker({
 
   useEffect(() => {
     if (!provider) return;
+    const cached = voicesCache.get(provider.id);
+    if (cached) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setVoices(cached);
+      setLoading(false);
+      return;
+    }
     let ignore = false;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     setError(null);
     listElevenLabsVoices(provider.id)
       .then((v) => {
-        if (!ignore) setVoices(v);
+        if (ignore) return;
+        voicesCache.set(provider.id, v);
+        setVoices(v);
       })
       .catch((e) => {
         if (!ignore) setError(e instanceof ApiError ? e.detail : String(e));
@@ -56,6 +72,20 @@ export function ElevenLabsVoicePicker({
       ignore = true;
     };
   }, [provider]);
+
+  const handleRefresh = () => {
+    if (!provider) return;
+    voicesCache.delete(provider.id);
+    setLoading(true);
+    setError(null);
+    listElevenLabsVoices(provider.id)
+      .then((v) => {
+        voicesCache.set(provider.id, v);
+        setVoices(v);
+      })
+      .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)))
+      .finally(() => setLoading(false));
+  };
 
   const handleConnect = async () => {
     setConnecting(true);
@@ -160,9 +190,14 @@ export function ElevenLabsVoicePicker({
         <div style={{ fontSize: ".78rem", fontWeight: 500 }}>
           {selectedVoice ? `Selected: ${selectedVoice.name}` : "Select a voice"}
         </div>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setExpanded(false)}>
-          Close
-        </button>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={handleRefresh} disabled={loading}>
+            {loading ? "Refreshing…" : "Refresh"}
+          </button>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setExpanded(false)}>
+            Close
+          </button>
+        </div>
       </div>
       {languages.length > 1 && (
         <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
@@ -215,7 +250,7 @@ export function ElevenLabsVoicePicker({
         })}
       </div>
       <div style={{ fontSize: ".7rem", color: "var(--text-3)", marginTop: 10 }}>
-        Voices come from this ElevenLabs account directly — add or remove voices at elevenlabs.io, then reopen this panel to refresh.
+        Voices come from this ElevenLabs account directly, and are cached after the first load — add or remove voices at elevenlabs.io, then click Refresh above to see the change here.
       </div>
     </div>
   );
