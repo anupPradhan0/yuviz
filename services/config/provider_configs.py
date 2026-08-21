@@ -10,12 +10,15 @@ in depth (see audit.py docstring).
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 
 from . import audit, cache, db
 from .secret_resolver import SecretResolver
+
+log = logging.getLogger(__name__)
 
 _UPDATABLE_FIELDS = {
     "name", "engine", "model", "voice", "language", "region", "environment",
@@ -228,10 +231,24 @@ async def list_elevenlabs_voices(provider_id: Any, *, secret_resolver: SecretRes
         raise ValueError(f"provider_config {provider_id} has no api_key_ref configured")
 
     api_key = await secret_resolver.resolve(cfg["api_key_ref"])
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(_ELEVENLABS_VOICES_URL, headers={"xi-api-key": api_key})
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(_ELEVENLABS_VOICES_URL, headers={"xi-api-key": api_key})
+    except httpx.RequestError as exc:
+        # DNS failure, connect timeout, read timeout — nothing else catches
+        # this (the router doesn't either), so left unhandled it reaches the
+        # admin-ui as a bare 500 with no actionable detail.
+        raise ValueError(f"could not reach the ElevenLabs Voices API: {exc.__class__.__name__}") from exc
     if resp.status_code != 200:
-        raise ValueError(f"ElevenLabs Voices API returned {resp.status_code}: {resp.text[:200]}")
+        # Log the real response body (useful for debugging a bad key/rate
+        # limit) but never forward it in the ValueError: the router maps
+        # ValueError to a 400 `detail`, and the ElevenLabs response body is
+        # not ours to hand back to the admin-ui caller verbatim.
+        log.warning(
+            "ElevenLabs Voices API returned %s for provider_config %s: %s",
+            resp.status_code, provider_id, resp.text[:200],
+        )
+        raise ValueError(f"ElevenLabs Voices API returned {resp.status_code}")
 
     return [
         {
@@ -240,6 +257,15 @@ async def list_elevenlabs_voices(provider_id: Any, *, secret_resolver: SecretRes
             "category": v.get("category"),
             "labels": v.get("labels") or {},
             "preview_url": v.get("preview_url"),
+            # ElevenLabs documents `labels` as arbitrary, unvalidated
+            # metadata (any string a voice's owner chose to tag it with) —
+            # `verified_languages` is the actual validated field: each entry
+            # is a real ISO 639-1 code this voice has been confirmed to
+            # speak, with its own model_id/accent/locale/preview_url. Not
+            # every voice has this populated (e.g. voices never run through
+            # ElevenLabs' verification), so callers should fall back to
+            # `labels` when it's empty, not assume it's always present.
+            "verified_languages": v.get("verified_languages") or [],
         }
         for v in resp.json().get("voices", [])
     ]

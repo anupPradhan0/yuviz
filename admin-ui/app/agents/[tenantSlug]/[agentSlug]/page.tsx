@@ -13,6 +13,17 @@ import { LANGUAGES, OTHER } from "@/lib/engineCatalog";
 
 type Tab = "overview" | "behaviour" | "escalation" | "sip" | "tools" | "knowledge-base";
 
+// The Voice card only has a picker for these three — a provider on another
+// real, backend-supported TTS engine (e.g. "deepgram", assignable via the
+// raw Provider Assignments dropdown further down this page) has no catalog
+// entry in LocalVoicePicker and no picker at all, so it must fall back to
+// the neutral engine chooser rather than being cast/trusted blindly.
+type BrowsableTtsEngine = "macos" | "kokoro" | "elevenlabs";
+const BROWSABLE_TTS_ENGINES: readonly BrowsableTtsEngine[] = ["macos", "kokoro", "elevenlabs"];
+function asBrowsableTtsEngine(engine: string | undefined): BrowsableTtsEngine | null {
+  return BROWSABLE_TTS_ENGINES.includes(engine as BrowsableTtsEngine) ? (engine as BrowsableTtsEngine) : null;
+}
+
 // Structured system-prompt editor — still writes to the single
 // agent.system_prompt TEXT field (no schema change), just gives Behaviour
 // a labeled-section editing view matching the Personality/Environment/Tone
@@ -453,7 +464,7 @@ export default function AgentDetailPage() {
               <div className="card-body">
                 {(() => {
                   const selectedTts = providers.find((p) => p.id === form.tts_config_id);
-                  const engine = chosenEngine ?? (selectedTts?.engine as "macos" | "kokoro" | "elevenlabs" | undefined) ?? null;
+                  const engine = chosenEngine ?? asBrowsableTtsEngine(selectedTts?.engine);
 
                   if (showEngineChooser || !engine) {
                     return (

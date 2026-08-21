@@ -146,7 +146,7 @@ export function LocalVoicePicker({
                 type="button"
                 className={`btn btn-sm ${isSelected ? "btn-primary" : "btn-ghost"}`}
                 onClick={() => handlePick(voiceId, language)}
-                disabled={isCreating}
+                disabled={creatingId !== null}
               >
                 {isCreating ? "…" : isSelected ? "Selected" : "Select"}
               </button>

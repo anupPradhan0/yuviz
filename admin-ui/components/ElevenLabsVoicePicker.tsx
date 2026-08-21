@@ -12,7 +12,16 @@ import { ELEVENLABS_LANGUAGES } from "@/lib/engineCatalog";
 // TTL or no caching at all.
 const voicesCache = new Map<string, ElevenLabsVoice[]>();
 
-// Unlike VoicePicker (macOS/Kokoro): ElevenLabs voices belong to one
+// verified_languages is the actual validated field (real ISO 639-1 codes
+// ElevenLabs confirmed this voice speaks); labels.language is arbitrary,
+// unvalidated free text an account owner typed in — prefer the former,
+// fall back to the latter only when a voice has no verified languages at
+// all (e.g. never run through ElevenLabs' verification).
+function voicePrimaryLanguage(v: ElevenLabsVoice): string | null {
+  return v.verified_languages[0]?.language ?? v.labels.language ?? null;
+}
+
+// Unlike LocalVoicePicker (macOS/Kokoro): ElevenLabs voices belong to one
 // account, so there's no "browse then create per voice" — a provider_config
 // with a real api_key_ref must exist first. If the tenant doesn't have one
 // yet, this renders a one-time "connect" step (api_key_ref only, no voice)
@@ -57,6 +66,12 @@ export function ElevenLabsVoicePicker({
       return;
     }
     let ignore = false;
+    // Reset for the real fetch below (not just initial mount): if the
+    // Voice card's engine chooser switches to a different ElevenLabs
+    // provider (e.g. multiple connected accounts) while this component
+    // stays mounted, `provider` changes and this effect re-runs — without
+    // resetting here, a stale error/stale "not loading" from the previous
+    // provider would flash before the new fetch resolves.
     setLoading(true);
     setError(null);
     listElevenLabsVoices(provider.id)
@@ -167,13 +182,22 @@ export function ElevenLabsVoicePicker({
   if (error) return <div className="error-banner">{error}</div>;
   if (!voices || voices.length === 0) return <div className="empty-state">No voices on this ElevenLabs account.</div>;
 
-  // Languages come from each voice's own labels — ElevenLabs has no fixed
-  // list to draw from (unlike local engines' static VOICES_BY_ENGINE), so
-  // the filter options are whatever languages this account's voices
-  // actually have.
-  const languages = Array.from(new Set(voices.map((v) => v.labels.language).filter((l): l is string => !!l))).sort();
-  const activeLanguageFilter = languageFilter ?? (languages.includes("en") ? "en" : "all");
-  const filteredVoices = activeLanguageFilter === "all" ? voices : voices.filter((v) => v.labels.language === activeLanguageFilter);
+  // Languages come from each voice's own verified_languages — ElevenLabs
+  // has no fixed list to draw from (unlike local engines' static
+  // VOICES_BY_ENGINE), so the filter options are whatever languages this
+  // account's voices actually have. Not every voice has been through
+  // ElevenLabs' language verification, so labels.language (arbitrary,
+  // unvalidated free text) is only a fallback for those.
+  const languages = Array.from(new Set(voices.map(voicePrimaryLanguage).filter((l): l is string => !!l))).sort();
+  // languageFilter only wins when it's still a real option — a Refresh (or
+  // switching provider) can return a voice list that no longer has the
+  // previously-selected language, and without this guard the filter would
+  // stay stuck on a value that matches zero voices with no visible way to
+  // reset it (the filter chips are hidden once only one language remains).
+  const activeLanguageFilter =
+    languageFilter && languages.includes(languageFilter) ? languageFilter : languages.includes("en") ? "en" : "all";
+  const filteredVoices =
+    activeLanguageFilter === "all" ? voices : voices.filter((v) => voicePrimaryLanguage(v) === activeLanguageFilter);
   const selectedVoice = voices.find((v) => v.voice_id === provider.voice);
 
   if (!expanded) {
@@ -273,15 +297,15 @@ export function ElevenLabsVoicePicker({
                   {v.category}
                   {v.labels.gender ? ` · ${v.labels.gender}` : ""}
                   {v.labels.accent ? ` · ${v.labels.accent}` : ""}
-                  {v.labels.language ? ` · ${v.labels.language}` : ""}
+                  {voicePrimaryLanguage(v) ? ` · ${voicePrimaryLanguage(v)}` : ""}
                 </div>
               </div>
               {v.preview_url && <audio controls src={v.preview_url} style={{ height: 30, maxWidth: 200 }} />}
               <button
                 type="button"
                 className={`btn btn-sm ${isSelected ? "btn-primary" : "btn-ghost"}`}
-                onClick={() => handlePick(v.voice_id, v.labels.language ?? null)}
-                disabled={isSaving}
+                onClick={() => handlePick(v.voice_id, voicePrimaryLanguage(v))}
+                disabled={saving !== null}
               >
                 {isSaving ? "…" : isSelected ? "Selected" : "Select"}
               </button>

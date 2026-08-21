@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Protocol
 
 import hvac
+import requests
 
 
 class SecretResolver(Protocol):
@@ -72,6 +73,21 @@ class VaultResolver:
             )
         except hvac.exceptions.InvalidPath as exc:
             raise KeyError(f"VaultResolver: no secret at {path!r} (ref={ref!r})") from exc
+        except hvac.exceptions.Forbidden as exc:
+            # A bad/missing/expired VAULT_TOKEN — confirmed live this exact
+            # class of failure once already (a process running without
+            # VAULT_TOKEN silently fell back to legacy defaults instead of
+            # surfacing an error). Mapped to ValueError (400), same posture
+            # as the ElevenLabs-API-failure path above: a clean, explicit
+            # error instead of an unhandled 500 with no detail.
+            raise ValueError(f"VaultResolver: permission denied reading {path!r} — check VAULT_TOKEN") from exc
+        except hvac.exceptions.VaultDown as exc:
+            raise ValueError(f"VaultResolver: Vault is sealed/unavailable (path={path!r})") from exc
+        except requests.exceptions.ConnectionError as exc:
+            # hvac's default adapter is requests-based (not httpx) — a
+            # dead/unreachable Vault host raises here, not as a hvac
+            # exception.
+            raise ValueError(f"VaultResolver: could not reach Vault (path={path!r})") from exc
         data = response["data"]["data"]
         if field not in data:
             raise KeyError(f"VaultResolver: field {field!r} not found at {path!r} (ref={ref!r})")

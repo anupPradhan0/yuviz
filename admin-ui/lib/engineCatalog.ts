@@ -128,6 +128,8 @@ export const LANGUAGES = [
   { value: "en", label: "English" },
   { value: "en-US", label: "English (US)" },
   { value: "en-GB", label: "English (UK)" },
+  { value: "en-AU", label: "English (Australia)" },
+  { value: "en-IE", label: "English (Ireland)" },
   { value: "es", label: "Spanish" },
   { value: "fr", label: "French" },
   { value: "de", label: "German" },

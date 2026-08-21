@@ -59,12 +59,26 @@ async def create_provider_config(
     )
 
 
-@router.get("/{provider_id}")
-async def get_provider_config(provider_id: str, current_user: CurrentUser = Depends(get_current_user)):
-    return await get_or_404(
+async def _authorize_provider(provider_id: str, current_user: CurrentUser) -> dict:
+    """404 if the provider doesn't exist; 403 if it exists but belongs to a
+    different tenant than the caller. Superadmin (tenant_id is None — see
+    auth.py's CurrentUser docstring) is exempt, the same "unscoped" contract
+    used everywhere else in this service. Without this check, any
+    authenticated admin/viewer could read, edit, or delete another tenant's
+    provider_config by id, and list_provider_voices would resolve *that*
+    tenant's real api_key_ref and burn its ElevenLabs quota using their key."""
+    cfg = await get_or_404(
         provider_configs_service.get_provider_config(provider_id),
         f"provider_config {provider_id!r} not found",
     )
+    if current_user.tenant_id is not None and str(cfg["tenant_id"]) != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="provider_config belongs to a different tenant")
+    return cfg
+
+
+@router.get("/{provider_id}")
+async def get_provider_config(provider_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    return await _authorize_provider(provider_id, current_user)
 
 
 @router.patch("/{provider_id}")
@@ -73,6 +87,7 @@ async def update_provider_config(
     body: ProviderConfigUpdate,
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
+    await _authorize_provider(provider_id, current_user)
     fields = body.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(status_code=400, detail="request body has no fields to update")
@@ -85,6 +100,7 @@ async def update_provider_config(
 async def delete_provider_config(
     provider_id: str, current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
+    await _authorize_provider(provider_id, current_user)
     await provider_configs_service.soft_delete_provider_config(
         provider_id, user_id=current_user.id, user_email=current_user.email,
     )
@@ -92,6 +108,7 @@ async def delete_provider_config(
 
 @router.get("/{provider_id}/voices")
 async def list_provider_voices(provider_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    await _authorize_provider(provider_id, current_user)
     return await provider_configs_service.list_elevenlabs_voices(
         provider_id, secret_resolver=_secret_resolver,
     )

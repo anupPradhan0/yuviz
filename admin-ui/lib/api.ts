@@ -156,12 +156,24 @@ export const updateProvider = (providerId: string, body: ProviderConfigUpdate) =
 export const deleteProvider = (providerId: string) =>
   request<void>(`/providers/${providerId}`, { method: "DELETE" });
 
+export interface ElevenLabsVoiceVerifiedLanguage {
+  language: string; // validated ISO 639-1 code — unlike labels.language, which is arbitrary free text
+  model_id: string;
+  accent: string | null;
+  locale: string | null;
+  preview_url: string | null;
+}
+
 export interface ElevenLabsVoice {
   voice_id: string;
   name: string;
   category: string | null;
   labels: Record<string, string>;
   preview_url: string | null;
+  // May be empty — not every voice has been through ElevenLabs' language
+  // verification. Prefer this over labels.language when present (see
+  // ElevenLabsVoicePicker's voicePrimaryLanguage()).
+  verified_languages: ElevenLabsVoiceVerifiedLanguage[];
 }
 
 export const listElevenLabsVoices = (providerId: string) =>
