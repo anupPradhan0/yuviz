@@ -638,6 +638,37 @@ class TestProviderConfigTenantScoping:
             )
             await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
 
+    async def test_viewer_with_no_tenant_id_is_unscoped(self, client, pool, test_tenant):
+        """Regression (found live 2026-08-21): the Conversation Service's own
+        internal service account (conversation-service@internal.yuviz.ai)
+        is role=viewer with tenant_id=NULL — it legitimately reads provider
+        configs across every tenant it serves calls for, one process
+        handling all tenants. A role=="superadmin"-only exemption blocked
+        this account entirely, and every live call silently fell back to
+        agent_config.py's hardcoded legacy default (a generic greeting
+        instead of the real configured one) because agent_resolver treats
+        any RuntimeConfig fetch failure as "fall back," not as a hard
+        error. tenant_id is None must independently exempt regardless of
+        role, matching auth.py's own CurrentUser docstring contract."""
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+        )
+        provider_id = create.json()["id"]
+
+        user = await users_service.create_user(
+            email=f"scoped-viewer-{uuid.uuid4().hex[:8]}@example.com",
+            password="test-password-not-real", role="viewer", tenant_id=None,
+        )
+        token = auth.create_access_token(user)
+        transport = ASGITransport(app=app)
+        try:
+            async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization": f"Bearer {token}"}) as scoped_client:
+                resp = await scoped_client.get(f"/providers/{provider_id}")
+                assert resp.status_code == 200
+        finally:
+            await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])
+
 
 class TestToolProviderConfigEndpoints:
     """Regression coverage for the blank api_key_ref gap (2026-07-23): a

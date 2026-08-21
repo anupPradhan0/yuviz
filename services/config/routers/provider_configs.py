@@ -61,24 +61,36 @@ async def create_provider_config(
 
 async def _authorize_provider(provider_id: str, current_user: CurrentUser) -> dict:
     """404 if the provider doesn't exist; 403 if it exists but belongs to a
-    different tenant than the caller. Superadmin is exempt — checked via
-    current_user.role, NOT tenant_id nullness: confirmed live (2026-08-21)
-    that a real superadmin account can have a non-null tenant_id set (a
-    leftover default from account creation, unrelated to their actual
-    unrestricted access), which caused a genuine 403 for a legitimate
-    superadmin browsing a different tenant's agent. role=="superadmin" is
-    the same check routers/users.py already uses for this exact
-    unrestricted-access decision — matching that established pattern
-    instead of re-deriving it from tenant_id. Without this authorization at
-    all, any authenticated admin/viewer could read, edit, or delete another
-    tenant's provider_config by id, and list_provider_voices would resolve
-    *that* tenant's real api_key_ref and burn its ElevenLabs quota using
-    their key."""
+    different tenant than the caller.
+
+    Exempt from the scope check: role=="superadmin" (confirmed live
+    2026-08-21 that a real superadmin account can have a non-null tenant_id
+    set — a leftover default from account creation, unrelated to their
+    actual unrestricted access — so this can't be derived from tenant_id
+    alone), OR tenant_id is None (the Conversation Service's own internal
+    service account — conversation-service@internal.yuviz.ai, role=viewer,
+    tenant_id=NULL — legitimately reads provider configs across every
+    tenant it serves calls for, one process handling all tenants; a role
+    ==superadmin-only check broke this and made every live call silently
+    fall back to agent_config.py's hardcoded legacy default, confirmed live
+    2026-08-21 as the "Hello! How can I help you today?" greeting instead
+    of the real configured one — same day this authorization was added,
+    caught the same afternoon). auth.py's CurrentUser docstring already
+    established "tenant_id is None == unscoped" as the intended contract;
+    this restores it as a second, independent exemption alongside the
+    superadmin-role one, rather than replacing it.
+
+    Without this authorization at all, any authenticated tenant-scoped
+    admin/viewer could read, edit, or delete another tenant's
+    provider_config by id, and list_provider_voices would resolve *that*
+    tenant's real api_key_ref and burn its ElevenLabs quota using their
+    key."""
     cfg = await get_or_404(
         provider_configs_service.get_provider_config(provider_id),
         f"provider_config {provider_id!r} not found",
     )
-    if current_user.role != "superadmin" and str(cfg["tenant_id"]) != current_user.tenant_id:
+    is_unscoped = current_user.role == "superadmin" or current_user.tenant_id is None
+    if not is_unscoped and str(cfg["tenant_id"]) != current_user.tenant_id:
         raise HTTPException(status_code=403, detail="provider_config belongs to a different tenant")
     return cfg
 
