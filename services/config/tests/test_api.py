@@ -15,6 +15,8 @@ import uuid
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from services.config import auth
+from services.config import users as users_service
 from services.config.app import app
 
 
@@ -596,14 +598,45 @@ class TestProviderConfigTenantScoping:
             await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
 
     async def test_superadmin_can_access_any_tenants_provider(self, client, test_tenant):
-        """Superadmin (tenant_id=None) is deliberately exempt from the scope
-        check — same "unscoped" contract as everywhere else in this service."""
+        """Superadmin is deliberately exempt from the scope check — same
+        "unscoped" contract as everywhere else in this service."""
         create = await client.post(
             f"/tenants/{test_tenant['id']}/providers",
             json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
         )
         resp = await client.get(f"/providers/{create.json()['id']}")
         assert resp.status_code == 200
+
+    async def test_superadmin_with_a_tenant_id_set_is_still_unscoped(self, pool, test_tenant):
+        """Regression (found live 2026-08-21): a real superadmin account can
+        have a non-null tenant_id (a leftover default from account
+        creation, unrelated to their actual access level) — the
+        authorization check must key off role=="superadmin", not tenant_id
+        being None, or a legitimate superadmin gets a spurious 403 browsing
+        any tenant other than the one their own tenant_id happens to name."""
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other Tenant", f"other-{uuid.uuid4().hex[:8]}",
+        )
+        user = await users_service.create_user(
+            email=f"scoped-superadmin-{uuid.uuid4().hex[:8]}@example.com",
+            password="test-password-not-real", role="superadmin", tenant_id=other["id"],
+        )
+        token = auth.create_access_token(user)
+        transport = ASGITransport(app=app)
+        try:
+            async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization": f"Bearer {token}"}) as scoped_client:
+                create = await scoped_client.post(
+                    f"/tenants/{test_tenant['id']}/providers",
+                    json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+                )
+                resp = await scoped_client.get(f"/providers/{create.json()['id']}")
+                assert resp.status_code == 200
+        finally:
+            await pool.execute(
+                "UPDATE users SET deleted_at = now(), tenant_id = NULL WHERE id = $1", user["id"],
+            )
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
 
 
 class TestToolProviderConfigEndpoints:
