@@ -194,6 +194,7 @@ async def _make_elevenlabs_tts(cfg: ProviderConfig, api_key: str | None) -> Any:
         voice_id=cfg.voice or "",
         model_id=cfg.extra.get("model_id", "eleven_turbo_v2_5"),
         speed=voice_speed(cfg),
+        language_code=cfg.language,
     )
 
 

@@ -38,31 +38,45 @@ class ElevenLabsTTS:
     """
     ITTS implementation backed by ElevenLabs' /v1/text-to-speech/{voice_id}.
 
-    api_key   — resolved once at construction by AIProviderManager via
-                SecretResolver, never re-resolved per call.
-    voice_id  — ElevenLabs voice id (not a display name — see
-                https://elevenlabs.io/app/voice-library for ids).
-    model_id  — e.g. "eleven_turbo_v2_5" (lower latency) or "eleven_multilingual_v2"
+    api_key       — resolved once at construction by AIProviderManager via
+                    SecretResolver, never re-resolved per call.
+    voice_id      — ElevenLabs voice id (not a display name — see
+                    https://elevenlabs.io/app/voice-library for ids).
+    model_id      — e.g. "eleven_turbo_v2_5" (lower latency) or "eleven_multilingual_v2"
+    language_code — ISO 639-1 code (e.g. "hi", "fr") forcing the output
+                    language on a multilingual voice/model, independent of
+                    the voice's own "native" language/accent. None = let
+                    ElevenLabs auto-detect from the input text, its
+                    default behavior. Only meaningful with a multilingual
+                    model_id (eleven_turbo_v2_5/eleven_multilingual_v2/
+                    eleven_flash_v2_5, all default-capable); ElevenLabs
+                    silently ignores it on non-multilingual models rather
+                    than erroring, so no validation against model_id here.
     """
 
     def __init__(
         self,
-        api_key:   str,
-        voice_id:  str,
-        model_id:  str = "eleven_turbo_v2_5",
-        base_url:  str = _DEFAULT_BASE_URL,
-        timeout_s: float = 15.0,
-        speed:     float = 1.0,
+        api_key:       str,
+        voice_id:      str,
+        model_id:      str = "eleven_turbo_v2_5",
+        base_url:      str = _DEFAULT_BASE_URL,
+        timeout_s:     float = 15.0,
+        speed:         float = 1.0,
+        language_code: str | None = None,
     ) -> None:
-        self._voice_id = voice_id
-        self._speed    = speed
-        self._model_id = model_id
+        self._voice_id      = voice_id
+        self._speed         = speed
+        self._model_id      = model_id
+        self._language_code = language_code
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             headers={"xi-api-key": api_key},
             timeout=timeout_s,
         )
-        log.info("ElevenLabsTTS voice_id=%s model_id=%s", voice_id, model_id)
+        log.info(
+            "ElevenLabsTTS voice_id=%s model_id=%s language_code=%s",
+            voice_id, model_id, language_code,
+        )
 
     async def synthesize(self, text: str, sample_rate: int) -> bytes:
         if not text.strip():
@@ -83,6 +97,7 @@ class ElevenLabsTTS:
                         {"voice_settings": {"speed": self._speed}}
                         if self._speed != 1.0 else {}
                     ),
+                    **({"language_code": self._language_code} if self._language_code else {}),
                 },
             )
             resp.raise_for_status()

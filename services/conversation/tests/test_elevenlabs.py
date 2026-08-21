@@ -13,8 +13,8 @@ import httpx
 from services.conversation.providers.tts.elevenlabs import ElevenLabsTTS, _nearest_supported_rate
 
 
-def _make_tts(handler) -> ElevenLabsTTS:
-    tts = ElevenLabsTTS(api_key="test-key", voice_id="voice-123")
+def _make_tts(handler, **kwargs) -> ElevenLabsTTS:
+    tts = ElevenLabsTTS(api_key="test-key", voice_id="voice-123", **kwargs)
     tts._client = httpx.AsyncClient(
         base_url="https://api.elevenlabs.io",
         headers={"xi-api-key": "test-key"},
@@ -89,3 +89,27 @@ async def test_synthesize_returns_empty_on_http_error():
     result = await tts.synthesize("hello", 16000)
 
     assert result == b""
+
+
+async def test_synthesize_sends_language_code_when_set():
+    import json as _json
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _json.loads(request.content)
+        assert body["language_code"] == "hi"
+        return httpx.Response(200, content=_silence_pcm(1600))
+
+    tts = _make_tts(handler, language_code="hi")
+    await tts.synthesize("hello", 16000)
+
+
+async def test_synthesize_omits_language_code_when_unset():
+    import json as _json
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _json.loads(request.content)
+        assert "language_code" not in body
+        return httpx.Response(200, content=_silence_pcm(1600))
+
+    tts = _make_tts(handler)
+    await tts.synthesize("hello", 16000)

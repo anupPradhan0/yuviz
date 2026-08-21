@@ -255,9 +255,29 @@ async def test_runtime_config_policies_sourced_from_tenant_and_agent():
     assert rc.policies.vad_hold_ms == 500
     assert rc.policies.silence_timeout_ms == 8000
     assert rc.policies.goodbye_grace_ms == 4000
-    # No schema column exists for these yet — honestly None, not invented.
+    # No schema column exists for this yet — honestly None, not invented.
     assert rc.policies.barge_in_enabled is None
+    # max_call_duration_s does have a real column; unset on the row still
+    # means "unlimited" (None), not a magically invented default.
     assert rc.policies.max_call_duration_s is None
+
+
+async def test_runtime_config_max_call_duration_sourced_from_agent():
+    redis_repo = FakeRepo(
+        tenants={"acme": _tenant_row(
+            "acme", default_stt_config_id="stt1", default_llm_config_id="llm1", default_tts_config_id="tts1",
+        )},
+        agents={("acme", "sup"): _agent_row("sup", max_call_duration_s=600)},
+        providers={
+            "stt1": _provider_row("stt1", "stt", "deepgram"),
+            "llm1": _provider_row("llm1", "llm", "openai"),
+            "tts1": _provider_row("tts1", "tts", "elevenlabs"),
+        },
+    )
+    provider = CacheAsideConfigProvider(redis_repo, FakeRepo())
+
+    rc = await provider.get_runtime_config("acme", "sup")
+    assert rc.policies.max_call_duration_s == 600
 
 
 async def test_agent_transfer_fields_default_when_absent_from_row():

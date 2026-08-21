@@ -7,8 +7,9 @@ import { KnowledgeBasePanel } from "@/components/KnowledgeBasePanel";
 import { ToolsPanel } from "@/components/ToolsPanel";
 import { SipPanel } from "@/components/SipPanel";
 import { TestAgentPanel } from "@/components/TestAgentPanel";
-import { VoicePicker } from "@/components/VoicePicker";
-import { LANGUAGES, OTHER } from "@/lib/engineCatalog";
+import { LocalVoicePicker } from "@/components/LocalVoicePicker";
+import { ElevenLabsVoicePicker } from "@/components/ElevenLabsVoicePicker";
+import { LANGUAGES, OTHER, asBrowsableTtsEngine } from "@/lib/engineCatalog";
 
 type Tab = "overview" | "behaviour" | "escalation" | "sip" | "tools" | "knowledge-base";
 
@@ -55,6 +56,14 @@ export default function AgentDetailPage() {
   const [customLanguage, setCustomLanguage] = useState("");
   const [promptMode, setPromptMode] = useState<"freeform" | "structured">("freeform");
   const [promptSections, setPromptSections] = useState<PromptSections>({ personality: "", environment: "", tone: "" });
+  // Explicit override once the user picks an engine from the chooser (or
+  // clicks "Change engine") — null defers to whatever engine the agent's
+  // current tts_config_id actually points at, so the Voice card only ever
+  // shows the picker matching the configured provider, never an unrelated
+  // engine's voices (picking one there would silently swap tts_config_id
+  // to a different provider without it being obvious that happened).
+  const [chosenEngine, setChosenEngine] = useState<"macos" | "kokoro" | "elevenlabs" | null>(null);
+  const [showEngineChooser, setShowEngineChooser] = useState(false);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -83,6 +92,7 @@ export default function AgentDetailPage() {
           transfer_prompt: a.transfer_prompt,
           farewell_message: a.farewell_message,
           transfer_announcement: a.transfer_announcement,
+          max_call_duration_s: a.max_call_duration_s,
           status: a.status,
         });
         if (a.language && LANGUAGES.some((l) => l.value === a.language)) {
@@ -107,6 +117,20 @@ export default function AgentDetailPage() {
       .finally(() => setLoading(false));
   }, [tenantSlug, agentSlug]);
 
+  // Picking a voice sets the agent's language to match it, rather than the
+  // other way around — a voice is a concrete, single-language artifact,
+  // while agent.language is a looser override (see its own "derive from
+  // provider" default), so syncing from voice -> language is the direction
+  // that can't produce a contradiction.
+  const applyDetectedLanguage = (language: string) => {
+    if (LANGUAGES.some((l) => l.value === language)) {
+      setLanguageChoice(language);
+    } else {
+      setLanguageChoice(OTHER);
+      setCustomLanguage(language);
+    }
+  };
+
   const switchToStructured = () => {
     const parsed = parsePromptSections(form.system_prompt || "");
     const sections = parsed || { personality: form.system_prompt || "", environment: "", tone: "" };
@@ -127,7 +151,8 @@ export default function AgentDetailPage() {
     setSaveError(null);
     setSaved(false);
     try {
-      const language = languageChoice === "" ? null : languageChoice === OTHER ? customLanguage : languageChoice;
+      const language =
+        languageChoice === "" ? null : languageChoice === OTHER ? customLanguage.trim() || null : languageChoice;
       const updated = await updateAgent(tenantSlug, agent.id, { ...form, language });
       setAgent(updated);
       setSaved(true);
@@ -229,6 +254,23 @@ export default function AgentDetailPage() {
                       onChange={(e) => setForm({ ...form, goodbye_grace_ms: Number(e.target.value) })}
                     />
                   </div>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">
+                    Max Call Duration <span className="hint">seconds — hard cutoff, caller hears a wrap-up line then the call ends. Leave blank for unlimited.</span>
+                  </label>
+                  <input
+                    className="form-input"
+                    style={{ fontFamily: "var(--mono)", maxWidth: 160 }}
+                    type="number"
+                    min={30}
+                    max={7200}
+                    placeholder="unlimited"
+                    value={form.max_call_duration_s ?? ""}
+                    onChange={(e) =>
+                      setForm({ ...form, max_call_duration_s: e.target.value === "" ? null : Number(e.target.value) })
+                    }
+                  />
                 </div>
                 <div className="form-group">
                   <label className="form-label">
@@ -407,16 +449,97 @@ export default function AgentDetailPage() {
             <div className="card" style={{ marginBottom: 14 }}>
               <div className="card-hdr">
                 <div className="card-title">Voice</div>
-                <div className="card-sub">local engines only — sets the same TTS assignment as below</div>
+                <div className="card-sub">sets the same TTS assignment as below</div>
               </div>
               <div className="card-body">
-                <VoicePicker
-                  tenantId={agent.tenant_id}
-                  providers={providers}
-                  value={form.tts_config_id}
-                  onChange={(id) => setForm({ ...form, tts_config_id: id })}
-                  onProviderCreated={(p) => setProviders([...providers, p])}
-                />
+                {(() => {
+                  const selectedTts = providers.find((p) => p.id === form.tts_config_id);
+                  const engine = chosenEngine ?? asBrowsableTtsEngine(selectedTts?.engine);
+
+                  if (showEngineChooser || !engine) {
+                    return (
+                      <div>
+                        <div className="form-hint" style={{ marginBottom: 8 }}>
+                          Choose a TTS engine to browse its voices.
+                        </div>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          {(["macos", "kokoro", "elevenlabs"] as const).map((e) => (
+                            <button
+                              key={e}
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => {
+                                setChosenEngine(e);
+                                setShowEngineChooser(false);
+                              }}
+                            >
+                              {e === "macos" ? "macOS say" : e === "kokoro" ? "Kokoro" : "ElevenLabs"}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  const changeEngineButton = (
+                    <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowEngineChooser(true)}>
+                        Change engine
+                      </button>
+                    </div>
+                  );
+
+                  if (engine === "elevenlabs") {
+                    // Prefer the provider actually assigned to this agent —
+                    // falling back to "any ElevenLabs provider on the
+                    // tenant" only when the agent isn't currently on one —
+                    // otherwise a tenant with multiple connected accounts
+                    // could show a different agent's selected voice here.
+                    const elevenLabsProvider =
+                      (selectedTts?.engine === "elevenlabs" ? selectedTts : undefined) ??
+                      providers.find((p) => p.role === "tts" && p.engine === "elevenlabs") ??
+                      null;
+                    return (
+                      <>
+                        <ElevenLabsVoicePicker
+                          tenantId={agent.tenant_id}
+                          provider={elevenLabsProvider}
+                          isCurrentAssignment={selectedTts?.engine === "elevenlabs"}
+                          onProviderCreated={(p) => {
+                            setProviders((prev) => [...prev, p]);
+                            setForm((prev) => ({ ...prev, tts_config_id: p.id }));
+                            setChosenEngine(null);
+                          }}
+                          onVoicePicked={(updated) => {
+                            setProviders((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+                            setForm((prev) => ({ ...prev, tts_config_id: updated.id }));
+                            setChosenEngine(null);
+                          }}
+                          onLanguageDetected={applyDetectedLanguage}
+                        />
+                        {changeEngineButton}
+                      </>
+                    );
+                  }
+
+                  return (
+                    <>
+                      <LocalVoicePicker
+                        engine={engine}
+                        tenantId={agent.tenant_id}
+                        providers={providers}
+                        value={form.tts_config_id}
+                        onChange={(id) => {
+                          setForm((prev) => ({ ...prev, tts_config_id: id }));
+                          setChosenEngine(null);
+                        }}
+                        onProviderCreated={(p) => setProviders((prev) => [...prev, p])}
+                        onLanguageDetected={applyDetectedLanguage}
+                      />
+                      {changeEngineButton}
+                    </>
+                  );
+                })()}
                 {(() => {
                   const selectedTts = providers.find((p) => p.id === form.tts_config_id);
                   const speed = Number((selectedTts?.extra as Record<string, unknown> | null)?.speed ?? 1.0);
@@ -573,8 +696,18 @@ export default function AgentDetailPage() {
                   <input
                     className="form-input"
                     style={{ fontFamily: "var(--mono)", width: 80 }}
+                    type="number"
+                    min={1}
+                    step={1}
                     value={form.escalation_threshold ?? ""}
-                    onChange={(e) => setForm({ ...form, escalation_threshold: e.target.value === "" ? null : Number(e.target.value) })}
+                    onChange={(e) => {
+                      if (e.target.value === "") {
+                        setForm({ ...form, escalation_threshold: null });
+                        return;
+                      }
+                      const v = Number(e.target.value);
+                      if (Number.isInteger(v) && v >= 1) setForm({ ...form, escalation_threshold: v });
+                    }}
                   />
                 </div>
               </div>

@@ -22,12 +22,16 @@ for cache validation and a future hot-config-reload feature, not something
 any code re-checks mid-call today — session-lifetime-only resolution (see
 project architecture decisions) is unchanged by adding these fields.
 
-A few RuntimeConfig fields (goodbye_prompt, fallback_prompt, barge_in_enabled,
-max_call_duration_s) have no backing column in today's schema. They're
-modeled as real fields defaulting to None, not omitted and not faked with
-invented data — same "real empty, not a stub exception" posture already
-used for get_tools(). Forward-compatible shape now; real values whenever
-those columns exist.
+A few RuntimeConfig fields (goodbye_prompt, fallback_prompt, barge_in_enabled)
+have no backing column in today's schema. They're modeled as real fields
+defaulting to None, not omitted and not faked with invented data — same
+"real empty, not a stub exception" posture already used for get_tools().
+Forward-compatible shape now; real values whenever those columns exist.
+
+max_call_duration_s (agents.max_call_duration_s, Policies.max_call_duration_s)
+was in that same forward-compatible-stub state until it got a real column
+and enforcement (services/conversation/pipeline.py's on_speech_ended) —
+kept here as an example of the pattern actually paying off.
 """
 
 from __future__ import annotations
@@ -144,6 +148,9 @@ class Agent:
     # Mirrors agents.transfer_waiting_experience — see Policies.
     # transfer_waiting_experience's own comment for what this controls.
     transfer_waiting_experience: str = "announcement_moh"
+    # Mirrors agents.max_call_duration_s — see Policies.max_call_duration_s's
+    # own comment for what this controls. None = unlimited.
+    max_call_duration_s: int | None = None
 
 
 @dataclass(frozen=True)
@@ -225,7 +232,18 @@ class Policies:
     llm_timeout_ms: int | None
     goodbye_grace_ms: int            # = agent.goodbye_grace_ms
     barge_in_enabled: bool | None = None      # no schema column yet — see module docstring
-    max_call_duration_s: int | None = None    # no schema column yet — see module docstring
+    # = agent.max_call_duration_s. Admin-configured hard ceiling on call
+    # length in seconds; None = unlimited. Enforced in
+    # services/conversation/pipeline.py's on_speech_ended(): checked after
+    # STT (so the caller's final utterance is still transcribed), before
+    # the LLM call (so no response is generated only to be discarded) —
+    # once exceeded, the pipeline skips the LLM, speaks a fixed wrap-up
+    # line, and ends the call the same way farewell_message/[[END_CALL]]
+    # do. Agent-scoped (not tenant-scoped like the gateway's FSM timers —
+    # see CallFsmTimerConfig) since a reasonable call length is a business
+    # decision that varies per agent (a quick reception agent vs. a longer
+    # sales conversation), not a platform/tenant-wide dial.
+    max_call_duration_s: int | None = None
     # Mirrors agent.transfer_type/transfer_destination/queue_id/
     # escalation_threshold — surfaced here (grouped with other call-behavior
     # policy) in addition to Agent, same precedent as goodbye_grace_ms above.

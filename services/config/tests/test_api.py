@@ -15,6 +15,8 @@ import uuid
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from services.config import auth
+from services.config import users as users_service
 from services.config.app import app
 
 
@@ -142,6 +144,140 @@ class TestAgentEndpoints:
         assert resp.status_code == 200
         assert resp.json()["transfer_type"] == "warm"
 
+    async def test_create_agent_with_inline_provider_config_ids(self, client, test_tenant):
+        stt = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+        )
+        llm = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Ollama", "role": "llm", "engine": "ollama"},
+        )
+        tts = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Kokoro", "role": "tts", "engine": "kokoro"},
+        )
+        stt_id, llm_id, tts_id = stt.json()["id"], llm.json()["id"], tts.json()["id"]
+
+        resp = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={
+                "slug": "support-agent", "name": "Support",
+                "stt_config_id": stt_id, "llm_config_id": llm_id, "tts_config_id": tts_id,
+            },
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["stt_config_id"] == stt_id
+        assert body["llm_config_id"] == llm_id
+        assert body["tts_config_id"] == tts_id
+
+    async def test_create_agent_with_nonexistent_provider_config_id_is_400(self, client, test_tenant):
+        resp = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={
+                "slug": "support-agent", "name": "Support",
+                "stt_config_id": "00000000-0000-0000-0000-000000000000",
+            },
+        )
+        assert resp.status_code == 400
+
+    async def test_create_agent_with_malformed_provider_config_id_is_400_not_500(self, client, test_tenant):
+        """A non-UUID-shaped string previously reached asyncpg's parameter
+        binding directly, raising DataError — not a ValueError/LookupError,
+        so app.py had no handler for it and it surfaced as a raw 500."""
+        resp = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "support-agent", "name": "Support", "stt_config_id": "not-a-uuid"},
+        )
+        assert resp.status_code == 400
+
+    async def test_create_agent_rejects_wrong_role_provider_config(self, client, test_tenant):
+        tts = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Kokoro", "role": "tts", "engine": "kokoro"},
+        )
+        resp = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "support-agent", "name": "Support", "stt_config_id": tts.json()["id"]},
+        )
+        assert resp.status_code == 400
+
+    async def test_create_agent_rejects_cross_tenant_provider_config(self, client, test_tenant, pool):
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other Tenant", f"other-{uuid.uuid4().hex[:8]}",
+        )
+        try:
+            other_stt = await client.post(
+                f"/tenants/{other['id']}/providers",
+                json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+            )
+            resp = await client.post(
+                f"/tenants/{test_tenant['slug']}/agents",
+                json={"slug": "support-agent", "name": "Support", "stt_config_id": other_stt.json()["id"]},
+            )
+            assert resp.status_code == 400
+        finally:
+            await pool.execute("DELETE FROM provider_configs WHERE tenant_id = $1", other["id"])
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_update_agent_rejects_wrong_role_provider_config(self, client, test_tenant):
+        create = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "support-agent", "name": "Support"},
+        )
+        agent_id = create.json()["id"]
+        tts = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Kokoro", "role": "tts", "engine": "kokoro"},
+        )
+        resp = await client.patch(
+            f"/tenants/{test_tenant['slug']}/agents/{agent_id}",
+            json={"stt_config_id": tts.json()["id"]},
+        )
+        assert resp.status_code == 400
+
+    async def test_create_agent_rejects_elevenlabs_provider_with_no_voice(self, client, test_tenant):
+        tts = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "EL", "role": "tts", "engine": "elevenlabs", "api_key_ref": "env:FAKE"},
+        )
+        resp = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "support-agent", "name": "Support", "tts_config_id": tts.json()["id"]},
+        )
+        assert resp.status_code == 400
+        assert "no voice selected" in resp.json()["detail"]
+
+    async def test_update_agent_rejects_elevenlabs_provider_with_no_voice(self, client, test_tenant):
+        create = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "support-agent", "name": "Support"},
+        )
+        agent_id = create.json()["id"]
+        tts = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "EL", "role": "tts", "engine": "elevenlabs", "api_key_ref": "env:FAKE"},
+        )
+        resp = await client.patch(
+            f"/tenants/{test_tenant['slug']}/agents/{agent_id}",
+            json={"tts_config_id": tts.json()["id"]},
+        )
+        assert resp.status_code == 400
+        assert "no voice selected" in resp.json()["detail"]
+
+    async def test_elevenlabs_provider_with_voice_is_accepted(self, client, test_tenant):
+        tts = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "EL", "role": "tts", "engine": "elevenlabs", "api_key_ref": "env:FAKE", "voice": "abc123"},
+        )
+        resp = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "support-agent", "name": "Support", "tts_config_id": tts.json()["id"]},
+        )
+        assert resp.status_code == 201
+
     async def test_update_agent_invalid_transfer_type_is_422(self, client, test_tenant):
         create = await client.post(
             f"/tenants/{test_tenant['slug']}/agents",
@@ -220,6 +356,318 @@ class TestProviderConfigEndpoints:
 
         resp = await client.get(f"/providers/{provider_id}")
         assert resp.status_code == 404
+
+    async def test_voices_requires_elevenlabs_engine(self, client, test_tenant):
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Kokoro", "role": "tts", "engine": "kokoro"},
+        )
+        resp = await client.get(f"/providers/{create.json()['id']}/voices")
+        assert resp.status_code == 400
+
+    async def test_voices_requires_api_key_ref(self, client, test_tenant):
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "EL", "role": "tts", "engine": "elevenlabs"},
+        )
+        resp = await client.get(f"/providers/{create.json()['id']}/voices")
+        assert resp.status_code == 400
+
+    async def test_voices_unknown_provider_is_404(self, client):
+        resp = await client.get("/providers/00000000-0000-0000-0000-000000000000/voices")
+        assert resp.status_code == 404
+
+    async def test_voices_success(self, client, test_tenant, monkeypatch):
+        import httpx
+
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "EL", "role": "tts", "engine": "elevenlabs", "api_key_ref": "env:TEST_EL_KEY"},
+        )
+        provider_id = create.json()["id"]
+        monkeypatch.setenv("TEST_EL_KEY", "fake-key-for-test")
+
+        canned = {
+            "voices": [
+                {
+                    "voice_id": "abc123", "name": "Rachel", "category": "premade",
+                    "labels": {"gender": "female", "accent": "american"},
+                    "preview_url": "https://example.com/preview.mp3",
+                    "verified_languages": [
+                        {
+                            "language": "en", "model_id": "eleven_multilingual_v2",
+                            "accent": "american", "locale": "en-US",
+                            "preview_url": "https://example.com/preview-en.mp3",
+                        },
+                    ],
+                },
+            ],
+        }
+
+        real_get = httpx.AsyncClient.get
+
+        async def fake_get(self, url, headers=None, **kwargs):
+            if "elevenlabs.io" not in str(url):
+                return await real_get(self, url, headers=headers, **kwargs)
+            assert headers["xi-api-key"] == "fake-key-for-test"
+            return httpx.Response(200, json=canned, request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+        resp = await client.get(f"/providers/{provider_id}/voices")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body == [
+            {
+                "voice_id": "abc123", "name": "Rachel", "category": "premade",
+                "labels": {"gender": "female", "accent": "american"},
+                "preview_url": "https://example.com/preview.mp3",
+                "verified_languages": [
+                    {
+                        "language": "en", "model_id": "eleven_multilingual_v2",
+                        "accent": "american", "locale": "en-US",
+                        "preview_url": "https://example.com/preview-en.mp3",
+                    },
+                ],
+            },
+        ]
+
+    async def test_voices_verified_languages_defaults_to_empty_list(self, client, test_tenant, monkeypatch):
+        """Not every voice has been through ElevenLabs' language
+        verification — a missing verified_languages key must come through
+        as [], not be dropped or raise."""
+        import httpx
+
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "EL", "role": "tts", "engine": "elevenlabs", "api_key_ref": "env:TEST_EL_KEY4"},
+        )
+        provider_id = create.json()["id"]
+        monkeypatch.setenv("TEST_EL_KEY4", "fake-key-for-test")
+
+        canned = {
+            "voices": [
+                {
+                    "voice_id": "xyz789", "name": "Unverified", "category": "cloned",
+                    "labels": {"language": "fr"}, "preview_url": None,
+                },
+            ],
+        }
+        real_get = httpx.AsyncClient.get
+
+        async def fake_get(self, url, headers=None, **kwargs):
+            if "elevenlabs.io" not in str(url):
+                return await real_get(self, url, headers=headers, **kwargs)
+            return httpx.Response(200, json=canned, request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+        resp = await client.get(f"/providers/{provider_id}/voices")
+        assert resp.status_code == 200
+        assert resp.json()[0]["verified_languages"] == []
+
+    async def test_voices_network_error_is_clean_400_not_500(self, client, test_tenant, monkeypatch):
+        """httpx.RequestError (DNS failure, timeout, ...) must not reach the
+        caller as a bare, unhandled 500."""
+        import httpx
+
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "EL", "role": "tts", "engine": "elevenlabs", "api_key_ref": "env:TEST_EL_KEY2"},
+        )
+        provider_id = create.json()["id"]
+        monkeypatch.setenv("TEST_EL_KEY2", "fake-key-for-test")
+
+        real_get = httpx.AsyncClient.get
+
+        async def fake_get(self, url, headers=None, **kwargs):
+            if "elevenlabs.io" not in str(url):
+                return await real_get(self, url, headers=headers, **kwargs)
+            raise httpx.ConnectTimeout("connect timed out", request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+        resp = await client.get(f"/providers/{provider_id}/voices")
+        assert resp.status_code == 400
+        assert "ConnectTimeout" in resp.json()["detail"]
+
+    async def test_voices_error_response_body_not_forwarded_to_caller(self, client, test_tenant, monkeypatch):
+        """A non-200 ElevenLabs response (e.g. a 401 body with account
+        details) must be logged server-side, never echoed into the client-
+        facing error detail."""
+        import httpx
+
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "EL", "role": "tts", "engine": "elevenlabs", "api_key_ref": "env:TEST_EL_KEY3"},
+        )
+        provider_id = create.json()["id"]
+        monkeypatch.setenv("TEST_EL_KEY3", "fake-key-for-test")
+
+        secret_body = "super-secret-account-details-should-not-leak"
+        real_get = httpx.AsyncClient.get
+
+        async def fake_get(self, url, headers=None, **kwargs):
+            if "elevenlabs.io" not in str(url):
+                return await real_get(self, url, headers=headers, **kwargs)
+            return httpx.Response(401, text=secret_body, request=httpx.Request("GET", url))
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+        resp = await client.get(f"/providers/{provider_id}/voices")
+        assert resp.status_code == 400
+        assert secret_body not in resp.json()["detail"]
+        assert resp.json()["detail"] == "ElevenLabs Voices API returned 401"
+
+
+class TestProviderConfigTenantScoping:
+    """A tenant-scoped admin/viewer must never read, edit, delete, or fetch
+    voices for another tenant's provider_config by id — the bare
+    /providers/{id} routes have no tenant_id in their URL path, so nothing
+    scopes them except the explicit check in _authorize_provider()."""
+
+    async def test_admin_cannot_get_another_tenants_provider(self, admin_client, pool):
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other Tenant", f"other-{uuid.uuid4().hex[:8]}",
+        )
+        try:
+            row = await pool.fetchrow(
+                "INSERT INTO provider_configs (tenant_id, name, role, engine) "
+                "VALUES ($1, $2, $3, $4) RETURNING *",
+                other["id"], "Other's Deepgram", "stt", "deepgram",
+            )
+            resp = await admin_client.get(f"/providers/{row['id']}")
+            assert resp.status_code == 403
+        finally:
+            await pool.execute("DELETE FROM provider_configs WHERE tenant_id = $1", other["id"])
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_admin_cannot_update_another_tenants_provider(self, admin_client, pool):
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other Tenant", f"other-{uuid.uuid4().hex[:8]}",
+        )
+        try:
+            row = await pool.fetchrow(
+                "INSERT INTO provider_configs (tenant_id, name, role, engine) "
+                "VALUES ($1, $2, $3, $4) RETURNING *",
+                other["id"], "Other's Deepgram", "stt", "deepgram",
+            )
+            resp = await admin_client.patch(f"/providers/{row['id']}", json={"model": "nova-3"})
+            assert resp.status_code == 403
+        finally:
+            await pool.execute("DELETE FROM provider_configs WHERE tenant_id = $1", other["id"])
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_admin_cannot_delete_another_tenants_provider(self, admin_client, pool):
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other Tenant", f"other-{uuid.uuid4().hex[:8]}",
+        )
+        try:
+            row = await pool.fetchrow(
+                "INSERT INTO provider_configs (tenant_id, name, role, engine) "
+                "VALUES ($1, $2, $3, $4) RETURNING *",
+                other["id"], "Other's Deepgram", "stt", "deepgram",
+            )
+            resp = await admin_client.delete(f"/providers/{row['id']}")
+            assert resp.status_code == 403
+        finally:
+            await pool.execute("DELETE FROM provider_configs WHERE tenant_id = $1", other["id"])
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_admin_cannot_fetch_voices_for_another_tenants_provider(self, admin_client, pool):
+        """The highest-stakes case: without this check, a cross-tenant
+        request would resolve the OTHER tenant's real api_key_ref and spend
+        its ElevenLabs quota, not just leak metadata."""
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other Tenant", f"other-{uuid.uuid4().hex[:8]}",
+        )
+        try:
+            row = await pool.fetchrow(
+                "INSERT INTO provider_configs (tenant_id, name, role, engine, api_key_ref) "
+                "VALUES ($1, $2, $3, $4, $5) RETURNING *",
+                other["id"], "Other's ElevenLabs", "tts", "elevenlabs", "env:OTHER_TENANT_KEY",
+            )
+            resp = await admin_client.get(f"/providers/{row['id']}/voices")
+            assert resp.status_code == 403
+        finally:
+            await pool.execute("DELETE FROM provider_configs WHERE tenant_id = $1", other["id"])
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_superadmin_can_access_any_tenants_provider(self, client, test_tenant):
+        """Superadmin is deliberately exempt from the scope check — same
+        "unscoped" contract as everywhere else in this service."""
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+        )
+        resp = await client.get(f"/providers/{create.json()['id']}")
+        assert resp.status_code == 200
+
+    async def test_superadmin_with_a_tenant_id_set_is_still_unscoped(self, pool, test_tenant):
+        """Regression (found live): a real superadmin account can
+        have a non-null tenant_id (a leftover default from account
+        creation, unrelated to their actual access level) — the
+        authorization check must key off role=="superadmin", not tenant_id
+        being None, or a legitimate superadmin gets a spurious 403 browsing
+        any tenant other than the one their own tenant_id happens to name."""
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other Tenant", f"other-{uuid.uuid4().hex[:8]}",
+        )
+        user = await users_service.create_user(
+            email=f"scoped-superadmin-{uuid.uuid4().hex[:8]}@example.com",
+            password="test-password-not-real", role="superadmin", tenant_id=other["id"],
+        )
+        token = auth.create_access_token(user)
+        transport = ASGITransport(app=app)
+        try:
+            async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization": f"Bearer {token}"}) as scoped_client:
+                create = await scoped_client.post(
+                    f"/tenants/{test_tenant['id']}/providers",
+                    json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+                )
+                resp = await scoped_client.get(f"/providers/{create.json()['id']}")
+                assert resp.status_code == 200
+        finally:
+            await pool.execute(
+                "UPDATE users SET deleted_at = now(), tenant_id = NULL WHERE id = $1", user["id"],
+            )
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_viewer_with_no_tenant_id_is_unscoped(self, client, pool, test_tenant):
+        """Regression (found live): the Conversation Service's own
+        internal service account (conversation-service@internal.yuviz.ai)
+        is role=viewer with tenant_id=NULL — it legitimately reads provider
+        configs across every tenant it serves calls for, one process
+        handling all tenants. A role=="superadmin"-only exemption blocked
+        this account entirely, and every live call silently fell back to
+        agent_config.py's hardcoded legacy default (a generic greeting
+        instead of the real configured one) because agent_resolver treats
+        any RuntimeConfig fetch failure as "fall back," not as a hard
+        error. tenant_id is None must independently exempt regardless of
+        role, matching auth.py's own CurrentUser docstring contract."""
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+        )
+        provider_id = create.json()["id"]
+
+        user = await users_service.create_user(
+            email=f"scoped-viewer-{uuid.uuid4().hex[:8]}@example.com",
+            password="test-password-not-real", role="viewer", tenant_id=None,
+        )
+        token = auth.create_access_token(user)
+        transport = ASGITransport(app=app)
+        try:
+            async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization": f"Bearer {token}"}) as scoped_client:
+                resp = await scoped_client.get(f"/providers/{provider_id}")
+                assert resp.status_code == 200
+        finally:
+            await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])
 
 
 class TestToolProviderConfigEndpoints:

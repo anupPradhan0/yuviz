@@ -1,40 +1,30 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
-  AgentCreate,
   AgentStatus,
   AgentWithTenant,
   ApiError,
-  createAgent,
   deleteAgent,
   listAllAgents,
   listTenants,
   Tenant,
   updateAgent,
 } from "@/lib/api";
-import { Modal } from "@/components/Modal";
 
 const ALL_TENANTS = "__all__";
 
 export default function AgentsPage() {
+  const router = useRouter();
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [filterTenant, setFilterTenant] = useState<string>(ALL_TENANTS);
   const [agents, setAgents] = useState<AgentWithTenant[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [modalOpen, setModalOpen] = useState(false);
-
-  const [createTenantSlug, setCreateTenantSlug] = useState("");
-  const [form, setForm] = useState<AgentCreate>({ slug: "", name: "", greeting: "", system_prompt: "" });
-  const [submitting, setSubmitting] = useState(false);
-  const [formError, setFormError] = useState<string | null>(null);
 
   useEffect(() => {
-    listTenants().then((ts) => {
-      setTenants(ts);
-      if (ts.length > 0) setCreateTenantSlug(ts[0].slug);
-    });
+    listTenants().then(setTenants);
   }, []);
 
   const refresh = () => {
@@ -48,21 +38,6 @@ export default function AgentsPage() {
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(refresh, [tenants]);
-
-  const handleCreate = async () => {
-    setSubmitting(true);
-    setFormError(null);
-    try {
-      await createAgent(createTenantSlug, form);
-      setModalOpen(false);
-      setForm({ slug: "", name: "", greeting: "", system_prompt: "" });
-      refresh();
-    } catch (e) {
-      setFormError(e instanceof ApiError ? e.detail : String(e));
-    } finally {
-      setSubmitting(false);
-    }
-  };
 
   const handleDelete = async (a: AgentWithTenant) => {
     if (!window.confirm(`Delete agent "${a.name}"? Any DIDs still pointing at it will fall back to their fallback agent, or default.`)) return;
@@ -96,7 +71,7 @@ export default function AgentsPage() {
             </option>
           ))}
         </select>
-        <button className="btn btn-primary btn-sm" onClick={() => setModalOpen(true)} disabled={tenants.length === 0}>
+        <button className="btn btn-primary btn-sm" onClick={() => router.push("/agents/new")} disabled={tenants.length === 0}>
           + New Agent
         </button>
       </div>
@@ -156,68 +131,6 @@ export default function AgentsPage() {
           </table>
         )}
       </div>
-
-      <Modal
-        open={modalOpen}
-        title="New Agent"
-        onClose={() => setModalOpen(false)}
-        footer={
-          <>
-            <button className="btn btn-ghost btn-sm" onClick={() => setModalOpen(false)}>
-              Cancel
-            </button>
-            <button className="btn btn-primary btn-sm" onClick={handleCreate} disabled={submitting || !form.slug || !form.name}>
-              {submitting ? "Creating…" : "Create Agent"}
-            </button>
-          </>
-        }
-      >
-        {formError && <div className="error-banner">{formError}</div>}
-        <div className="form-group">
-          <label className="form-label">
-            Account <span className="required">*</span>
-          </label>
-          <select className="form-select" value={createTenantSlug} onChange={(e) => setCreateTenantSlug(e.target.value)}>
-            {tenants.map((t) => (
-              <option key={t.id} value={t.slug}>
-                {t.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="form-group">
-          <label className="form-label">
-            Display Name <span className="required">*</span>
-          </label>
-          <input className="form-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Customer Support" />
-        </div>
-        <div className="form-group">
-          <label className="form-label">
-            Slug <span className="required">*</span>
-            <span className="hint">used in the WS routing path — no spaces</span>
-          </label>
-          <input className="form-input" style={{ fontFamily: "var(--mono)" }} value={form.slug} onChange={(e) => setForm({ ...form, slug: e.target.value })} placeholder="support" />
-        </div>
-        <div className="form-group">
-          <label className="form-label">Greeting</label>
-          <textarea
-            className="form-textarea"
-            style={{ minHeight: 50 }}
-            value={form.greeting}
-            onChange={(e) => setForm({ ...form, greeting: e.target.value })}
-            placeholder="Hi! How can I help you today?"
-          />
-        </div>
-        <div className="form-group">
-          <label className="form-label">System Prompt</label>
-          <textarea
-            className="form-textarea"
-            value={form.system_prompt}
-            onChange={(e) => setForm({ ...form, system_prompt: e.target.value })}
-            placeholder="You are a helpful customer support agent."
-          />
-        </div>
-      </Modal>
     </>
   );
 }

@@ -146,7 +146,7 @@ def _make_handler(
     escalation_threshold: int | None = None,
     end_call_prompt: str | None = None, transfer_prompt: str | None = None,
     farewell_message: str | None = None, transfer_announcement: str | None = None,
-    tool_orchestrator=None,
+    tool_orchestrator=None, max_call_duration_s: int | None = None,
 ) -> PipelineConversationHandler:
     """Builds the minimal (RuntimeConfig, ProviderBundle) pair these tests
     need — PipelineConversationHandler's real constructor contract now (see
@@ -186,6 +186,7 @@ def _make_handler(
             goodbye_grace_ms=goodbye_grace_ms,
             transfer_type=transfer_type, transfer_destination=transfer_destination,
             escalation_threshold=escalation_threshold,
+            max_call_duration_s=max_call_duration_s,
         ),
         tools=[], version=1, resolved_at=now,
     )
@@ -344,6 +345,68 @@ async def test_pipeline_marker_only_reply_gets_fallback_audio():
     assert any(responses.index(r) < end_call_index for r in tts_responses)
 
     tts.synthesize.assert_any_call(_FALLBACK_GOODBYE, 16_000)
+
+
+def _make_spy_llm(tokens: list[str]) -> tuple[MagicMock, list[int]]:
+    """_make_llm's `generate` is a plain async-generator function, not a
+    Mock — llm.generate.assert_not_called() is silently a no-op against it
+    (no such attribute), so it can't actually prove the LLM was skipped.
+    This tracks real invocations via a closure-captured counter instead."""
+    calls: list[int] = []
+
+    async def _gen(messages):
+        calls.append(1)
+        for t in tokens:
+            yield t
+
+    llm = MagicMock()
+    llm.generate = _gen
+    return llm, calls
+
+
+@pytest.mark.asyncio
+async def test_pipeline_max_call_duration_ends_call_without_calling_llm():
+    """Once policies.max_call_duration_s has elapsed, on_speech_ended must
+    skip the LLM entirely (no response is generated only to be discarded)
+    and instead speak a fixed wrap-up line, ending the call the same way
+    farewell_message/[[END_CALL]] do."""
+    stt = _make_stt("are you still there")
+    llm, calls = _make_spy_llm(["should never be reached"])
+    tts = _make_tts(b"\x00" * 640)
+
+    handler = _make_handler(stt, llm, tts, max_call_duration_s=60, goodbye_grace_ms=1500)
+    # Simulate 61s having elapsed since the handler (= call) was constructed,
+    # deterministically, without sleeping in the test.
+    handler._call_started_at -= 61
+
+    responses = []
+    async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        responses.append(r)
+
+    assert calls == [], "LLM must not be invoked once the duration limit is exceeded"
+    tts_responses = [r for r in responses if r.tts_payloads]
+    assert tts_responses, "expected the fixed wrap-up line to be synthesized"
+    end_call_responses = [r for r in responses if r.end_call]
+    assert len(end_call_responses) == 1
+    assert end_call_responses[0].end_call_grace_period_ms == 1500
+
+
+@pytest.mark.asyncio
+async def test_pipeline_max_call_duration_unset_does_not_affect_normal_turns():
+    """max_call_duration_s=None (the default) must behave exactly like
+    before this feature existed — no early return, LLM runs normally."""
+    stt = _make_stt("hello")
+    llm, calls = _make_spy_llm(["Hi", " there", "!"])
+    tts = _make_tts(b"\x00" * 640)
+
+    handler = _make_handler(stt, llm, tts, max_call_duration_s=None)
+    responses = []
+    async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        responses.append(r)
+
+    assert calls == [1], "expected exactly one real LLM invocation for this turn"
+    assert not any(r.end_call for r in responses)
+    assert any(r.tts_payloads for r in responses)
 
 
 @pytest.mark.asyncio

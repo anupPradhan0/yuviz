@@ -46,6 +46,30 @@ from typing import Union
 _TAG_RE  = re.compile(r'\[\[(?P<name>[A-Z_]+)(?P<attrs>[^\]]*)\]\]')
 _ATTR_RE = re.compile(r'(\w+)="([^"]*)"')
 
+# LLMs occasionally emit markdown (**bold**, bullet lists, headers) even
+# when never asked to — harmless as text, but a TTS engine speaks these
+# characters literally (e.g. "*" -> "asterisk"); confirmed live, spoken
+# right before a time ("**Time:** 10:00 AM"). A blanket strip rather
+# than a paired **...** regex on purpose: DirectiveParser.parse() is called
+# per streamed chunk (see StreamBuffer.feed()), and a bold marker can land
+# split across two chunks — stripping every occurrence of these characters
+# unconditionally is naturally robust to that, no pairing/state needed.
+_MARKDOWN_CHARS_RE = re.compile(r"[*_`#]")
+
+
+def strip_markdown_chars(text: str) -> str:
+    """Public wrapper around _MARKDOWN_CHARS_RE — DirectiveParser.parse()
+    only runs on the LLM-token path (see pipeline.py's _llm_to_tts); text
+    that reaches TTS a different way (agent.greeting, farewell_message,
+    transfer_announcement, the fixed fallback/filler strings) never passes
+    through it, and any markdown an admin typed into those fields would
+    reach TTS unstripped. pipeline.py's _synthesize_sentence_stream calls
+    this directly since it's the one shared boundary all of those paths
+    (plus the already-DirectiveParser-cleaned assistant_text) funnel
+    through — safe to call twice on already-clean text, since stripping is
+    idempotent."""
+    return _MARKDOWN_CHARS_RE.sub("", text)
+
 
 class TransferType(str, Enum):
     """
@@ -203,6 +227,7 @@ class DirectiveParser:
             return ""
 
         clean_text = _TAG_RE.sub(_record, text)
+        clean_text = strip_markdown_chars(clean_text)
         return DirectiveResult(clean_text=clean_text, directives=directives)
 
     @staticmethod

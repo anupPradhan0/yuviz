@@ -143,7 +143,7 @@ export interface ProviderConfigUpdate {
   environment?: ProviderEnvironment;
   model?: string;
   voice?: string;
-  language?: string;
+  language?: string | null;
   region?: string;
   api_key_ref?: string;
   // Replaces the whole extra object — spread the existing extra when
@@ -155,6 +155,29 @@ export const updateProvider = (providerId: string, body: ProviderConfigUpdate) =
   request<ProviderConfig>(`/providers/${providerId}`, { method: "PATCH", body: JSON.stringify(body) });
 export const deleteProvider = (providerId: string) =>
   request<void>(`/providers/${providerId}`, { method: "DELETE" });
+
+export interface ElevenLabsVoiceVerifiedLanguage {
+  language: string; // validated ISO 639-1 code — unlike labels.language, which is arbitrary free text
+  model_id: string;
+  accent: string | null;
+  locale: string | null;
+  preview_url: string | null;
+}
+
+export interface ElevenLabsVoice {
+  voice_id: string;
+  name: string;
+  category: string | null;
+  labels: Record<string, string>;
+  preview_url: string | null;
+  // May be empty — not every voice has been through ElevenLabs' language
+  // verification. Prefer this over labels.language when present (see
+  // ElevenLabsVoicePicker's voicePrimaryLanguage()).
+  verified_languages: ElevenLabsVoiceVerifiedLanguage[];
+}
+
+export const listElevenLabsVoices = (providerId: string) =>
+  request<ElevenLabsVoice[]>(`/providers/${providerId}/voices`);
 
 // ── Agents ───────────────────────────────────────────────────────────────
 
@@ -207,6 +230,11 @@ export interface Agent {
   // chooses its own wording.
   farewell_message: string | null;
   transfer_announcement: string | null;
+  // Admin-configured hard ceiling on how long a caller may stay on this
+  // agent, in seconds (30-7200). null = unlimited — the pre-existing
+  // behavior. Enforced by the Conversation Service: once exceeded, the
+  // pipeline skips the LLM, speaks a fixed wrap-up line, and ends the call.
+  max_call_duration_s: number | null;
   status: AgentStatus;
   config_version: number;
   created_at: string;
@@ -218,6 +246,9 @@ export interface AgentCreate {
   name: string;
   greeting?: string;
   system_prompt?: string;
+  stt_config_id?: string | null;
+  llm_config_id?: string | null;
+  tts_config_id?: string | null;
 }
 
 export interface AgentUpdate {
@@ -241,6 +272,7 @@ export interface AgentUpdate {
   transfer_prompt?: string | null;
   farewell_message?: string | null;
   transfer_announcement?: string | null;
+  max_call_duration_s?: number | null;
   status?: AgentStatus;
 }
 
