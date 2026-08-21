@@ -608,7 +608,7 @@ class TestProviderConfigTenantScoping:
         assert resp.status_code == 200
 
     async def test_superadmin_with_a_tenant_id_set_is_still_unscoped(self, pool, test_tenant):
-        """Regression (found live 2026-08-21): a real superadmin account can
+        """Regression (found live): a real superadmin account can
         have a non-null tenant_id (a leftover default from account
         creation, unrelated to their actual access level) — the
         authorization check must key off role=="superadmin", not tenant_id
@@ -639,7 +639,7 @@ class TestProviderConfigTenantScoping:
             await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
 
     async def test_viewer_with_no_tenant_id_is_unscoped(self, client, pool, test_tenant):
-        """Regression (found live 2026-08-21): the Conversation Service's own
+        """Regression (found live): the Conversation Service's own
         internal service account (conversation-service@internal.yuviz.ai)
         is role=viewer with tenant_id=NULL — it legitimately reads provider
         configs across every tenant it serves calls for, one process

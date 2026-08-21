@@ -48,8 +48,8 @@ _ATTR_RE = re.compile(r'(\w+)="([^"]*)"')
 
 # LLMs occasionally emit markdown (**bold**, bullet lists, headers) even
 # when never asked to — harmless as text, but a TTS engine speaks these
-# characters literally (e.g. "*" -> "asterisk"); confirmed live 2026-08-21,
-# spoken right before a time ("**Time:** 10:00 AM"). A blanket strip rather
+# characters literally (e.g. "*" -> "asterisk"); confirmed live, spoken
+# right before a time ("**Time:** 10:00 AM"). A blanket strip rather
 # than a paired **...** regex on purpose: DirectiveParser.parse() is called
 # per streamed chunk (see StreamBuffer.feed()), and a bold marker can land
 # split across two chunks — stripping every occurrence of these characters

@@ -50,8 +50,8 @@ export function ElevenLabsVoicePicker({
   // ElevenLabs provider yet — see the Voice card's engine-chooser callers.
   // `provider.voice` can be non-empty in that case purely from unrelated
   // past use (another agent, earlier testing), which is real data but NOT
-  // this agent's current voice — confirmed live 2026-08-21: a fallback
-  // provider showing a stale "✓ Primary voice" checkmark was mistaken for
+  // this agent's current voice — confirmed live: a fallback provider
+  // showing a stale "✓ Primary voice" checkmark was mistaken for
   // an actual (and wrong) agent assignment. Default true so a caller that
   // always passes the genuinely-assigned provider (or none) doesn't need
   // to think about this.
