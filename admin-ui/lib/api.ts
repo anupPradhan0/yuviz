@@ -143,7 +143,7 @@ export interface ProviderConfigUpdate {
   environment?: ProviderEnvironment;
   model?: string;
   voice?: string;
-  language?: string;
+  language?: string | null;
   region?: string;
   api_key_ref?: string;
   // Replaces the whole extra object — spread the existing extra when

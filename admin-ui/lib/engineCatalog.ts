@@ -134,3 +134,43 @@ export const LANGUAGES = [
 ];
 
 export const OTHER = "__other__";
+
+// ElevenLabs' own documented set of languages supported by its multilingual
+// models (eleven_multilingual_v2/eleven_turbo_v2_5/eleven_flash_v2_5) via
+// the language_code request field — independent of which languages this
+// account's current voices happen to be tagged with (any of these voices
+// can speak any of these languages when a multilingual model is used; see
+// services/conversation/providers/tts/elevenlabs.py's language_code
+// docstring). Not the same list as LANGUAGES above: this is specifically
+// what ElevenLabs can synthesize, not a general agent-language catalog.
+export const ELEVENLABS_LANGUAGES = [
+  { value: "en", label: "English" },
+  { value: "ja", label: "Japanese" },
+  { value: "zh", label: "Chinese" },
+  { value: "de", label: "German" },
+  { value: "hi", label: "Hindi" },
+  { value: "fr", label: "French" },
+  { value: "ko", label: "Korean" },
+  { value: "pt", label: "Portuguese" },
+  { value: "it", label: "Italian" },
+  { value: "es", label: "Spanish" },
+  { value: "id", label: "Indonesian" },
+  { value: "nl", label: "Dutch" },
+  { value: "tr", label: "Turkish" },
+  { value: "fil", label: "Filipino" },
+  { value: "pl", label: "Polish" },
+  { value: "sv", label: "Swedish" },
+  { value: "bg", label: "Bulgarian" },
+  { value: "ro", label: "Romanian" },
+  { value: "ar", label: "Arabic" },
+  { value: "cs", label: "Czech" },
+  { value: "el", label: "Greek" },
+  { value: "fi", label: "Finnish" },
+  { value: "hr", label: "Croatian" },
+  { value: "ms", label: "Malay" },
+  { value: "sk", label: "Slovak" },
+  { value: "da", label: "Danish" },
+  { value: "ta", label: "Tamil" },
+  { value: "uk", label: "Ukrainian" },
+  { value: "ru", label: "Russian" },
+];

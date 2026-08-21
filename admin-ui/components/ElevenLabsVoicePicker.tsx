@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { ApiError, ElevenLabsVoice, ProviderConfig, createProvider, listElevenLabsVoices, updateProvider } from "@/lib/api";
+import { ELEVENLABS_LANGUAGES } from "@/lib/engineCatalog";
 
 // Module-level, not component state — survives the component unmounting
 // (e.g. navigating away from Behaviour and back), so re-opening the Voice
@@ -38,6 +39,8 @@ export function ElevenLabsVoicePicker({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
+  const [savingLanguage, setSavingLanguage] = useState(false);
+  const [languageError, setLanguageError] = useState<string | null>(null);
   // null = no explicit choice yet — defaults to English when the account
   // has it, matching ElevenLabs' own agent builder ("Default language is
   // English").
@@ -132,6 +135,19 @@ export function ElevenLabsVoicePicker({
     );
   }
 
+  const handleSynthesisLanguageChange = async (language: string) => {
+    setSavingLanguage(true);
+    setLanguageError(null);
+    try {
+      const updated = await updateProvider(provider.id, { language: language || null });
+      onVoicePicked(updated);
+    } catch (e) {
+      setLanguageError(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setSavingLanguage(false);
+    }
+  };
+
   const handlePick = async (voiceId: string, language: string | null) => {
     setSaving(voiceId);
     setError(null);
@@ -199,8 +215,31 @@ export function ElevenLabsVoicePicker({
           </button>
         </div>
       </div>
+      {languageError && <div className="error-banner">{languageError}</div>}
+      <div className="form-group" style={{ marginBottom: 12 }}>
+        <label className="form-label">
+          Synthesis Language <span className="hint">what language the voice actually speaks on calls — not just which voices are shown below</span>
+        </label>
+        <select
+          className="form-select"
+          value={provider.language ?? ""}
+          disabled={savingLanguage}
+          onChange={(e) => handleSynthesisLanguageChange(e.target.value)}
+        >
+          <option value="">Auto-detect from text (default)</option>
+          {ELEVENLABS_LANGUAGES.map((l) => (
+            <option key={l.value} value={l.value}>
+              {l.label}
+            </option>
+          ))}
+        </select>
+      </div>
       {languages.length > 1 && (
-        <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+        <div style={{ marginBottom: 12 }}>
+          <div className="form-label" style={{ marginBottom: 6 }}>
+            Filter voices below by native language/accent
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           <button
             type="button"
             className={`btn btn-sm ${activeLanguageFilter === "all" ? "btn-primary" : "btn-ghost"}`}
@@ -218,6 +257,7 @@ export function ElevenLabsVoicePicker({
               {lang === "en" ? "English (Default)" : lang}
             </button>
           ))}
+          </div>
         </div>
       )}
       {filteredVoices.length === 0 && <div className="empty-state">No voices match this language.</div>}
