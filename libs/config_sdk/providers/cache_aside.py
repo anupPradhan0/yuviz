@@ -116,6 +116,7 @@ def _agent_from_dict(row: dict[str, Any]) -> Agent:
         transfer_prompt=row.get("transfer_prompt"),
         farewell_message=row.get("farewell_message"),
         transfer_announcement=row.get("transfer_announcement"),
+        max_call_duration_s=row.get("max_call_duration_s"),
     )
 
 
@@ -231,6 +232,7 @@ class CacheAsideConfigProvider:
                 platform_did=agent.platform_did,
                 custom_caller_id=agent.custom_caller_id,
                 transfer_waiting_experience=agent.transfer_waiting_experience,
+                max_call_duration_s=agent.max_call_duration_s,
             ),
             tools=await self.get_tools(tenant_slug, agent_slug),
             version=agent.config_version,

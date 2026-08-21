@@ -22,7 +22,7 @@ _UPDATABLE_FIELDS = {
     "transfer_waiting_experience",
     "end_call_prompt", "transfer_prompt",
     "farewell_message", "transfer_announcement",
-    "status",
+    "status", "max_call_duration_s",
 }
 
 

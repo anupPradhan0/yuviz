@@ -218,6 +218,11 @@ export interface Agent {
   // chooses its own wording.
   farewell_message: string | null;
   transfer_announcement: string | null;
+  // Admin-configured hard ceiling on how long a caller may stay on this
+  // agent, in seconds (30-7200). null = unlimited — the pre-existing
+  // behavior. Enforced by the Conversation Service: once exceeded, the
+  // pipeline skips the LLM, speaks a fixed wrap-up line, and ends the call.
+  max_call_duration_s: number | null;
   status: AgentStatus;
   config_version: number;
   created_at: string;
@@ -252,6 +257,7 @@ export interface AgentUpdate {
   transfer_prompt?: string | null;
   farewell_message?: string | null;
   transfer_announcement?: string | null;
+  max_call_duration_s?: number | null;
   status?: AgentStatus;
 }
 

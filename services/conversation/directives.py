@@ -46,6 +46,16 @@ from typing import Union
 _TAG_RE  = re.compile(r'\[\[(?P<name>[A-Z_]+)(?P<attrs>[^\]]*)\]\]')
 _ATTR_RE = re.compile(r'(\w+)="([^"]*)"')
 
+# LLMs occasionally emit markdown (**bold**, bullet lists, headers) even
+# when never asked to — harmless as text, but a TTS engine speaks these
+# characters literally (e.g. "*" -> "asterisk"); confirmed live 2026-08-21,
+# spoken right before a time ("**Time:** 10:00 AM"). A blanket strip rather
+# than a paired **...** regex on purpose: DirectiveParser.parse() is called
+# per streamed chunk (see StreamBuffer.feed()), and a bold marker can land
+# split across two chunks — stripping every occurrence of these characters
+# unconditionally is naturally robust to that, no pairing/state needed.
+_MARKDOWN_CHARS_RE = re.compile(r"[*_`#]")
+
 
 class TransferType(str, Enum):
     """
@@ -203,6 +213,7 @@ class DirectiveParser:
             return ""
 
         clean_text = _TAG_RE.sub(_record, text)
+        clean_text = _MARKDOWN_CHARS_RE.sub("", clean_text)
         return DirectiveResult(clean_text=clean_text, directives=directives)
 
     @staticmethod

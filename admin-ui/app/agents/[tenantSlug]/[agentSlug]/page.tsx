@@ -92,6 +92,7 @@ export default function AgentDetailPage() {
           transfer_prompt: a.transfer_prompt,
           farewell_message: a.farewell_message,
           transfer_announcement: a.transfer_announcement,
+          max_call_duration_s: a.max_call_duration_s,
           status: a.status,
         });
         if (a.language && LANGUAGES.some((l) => l.value === a.language)) {
@@ -252,6 +253,23 @@ export default function AgentDetailPage() {
                       onChange={(e) => setForm({ ...form, goodbye_grace_ms: Number(e.target.value) })}
                     />
                   </div>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">
+                    Max Call Duration <span className="hint">seconds — hard cutoff, caller hears a wrap-up line then the call ends. Leave blank for unlimited.</span>
+                  </label>
+                  <input
+                    className="form-input"
+                    style={{ fontFamily: "var(--mono)", maxWidth: 160 }}
+                    type="number"
+                    min={30}
+                    max={7200}
+                    placeholder="unlimited"
+                    value={form.max_call_duration_s ?? ""}
+                    onChange={(e) =>
+                      setForm({ ...form, max_call_duration_s: e.target.value === "" ? null : Number(e.target.value) })
+                    }
+                  />
                 </div>
                 <div className="form-group">
                   <label className="form-label">

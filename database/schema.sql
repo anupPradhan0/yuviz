@@ -121,6 +121,17 @@ CREATE TABLE IF NOT EXISTS agents (
     -- NULL/empty = the LLM chooses its own wording, as before.
     farewell_message        TEXT,
     transfer_announcement   TEXT,
+    -- Admin-configured hard ceiling on how long a caller may stay on this
+    -- agent, in seconds. NULL = unlimited (the pre-existing behavior — a
+    -- call could run forever, bounded only by the caller/agent choosing to
+    -- end it). Enforced by services/conversation/pipeline.py: checked
+    -- per-turn (after STT, before the LLM call) against wall-clock time
+    -- since the call started; when exceeded, the pipeline skips the LLM,
+    -- speaks a fixed wrap-up line, and ends the call the same way
+    -- [[END_CALL]]/farewell_message do — see libs/config_sdk's
+    -- Policies.max_call_duration_s (already modeled there before this
+    -- column existed).
+    max_call_duration_s     INT CHECK (max_call_duration_s IS NULL OR max_call_duration_s BETWEEN 30 AND 7200),
     -- Reversible "temporarily stop routing calls to this agent" — distinct
     -- from deleted_at (soft-delete): an inactive agent's row/history/config
     -- stays fully intact and editable, it just resolves like an unavailable
@@ -153,6 +164,11 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS transfer_waiting_experience TEXT NOT
 DO $$ BEGIN
     ALTER TABLE agents ADD CONSTRAINT agents_transfer_waiting_experience_check
         CHECK (transfer_waiting_experience IN ('announcement_moh', 'announcement_silence'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS max_call_duration_s INT;
+DO $$ BEGIN
+    ALTER TABLE agents ADD CONSTRAINT agents_max_call_duration_s_check
+        CHECK (max_call_duration_s IS NULL OR max_call_duration_s BETWEEN 30 AND 7200);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ── tool_provider_configs — Tool Execution Framework, mirrors provider_configs ──

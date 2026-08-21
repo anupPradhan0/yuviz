@@ -127,6 +127,17 @@ def _build_end_call_instruction(condition: str | None, scripted: bool = False) -
 # would never hang up on its own, forcing the caller to disconnect manually.
 _FALLBACK_GOODBYE = "Goodbye."
 
+# Spoken when policies.max_call_duration_s is exceeded (see
+# PipelineConversationHandler.on_speech_ended's check, right after STT).
+# Fixed rather than per-agent configurable, same posture as
+# _FALLBACK_LLM_ERROR below — deliberately not agent.farewell_message,
+# since that line is written for a natural end-of-conversation goodbye and
+# would misleadingly imply the conversation just happened to finish, not
+# that a time limit cut it off.
+_MAX_DURATION_GOODBYE = (
+    "We're at the time limit for this call now. Thanks for calling — goodbye."
+)
+
 # Spoken when the LLM/tool-orchestrator stream raises (provider 5xx/429,
 # network error, a bridging bug) partway through a turn. Without this the
 # caller hears dead air for that whole turn — the exception was already
@@ -348,6 +359,19 @@ class PipelineConversationHandler:
             )
         ) if system_prompt else ""
         self._goodbye_grace_period_ms = runtime_config.policies.goodbye_grace_ms
+        # Admin-configured hard ceiling on call length (agents.max_call_
+        # duration_s) — None means unlimited, the pre-existing behavior.
+        # _call_started_at is this handler's own construction time, which
+        # is effectively "call start" (PipelineConversationHandler is built
+        # fresh per call — see servicer.py's handler_factory). Checked in
+        # on_speech_ended(), not via a separate timer task: turn boundaries
+        # already happen frequently enough in a real conversation (bounded
+        # by the gateway's own no_speech_timeout/max_utterance_timeout) for
+        # a per-turn check to catch the limit promptly, without adding a
+        # second concurrent trigger path into the servicer's single-
+        # generator Converse() loop.
+        self._max_call_duration_s = runtime_config.policies.max_call_duration_s
+        self._call_started_at = time.monotonic()
         # Escalation config for record_guardrail_violation() — see that
         # method. transfer_type defaults to "none" (the column default;
         # Policies dataclass mirrors it) when an operator sets
@@ -565,6 +589,48 @@ class PipelineConversationHandler:
             # satisfied, then frustrated again starts counting from 1
             # rather than accumulating across the whole call.
             self._guardrail_counter.reset(session_id)
+
+        # ── Max call duration ────────────────────────────────────────────────
+        # Checked here — after STT, so the caller's final utterance is still
+        # transcribed/recorded, but before the LLM call, so we never pay for
+        # (and then discard) a generated response. Skips the LLM entirely and
+        # speaks a fixed, deterministic wrap-up line — same "scripted, not
+        # LLM-judged" posture as farewell_message/[[END_CALL]], and reliable
+        # regardless of what the model would have said. See __init__ for why
+        # this is a per-turn check rather than a separate timer task.
+        if (
+            self._max_call_duration_s is not None
+            and (time.monotonic() - self._call_started_at) >= self._max_call_duration_s
+        ):
+            log.info(
+                "Max call duration (%ds) reached — ending call session=%s",
+                self._max_call_duration_s, session_id,
+            )
+            got_audio = False
+            async for chunk in self._synthesize_sentence_stream(_MAX_DURATION_GOODBYE, session_id):
+                got_audio = True
+                yield HandlerResponse(tts_payloads=[chunk])
+            if not got_audio:
+                # Synthesis failed outright — fall back so tts_started_sent
+                # still flips true on the gateway side (see servicer.py);
+                # otherwise EndCall below would be silently dropped, same
+                # reasoning as _FALLBACK_GOODBYE.
+                async for chunk in self._synthesize_sentence_stream(_FALLBACK_GOODBYE, session_id):
+                    yield HandlerResponse(tts_payloads=[chunk])
+            if self._transcripts is not None:
+                self._transcripts.record_turn(
+                    session_id, stt_result.text, stt_result.confidence,
+                    _MAX_DURATION_GOODBYE, False,
+                    latency=TurnLatency(
+                        stt_ms=stt_ms, stt_engine=type(self._stt).__name__,
+                        tts_engine=type(self._tts).__name__,
+                    ),
+                )
+            yield HandlerResponse(
+                end_call=True,
+                end_call_grace_period_ms=self._goodbye_grace_period_ms,
+            )
+            return
 
         # ── 2. LLM ─────────────────────────────────────────────────────────────
         history = self._get_history(session_id)

@@ -128,26 +128,29 @@ export function LocalVoicePicker({
           ))}
         </div>
       )}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-        {filtered.map(({ id: voiceId, label, gender, language }) => {
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {filtered.map(({ id: voiceId, label, gender, language, sampleUrl }) => {
           const isSelected = selectedVoice?.id === voiceId;
           const isCreating = creatingId === voiceId;
           return (
-            <button
-              key={voiceId}
-              type="button"
-              className={`btn btn-sm ${isSelected ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => handlePick(voiceId, language)}
-              disabled={isCreating}
-              title={`${voiceId} · ${language}`}
-            >
-              {isCreating ? "…" : (
-                <>
+            <div key={voiceId} className="kb-row">
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 500 }}>
                   <span style={{ marginRight: 4, opacity: 0.6 }}>{GENDER_BADGE[gender]}</span>
                   {label}
-                </>
-              )}
-            </button>
+                </div>
+                <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>{language}</div>
+              </div>
+              <audio controls src={sampleUrl} style={{ height: 30, maxWidth: 200 }} />
+              <button
+                type="button"
+                className={`btn btn-sm ${isSelected ? "btn-primary" : "btn-ghost"}`}
+                onClick={() => handlePick(voiceId, language)}
+                disabled={isCreating}
+              >
+                {isCreating ? "…" : isSelected ? "Selected" : "Select"}
+              </button>
+            </div>
           );
         })}
       </div>

@@ -74,6 +74,12 @@ class AgentUpdate(BaseModel):
     farewell_message:      str | None = None
     transfer_announcement: str | None = None
     status:               Literal["active", "inactive"] | None = None
+    # Admin-configured hard ceiling on call length, in seconds; None = no
+    # limit set (leaves the column NULL — unlimited, the pre-existing
+    # behavior). Bounds mirror the DB CHECK constraint (agents_max_call_
+    # duration_s_check) so a bad value is rejected at config time instead
+    # of failing the INSERT/UPDATE.
+    max_call_duration_s:  int | None = Field(default=None, ge=30, le=7200)
 
 
 class ProviderConfigCreate(BaseModel):

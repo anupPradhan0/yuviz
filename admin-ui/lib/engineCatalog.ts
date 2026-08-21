@@ -86,29 +86,35 @@ export interface VoiceOption {
   // guessed): Samantha/Alex are en-US, Karen is en-AU, Moira is en-IE,
   // Daniel is en-GB.
   language: string;
+  // Pre-rendered preview clip (see scripts/generate_voice_samples.py) —
+  // the macOS/Kokoro equivalent of ElevenLabs' preview_url. Static rather
+  // than synthesized on demand: unlike ElevenLabs' account-specific,
+  // unbounded voice list, this catalog is small and fixed, so there's no
+  // need for a live synthesis endpoint just to preview it.
+  sampleUrl: string;
 }
 
 export const VOICES_BY_ENGINE: Record<string, VoiceOption[] | null> = {
   macos: [
-    { id: "Samantha", label: "Samantha", gender: "female", language: "en-US" },
-    { id: "Karen",    label: "Karen",    gender: "female", language: "en-AU" },
-    { id: "Moira",    label: "Moira",    gender: "female", language: "en-IE" },
-    { id: "Alex",     label: "Alex",     gender: "male",   language: "en-US" },
-    { id: "Daniel",   label: "Daniel",   gender: "male",   language: "en-GB" },
+    { id: "Samantha", label: "Samantha", gender: "female", language: "en-US", sampleUrl: "/voice-samples/macos/Samantha.wav" },
+    { id: "Karen",    label: "Karen",    gender: "female", language: "en-AU", sampleUrl: "/voice-samples/macos/Karen.wav" },
+    { id: "Moira",    label: "Moira",    gender: "female", language: "en-IE", sampleUrl: "/voice-samples/macos/Moira.wav" },
+    { id: "Alex",     label: "Alex",     gender: "male",   language: "en-US", sampleUrl: "/voice-samples/macos/Alex.wav" },
+    { id: "Daniel",   label: "Daniel",   gender: "male",   language: "en-GB", sampleUrl: "/voice-samples/macos/Daniel.wav" },
   ],
   // af_/bf_ = American/British female, am_/bm_ = American/British male
   // (Kokoro's own naming convention) — full set of voices shipped with
   // the installed model, not just the original 5.
   kokoro: [
-    { id: "af_sarah",  label: "Sarah (US)",   gender: "female", language: "en-US" },
-    { id: "af_bella",  label: "Bella (US)",   gender: "female", language: "en-US" },
-    { id: "af_nicole", label: "Nicole (US)",  gender: "female", language: "en-US" },
-    { id: "bf_emma",   label: "Emma (UK)",    gender: "female", language: "en-GB" },
-    { id: "bf_isabella", label: "Isabella (UK)", gender: "female", language: "en-GB" },
-    { id: "am_adam",   label: "Adam (US)",    gender: "male",   language: "en-US" },
-    { id: "am_michael", label: "Michael (US)", gender: "male",  language: "en-US" },
-    { id: "bm_george", label: "George (UK)",  gender: "male",   language: "en-GB" },
-    { id: "bm_lewis",  label: "Lewis (UK)",   gender: "male",   language: "en-GB" },
+    { id: "af_sarah",  label: "Sarah (US)",   gender: "female", language: "en-US", sampleUrl: "/voice-samples/kokoro/af_sarah.wav" },
+    { id: "af_bella",  label: "Bella (US)",   gender: "female", language: "en-US", sampleUrl: "/voice-samples/kokoro/af_bella.wav" },
+    { id: "af_nicole", label: "Nicole (US)",  gender: "female", language: "en-US", sampleUrl: "/voice-samples/kokoro/af_nicole.wav" },
+    { id: "bf_emma",   label: "Emma (UK)",    gender: "female", language: "en-GB", sampleUrl: "/voice-samples/kokoro/bf_emma.wav" },
+    { id: "bf_isabella", label: "Isabella (UK)", gender: "female", language: "en-GB", sampleUrl: "/voice-samples/kokoro/bf_isabella.wav" },
+    { id: "am_adam",   label: "Adam (US)",    gender: "male",   language: "en-US", sampleUrl: "/voice-samples/kokoro/am_adam.wav" },
+    { id: "am_michael", label: "Michael (US)", gender: "male",  language: "en-US", sampleUrl: "/voice-samples/kokoro/am_michael.wav" },
+    { id: "bm_george", label: "George (UK)",  gender: "male",   language: "en-GB", sampleUrl: "/voice-samples/kokoro/bm_george.wav" },
+    { id: "bm_lewis",  label: "Lewis (UK)",   gender: "male",   language: "en-GB", sampleUrl: "/voice-samples/kokoro/bm_lewis.wav" },
   ],
   elevenlabs: null, // account-specific voice_id — never guessed, always free text
 };
