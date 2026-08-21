@@ -582,6 +582,42 @@ class TestUserEndpoints:
         resp = await client.patch(f"/users/{test_viewer['user']['id']}", json={"password": None})
         assert resp.status_code == 400
 
+    async def test_service_account_hidden_from_list_and_protected(self, client, pool):
+        row = await pool.fetchrow(
+            "INSERT INTO users (email, password_hash, role, is_service_account) "
+            "VALUES ($1, 'x', 'viewer', true) RETURNING *",
+            f"test-svc-{uuid.uuid4().hex[:8]}@internal.yuviz.ai",
+        )
+        svc_id = str(row["id"])
+        try:
+            resp = await client.get("/users")
+            assert svc_id not in [u["id"] for u in resp.json()]
+
+            resp = await client.patch(f"/users/{svc_id}", json={"role": "admin"})
+            assert resp.status_code == 400
+
+            resp = await client.delete(f"/users/{svc_id}")
+            assert resp.status_code == 400
+        finally:
+            await pool.execute("DELETE FROM users WHERE id = $1", svc_id)
+
+    async def test_service_account_backfill_is_case_insensitive(self, pool):
+        row = await pool.fetchrow(
+            "INSERT INTO users (email, password_hash, role, is_service_account) "
+            "VALUES ($1, 'x', 'viewer', false) RETURNING id",
+            f"Test-Mixed-Case-{uuid.uuid4().hex[:8]}@INTERNAL.yuviz.ai",
+        )
+        svc_id = row["id"]
+        try:
+            await pool.execute(
+                "UPDATE users SET is_service_account = true "
+                "WHERE lower(email) LIKE '%@internal.%' AND is_service_account = false",
+            )
+            flagged = await pool.fetchval("SELECT is_service_account FROM users WHERE id = $1", svc_id)
+            assert flagged is True
+        finally:
+            await pool.execute("DELETE FROM users WHERE id = $1", svc_id)
+
 
 class TestHealthEndpoint:
     async def test_health_check(self, client):

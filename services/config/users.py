@@ -44,13 +44,20 @@ async def get_user_by_id(user_id: Any) -> dict[str, Any] | None:
 
 
 async def list_users(*, tenant_id: Any | None, is_superadmin: bool) -> list[dict[str, Any]]:
+    # Service accounts (conversation-service@internal.yuviz.ai etc.) never
+    # appear here — see is_service_account's schema.sql comment for why:
+    # an admin soft-deleted one through this exact listing once already,
+    # breaking every live call until it was noticed. They're managed
+    # directly in Postgres, not through the Users UI.
     pool = await db.get_pool()
     if is_superadmin:
-        rows = await pool.fetch("SELECT * FROM users WHERE deleted_at IS NULL ORDER BY email")
+        rows = await pool.fetch(
+            "SELECT * FROM users WHERE deleted_at IS NULL AND NOT is_service_account ORDER BY email",
+        )
     else:
         rows = await pool.fetch(
             "SELECT * FROM users WHERE tenant_id IS NOT DISTINCT FROM $1 "
-            "AND role != 'superadmin' AND deleted_at IS NULL ORDER BY email",
+            "AND role != 'superadmin' AND deleted_at IS NULL AND NOT is_service_account ORDER BY email",
             tenant_id,
         )
     return [dict(row) for row in rows]
@@ -185,6 +192,11 @@ async def update_user(
             if old_row is None:
                 raise LookupError(f"user {user_id} not found")
             old = dict(old_row)
+            if old["is_service_account"]:
+                raise ValueError(
+                    "cannot update a service account through this endpoint — "
+                    "manage it directly in Postgres",
+                )
 
             columns = list(fields.keys())
             set_clause = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(columns))
@@ -261,6 +273,11 @@ async def soft_delete_user(
             if old_row is None:
                 raise LookupError(f"user {user_id} not found")
             old = dict(old_row)
+            if old["is_service_account"]:
+                raise ValueError(
+                    "cannot deactivate a service account — the platform depends on it "
+                    "staying active; manage it directly in Postgres if truly needed",
+                )
 
             await conn.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user_id)
             await audit.write_audit(
