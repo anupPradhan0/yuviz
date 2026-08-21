@@ -17,6 +17,20 @@ export interface EngineOption {
   label: string;
 }
 
+// The Voice card (agent detail page, new-agent page) only has a browsing
+// picker for these three — a provider on another real, backend-supported
+// TTS engine (e.g. "deepgram", assignable via the raw Provider Assignments
+// dropdown) has no catalog entry in LocalVoicePicker and no picker at all,
+// so it must fall back to the neutral engine chooser rather than being
+// cast/trusted blindly. Shared between both pages rather than duplicated —
+// unlike the per-page state (chosenEngine, form vs. local setters), this
+// logic is identical in both places.
+export type BrowsableTtsEngine = "macos" | "kokoro" | "elevenlabs";
+export const BROWSABLE_TTS_ENGINES: readonly BrowsableTtsEngine[] = ["macos", "kokoro", "elevenlabs"];
+export function asBrowsableTtsEngine(engine: string | undefined): BrowsableTtsEngine | null {
+  return BROWSABLE_TTS_ENGINES.includes(engine as BrowsableTtsEngine) ? (engine as BrowsableTtsEngine) : null;
+}
+
 export const ENGINES_BY_ROLE: Record<ProviderRole, EngineOption[]> = {
   stt: [
     { value: "faster_whisper", label: "FasterWhisper (local)" },

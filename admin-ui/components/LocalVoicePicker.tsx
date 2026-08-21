@@ -36,6 +36,7 @@ export function LocalVoicePicker({
   onChange,
   onProviderCreated,
   onLanguageDetected,
+  disabled = false,
 }: {
   engine: "macos" | "kokoro";
   tenantId: string;
@@ -44,6 +45,12 @@ export function LocalVoicePicker({
   onChange: (providerId: string) => void;
   onProviderCreated: (provider: ProviderConfig) => void;
   onLanguageDetected: (language: string) => void;
+  // Locks the whole picker (can't even expand it) — used once a voice
+  // choice has already been committed elsewhere and changing it here would
+  // silently do nothing (e.g. the new-agent flow post-creation, where
+  // picking a different voice would need a real PATCH this component
+  // doesn't know to send).
+  disabled?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [creatingId, setCreatingId] = useState<string | null>(null);
@@ -83,8 +90,9 @@ export function LocalVoicePicker({
       <button
         type="button"
         className="kb-row"
-        style={{ width: "100%", textAlign: "left", cursor: "pointer", background: "none", border: "1px solid var(--border-2)", borderRadius: "var(--rs)" }}
-        onClick={() => setExpanded(true)}
+        style={{ width: "100%", textAlign: "left", cursor: disabled ? "not-allowed" : "pointer", background: "none", border: "1px solid var(--border-2)", borderRadius: "var(--rs)", opacity: disabled ? 0.6 : 1 }}
+        onClick={() => !disabled && setExpanded(true)}
+        disabled={disabled}
       >
         {selectedVoice ? (
           <>
@@ -146,7 +154,7 @@ export function LocalVoicePicker({
                 type="button"
                 className={`btn btn-sm ${isSelected ? "btn-primary" : "btn-ghost"}`}
                 onClick={() => handlePick(voiceId, language)}
-                disabled={creatingId !== null}
+                disabled={creatingId !== null || disabled}
               >
                 {isCreating ? "…" : isSelected ? "Selected" : "Select"}
               </button>

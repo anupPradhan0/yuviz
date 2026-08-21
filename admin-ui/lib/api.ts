@@ -246,6 +246,9 @@ export interface AgentCreate {
   name: string;
   greeting?: string;
   system_prompt?: string;
+  stt_config_id?: string | null;
+  llm_config_id?: string | null;
+  tts_config_id?: string | null;
 }
 
 export interface AgentUpdate {

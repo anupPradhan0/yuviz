@@ -33,12 +33,16 @@ export function ElevenLabsVoicePicker({
   onProviderCreated,
   onVoicePicked,
   onLanguageDetected,
+  disabled = false,
 }: {
   tenantId: string;
   provider: ProviderConfig | null;
   onProviderCreated: (provider: ProviderConfig) => void;
   onVoicePicked: (provider: ProviderConfig) => void;
   onLanguageDetected: (language: string) => void;
+  // Locks the whole picker (can't connect, can't expand/reselect) — see
+  // LocalVoicePicker's disabled prop for why this exists.
+  disabled?: boolean;
 }) {
   const [apiKeyRef, setApiKeyRef] = useState("");
   const [connecting, setConnecting] = useState(false);
@@ -135,12 +139,13 @@ export function ElevenLabsVoicePicker({
               value={apiKeyRef}
               onChange={(e) => setApiKeyRef(e.target.value)}
               placeholder="env:ELEVENLABS_API_KEY"
+              disabled={disabled}
             />
             <button
               type="button"
               className="btn btn-primary btn-sm"
               onClick={handleConnect}
-              disabled={connecting || !apiKeyRef.trim()}
+              disabled={connecting || !apiKeyRef.trim() || disabled}
             >
               {connecting ? "Connecting…" : "Connect"}
             </button>
@@ -205,8 +210,9 @@ export function ElevenLabsVoicePicker({
       <button
         type="button"
         className="kb-row"
-        style={{ width: "100%", textAlign: "left", cursor: "pointer", background: "none", border: "1px solid var(--border-2)", borderRadius: "var(--rs)" }}
-        onClick={() => setExpanded(true)}
+        style={{ width: "100%", textAlign: "left", cursor: disabled ? "not-allowed" : "pointer", background: "none", border: "1px solid var(--border-2)", borderRadius: "var(--rs)", opacity: disabled ? 0.6 : 1 }}
+        onClick={() => !disabled && setExpanded(true)}
+        disabled={disabled}
       >
         {selectedVoice ? (
           <>
@@ -305,7 +311,7 @@ export function ElevenLabsVoicePicker({
                 type="button"
                 className={`btn btn-sm ${isSelected ? "btn-primary" : "btn-ghost"}`}
                 onClick={() => handlePick(v.voice_id, voicePrimaryLanguage(v))}
-                disabled={saving !== null}
+                disabled={saving !== null || disabled}
               >
                 {isSaving ? "…" : isSelected ? "Selected" : "Select"}
               </button>

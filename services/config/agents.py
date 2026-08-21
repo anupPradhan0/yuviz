@@ -10,6 +10,7 @@ exists for the Admin UI's edit-by-id flow, where the id is already known.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from . import audit, cache, db
@@ -66,6 +67,56 @@ async def list_agents(tenant_id: Any) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+_PROVIDER_ROLE_BY_FIELD = {
+    "stt_config_id": "stt", "llm_config_id": "llm", "tts_config_id": "tts",
+}
+
+# macos/kokoro/deepgram all fall back to a sensible default voice when
+# provider_configs.voice is unset (see ai_provider_manager.py's
+# _make_macos_tts/_make_kokoro_tts/_make_deepgram_tts) — only elevenlabs has
+# no safe fallback (cfg.voice or "" — an empty voice_id, which fails at
+# call time with an opaque ElevenLabs API error). Checked here instead, so
+# "connected but never picked a voice" is a clear save-time error.
+_TTS_ENGINES_REQUIRING_VOICE = {"elevenlabs"}
+
+
+async def _validate_provider_assignments(conn: Any, tenant_id: Any, fields: dict[str, Any]) -> None:
+    """FK existence alone lets stt_config_id point at another tenant's
+    provider, or at a real provider_configs row with the wrong role (e.g.
+    an llm engine assigned as tts_config_id) — either silently breaks the
+    agent at call time rather than at config time. Checked here instead of
+    relying on the caller, so both create_agent() and update_agent() get
+    the same guarantee."""
+    for field, expected_role in _PROVIDER_ROLE_BY_FIELD.items():
+        config_id = fields.get(field)
+        if config_id is None:
+            continue
+        # UUID-format check before the query: a malformed (non-UUID-shaped)
+        # string reaching asyncpg's parameter binding raises DataError, which
+        # is neither a ValueError nor a LookupError — app.py has no handler
+        # for it, so it would otherwise surface as a raw, undetailed 500
+        # instead of a clean 400. Same discipline as deps.py's
+        # validate_id_exists() for other id fields in request bodies.
+        try:
+            uuid.UUID(config_id)
+        except (ValueError, TypeError):
+            raise ValueError(f"{field}={config_id!r} is not a valid id")
+        row = await conn.fetchrow(
+            "SELECT tenant_id, role, engine, voice FROM provider_configs WHERE id = $1", config_id,
+        )
+        if row is None:
+            raise ValueError(f"{field}={config_id!r} does not exist")
+        if row["tenant_id"] != tenant_id:
+            raise ValueError(f"{field}={config_id!r} belongs to a different tenant")
+        if row["role"] != expected_role:
+            raise ValueError(f"{field}={config_id!r} has role {row['role']!r}, expected {expected_role!r}")
+        if row["engine"] in _TTS_ENGINES_REQUIRING_VOICE and not row["voice"]:
+            raise ValueError(
+                f"{field}={config_id!r} is a {row['engine']} provider with no voice selected — "
+                "pick a voice for it before assigning it to an agent"
+            )
+
+
 async def create_agent(
     *,
     tenant_id: Any,
@@ -73,6 +124,9 @@ async def create_agent(
     name: str,
     greeting: str = "",
     system_prompt: str = "",
+    stt_config_id: Any | None = None,
+    llm_config_id: Any | None = None,
+    tts_config_id: Any | None = None,
     tenant_slug: str | None = None,
     user_id: Any | None = None,
     user_email: str | None = None,
@@ -80,10 +134,17 @@ async def create_agent(
     pool = await db.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await _validate_provider_assignments(
+                conn, tenant_id,
+                {"stt_config_id": stt_config_id, "llm_config_id": llm_config_id, "tts_config_id": tts_config_id},
+            )
             row = await conn.fetchrow(
-                "INSERT INTO agents (tenant_id, slug, name, greeting, system_prompt) "
-                "VALUES ($1, $2, $3, $4, $5) RETURNING *",
+                "INSERT INTO agents "
+                "(tenant_id, slug, name, greeting, system_prompt, "
+                "stt_config_id, llm_config_id, tts_config_id) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *",
                 tenant_id, slug, name, greeting, system_prompt,
+                stt_config_id, llm_config_id, tts_config_id,
             )
             result = dict(row)
             await audit.write_audit(
@@ -144,6 +205,7 @@ async def update_agent(
             if old_row is None:
                 raise LookupError(f"agent {agent_id} not found under tenant {tenant_slug!r}")
             old = dict(old_row)
+            await _validate_provider_assignments(conn, old["tenant_id"], fields)
 
             columns = list(fields.keys())
             set_clause = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(columns))

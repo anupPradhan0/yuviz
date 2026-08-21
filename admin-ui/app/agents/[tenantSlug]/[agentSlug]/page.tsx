@@ -9,20 +9,9 @@ import { SipPanel } from "@/components/SipPanel";
 import { TestAgentPanel } from "@/components/TestAgentPanel";
 import { LocalVoicePicker } from "@/components/LocalVoicePicker";
 import { ElevenLabsVoicePicker } from "@/components/ElevenLabsVoicePicker";
-import { LANGUAGES, OTHER } from "@/lib/engineCatalog";
+import { LANGUAGES, OTHER, asBrowsableTtsEngine } from "@/lib/engineCatalog";
 
 type Tab = "overview" | "behaviour" | "escalation" | "sip" | "tools" | "knowledge-base";
-
-// The Voice card only has a picker for these three — a provider on another
-// real, backend-supported TTS engine (e.g. "deepgram", assignable via the
-// raw Provider Assignments dropdown further down this page) has no catalog
-// entry in LocalVoicePicker and no picker at all, so it must fall back to
-// the neutral engine chooser rather than being cast/trusted blindly.
-type BrowsableTtsEngine = "macos" | "kokoro" | "elevenlabs";
-const BROWSABLE_TTS_ENGINES: readonly BrowsableTtsEngine[] = ["macos", "kokoro", "elevenlabs"];
-function asBrowsableTtsEngine(engine: string | undefined): BrowsableTtsEngine | null {
-  return BROWSABLE_TTS_ENGINES.includes(engine as BrowsableTtsEngine) ? (engine as BrowsableTtsEngine) : null;
-}
 
 // Structured system-prompt editor — still writes to the single
 // agent.system_prompt TEXT field (no schema change), just gives Behaviour
@@ -705,8 +694,18 @@ export default function AgentDetailPage() {
                   <input
                     className="form-input"
                     style={{ fontFamily: "var(--mono)", width: 80 }}
+                    type="number"
+                    min={1}
+                    step={1}
                     value={form.escalation_threshold ?? ""}
-                    onChange={(e) => setForm({ ...form, escalation_threshold: e.target.value === "" ? null : Number(e.target.value) })}
+                    onChange={(e) => {
+                      if (e.target.value === "") {
+                        setForm({ ...form, escalation_threshold: null });
+                        return;
+                      }
+                      const v = Math.trunc(Number(e.target.value));
+                      if (Number.isFinite(v) && v >= 1) setForm({ ...form, escalation_threshold: v });
+                    }}
                   />
                 </div>
               </div>
