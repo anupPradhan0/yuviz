@@ -68,7 +68,7 @@ class TestVaultResolver:
             raise hvac.exceptions.Forbidden("permission denied")
 
         resolver = self._resolver_with_fake_read(fake_read)
-        with pytest.raises(ValueError, match="permission denied|VAULT_TOKEN"):
+        with pytest.raises(ValueError, match=r"permission denied|VAULT_TOKEN"):
             await resolver.resolve("vault:voiceai/providers/elevenlabs#api_key")
 
     async def test_vault_down_raises_value_error_not_unhandled(self):

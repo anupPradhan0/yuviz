@@ -57,6 +57,20 @@ _ATTR_RE = re.compile(r'(\w+)="([^"]*)"')
 _MARKDOWN_CHARS_RE = re.compile(r"[*_`#]")
 
 
+def strip_markdown_chars(text: str) -> str:
+    """Public wrapper around _MARKDOWN_CHARS_RE — DirectiveParser.parse()
+    only runs on the LLM-token path (see pipeline.py's _llm_to_tts); text
+    that reaches TTS a different way (agent.greeting, farewell_message,
+    transfer_announcement, the fixed fallback/filler strings) never passes
+    through it, and any markdown an admin typed into those fields would
+    reach TTS unstripped. pipeline.py's _synthesize_sentence_stream calls
+    this directly since it's the one shared boundary all of those paths
+    (plus the already-DirectiveParser-cleaned assistant_text) funnel
+    through — safe to call twice on already-clean text, since stripping is
+    idempotent."""
+    return _MARKDOWN_CHARS_RE.sub("", text)
+
+
 class TransferType(str, Enum):
     """
     Mirrors database/schema.sql's agents.transfer_type CHECK constraint
@@ -213,7 +227,7 @@ class DirectiveParser:
             return ""
 
         clean_text = _TAG_RE.sub(_record, text)
-        clean_text = _MARKDOWN_CHARS_RE.sub("", clean_text)
+        clean_text = strip_markdown_chars(clean_text)
         return DirectiveResult(clean_text=clean_text, directives=directives)
 
     @staticmethod

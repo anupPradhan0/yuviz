@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, ElevenLabsVoice, ProviderConfig, createProvider, listElevenLabsVoices, updateProvider } from "@/lib/api";
 import { ELEVENLABS_LANGUAGES } from "@/lib/engineCatalog";
 
@@ -59,11 +59,25 @@ export function ElevenLabsVoicePicker({
   // English").
   const [languageFilter, setLanguageFilter] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
+  // Tracks the latest `provider` prop for handleRefresh's staleness check
+  // below — a plain closure over `provider` can't do this: handleRefresh is
+  // re-created every render, so the closure it captures is always the same
+  // snapshot its own comparison would be checked against (always equal,
+  // never actually catching a stale response). A ref updated on every
+  // render is the only way to compare a pending request's provider id
+  // against whatever is *actually* current when it resolves.
+  const currentProviderId = useRef(provider?.id);
+  useEffect(() => {
+    currentProviderId.current = provider?.id;
+  }, [provider?.id]);
 
   useEffect(() => {
     if (!provider) return;
     const cached = voicesCache.get(provider.id);
     if (cached) {
+      // Cache hit: adopt the list without a fetch, so `loading` (which
+      // starts true) must be cleared here too — same "why" as the reset
+      // below, just for the branch that skips the fetch entirely.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setVoices(cached);
       setLoading(false);
@@ -97,16 +111,28 @@ export function ElevenLabsVoicePicker({
 
   const handleRefresh = () => {
     if (!provider) return;
-    voicesCache.delete(provider.id);
+    // Same stale-response guard as the effect above: if the Voice card
+    // switches to a different ElevenLabs provider while this refresh is in
+    // flight, its resolution must not clobber the new provider's state.
+    // Checked against currentProviderId.current (kept fresh every render),
+    // not the `provider` this closure captured — that value never changes
+    // within one call of handleRefresh, so comparing against it here would
+    // always be true and never actually catch a stale response.
+    const providerId = provider.id;
+    voicesCache.delete(providerId);
     setLoading(true);
     setError(null);
-    listElevenLabsVoices(provider.id)
+    listElevenLabsVoices(providerId)
       .then((v) => {
-        voicesCache.set(provider.id, v);
-        setVoices(v);
+        voicesCache.set(providerId, v);
+        if (providerId === currentProviderId.current) setVoices(v);
       })
-      .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)))
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        if (providerId === currentProviderId.current) setError(e instanceof ApiError ? e.detail : String(e));
+      })
+      .finally(() => {
+        if (providerId === currentProviderId.current) setLoading(false);
+      });
   };
 
   const handleConnect = async () => {
@@ -253,7 +279,7 @@ export function ElevenLabsVoicePicker({
         <select
           className="form-select"
           value={provider.language ?? ""}
-          disabled={savingLanguage}
+          disabled={savingLanguage || disabled}
           onChange={(e) => handleSynthesisLanguageChange(e.target.value)}
         >
           <option value="">Auto-detect from text (default)</option>

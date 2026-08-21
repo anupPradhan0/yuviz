@@ -145,7 +145,8 @@ export default function NewAgentPage() {
         tts_config_id: ttsConfigId,
       });
 
-      const language = languageChoice === "" ? null : languageChoice === OTHER ? customLanguage : languageChoice;
+      const language =
+        languageChoice === "" ? null : languageChoice === OTHER ? customLanguage.trim() || null : languageChoice;
       try {
         const final = await updateAgent(tenantSlug, created.id, {
           goodbye_grace_ms: goodbyeGraceMs,
@@ -699,8 +700,8 @@ export default function NewAgentPage() {
                           setEscalationThreshold(null);
                           return;
                         }
-                        const v = Math.trunc(Number(e.target.value));
-                        if (Number.isFinite(v) && v >= 1) setEscalationThreshold(v);
+                        const v = Number(e.target.value);
+                        if (Number.isInteger(v) && v >= 1) setEscalationThreshold(v);
                       }}
                       disabled={!!createdAgent}
                     />

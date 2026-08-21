@@ -32,6 +32,7 @@ from .directives import (
     StreamBuffer,
     TransferDirective,
     TransferRequest,
+    strip_markdown_chars,
 )
 from .guardrails import GuardrailCounter, GuardrailDetector
 from .metrics import IMetrics, NullMetrics
@@ -1133,6 +1134,12 @@ class PipelineConversationHandler:
         return text
 
     async def _synthesize_sentence_stream(self, text: str, session_id: str) -> AsyncGenerator[bytes, None]:
+        # The one shared boundary every text source reaches TTS through —
+        # the LLM-token path already ran DirectiveParser.parse() upstream,
+        # but greeting/farewell_message/transfer_announcement/fallback
+        # strings never do (see strip_markdown_chars' docstring), so this
+        # is where all of them get covered instead of at every call site.
+        text = strip_markdown_chars(text)
         # Forwards each chunk the TTS provider yields immediately — real
         # latency win only for a provider with genuine incremental
         # synthesis (Deepgram today); a no-genuine-streaming provider

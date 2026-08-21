@@ -151,7 +151,8 @@ export default function AgentDetailPage() {
     setSaveError(null);
     setSaved(false);
     try {
-      const language = languageChoice === "" ? null : languageChoice === OTHER ? customLanguage : languageChoice;
+      const language =
+        languageChoice === "" ? null : languageChoice === OTHER ? customLanguage.trim() || null : languageChoice;
       const updated = await updateAgent(tenantSlug, agent.id, { ...form, language });
       setAgent(updated);
       setSaved(true);
@@ -504,13 +505,13 @@ export default function AgentDetailPage() {
                           tenantId={agent.tenant_id}
                           provider={elevenLabsProvider}
                           onProviderCreated={(p) => {
-                            setProviders([...providers, p]);
-                            setForm({ ...form, tts_config_id: p.id });
+                            setProviders((prev) => [...prev, p]);
+                            setForm((prev) => ({ ...prev, tts_config_id: p.id }));
                             setChosenEngine(null);
                           }}
                           onVoicePicked={(updated) => {
-                            setProviders(providers.map((p) => (p.id === updated.id ? updated : p)));
-                            setForm({ ...form, tts_config_id: updated.id });
+                            setProviders((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+                            setForm((prev) => ({ ...prev, tts_config_id: updated.id }));
                             setChosenEngine(null);
                           }}
                           onLanguageDetected={applyDetectedLanguage}
@@ -528,10 +529,10 @@ export default function AgentDetailPage() {
                         providers={providers}
                         value={form.tts_config_id}
                         onChange={(id) => {
-                          setForm({ ...form, tts_config_id: id });
+                          setForm((prev) => ({ ...prev, tts_config_id: id }));
                           setChosenEngine(null);
                         }}
-                        onProviderCreated={(p) => setProviders([...providers, p])}
+                        onProviderCreated={(p) => setProviders((prev) => [...prev, p])}
                         onLanguageDetected={applyDetectedLanguage}
                       />
                       {changeEngineButton}
@@ -703,8 +704,8 @@ export default function AgentDetailPage() {
                         setForm({ ...form, escalation_threshold: null });
                         return;
                       }
-                      const v = Math.trunc(Number(e.target.value));
-                      if (Number.isFinite(v) && v >= 1) setForm({ ...form, escalation_threshold: v });
+                      const v = Number(e.target.value);
+                      if (Number.isInteger(v) && v >= 1) setForm({ ...form, escalation_threshold: v });
                     }}
                   />
                 </div>
