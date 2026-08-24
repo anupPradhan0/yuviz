@@ -308,6 +308,14 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
           <div className="form-group">
             <label className="form-label">
               Model {form.role === "embedding" && <span className="hint">leave unset to use the engine&apos;s default</span>}
+              {form.role === "stt" && form.engine === "faster_whisper" && (
+                <span className="hint">
+                  prefer a .en model (e.g. base.en) for English-only agents — the plain multilingual
+                  models (base, small, …) auto-detect language per utterance and can mis-hear unclear
+                  audio as a different language entirely, causing the agent to reply in the wrong
+                  language mid-call
+                </span>
+              )}
             </label>
             {modelOptions ? (
               <>

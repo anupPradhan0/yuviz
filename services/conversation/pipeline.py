@@ -103,6 +103,36 @@ def _build_current_date_context() -> str:
     )
 
 
+def _build_caller_number_context(caller_number: str) -> str:
+    """CalendarExecutor already defaults attendee_phone to the caller's
+    real ANI (request.context.caller_number) when the LLM doesn't supply
+    one explicitly — but the LLM itself never sees those digits anywhere
+    in its context, so it can only ever ask for a number from scratch, the
+    exact STT-mis-transcription risk this is meant to avoid (confirmed
+    live: a spoken-and-mis-heard digit got confirmed and booked wrong).
+    Pre-spaced digit-by-digit here, matching the digit-confirmation
+    guardrail's own formatting convention, both so the instruction reads
+    naturally and so the LLM's first exposure to "how to write this
+    number" is already in the safe, TTS-speaks-each-digit shape.
+
+    Empty caller_number (browser test calls, some SIP trunks that don't
+    pass ANI) returns "" — prompt is unchanged, agent falls back to
+    asking directly, today's existing behavior."""
+    if not caller_number:
+        return ""
+    spaced = " ".join(caller_number)
+    return (
+        f"\n\nThe caller's phone number from Caller ID is: {spaced}. Before "
+        "booking, state this number back to the caller one digit at a time "
+        "(never as a compound number) and ask if it's the best number to "
+        "reach them. If they confirm, use it as-is — you don't need to "
+        "repeat it in the tool call. If they say it's different or wrong, "
+        "ask them to say the correct number one digit at a time, including "
+        "country code, then read it back the same way to confirm before "
+        "you book anything."
+    )
+
+
 def _build_end_call_instruction(condition: str | None, scripted: bool = False) -> str:
     """scripted=True when the agent has a configured farewell_message: the
     LLM is told to emit only the token — pipeline.py speaks the scripted
@@ -354,6 +384,7 @@ class PipelineConversationHandler:
         self._system_prompt = (
             system_prompt
             + _build_current_date_context()
+            + _build_caller_number_context(self._caller_number)
             + _build_end_call_instruction(
                 runtime_config.conversation.end_call_prompt,
                 scripted=self._farewell_message is not None,
