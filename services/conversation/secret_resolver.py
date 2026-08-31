@@ -102,6 +102,21 @@ class VaultResolver:
         return data[field]
 
 
+class EncryptedResolver:
+    """ref = 'enc:<fernet-token>' -> the key an operator typed into the Admin
+    UI, encrypted by Config Service before it reached Postgres (see
+    libs/config_sdk/secrets.py).
+
+    The other three schemes point at a secret someone provisioned elsewhere;
+    this one carries it, sealed. It exists so adding a cloud provider is
+    picking a model and pasting a key, not an ops task."""
+
+    async def resolve(self, ref: str) -> str:
+        from libs.config_sdk.secrets import decrypt_secret
+
+        return decrypt_secret(ref)
+
+
 class CompositeSecretResolver:
     """Dispatches by ref prefix to the resolver that owns that scheme."""
 
@@ -109,6 +124,7 @@ class CompositeSecretResolver:
         self._env = EnvResolver()
         self._k8s = K8sFileResolver(k8s_mount_root)
         self._vault = VaultResolver(vault_mount_point)
+        self._enc = EncryptedResolver()
 
     async def resolve(self, ref: str) -> str:
         if ref.startswith("env:"):
@@ -117,4 +133,11 @@ class CompositeSecretResolver:
             return await self._k8s.resolve(ref)
         if ref.startswith("vault:"):
             return await self._vault.resolve(ref)
-        raise ValueError(f"unrecognized secret ref scheme (expected env:/k8s:/vault:): {ref!r}")
+        if ref.startswith("enc:"):
+            return await self._enc.resolve(ref)
+        # Never put `ref` in this message: the most likely reason to land
+        # here is someone pasting a raw API key into a reference field, and
+        # echoing it would copy the key into the logs (seen live 2026-08-28).
+        raise ValueError(
+            f"unrecognized secret ref scheme (expected env:/k8s:/vault:/enc:), got {ref.split(':')[0][:12]!r}"
+        )

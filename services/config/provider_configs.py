@@ -1,14 +1,66 @@
 """
 Provider config CRUD — same cache-aside + audited-mutation pattern.
 
-Returning api_key_ref to a caller is fine: it's a reference path
-('k8s:voiceai/deepgram-api-key'), never a resolved secret — the AI Provider
-Manager resolves it at provider-instantiation time via SecretResolver, not
-here. audit.write_audit() still redacts it in the history trail as defense
-in depth (see audit.py docstring).
+Returning api_key_ref to a caller is fine for the pointer schemes: it's a
+reference path ('k8s:voiceai/deepgram-api-key'), never a resolved secret —
+the AI Provider Manager resolves it at provider-instantiation time via
+SecretResolver, not here. audit.write_audit() still redacts it in the
+history trail as defense in depth (see audit.py docstring).
+
+An `enc:` ref is different — it CARRIES the credential rather than pointing
+at it (see libs/config_sdk/secrets.py). It is still returned on read, and
+deliberately so: Conversation Service reads this endpoint on a Redis miss
+and needs the sealed value to decrypt. What protects it is that Fernet
+ciphertext is useless without SECRET_ENCRYPTION_KEY, which never leaves the
+server. See the note above resolve_api_key_input() for when that should
+become real server-side masking instead.
 """
 
 from __future__ import annotations
+
+from libs.config_sdk.secrets import ENCRYPTED_PREFIX, encrypt_secret, is_encrypted
+
+# What the UI sees instead of a stored credential. Not the ciphertext
+# either: there is no reason for a browser to hold it.
+MASKED_SECRET = "__set__"
+
+_REFERENCE_SCHEMES = ("env:", "k8s:", "vault:")
+
+
+# ponytail: an `enc:` ref is returned as-is rather than masked server-side.
+# Fernet ciphertext is worthless without SECRET_ENCRYPTION_KEY, which never
+# leaves the server, so this is not a credential leak — and the alternative
+# (masking here) would break the Conversation Service, which reads this very
+# endpoint on a Redis miss and needs the sealed value to decrypt. The Admin
+# UI renders any enc: ref as "key saved" and never shows the blob (see
+# SecretRefInput.tsx). Mask server-side instead if the API ever gains a
+# consumer that is neither a browser nor that service — which needs
+# is_service_account on the JWT first.
+
+
+def resolve_api_key_input(api_key: str | None, api_key_ref: str | None) -> str | None:
+    """Turns whatever the UI sent into what belongs in the column.
+
+    `api_key` is a credential the operator typed — encrypted here, before
+    it can reach Postgres. `api_key_ref` is a pointer they typed, stored
+    verbatim. A raw key pasted into the ref field is rejected rather than
+    stored: that mistake put a live Gemini key in this column in plaintext
+    (2026-08-28), and the only feedback was a stack trace in a log nobody
+    was watching."""
+    if api_key:
+        return encrypt_secret(api_key.strip())
+    if api_key_ref is None or api_key_ref == MASKED_SECRET:
+        return None          # unchanged — the UI echoed the mask back
+    ref = api_key_ref.strip()
+    if not ref:
+        return ""            # explicit clear
+    if ref.startswith(_REFERENCE_SCHEMES) or ref.startswith(ENCRYPTED_PREFIX):
+        return ref
+    raise ValueError(
+        "api_key_ref must point at a secret (env:VAR_NAME, vault:path#field or "
+        "k8s:namespace/secret). To store the key itself, send it as `api_key` "
+        "and it will be encrypted — never paste a real key into this field."
+    )
 
 import logging
 from typing import Any
@@ -88,11 +140,15 @@ async def create_provider_config(
     language: str | None = None,
     region: str | None = None,
     api_key_ref: str | None = None,
+    api_key: str | None = None,
     extra: dict[str, Any] | None = None,
     user_id: Any | None = None,
     user_email: str | None = None,
 ) -> dict[str, Any]:
     import json as _json
+
+    # A typed key is encrypted here, before it can reach Postgres.
+    api_key_ref = resolve_api_key_input(api_key, api_key_ref)
 
     pool = await db.get_pool()
     async with pool.acquire() as conn:
@@ -125,6 +181,17 @@ async def update_provider_config(
     user_email: str | None = None,
     **fields: Any,
 ) -> dict[str, Any]:
+    # `api_key` is a credential, not a column: it never appears in
+    # _UPDATABLE_FIELDS, it is encrypted and folded into api_key_ref here.
+    # Popping it before the unknown-field check is what keeps that true.
+    typed_key = fields.pop("api_key", None)
+    if typed_key or "api_key_ref" in fields:
+        resolved = resolve_api_key_input(typed_key, fields.get("api_key_ref"))
+        if resolved is None:
+            fields.pop("api_key_ref", None)   # the UI echoed the mask back — leave it alone
+        else:
+            fields["api_key_ref"] = resolved
+
     if not fields:
         raise ValueError("update_provider_config() called with no fields to update")
     unknown = set(fields) - _UPDATABLE_FIELDS
