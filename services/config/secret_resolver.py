@@ -94,6 +94,16 @@ class VaultResolver:
         return data[field]
 
 
+class EncryptedResolver:
+    """ref = 'enc:<fernet-token>' -> the key an operator pasted into the Admin
+    UI. The other schemes point at a secret; this one carries it, sealed."""
+
+    async def resolve(self, ref: str) -> str:
+        from libs.config_sdk.secrets import decrypt_secret
+
+        return decrypt_secret(ref)
+
+
 class CompositeSecretResolver:
     """Dispatches by ref prefix to the resolver that owns that scheme."""
 
@@ -101,6 +111,7 @@ class CompositeSecretResolver:
         self._env = EnvResolver()
         self._k8s = K8sFileResolver(k8s_mount_root)
         self._vault = VaultResolver(vault_mount_point)
+        self._enc = EncryptedResolver()
 
     async def resolve(self, ref: str) -> str:
         if ref.startswith("env:"):
@@ -109,4 +120,11 @@ class CompositeSecretResolver:
             return await self._k8s.resolve(ref)
         if ref.startswith("vault:"):
             return await self._vault.resolve(ref)
-        raise ValueError(f"unrecognized secret ref scheme (expected env:/k8s:/vault:): {ref!r}")
+        if ref.startswith("enc:"):
+            return await self._enc.resolve(ref)
+        # Never log `ref` here — the likeliest cause is a raw API key pasted
+        # into the reference field, and echoing it leaks the key (2026-08-28).
+        raise ValueError(
+            f"unrecognized secret ref scheme (expected env:/k8s:/vault:/enc:), "
+            f"got {ref.split(':')[0][:12]!r}"
+        )

@@ -99,6 +99,9 @@ class ProviderConfigCreate(BaseModel):
     language:    str | None = None
     region:      str | None = None
     api_key_ref: str | None = None
+    # The credential itself, encrypted before it reaches Postgres and stored
+    # as an enc: api_key_ref. Never a column — see resolve_api_key_input().
+    api_key:     str | None = None
     extra:       dict[str, Any] | None = None
 
 
@@ -111,6 +114,7 @@ class ProviderConfigUpdate(BaseModel):
     language:    str | None = None
     region:      str | None = None
     api_key_ref: str | None = None
+    api_key:     str | None = None
 
 
 class TelephonyConfigCreate(BaseModel):

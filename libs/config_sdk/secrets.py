@@ -1,29 +1,14 @@
 """
 Provider credentials entered in the Admin UI, encrypted at rest.
 
-The other three secret schemes (env:/k8s:/vault:) point at a secret someone
-put somewhere else. That is right for a deployment with a secret manager,
-and wrong for the person who just wants to pick Gemini and paste their key:
-it makes adding a provider an ops task — edit .env, restart the container —
-for something the UI is already asking about.
+env:/k8s:/vault: point at a secret provisioned elsewhere, which makes adding
+a provider an ops task. `enc:` carries the credential instead: Config Service
+encrypts here before it reaches Postgres, Conversation Service decrypts at
+provider-construction time (secret_resolver.py's EncryptedResolver).
 
-`enc:` closes that gap. The Admin UI takes the real key, Config Service
-encrypts it here before it ever reaches Postgres, and Conversation Service
-decrypts it at provider-construction time (see services/conversation/
-secret_resolver.py's EncryptedResolver). What lands in the database is
-ciphertext, so a leaked row, backup or audit trail still yields nothing.
-
-One platform-level key does the work — SECRET_ENCRYPTION_KEY, generated
-once by deployment/sh/dev.sh alongside JWT_SECRET. That is one secret in
-the environment for the whole install, instead of one per provider.
-
-Deliberately Fernet from `cryptography` rather than anything hand-rolled:
-it is authenticated (AES-CBC + HMAC), versioned, and the one-line API is
-hard to hold wrong. Encrypting credentials is exactly the place not to be
-clever.
-
-Lives in config_sdk because both planes need the identical encoding — the
-same reason the workflow graph model lives here.
+Fernet rather than anything hand-rolled — authenticated and versioned, and
+this is exactly the place not to be clever. Lives in config_sdk because both
+planes need the identical encoding.
 """
 
 from __future__ import annotations
@@ -35,8 +20,7 @@ _ENV_VAR = "SECRET_ENCRYPTION_KEY"
 
 
 class SecretEncryptionUnavailable(RuntimeError):
-    """SECRET_ENCRYPTION_KEY is missing or malformed. Raised rather than
-    silently falling back to storing plaintext — a credential store that
+    """Raised rather than falling back to plaintext: a credential store that
     quietly stops encrypting is worse than one that refuses to start."""
 
 
@@ -83,8 +67,7 @@ def decrypt_secret(ref: str) -> str:
     except SecretEncryptionUnavailable:
         raise
     except Exception:
-        # Wrong key, or a row encrypted by a different install. Never echo
-        # the ciphertext into a log line.
+        # Wrong key, or a row from another install. Never echo the ciphertext.
         raise SecretEncryptionUnavailable(
             "stored API key could not be decrypted — SECRET_ENCRYPTION_KEY does not match "
             "the one it was saved with. Re-enter the key on the provider."

@@ -2,20 +2,11 @@
 
 import { useState } from "react";
 
-// Two different things wear the same shape here, and conflating them put a
-// live API key into the database in plaintext (2026-08-28):
-//
-//   the key    — "AIza..."          typed here, encrypted server-side,
-//                                   stored as enc:... (libs/config_sdk/secrets.py)
-//   a pointer  — "env:GEMINI_API_KEY" points at a secret provisioned elsewhere
-//
-// Pasting a key is what people actually do, so that is the default and it
-// now works. The pointer is behind a link for deployments with a secret
-// manager. Masked like a password either way, with a Show toggle — refs are
-// easy to typo and worth being able to check.
+// A key ("AIza...", encrypted server-side into enc:...) and a pointer
+// ("env:GEMINI_API_KEY") wear the same shape, and conflating them stored a
+// live key in plaintext (2026-08-28). Pasting a key is the default; the
+// pointer is behind a link for deployments with a secret manager.
 
-/** An api_key_ref the server has already sealed. The ciphertext is useless
- *  without the server's key, but there's no reason to put it on screen. */
 const isStored = (v: string) => v.startsWith("enc:");
 
 export function SecretRefInput({
@@ -30,9 +21,8 @@ export function SecretRefInput({
   disabled?: boolean;
 }) {
   const [visible, setVisible] = useState(false);
-  // A saved key stays hidden until the operator chooses to replace it —
-  // otherwise the only way to edit anything else on the provider is to
-  // retype the credential.
+  // A saved key stays hidden until Replace, so editing anything else on the
+  // provider doesn't mean retyping the credential.
   const [replacing, setReplacing] = useState(false);
   const [mode, setMode] = useState<"key" | "ref">(
     value && !isStored(value) ? "ref" : "key",
@@ -106,13 +96,13 @@ export function SecretRefInput({
   );
 }
 
-/** Which field the value belongs in when saving. A pointer goes to
- *  api_key_ref verbatim; anything else is a credential and goes to api_key,
- *  which the server encrypts. Keeps the "paste a key into the ref field"
- *  mistake impossible from this UI. */
+/** A pointer goes to api_key_ref verbatim; anything else is a credential and
+ *  goes to api_key for the server to encrypt. */
 export function secretPayload(value: string): { api_key_ref?: string; api_key?: string } {
   const v = value.trim();
-  if (!v) return {};
+  // Explicit clear, not "unchanged": after Replace the field is empty, and
+  // sending nothing would silently keep the credential it just cleared.
+  if (!v) return { api_key_ref: "" };
   if (/^(env|vault|k8s|enc):/.test(v)) return { api_key_ref: v };
   return { api_key: v };
 }

@@ -104,6 +104,8 @@ services:
       POSTGRES_DSN: ${POSTGRES_DSN}
       REDIS_URL: ${REDIS_URL}
       KNOWLEDGE_STORAGE_ROOT: /app/data/knowledge_documents
+      # Embedding providers resolve api_key_ref too (embedding_manager.py).
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${KNOWLEDGE_PORT:-8100}:8100"
     volumes:
