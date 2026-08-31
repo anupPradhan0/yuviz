@@ -94,7 +94,7 @@ async def _make_ollama(cfg: ProviderConfig, _api_key: str | None) -> Any:
     from .providers.llm.ollama import OllamaLLM
 
     return OllamaLLM(
-        model=cfg.model or "llama3.2",
+        model=_model_or_default(cfg, "llama3.2"),
         system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
         temperature=cfg.extra.get("temperature", 0.7),
         base_url=cfg.extra.get("base_url", "http://localhost:11434"),
@@ -119,6 +119,21 @@ async def _make_kokoro_tts(cfg: ProviderConfig, _api_key: str | None) -> Any:
         speed=voice_speed(cfg),
         lang_code=cfg.extra.get("lang_code", "a"),
     )
+
+
+def _model_or_default(cfg: ProviderConfig, default: str) -> str:
+    """provider_configs.model is nullable and the admin UI's model select
+    starts blank, so plenty of live rows run on whatever an engine's
+    fallback happens to be — changing one silently re-points all of them
+    (gpt-4o -> gpt-4o-mini here did exactly that). Log which model a row
+    actually ended up on so that is visible rather than inferred."""
+    if cfg.model:
+        return cfg.model
+    log.info(
+        "provider_config id=%s engine=%s: no model set — using engine default %s",
+        cfg.id, cfg.engine, default,
+    )
+    return default
 
 
 def _require_api_key(cfg: ProviderConfig, api_key: str | None) -> str:
@@ -149,7 +164,7 @@ async def _make_openai_llm(cfg: ProviderConfig, api_key: str | None) -> Any:
 
     return OpenAILLM(
         api_key=_require_api_key(cfg, api_key),
-        model=cfg.model or "gpt-4o-mini",
+        model=_model_or_default(cfg, "gpt-4o-mini"),
         system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
         temperature=cfg.extra.get("temperature", 0.7),
     )
@@ -163,7 +178,7 @@ async def _make_groq_llm(cfg: ProviderConfig, api_key: str | None) -> Any:
     # Groq-hosted model default. See openai.py's module docstring.
     return OpenAILLM(
         api_key=_require_api_key(cfg, api_key),
-        model=cfg.model or "llama-3.3-70b-versatile",
+        model=_model_or_default(cfg, "llama-3.3-70b-versatile"),
         base_url="https://api.groq.com/openai",
         system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
         temperature=cfg.extra.get("temperature", 0.7),
@@ -175,7 +190,7 @@ async def _make_gemini_llm(cfg: ProviderConfig, api_key: str | None) -> Any:
 
     return GeminiLLM(
         api_key=_require_api_key(cfg, api_key),
-        model=cfg.model or "gemini-flash-latest",
+        model=_model_or_default(cfg, "gemini-flash-latest"),
         system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
         temperature=cfg.extra.get("temperature", 0.7),
     )
@@ -188,10 +203,10 @@ async def _make_anthropic_llm(cfg: ProviderConfig, api_key: str | None) -> Any:
     # models stay an explicit opt-in.
     return AnthropicLLM(
         api_key=_require_api_key(cfg, api_key),
-        model=cfg.model or "claude-haiku-4-5",
+        model=_model_or_default(cfg, "claude-haiku-4-5"),
         system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
         temperature=cfg.extra.get("temperature", 0.7),
-        max_tokens=cfg.extra.get("max_tokens", 1024),
+        max_tokens=cfg.extra.get("max_tokens", 4096),
     )
 
 
@@ -202,7 +217,7 @@ async def _make_nvidia_llm(cfg: ProviderConfig, api_key: str | None) -> Any:
     # same as _make_groq_llm, not a new client.
     return OpenAILLM(
         api_key=_require_api_key(cfg, api_key),
-        model=cfg.model or "meta/llama-3.1-8b-instruct",
+        model=_model_or_default(cfg, "meta/llama-3.1-8b-instruct"),
         base_url="https://integrate.api.nvidia.com",
         system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
         temperature=cfg.extra.get("temperature", 0.7),
@@ -216,7 +231,7 @@ async def _make_cohere_llm(cfg: ProviderConfig, api_key: str | None) -> Any:
     # same models (streaming + tools documented) — again a base_url swap.
     return OpenAILLM(
         api_key=_require_api_key(cfg, api_key),
-        model=cfg.model or "command-r7b-12-2024",
+        model=_model_or_default(cfg, "command-r7b-12-2024"),
         base_url="https://api.cohere.ai/compatibility",
         system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
         temperature=cfg.extra.get("temperature", 0.7),

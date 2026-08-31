@@ -31,6 +31,19 @@ log = logging.getLogger(__name__)
 _DEFAULT_BASE_URL = "https://api.anthropic.com"
 _API_VERSION = "2023-06-01"
 
+# Claude 4.7-and-later removed the sampling parameters: sending temperature
+# to one of these is a 400, not a warning (haiku-4-5 and the 4.6 family
+# still accept it). The same generation also runs adaptive thinking when
+# `thinking` is omitted, which on a voice turn spends the token budget
+# reasoning instead of speaking. effort=low is the documented lever for
+# that, and unlike thinking={"type": "disabled"} it is accepted across the
+# whole family (Fable rejects "disabled" outright) and doesn't risk the
+# tool-call-leaks-into-visible-text failure mode that disabling it has.
+_EFFORT_MODELS = (
+    "claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-mythos-5",
+    "claude-opus-4-8", "claude-opus-4-7",
+)
+
 
 async def _raise_with_body_logged(resp: httpx.Response) -> None:
     """Same as openai.py/gemini.py's twin: raise_for_status() drops the body,
@@ -51,8 +64,9 @@ class AnthropicLLM:
                  sentence or two), "claude-sonnet-5", "claude-opus-5"
     system     — used only when the caller hasn't injected one, same
                  precedent as OllamaLLM.generate().
-    max_tokens — required by the API; also caps a runaway generation from
-                 holding the call open.
+    max_tokens — required by the API; a ceiling on a runaway generation,
+                 never a target. Thinking tokens draw from the same budget
+                 on the models that think, hence the headroom.
     """
 
     def __init__(
@@ -62,7 +76,7 @@ class AnthropicLLM:
         system:      str = "You are a helpful voice assistant. "
                           "Keep responses concise and natural for speech.",
         temperature: float = 0.7,
-        max_tokens:  int = 1024,
+        max_tokens:  int = 4096,
         base_url:    str = _DEFAULT_BASE_URL,
         timeout_s:   float = 30.0,
     ) -> None:
@@ -114,12 +128,15 @@ class AnthropicLLM:
     def _payload(self, messages: list[ChatMessage]) -> dict[str, Any]:
         system, shaped = self._shape_messages(messages)
         payload: dict[str, Any] = {
-            "model":       self._model,
-            "messages":    shaped,
-            "max_tokens":  self._max_tokens,
-            "temperature": self._temperature,
-            "stream":      True,
+            "model":      self._model,
+            "messages":   shaped,
+            "max_tokens": self._max_tokens,
+            "stream":     True,
         }
+        if self._model.startswith(_EFFORT_MODELS):
+            payload["output_config"] = {"effort": "low"}
+        else:
+            payload["temperature"] = self._temperature
         if system:
             payload["system"] = system
         return payload
@@ -133,11 +150,12 @@ class AnthropicLLM:
         except json.JSONDecodeError:
             log.warning("AnthropicLLM: malformed JSON line=%r", line)
             return None
-        # An overloaded_error arrives as a 200 SSE line, not an HTTP status,
-        # so without this the turn ends as unexplained dead air on a call.
+        # An overloaded_error arrives as a 200 SSE line, not an HTTP status.
+        # Raise rather than log-and-continue: swallowing it ends the turn in
+        # silence, while _llm_to_tts already catches and speaks a fallback
+        # line for any exception out of generate() (pipeline.py).
         if data.get("type") == "error":
-            log.error("AnthropicLLM: stream error event=%s", data.get("error"))
-            return None
+            raise RuntimeError(f"AnthropicLLM: stream error event={data.get('error')}")
         return data
 
     async def generate(self, messages: list[ChatMessage]) -> AsyncGenerator[str, None]:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 
 from services.conversation.providers.interfaces import ChatMessage
 from services.conversation.providers.llm.anthropic import AnthropicLLM
@@ -87,7 +88,7 @@ async def test_generate_sends_system_as_top_level_field_not_a_message():
 
     assert "voice assistant" in seen["system"]
     assert [m["role"] for m in seen["messages"]] == ["user"]
-    assert seen["max_tokens"] == 1024  # required by the API — omitting is a 400
+    assert seen["max_tokens"] == 4096  # required by the API — omitting is a 400
 
 
 async def test_generate_uses_caller_supplied_system_prompt():
@@ -122,8 +123,10 @@ async def test_generate_ignores_malformed_json_lines():
     assert tokens == ["ok"]
 
 
-async def test_generate_survives_mid_stream_error_event():
-    # An overloaded_error is a 200 SSE line, not an HTTP status.
+async def test_generate_raises_on_mid_stream_error_event():
+    # An overloaded_error is a 200 SSE line, not an HTTP status. It has to
+    # raise: _llm_to_tts catches and speaks a fallback line, whereas
+    # swallowing it ends the turn in silence.
     def handler(request: httpx.Request) -> httpx.Response:
         body = (
             b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n'
@@ -132,9 +135,12 @@ async def test_generate_survives_mid_stream_error_event():
         return httpx.Response(200, content=body)
 
     llm = _make_llm(handler)
-    tokens = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
+    tokens = []
+    with pytest.raises(RuntimeError, match="overloaded_error"):
+        async for tok in llm.generate([ChatMessage(role="user", content="hi")]):
+            tokens.append(tok)
 
-    assert tokens == ["hi"]
+    assert tokens == ["hi"]  # whatever arrived before the error still reached the caller
 
 
 SCHEMAS = [{
@@ -237,3 +243,32 @@ async def test_generate_with_tools_survives_malformed_tool_input():
     )]
 
     assert events[0].arguments == {}
+
+
+# Sampling params are a 400 on Claude 4.7-and-later, and the admin dropdown
+# offers two such models — so every catalogued id is checked, not just the
+# factory default that the rest of this file exercises.
+async def test_payload_matches_each_catalogued_model_capability():
+    cases = {
+        "claude-haiku-4-5": True,   # 4.5 still accepts temperature
+        "claude-sonnet-5":  False,
+        "claude-opus-5":    False,
+    }
+    for model, takes_temperature in cases.items():
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.update(json.loads(request.content))
+            return httpx.Response(200, content=_text_body("ok"))
+
+        llm = _make_llm(handler)
+        llm._model = model
+        _ = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
+
+        assert seen["model"] == model
+        assert ("temperature" in seen) is takes_temperature, model
+        # The thinking-capable models get effort=low instead: omitting it
+        # runs adaptive thinking, which spends the turn reasoning.
+        assert ("output_config" in seen) is not takes_temperature, model
+        if not takes_temperature:
+            assert seen["output_config"] == {"effort": "low"}

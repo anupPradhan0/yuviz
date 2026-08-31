@@ -65,8 +65,11 @@ export const MODELS_BY_ENGINE: Record<string, string[] | null> = {
   faster_whisper: ["small.en", "tiny.en", "base.en", "medium.en", "tiny", "base", "small", "medium", "large-v3"],
   deepgram: ["nova-3", "nova-2"],
   ollama: ["llama3.2", "llama3", "mistral", "phi3", "gemma2"],
-  // Cheapest-capable first below: the first entry is where the dropdown
-  // lands, and matches each engine's fallback in ai_provider_manager.py.
+  // Cheapest-capable first below, so the cheap option is the one a reader
+  // reaches for. It is NOT what the form submits by default — the model
+  // select starts blank ("— select a model —"), and a blank model means the
+  // backend engine default in ai_provider_manager.py applies instead. Those
+  // two agree everywhere except groq, whose backend fallback is the 70b.
   openai: ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"],
   anthropic: ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"],
   // Groq and NVIDIA host other vendors' models, hence publisher-namespaced ids.
