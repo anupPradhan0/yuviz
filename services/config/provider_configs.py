@@ -32,7 +32,7 @@ def resolve_api_key_input(api_key: str | None, api_key_ref: str | None) -> str |
     """Turns what the UI sent into what belongs in the column: a typed key is
     encrypted, a pointer is stored verbatim, and a raw key pasted into the
     pointer field is rejected — that mistake stored a live Gemini key in
-    plaintext (2026-08-28). None means no credential, i.e. a NULL column."""
+    plaintext. None means no credential, i.e. a NULL column."""
     if api_key:
         return encrypt_secret(api_key.strip())
     ref = (api_key_ref or "").strip()

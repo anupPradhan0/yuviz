@@ -123,7 +123,7 @@ class CompositeSecretResolver:
         if ref.startswith("enc:"):
             return await self._enc.resolve(ref)
         # Never log `ref` here — the likeliest cause is a raw API key pasted
-        # into the reference field, and echoing it leaks the key (2026-08-28).
+        # into the reference field, and echoing it leaks the key.
         raise ValueError(
             f"unrecognized secret ref scheme (expected env:/k8s:/vault:/enc:), "
             f"got {ref.split(':')[0][:12]!r}"

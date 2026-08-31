@@ -4,7 +4,7 @@ import { useState } from "react";
 
 // A key ("AIza...", encrypted server-side into enc:...) and a pointer
 // ("env:GEMINI_API_KEY") wear the same shape, and conflating them stored a
-// live key in plaintext (2026-08-28). Pasting a key is the default; the
+// live key in plaintext. Pasting a key is the default; the
 // pointer is behind a link for deployments with a secret manager.
 
 const isStored = (v: string) => v.startsWith("enc:");

@@ -44,7 +44,7 @@ def test_pointer_schemes_are_stored_verbatim(key):
 
 
 def test_a_raw_key_in_the_pointer_field_is_refused(key):
-    # The 2026-08-28 mistake: this used to be stored in plaintext.
+    # Raw keys in the pointer field must be refused instead of stored in plaintext.
     with pytest.raises(ValueError, match="must point at a secret"):
         resolve_api_key_input(None, "AIzaSyRAW")
 
