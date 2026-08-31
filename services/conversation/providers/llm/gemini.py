@@ -164,7 +164,12 @@ class GeminiLLM:
             payload["system_instruction"] = {"parts": [{"text": system_instruction}]}
 
         path = f"/v1beta/models/{self._model}:streamGenerateContent"
-        params = {"alt": "sse", "key": self._api_key}
+        # Key in the header, never the query string: httpx logs full URLs at
+        # INFO, so ?key=... prints the credential on every request — which
+        # put a live key in the container logs (2026-08-28) and undoes the
+        # encryption it is stored with. Google accepts either form.
+        params = {"alt": "sse"}
+        headers = {"x-goog-api-key": self._api_key}
 
         # Retry once, but only if the timeout hit before a single token came
         # back — found live 2026-08-02: Gemini's streamGenerateContent
@@ -175,7 +180,7 @@ class GeminiLLM:
         for attempt in range(2):
             yielded_any = False
             try:
-                async with self._client.stream("POST", path, params=params, json=payload) as resp:
+                async with self._client.stream("POST", path, params=params, headers=headers, json=payload) as resp:
                     await _raise_with_body_logged(resp)
                     async for line in resp.aiter_lines():
                         if not line.startswith("data: "):
@@ -221,7 +226,12 @@ class GeminiLLM:
             payload["system_instruction"] = {"parts": [{"text": system_instruction}]}
 
         path = f"/v1beta/models/{self._model}:streamGenerateContent"
-        params = {"alt": "sse", "key": self._api_key}
+        # Key in the header, never the query string: httpx logs full URLs at
+        # INFO, so ?key=... prints the credential on every request — which
+        # put a live key in the container logs (2026-08-28) and undoes the
+        # encryption it is stored with. Google accepts either form.
+        params = {"alt": "sse"}
+        headers = {"x-goog-api-key": self._api_key}
 
         # Same retry-once-if-nothing-yielded-yet posture as generate() —
         # see its comment for why this is only safe before any output
@@ -229,7 +239,7 @@ class GeminiLLM:
         for attempt in range(2):
             yielded_any = False
             try:
-                async with self._client.stream("POST", path, params=params, json=payload) as resp:
+                async with self._client.stream("POST", path, params=params, headers=headers, json=payload) as resp:
                     await _raise_with_body_logged(resp)
                     async for line in resp.aiter_lines():
                         if not line.startswith("data: "):
