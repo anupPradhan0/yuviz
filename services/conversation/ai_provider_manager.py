@@ -51,6 +51,13 @@ def voice_speed(cfg: "ProviderConfig") -> float:
     return VOICE_SPEED_DEFAULT
 
 
+# Fallback for every LLM factory below when extra has no "system" override.
+_VOICE_SYSTEM_PROMPT = (
+    "You are a helpful voice assistant. "
+    "Keep responses concise and natural for speech."
+)
+
+
 @dataclass(frozen=True)
 class ProviderConfig:
     """The subset of a provider_configs row AIProviderManager needs."""
@@ -87,11 +94,8 @@ async def _make_ollama(cfg: ProviderConfig, _api_key: str | None) -> Any:
     from .providers.llm.ollama import OllamaLLM
 
     return OllamaLLM(
-        model=cfg.model or "llama3.2",
-        system=cfg.extra.get(
-            "system",
-            "You are a helpful voice assistant. Keep responses concise and natural for speech.",
-        ),
+        model=_model_or_default(cfg, "llama3.2"),
+        system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
         temperature=cfg.extra.get("temperature", 0.7),
         base_url=cfg.extra.get("base_url", "http://localhost:11434"),
         timeout_s=cfg.extra.get("timeout_s", 30.0),
@@ -115,6 +119,21 @@ async def _make_kokoro_tts(cfg: ProviderConfig, _api_key: str | None) -> Any:
         speed=voice_speed(cfg),
         lang_code=cfg.extra.get("lang_code", "a"),
     )
+
+
+def _model_or_default(cfg: ProviderConfig, default: str) -> str:
+    """provider_configs.model is nullable and the admin UI's model select
+    starts blank, so plenty of live rows run on whatever an engine's
+    fallback happens to be — changing one silently re-points all of them
+    (gpt-4o -> gpt-4o-mini here did exactly that). Log which model a row
+    actually ended up on so that is visible rather than inferred."""
+    if cfg.model:
+        return cfg.model
+    log.info(
+        "provider_config id=%s engine=%s: no model set — using engine default %s",
+        cfg.id, cfg.engine, default,
+    )
+    return default
 
 
 def _require_api_key(cfg: ProviderConfig, api_key: str | None) -> str:
@@ -145,11 +164,8 @@ async def _make_openai_llm(cfg: ProviderConfig, api_key: str | None) -> Any:
 
     return OpenAILLM(
         api_key=_require_api_key(cfg, api_key),
-        model=cfg.model or "gpt-4o",
-        system=cfg.extra.get(
-            "system",
-            "You are a helpful voice assistant. Keep responses concise and natural for speech.",
-        ),
+        model=_model_or_default(cfg, "gpt-4o-mini"),
+        system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
         temperature=cfg.extra.get("temperature", 0.7),
     )
 
@@ -157,17 +173,14 @@ async def _make_openai_llm(cfg: ProviderConfig, api_key: str | None) -> Any:
 async def _make_groq_llm(cfg: ProviderConfig, api_key: str | None) -> Any:
     from .providers.llm.openai import OpenAILLM
 
-    # Groq's API is OpenAI-compatible (confirmed live 2026-07-24) — same
-    # class as _make_openai_llm, just pointed at Groq's endpoint with a
+    # Groq's API is OpenAI-compatible — same class as _make_openai_llm,
+    # just pointed at Groq's endpoint with a
     # Groq-hosted model default. See openai.py's module docstring.
     return OpenAILLM(
         api_key=_require_api_key(cfg, api_key),
-        model=cfg.model or "llama-3.3-70b-versatile",
+        model=_model_or_default(cfg, "llama-3.3-70b-versatile"),
         base_url="https://api.groq.com/openai",
-        system=cfg.extra.get(
-            "system",
-            "You are a helpful voice assistant. Keep responses concise and natural for speech.",
-        ),
+        system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
         temperature=cfg.extra.get("temperature", 0.7),
     )
 
@@ -177,11 +190,50 @@ async def _make_gemini_llm(cfg: ProviderConfig, api_key: str | None) -> Any:
 
     return GeminiLLM(
         api_key=_require_api_key(cfg, api_key),
-        model=cfg.model or "gemini-flash-latest",
-        system=cfg.extra.get(
-            "system",
-            "You are a helpful voice assistant. Keep responses concise and natural for speech.",
-        ),
+        model=_model_or_default(cfg, "gemini-flash-latest"),
+        system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
+        temperature=cfg.extra.get("temperature", 0.7),
+    )
+
+
+async def _make_anthropic_llm(cfg: ProviderConfig, api_key: str | None) -> Any:
+    from .providers.llm.anthropic import AnthropicLLM
+
+    # Haiku by default: a turn here is a sentence or two, so the pricier
+    # models stay an explicit opt-in.
+    return AnthropicLLM(
+        api_key=_require_api_key(cfg, api_key),
+        model=_model_or_default(cfg, "claude-haiku-4-5"),
+        system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
+        temperature=cfg.extra.get("temperature", 0.7),
+        max_tokens=cfg.extra.get("max_tokens", 4096),
+    )
+
+
+async def _make_nvidia_llm(cfg: ProviderConfig, api_key: str | None) -> Any:
+    from .providers.llm.openai import OpenAILLM
+
+    # NVIDIA's hosted NIM catalog is OpenAI-compatible — a base_url swap,
+    # same as _make_groq_llm, not a new client.
+    return OpenAILLM(
+        api_key=_require_api_key(cfg, api_key),
+        model=_model_or_default(cfg, "meta/llama-3.1-8b-instruct"),
+        base_url="https://integrate.api.nvidia.com",
+        system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
+        temperature=cfg.extra.get("temperature", 0.7),
+    )
+
+
+async def _make_cohere_llm(cfg: ProviderConfig, api_key: str | None) -> Any:
+    from .providers.llm.openai import OpenAILLM
+
+    # Cohere's Compatibility API is an OpenAI-shaped front door onto the
+    # same models (streaming + tools documented) — again a base_url swap.
+    return OpenAILLM(
+        api_key=_require_api_key(cfg, api_key),
+        model=_model_or_default(cfg, "command-r7b-12-2024"),
+        base_url="https://api.cohere.ai/compatibility",
+        system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
         temperature=cfg.extra.get("temperature", 0.7),
     )
 
@@ -219,6 +271,9 @@ _DEFAULT_REGISTRY: dict[tuple[str, str], ProviderFactory] = {
     ("llm", "openai"):         _make_openai_llm,
     ("llm", "gemini"):         _make_gemini_llm,
     ("llm", "groq"):           _make_groq_llm,
+    ("llm", "anthropic"):      _make_anthropic_llm,
+    ("llm", "nvidia"):         _make_nvidia_llm,
+    ("llm", "cohere"):         _make_cohere_llm,
     ("tts", "macos"):          _make_macos_tts,
     ("tts", "kokoro"):         _make_kokoro_tts,
     ("tts", "elevenlabs"):     _make_elevenlabs_tts,

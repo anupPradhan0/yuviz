@@ -39,7 +39,11 @@ export const ENGINES_BY_ROLE: Record<ProviderRole, EngineOption[]> = {
   llm: [
     { value: "ollama", label: "Ollama (local)" },
     { value: "openai", label: "OpenAI (cloud)" },
+    { value: "anthropic", label: "Anthropic Claude (cloud)" },
     { value: "gemini", label: "Gemini (cloud)" },
+    { value: "groq", label: "Groq (cloud)" },
+    { value: "nvidia", label: "NVIDIA NIM (cloud)" },
+    { value: "cohere", label: "Cohere (cloud)" },
   ],
   tts: [
     { value: "macos", label: "macOS say (local)" },
@@ -61,11 +65,20 @@ export const MODELS_BY_ENGINE: Record<string, string[] | null> = {
   faster_whisper: ["small.en", "tiny.en", "base.en", "medium.en", "tiny", "base", "small", "medium", "large-v3"],
   deepgram: ["nova-3", "nova-2"],
   ollama: ["llama3.2", "llama3", "mistral", "phi3", "gemma2"],
-  openai: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
-  // "-latest" aliases stay pointed at Google's current stable model as
-  // pinned versions are deprecated for new callers over time (confirmed
-  // live 2026-07-22: gemini-2.5-flash itself returned 404 "no longer
-  // available to new users" — the alias is the resilient default).
+  // Cheapest-capable first below, so the cheap option is the one a reader
+  // reaches for. It is NOT what the form submits by default — the model
+  // select starts blank ("— select a model —"), and a blank model means the
+  // backend engine default in ai_provider_manager.py applies instead. Those
+  // two agree everywhere except groq, whose backend fallback is the 70b.
+  openai: ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"],
+  anthropic: ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"],
+  // Groq and NVIDIA host other vendors' models, hence publisher-namespaced ids.
+  groq: ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
+  nvidia: ["meta/llama-3.1-8b-instruct", "meta/llama-3.3-70b-instruct", "mistralai/mistral-7b-instruct-v0.3"],
+  cohere: ["command-r7b-12-2024", "command-r-08-2024", "command-a-03-2025"],
+  // "-latest" aliases track Google's current stable model; pinned versions
+  // get deprecated for new callers (gemini-2.5-flash returned 404 "no longer
+  // available to new users"), so the alias is the resilient default.
   gemini: ["gemini-flash-latest", "gemini-pro-latest", "gemini-2.5-flash", "gemini-2.5-pro"],
 };
 

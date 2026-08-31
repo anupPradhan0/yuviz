@@ -2,8 +2,7 @@
 GeminiLLM tests use httpx.MockTransport — no real network call, no cost.
 See test_openai_llm.py's docstring for why cloud engines are tested this
 way; the mocked chunk shapes here match the real wire format captured
-live against the Gemini API on 2026-07-22 (see project history), not a
-guessed schema.
+live against the Gemini API, not a guessed schema.
 """
 
 from __future__ import annotations
@@ -42,7 +41,9 @@ def _make_llm(handler) -> GeminiLLM:
 
 async def test_generate_yields_streamed_tokens():
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.params["key"] == "test-key"
+        # Credential in a header, never the query string (see gemini.py).
+        assert request.headers["x-goog-api-key"] == "test-key"
+        assert "key" not in request.url.params
         return httpx.Response(200, content=_sse_body("Hello", " world"))
 
     llm = _make_llm(handler)
@@ -118,7 +119,7 @@ async def test_generate_ignores_malformed_json_lines():
 
 async def test_generate_ignores_chunks_with_no_candidates():
     # Real Gemini streams sometimes send a trailing chunk carrying only
-    # usageMetadata, no candidates — confirmed live 2026-07-22.
+    # usageMetadata, no candidates — confirmed against the real API.
     def handler(request: httpx.Request) -> httpx.Response:
         body = (
             b'data: {"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}\n'
@@ -201,7 +202,7 @@ async def test_generate_with_tools_shapes_tool_call_and_result_natively():
     }
 
 
-# --- Timeout retry: found live 2026-08-02 — Gemini's streamGenerateContent
+# --- Timeout retry: Gemini's streamGenerateContent
 # occasionally never sends a first byte, and the old 30s timeout left a
 # caller in dead air that long before any fallback spoke. generate()/
 # generate_with_tools() now retry once, but only if the timeout hit before
