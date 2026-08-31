@@ -173,8 +173,8 @@ async def _make_openai_llm(cfg: ProviderConfig, api_key: str | None) -> Any:
 async def _make_groq_llm(cfg: ProviderConfig, api_key: str | None) -> Any:
     from .providers.llm.openai import OpenAILLM
 
-    # Groq's API is OpenAI-compatible (confirmed live 2026-07-24) — same
-    # class as _make_openai_llm, just pointed at Groq's endpoint with a
+    # Groq's API is OpenAI-compatible — same class as _make_openai_llm,
+    # just pointed at Groq's endpoint with a
     # Groq-hosted model default. See openai.py's module docstring.
     return OpenAILLM(
         api_key=_require_api_key(cfg, api_key),

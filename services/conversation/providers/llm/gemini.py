@@ -11,8 +11,8 @@ class has to bridge, not push onto callers: (1) the system prompt is a
 top-level system_instruction field, never a "system"-role message inside
 contents; (2) the assistant's own role is named "model", not "assistant";
 (3) a functionCall part returned with tool-calling carries a sibling
-"thoughtSignature" field (Gemini's "thinking" models, confirmed live
-2026-07-23) that MUST be echoed back verbatim on that same functionCall
+"thoughtSignature" field (Gemini's "thinking" models) that MUST be
+echoed back verbatim on that same functionCall
 part when it's replayed into history for a later turn — omitting it is a
 hard 400 (INVALID_ARGUMENT: "missing a thought_signature"), not a
 degraded-quality warning. Carried end-to-end via ToolCallEvent/ChatMessage's
@@ -48,9 +48,9 @@ _DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com"
 async def _raise_with_body_logged(resp: httpx.Response) -> None:
     """httpx.Response.raise_for_status() never surfaces the response body,
     so a 4xx here otherwise reaches the caller as a bare 'Client error 400'
-    with no indication of which part of the payload Gemini rejected —
-    confirmed live 2026-07-24 when a real 400 on a late-conversation turn
-    (several retried tool calls deep) gave no actionable detail. Read the
+    with no indication of which part of the payload Gemini rejected — a
+    real 400 on a late-conversation turn (several retried tool calls deep)
+    gave no actionable detail. Read the
     body before raising so the next occurrence is diagnosable from the log
     alone."""
     if resp.is_success:
@@ -97,8 +97,8 @@ class GeminiLLM:
                           "Keep responses concise and natural for speech.",
         temperature: float = 0.7,
         base_url:    str = _DEFAULT_BASE_URL,
-        # 30s was found live 2026-08-02 to leave a caller sitting in dead
-        # air for a full 30 seconds before any fallback spoke — Gemini's
+        # 30s left a caller sitting in dead air for a full 30 seconds
+        # before any fallback spoke — Gemini's
         # streamGenerateContent endpoint occasionally never sends even its
         # first byte (httpx.ReadTimeout while still waiting on response
         # headers, not a slow-but-progressing stream). 10s cuts that wait
@@ -117,8 +117,8 @@ class GeminiLLM:
     def _shape_contents(self, messages: list[ChatMessage]) -> tuple[str | None, list[dict[str, Any]]]:
         """Bridges two Gemini-specific shapes build_chat_messages()'s generic
         output doesn't know about: a tool_calls-bearing assistant message
-        becomes a functionCall part (args, not "arguments" — confirmed live
-        2026-07-22), and a "tool"-role message becomes a functionResponse
+        becomes a functionCall part (args, not "arguments"), and a
+        "tool"-role message becomes a functionResponse
         part on a "user"-role turn — Gemini has no distinct tool role at
         all. functionResponse.response must be a JSON object, not a string,
         so a tool message's content (always a JSON string by convention —
@@ -165,13 +165,13 @@ class GeminiLLM:
 
         path = f"/v1beta/models/{self._model}:streamGenerateContent"
         # Key in the header, never the query string: httpx logs full URLs at
-        # INFO, so ?key=... put a live key in the container logs (2026-08-28).
+        # INFO, so ?key=... put a live key in the container logs.
         params = {"alt": "sse"}
         headers = {"x-goog-api-key": self._api_key}
 
         # Retry once, but only if the timeout hit before a single token came
-        # back — found live 2026-08-02: Gemini's streamGenerateContent
-        # occasionally never sends even its first byte. A retry after
+        # back — Gemini's streamGenerateContent occasionally never sends
+        # even its first byte. A retry after
         # tokens have already reached the caller/TTS would duplicate or
         # corrupt the turn, so it's only safe here, before anything's been
         # yielded yet.
@@ -225,7 +225,7 @@ class GeminiLLM:
 
         path = f"/v1beta/models/{self._model}:streamGenerateContent"
         # Key in the header, never the query string: httpx logs full URLs at
-        # INFO, so ?key=... put a live key in the container logs (2026-08-28).
+        # INFO, so ?key=... put a live key in the container logs.
         params = {"alt": "sse"}
         headers = {"x-goog-api-key": self._api_key}
 

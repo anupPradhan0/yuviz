@@ -76,10 +76,9 @@ export const MODELS_BY_ENGINE: Record<string, string[] | null> = {
   groq: ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
   nvidia: ["meta/llama-3.1-8b-instruct", "meta/llama-3.3-70b-instruct", "mistralai/mistral-7b-instruct-v0.3"],
   cohere: ["command-r7b-12-2024", "command-r-08-2024", "command-a-03-2025"],
-  // "-latest" aliases stay pointed at Google's current stable model as
-  // pinned versions are deprecated for new callers over time (confirmed
-  // live 2026-07-22: gemini-2.5-flash itself returned 404 "no longer
-  // available to new users" — the alias is the resilient default).
+  // "-latest" aliases track Google's current stable model; pinned versions
+  // get deprecated for new callers (gemini-2.5-flash returned 404 "no longer
+  // available to new users"), so the alias is the resilient default.
   gemini: ["gemini-flash-latest", "gemini-pro-latest", "gemini-2.5-flash", "gemini-2.5-pro"],
 };
 
