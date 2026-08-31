@@ -277,6 +277,48 @@ class TestCloudEngineRegistry:
         instance = await manager.get_tts(cfg)
         assert type(instance).__name__ == "ElevenLabsTTS"
 
+    async def test_get_llm_creates_anthropic_instance(self):
+        manager = AIProviderManager(FakeSecretResolver())
+        cfg = ProviderConfig(id="llm-3", role="llm", engine="anthropic", api_key_ref="k8s:x/anthropic")
+
+        instance = await manager.get_llm(cfg)
+        assert type(instance).__name__ == "AnthropicLLM"
+
+    # All three are OpenAILLM at a different base_url, so the endpoint is
+    # what's worth asserting — a class-name check would pass even if a
+    # factory sent Cohere's traffic to OpenAI.
+    async def test_openai_compatible_engines_get_their_own_base_url(self):
+        manager = AIProviderManager(FakeSecretResolver())
+        expected = {
+            "groq":   "https://api.groq.com/openai",
+            "nvidia": "https://integrate.api.nvidia.com",
+            "cohere": "https://api.cohere.ai/compatibility",
+            "openai": "https://api.openai.com",
+        }
+        for engine, base_url in expected.items():
+            cfg = ProviderConfig(
+                id=f"llm-{engine}", role="llm", engine=engine, api_key_ref=f"k8s:x/{engine}",
+            )
+            instance = await manager.get_llm(cfg)
+            assert type(instance).__name__ == "OpenAILLM"
+            assert str(instance._client.base_url).rstrip("/") == base_url
+
+    # Cheap-by-default is deliberate, not an accident of ordering.
+    async def test_llm_engines_default_to_their_cheap_model(self):
+        manager = AIProviderManager(FakeSecretResolver())
+        expected = {
+            "openai":    "gpt-4o-mini",
+            "anthropic": "claude-haiku-4-5",
+            "nvidia":    "meta/llama-3.1-8b-instruct",
+            "cohere":    "command-r7b-12-2024",
+        }
+        for engine, model in expected.items():
+            cfg = ProviderConfig(
+                id=f"cheap-{engine}", role="llm", engine=engine, api_key_ref=f"k8s:x/{engine}",
+            )  # no model set — the factory default is what's under test
+            instance = await manager.get_llm(cfg)
+            assert instance._model == model
+
     async def test_cloud_engine_without_api_key_ref_raises_value_error(self):
         manager = AIProviderManager(FakeSecretResolver())
         cfg = ProviderConfig(id="stt-3", role="stt", engine="deepgram")  # no api_key_ref

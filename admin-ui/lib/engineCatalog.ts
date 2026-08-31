@@ -39,7 +39,11 @@ export const ENGINES_BY_ROLE: Record<ProviderRole, EngineOption[]> = {
   llm: [
     { value: "ollama", label: "Ollama (local)" },
     { value: "openai", label: "OpenAI (cloud)" },
+    { value: "anthropic", label: "Anthropic Claude (cloud)" },
     { value: "gemini", label: "Gemini (cloud)" },
+    { value: "groq", label: "Groq (cloud)" },
+    { value: "nvidia", label: "NVIDIA NIM (cloud)" },
+    { value: "cohere", label: "Cohere (cloud)" },
   ],
   tts: [
     { value: "macos", label: "macOS say (local)" },
@@ -61,7 +65,14 @@ export const MODELS_BY_ENGINE: Record<string, string[] | null> = {
   faster_whisper: ["small.en", "tiny.en", "base.en", "medium.en", "tiny", "base", "small", "medium", "large-v3"],
   deepgram: ["nova-3", "nova-2"],
   ollama: ["llama3.2", "llama3", "mistral", "phi3", "gemma2"],
-  openai: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
+  // Cheapest-capable first below: the first entry is where the dropdown
+  // lands, and matches each engine's fallback in ai_provider_manager.py.
+  openai: ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"],
+  anthropic: ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"],
+  // Groq and NVIDIA host other vendors' models, hence publisher-namespaced ids.
+  groq: ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
+  nvidia: ["meta/llama-3.1-8b-instruct", "meta/llama-3.3-70b-instruct", "mistralai/mistral-7b-instruct-v0.3"],
+  cohere: ["command-r7b-12-2024", "command-r-08-2024", "command-a-03-2025"],
   // "-latest" aliases stay pointed at Google's current stable model as
   // pinned versions are deprecated for new callers over time (confirmed
   // live 2026-07-22: gemini-2.5-flash itself returned 404 "no longer

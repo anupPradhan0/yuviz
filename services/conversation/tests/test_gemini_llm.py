@@ -42,10 +42,7 @@ def _make_llm(handler) -> GeminiLLM:
 
 async def test_generate_yields_streamed_tokens():
     def handler(request: httpx.Request) -> httpx.Response:
-        # The credential rides in a header, never the query string: httpx
-        # logs full URLs at INFO, so ?key=... prints the key on every
-        # request (a live key reached the container logs this way,
-        # 2026-08-28).
+        # Credential in a header, never the query string (see gemini.py).
         assert request.headers["x-goog-api-key"] == "test-key"
         assert "key" not in request.url.params
         return httpx.Response(200, content=_sse_body("Hello", " world"))

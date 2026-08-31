@@ -22,8 +22,8 @@ build_chat_messages() still owns the "does the caller already have a
 system message" precedence decision — this class only re-shapes its
 output for Gemini's wire format afterward.
 
-Auth is a "key" query parameter, not an Authorization header — confirmed
-against the real API (see project history, 2026-07-22 live measurement).
+Auth is the x-goog-api-key header — never the "key" query parameter, which
+httpx logs at INFO (see generate()).
 
 pip install httpx (already a dependency via OllamaLLM)
 """
@@ -165,9 +165,7 @@ class GeminiLLM:
 
         path = f"/v1beta/models/{self._model}:streamGenerateContent"
         # Key in the header, never the query string: httpx logs full URLs at
-        # INFO, so ?key=... prints the credential on every request — which
-        # put a live key in the container logs (2026-08-28) and undoes the
-        # encryption it is stored with. Google accepts either form.
+        # INFO, so ?key=... put a live key in the container logs (2026-08-28).
         params = {"alt": "sse"}
         headers = {"x-goog-api-key": self._api_key}
 
@@ -227,9 +225,7 @@ class GeminiLLM:
 
         path = f"/v1beta/models/{self._model}:streamGenerateContent"
         # Key in the header, never the query string: httpx logs full URLs at
-        # INFO, so ?key=... prints the credential on every request — which
-        # put a live key in the container logs (2026-08-28) and undoes the
-        # encryption it is stored with. Google accepts either form.
+        # INFO, so ?key=... put a live key in the container logs (2026-08-28).
         params = {"alt": "sse"}
         headers = {"x-goog-api-key": self._api_key}
 
