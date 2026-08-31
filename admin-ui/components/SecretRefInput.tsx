@@ -78,13 +78,13 @@ export function SecretRefInput({
             Paste the key from your provider. It&apos;s encrypted before it&apos;s stored, and
             never shown again.{" "}
             <button type="button" className="wf-linkish" onClick={() => { setMode("ref"); onChange(""); }}>
-              Use a secret manager instead
+              Use an environment variable instead
             </button>
           </>
         ) : (
           <>
-            Point at a secret provisioned elsewhere — <code>env:VAR_NAME</code>,{" "}
-            <code>vault:path#field</code> or <code>k8s:namespace/secret</code>. The variable has to
+            Point at a secret provisioned elsewhere — <code>env:VAR_NAME</code>{" "}
+            or <code>k8s:namespace/secret</code>. The variable has to
             be set on the conversation service.{" "}
             <button type="button" className="wf-linkish" onClick={() => { setMode("key"); onChange(""); }}>
               Paste the key instead
@@ -103,6 +103,6 @@ export function secretPayload(value: string): { api_key_ref?: string; api_key?: 
   // Explicit clear, not "unchanged": after Replace the field is empty, and
   // sending nothing would silently keep the credential it just cleared.
   if (!v) return { api_key_ref: "" };
-  if (/^(env|vault|k8s|enc):/.test(v)) return { api_key_ref: v };
+  if (/^(env|k8s|enc):/.test(v)) return { api_key_ref: v };
   return { api_key: v };
 }

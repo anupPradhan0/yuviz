@@ -78,5 +78,5 @@ def test_empty_secrets_are_refused(key):
 
 def test_is_encrypted_only_claims_its_own_scheme():
     assert is_encrypted("enc:abc")
-    for other in ("env:GEMINI_API_KEY", "vault:p#f", "k8s:ns/s", "AIzaSyRAW", "", None):
+    for other in ("env:GEMINI_API_KEY", "k8s:ns/s", "AIzaSyRAW", "", None):
         assert not is_encrypted(other)

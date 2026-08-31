@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import hvac.exceptions
 import pytest
-import requests
 
-from ..secret_resolver import CompositeSecretResolver, EnvResolver, K8sFileResolver, VaultResolver
+from ..secret_resolver import CompositeSecretResolver, EnvResolver, K8sFileResolver
 
 
 class TestEnvResolver:
@@ -34,66 +32,6 @@ class TestK8sFileResolver:
         resolver = K8sFileResolver(mount_root=str(tmp_path))
         with pytest.raises(KeyError):
             await resolver.resolve("k8s:voiceai/does-not-exist")
-
-
-class TestVaultResolver:
-    """VaultResolver.resolve() previously only caught hvac.exceptions.
-    InvalidPath — a bad/expired VAULT_TOKEN (Forbidden), a sealed Vault
-    (VaultDown), or an unreachable host (requests.ConnectionError) all
-    reached the caller as an unhandled exception (a bare 500 with no
-    detail at the HTTP layer). Confirmed live once already this session:
-    a process running without VAULT_TOKEN hit exactly the Forbidden case
-    and silently fell back to legacy config elsewhere in the stack."""
-
-    def _resolver_with_fake_read(self, fake_read):
-        resolver = VaultResolver()
-        resolver._client.secrets.kv.v2.read_secret_version = fake_read
-        return resolver
-
-    async def test_malformed_ref_raises_value_error(self):
-        resolver = VaultResolver()
-        with pytest.raises(ValueError):
-            await resolver.resolve("vault:no-hash-field")
-
-    async def test_invalid_path_raises_key_error(self):
-        def fake_read(**kwargs):
-            raise hvac.exceptions.InvalidPath("no secret here")
-
-        resolver = self._resolver_with_fake_read(fake_read)
-        with pytest.raises(KeyError):
-            await resolver.resolve("vault:voiceai/nope#api_key")
-
-    async def test_forbidden_raises_value_error_not_unhandled(self):
-        def fake_read(**kwargs):
-            raise hvac.exceptions.Forbidden("permission denied")
-
-        resolver = self._resolver_with_fake_read(fake_read)
-        with pytest.raises(ValueError, match=r"permission denied|VAULT_TOKEN"):
-            await resolver.resolve("vault:voiceai/providers/elevenlabs#api_key")
-
-    async def test_vault_down_raises_value_error_not_unhandled(self):
-        def fake_read(**kwargs):
-            raise hvac.exceptions.VaultDown("vault is sealed")
-
-        resolver = self._resolver_with_fake_read(fake_read)
-        with pytest.raises(ValueError):
-            await resolver.resolve("vault:voiceai/providers/elevenlabs#api_key")
-
-    async def test_connection_error_raises_value_error_not_unhandled(self):
-        def fake_read(**kwargs):
-            raise requests.exceptions.ConnectionError("could not connect")
-
-        resolver = self._resolver_with_fake_read(fake_read)
-        with pytest.raises(ValueError):
-            await resolver.resolve("vault:voiceai/providers/elevenlabs#api_key")
-
-    async def test_field_missing_from_secret_raises_key_error(self):
-        def fake_read(**kwargs):
-            return {"data": {"data": {"other_field": "x"}}}
-
-        resolver = self._resolver_with_fake_read(fake_read)
-        with pytest.raises(KeyError):
-            await resolver.resolve("vault:voiceai/providers/elevenlabs#api_key")
 
 
 class TestCompositeSecretResolver:

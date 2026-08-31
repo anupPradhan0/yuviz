@@ -39,7 +39,7 @@ def test_a_typed_key_is_encrypted_not_stored_raw(key):
 
 
 def test_pointer_schemes_are_stored_verbatim(key):
-    for ref in ("env:GEMINI_API_KEY", "k8s:ns/secret", "vault:path#field", "enc:abc"):
+    for ref in ("env:GEMINI_API_KEY", "k8s:ns/secret", "enc:abc"):
         assert resolve_api_key_input(None, ref) == ref
 
 

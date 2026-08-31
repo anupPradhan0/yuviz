@@ -21,7 +21,7 @@ from .secret_resolver import SecretResolver
 
 log = logging.getLogger(__name__)
 
-_SECRET_SCHEMES = ("env:", "k8s:", "vault:", ENCRYPTED_PREFIX)
+_SECRET_SCHEMES = ("env:", "k8s:", ENCRYPTED_PREFIX)
 
 
 # ponytail: an enc: ref is returned unmasked. Fernet ciphertext is worthless
@@ -41,7 +41,7 @@ def resolve_api_key_input(api_key: str | None, api_key_ref: str | None) -> str |
     if ref.startswith(_SECRET_SCHEMES):
         return ref
     raise ValueError(
-        "api_key_ref must point at a secret (env:VAR_NAME, vault:path#field or "
+        "api_key_ref must point at a secret (env:VAR_NAME or "
         "k8s:namespace/secret). To store the key itself, send it as `api_key` "
         "and it will be encrypted — never paste a real key into this field."
     )

@@ -1,7 +1,7 @@
 """
 Provider credentials entered in the Admin UI, encrypted at rest.
 
-env:/k8s:/vault: point at a secret provisioned elsewhere, which makes adding
+env:/k8s: point at a secret provisioned elsewhere, which makes adding
 a provider an ops task. `enc:` carries the credential instead: Config Service
 encrypts here before it reaches Postgres, Conversation Service decrypts at
 provider-construction time (secret_resolver.py's EncryptedResolver).
