@@ -76,6 +76,16 @@ def _build_tts(cfg: PipelineConfig):
     return MacOSTTS(voice=cfg.tts.voice, speed=cfg.tts.macos_wpm)
 
 
+def _enabled(leg: str) -> bool:
+    """VOICEAI_ENABLE_STT / VOICEAI_ENABLE_TTS, set by deployment/sh/dev.sh's
+    --no-stt / --no-tts. Off means "don't spend startup on this leg" — the
+    models are hundreds of MB and are fetched the first time they're
+    touched, so warming them here is precisely what those flags exist to
+    avoid. Absent or anything but "0" means on: a real deployment sets
+    neither and behaves exactly as it always has."""
+    return os.environ.get(f"VOICEAI_ENABLE_{leg}", "1") != "0"
+
+
 async def _prewarm_agents(
     http_config_repo: HttpConfigRepository,
     provider_registry: ProviderRegistry,
@@ -118,6 +128,20 @@ async def _prewarm_agents(
                 continue
             agent_slug = agent.get("slug")
             if not agent_slug:
+                continue
+            if not _enabled("STT") or not _enabled("TTS"):
+                # Either flag is enough to skip the whole prewarm, because
+                # resolve_handler_deps() below builds all three providers
+                # together and that is where the cost lives:
+                # _make_faster_whisper() awaits inst.load(), and KokoroTTS's
+                # constructor builds a KPipeline. There is no way to resolve
+                # one leg without paying for the other, so an "and" here
+                # made --no-stt on its own do nothing except move whisper's
+                # download from dev.sh into container startup. Whatever is
+                # still enabled loads lazily on its first real use, exactly
+                # as it did before prewarm existed.
+                log.info("prewarm: tenant=%s agent=%s skipped (stt=%s tts=%s)",
+                         tenant_slug, agent_slug, _enabled("STT"), _enabled("TTS"))
                 continue
             try:
                 resolved = await resolve_handler_deps(tenant_slug, agent_slug, provider_registry, config)

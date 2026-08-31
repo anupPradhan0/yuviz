@@ -132,6 +132,10 @@ services:
       VOICEAI_TTS_ENGINE: kokoro
       VOICEAI_TTS_VOICE: af_sarah
       VOICEAI_STT_MODEL: ${VOICEAI_STT_MODEL:-small.en}
+      # dev.sh --no-stt / --no-tts. Off keeps the model out of startup (see
+      # _prewarm_agents); default on, so a normal run is unchanged.
+      VOICEAI_ENABLE_STT: ${VOICEAI_ENABLE_STT:-1}
+      VOICEAI_ENABLE_TTS: ${VOICEAI_ENABLE_TTS:-1}
       VOICEAI_LLM_URL: ${OLLAMA_BASE_URL}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${CONVERSATION_PORT:-50051}:50051"

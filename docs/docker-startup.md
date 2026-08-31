@@ -32,6 +32,9 @@ Select the `default` agent → click **Test Agent** → allow microphone → tal
 First run takes **10–30 minutes** (image build + ~3 GB of models).
 Every run after that takes **~75 seconds**.
 
+Short on CPU or disk? `--no-llm`, `--no-stt` and `--no-tts` leave out any of
+the local models — see [Turning off LLM, STT or TTS](#turning-off-llm-stt-or-tts).
+
 ---
 
 ## 2. Requirements
@@ -47,6 +50,11 @@ Every run after that takes **~75 seconds**.
 The stack idles at **~4.9 GB RAM**. `dev.sh` refuses to start below **16 GB
 free disk** rather than failing halfway through a download — the images and
 models come to ~15.6 GB (see §4).
+
+These are the figures for the full stack. The three local models are most of
+it, and any of them can be left out — see
+[Turning off LLM, STT or TTS](#turning-off-llm-stt-or-tts). `--no-llm` alone
+drops ~8.3 GB of disk and the bulk of the CPU load.
 
 No GPU is needed. In the default containerized mode everything runs on CPU,
 including a CPU-only build of PyTorch, and a host GPU is not used even when
@@ -215,7 +223,8 @@ proxy that restricts who can reach these ports.
 `dev.sh` checks the ports compose will publish, reading any `*_PORT` overrides
 from `deployment/.env`. In the default containerized mode that is all eight;
 with `USE_HOST_OLLAMA=1` it checks the seven compose ports and instead verifies
-that a host Ollama is answering on 11434.
+that a host Ollama is answering on 11434. With `--no-llm` nothing binds 11434,
+so that port is neither checked nor published.
 
 ---
 
@@ -234,7 +243,10 @@ that a host Ollama is answering on 11434.
 | Volume `knowledge-docs` (uploads) | 0 B until used |
 | **Total** | **≈ 15.6 GB** |
 
-This is why `dev.sh` gates on 16 GB free.
+This is why `dev.sh` gates on 16 GB free. `--no-llm` skips both the Ollama
+image and its model volume (~8.3 GB together); `--no-stt` / `--no-tts` skip
+their share of `hf-cache`. The gate itself doesn't move — it is checked before
+the flags could help — but the download does.
 
 Docker also accumulates **build cache** (tens of GB over time). Reclaim it with
 `docker builder prune` — the next build is slower but nothing is lost.
@@ -252,7 +264,7 @@ Seven phases, each labelled so the script never looks hung:
 [1/7] Checking Docker...      versions, RAM, free disk, port conflicts
 [2/7] Creating .env...        generates secrets, backfills new keys
 [3/7] Building containers...  docker compose up -d --build
-[4/7] Downloading models...   llama3.2, whisper, kokoro (skips cached)
+[4/7] Downloading models...   llama3.2, whisper, kokoro (skips cached/disabled)
 [5/7] Waiting for services... polls each healthcheck
 [6/7] Running verification... proves STT, LLM and TTS actually work
 [7/7] Ready!                  prints the URL and login
@@ -262,7 +274,8 @@ Phase 6 matters more than it looks. A healthcheck only proves a process is
 listening — during development the Conversation Service reported healthy while
 TTS was one missing model away from failing on the first reply. So phase 6
 synthesises a sentence with TTS, transcribes that same audio back with STT, and
-sends a prompt to the LLM. If any leg fails, the run fails.
+sends a prompt to the LLM. If any leg fails, the run fails. A leg you have
+turned off (below) is skipped rather than failed.
 
 ### Flags
 
@@ -271,6 +284,9 @@ sends a prompt to the LLM. If any leg fails, the run fails.
 ./deployment/sh/dev.sh --down          # stop, keep all data
 ./deployment/sh/dev.sh --clean         # stop and delete volumes (full reset)
 ./deployment/sh/dev.sh --logs          # tail all logs
+./deployment/sh/dev.sh --no-llm        # run without the LLM
+./deployment/sh/dev.sh --no-stt        # run without speech-to-text
+./deployment/sh/dev.sh --no-tts        # run without text-to-speech
 ./deployment/sh/dev.sh --verbose       # full build/pull output
 ./deployment/sh/dev.sh --timeout 600   # slower machines or CI
 ./deployment/sh/dev.sh --version       # versions, for bug reports
@@ -278,6 +294,41 @@ sends a prompt to the LLM. If any leg fails, the run fails.
 
 Re-running is always safe. Existing models are skipped, `deployment/.env` is
 never overwritten, and the database bootstrap is idempotent.
+
+### Turning off LLM, STT or TTS
+
+Everything runs by default. The three local models are the expensive part of
+this stack — llama3.2 on CPU will saturate a laptop by itself — so any of them
+can be left out. Nothing else changes: the same containers start, the Admin UI
+works the same, and re-running without the flag brings the model back.
+
+| Flag | Skips | Saves |
+|------|-------|-------|
+| `--no-llm` | Ollama container + llama3.2 | ~2 GB, and most of the CPU |
+| `--no-stt` | Whisper (`faster-whisper`) | ~500 MB and its load time |
+| `--no-tts` | Kokoro voice synthesis | ~313 MB and its load time |
+
+Combine them: `--no-llm --no-stt --no-tts` runs the platform with no local
+inference at all.
+
+What a flag actually does:
+
+- **The model is never downloaded** in phase 4.
+- **Conversation Service doesn't load it at startup.** `dev.sh` writes
+  `VOICEAI_ENABLE_STT` / `VOICEAI_ENABLE_TTS` into `deployment/.env`, and the
+  service's startup warm-up reads them — otherwise skipping the download here
+  would just move it to container start. Both default to `1`; a deployment that
+  sets neither behaves exactly as it always has.
+- **Phase 6 skips that leg** and prints `disabled` instead of a tick. STT is
+  verified by transcribing the audio TTS just made, so `--no-tts` on its own
+  leaves STT unverified too (it says so).
+- **`--no-llm` stops a running Ollama.** Leaving the compose profile out only
+  means "don't start it" — a container from an earlier run would keep going,
+  burning the CPU the flag exists to give back. Its model volume is untouched.
+
+With `--no-llm` there is no local model to talk to. Add a cloud provider key
+under **AI & Voice** in the Admin UI and point the agent at it — for most work
+past the first look around, that is the better setup anyway.
 
 ---
 
@@ -315,6 +366,8 @@ Everything lives in `deployment/.env`, generated on first run.
 | `OLLAMA_BASE_URL` | `http://ollama:11434` | Set automatically from `USE_HOST_OLLAMA` |
 | `BIND_ADDR` | `127.0.0.1` | Host interface for every published port |
 | `VOICEAI_STT_MODEL` | `small.en` | Used by both conversation and the seed — they must agree |
+| `VOICEAI_ENABLE_STT` | `1` | `0` keeps Whisper out of startup. Written by `--no-stt` |
+| `VOICEAI_ENABLE_TTS` | `1` | `0` keeps Kokoro out of startup. Written by `--no-tts` |
 | `*_PORT` (×8) | see §3 | Override on collision |
 | `SPACY_MODEL_URL` | empty | Mirror for the spaCy model if github.com is unreachable |
 
