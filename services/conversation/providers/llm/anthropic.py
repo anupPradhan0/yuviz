@@ -189,6 +189,8 @@ class AnthropicLLM:
 
         # Keyed by block index: a turn can open several tool_use blocks, and
         # their argument fragments interleave only by index, never by order.
+        # Fragments accumulate in a list joined once at the end rather than
+        # by repeated `+=`, which reallocates the whole string per fragment.
         accumulating: dict[int, dict[str, Any]] = {}
 
         async with self._client.stream("POST", "/v1/messages", json=payload) as resp:
@@ -204,13 +206,13 @@ class AnthropicLLM:
                     block = data.get("content_block") or {}
                     if block.get("type") == "tool_use":
                         accumulating[index] = {
-                            "id": block.get("id"), "name": block.get("name"), "arguments": "",
+                            "id": block.get("id"), "name": block.get("name"), "arguments": [],
                         }
 
                 elif event_type == "content_block_delta":
                     delta = data.get("delta") or {}
                     if index in accumulating:
-                        accumulating[index]["arguments"] += delta.get("partial_json") or ""
+                        accumulating[index]["arguments"].append(delta.get("partial_json") or "")
                         continue
                     token = delta.get("text") or ""
                     if token:
@@ -220,10 +222,11 @@ class AnthropicLLM:
                     entry = accumulating.pop(index, None)
                     if entry is None:
                         continue
+                    raw = "".join(entry["arguments"])
                     try:
-                        args = json.loads(entry["arguments"]) if entry["arguments"] else {}
+                        args = json.loads(raw) if raw else {}
                     except json.JSONDecodeError:
-                        log.warning("AnthropicLLM: malformed tool_use input=%r", entry["arguments"])
+                        log.warning("AnthropicLLM: malformed tool_use input=%r", raw)
                         args = {}
                     yield ToolCallEvent(
                         tool_call_id=entry["id"] or f"call_{index}",
