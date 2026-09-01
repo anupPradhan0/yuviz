@@ -145,9 +145,15 @@ services:
       # named here. Referenced from a provider_configs row as
       # api_key_ref='env:GEMINI_API_KEY' — the row stores the reference, never
       # the key itself (see services/conversation/secret_resolver.py).
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      COHERE_API_KEY: ${COHERE_API_KEY:-}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${CONVERSATION_PORT:-50051}:50051"
     volumes:

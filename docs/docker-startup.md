@@ -302,6 +302,11 @@ this stack — llama3.2 on CPU will saturate a laptop by itself — so any of th
 can be left out. Nothing else changes: the same containers start, the Admin UI
 works the same, and re-running without the flag brings the model back.
 
+A flag skips the download and the startup warm-up. It does not reconfigure
+the agent, so a leg that is still assigned to a local engine will fetch and
+load that model on the first call that needs it — see "What a flag does not
+do" below.
+
 | Flag | Skips | Saves |
 |------|-------|-------|
 | `--no-llm` | Ollama container + llama3.2 | ~2 GB, and most of the CPU |
@@ -322,6 +327,15 @@ What a flag actually does:
 - **Phase 6 skips that leg** and prints `disabled` instead of a tick. STT is
   verified by transcribing the audio TTS just made, so `--no-tts` on its own
   leaves STT unverified too (it says so).
+What a flag does **not** do:
+
+- **It doesn't reconfigure the agent.** `scripts/seed_default_config.py` still
+  seeds `faster_whisper` and `kokoro` provider rows and assigns them to the
+  default agent, so pressing "Test Agent" after `--no-stt` downloads Whisper
+  during the call — the cost moves out of startup, it doesn't disappear.
+  Repoint the agent at a cloud provider under **AI & Voice** to actually avoid
+  it. `dev.sh` says as much in its closing output.
+
 - **`--no-llm` stops a running Ollama.** Leaving the compose profile out only
   means "don't start it" — a container from an earlier run would keep going,
   burning the CPU the flag exists to give back. Its model volume is untouched.

@@ -383,6 +383,7 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
           <SecretRefInput
             value={form.api_key_ref || ""}
             onChange={(v) => setForm({ ...form, api_key_ref: v })}
+            canEncrypt
           />
         </div>
       </Modal>

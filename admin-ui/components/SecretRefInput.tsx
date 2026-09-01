@@ -14,19 +14,28 @@ export function SecretRefInput({
   onChange,
   placeholder,
   disabled = false,
+  canEncrypt = false,
 }: {
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   disabled?: boolean;
+  /** Only true where the caller sends the value through secretPayload() to
+   *  an `api_key` field. Everywhere else it lands in api_key_ref unencrypted,
+   *  so offering "paste the key" there would store one in plaintext. */
+  canEncrypt?: boolean;
 }) {
   const [visible, setVisible] = useState(false);
   // A saved key stays hidden until Replace, so editing anything else on the
   // provider doesn't mean retyping the credential.
   const [replacing, setReplacing] = useState(false);
   const [mode, setMode] = useState<"key" | "ref">(
-    value && !isStored(value) ? "ref" : "key",
+    canEncrypt && (!value || isStored(value)) ? "key" : "ref",
   );
+
+  // Only clear on the first keystroke, so clicking Replace and then saving
+  // something else leaves the stored credential alone.
+  const replace = (v: string) => onChange(v);
 
   if (isStored(value) && !replacing) {
     return (
@@ -40,7 +49,7 @@ export function SecretRefInput({
           className="btn btn-ghost btn-sm"
           style={{ marginLeft: "auto" }}
           disabled={disabled}
-          onClick={() => { setReplacing(true); onChange(""); }}
+          onClick={() => setReplacing(true)}
         >
           Replace
         </button>
@@ -55,8 +64,8 @@ export function SecretRefInput({
           className="form-input"
           style={{ fontFamily: "var(--mono)" }}
           type={visible ? "text" : "password"}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
+          value={isStored(value) ? "" : value}
+          onChange={(e) => replace(e.target.value)}
           placeholder={
             placeholder ?? (mode === "key" ? "Paste the API key" : "env:MY_API_KEY")
           }
@@ -73,7 +82,7 @@ export function SecretRefInput({
         </button>
       </div>
       <div className="form-hint">
-        {mode === "key" ? (
+        {mode === "key" && canEncrypt ? (
           <>
             Paste the key from your provider. It&apos;s encrypted before it&apos;s stored, and
             never shown again.{" "}
@@ -86,9 +95,11 @@ export function SecretRefInput({
             Point at a secret provisioned elsewhere — <code>env:VAR_NAME</code>{" "}
             or <code>k8s:namespace/secret</code>. The variable has to
             be set on the conversation service.{" "}
-            <button type="button" className="wf-linkish" onClick={() => { setMode("key"); onChange(""); }}>
-              Paste the key instead
-            </button>
+            {canEncrypt && (
+              <button type="button" className="wf-linkish" onClick={() => { setMode("key"); onChange(""); }}>
+                Paste the key instead
+              </button>
+            )}
           </>
         )}
       </div>
@@ -100,9 +111,9 @@ export function SecretRefInput({
  *  goes to api_key for the server to encrypt. */
 export function secretPayload(value: string): { api_key_ref?: string; api_key?: string } {
   const v = value.trim();
-  // Explicit clear, not "unchanged": after Replace the field is empty, and
-  // sending nothing would silently keep the credential it just cleared.
-  if (!v) return { api_key_ref: "" };
+  // Nothing typed means nothing to change. Clearing a credential is the
+  // Remove button's job, not an empty field's.
+  if (!v) return {};
   if (/^(env|k8s|enc):/.test(v)) return { api_key_ref: v };
   return { api_key: v };
 }

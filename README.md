@@ -58,6 +58,12 @@ startup, and dropped from the verification step; `--no-llm` also stops an
 Ollama container left over from an earlier run. Model caches are kept either
 way, so dropping a flag later costs nothing but the restart.
 
+These flags skip the download and the startup warm-up — they do not change
+what the agent is configured to use. The default agent still points at
+Whisper and Kokoro, so a test call after `--no-stt` / `--no-tts` pulls that
+model mid-call. Repoint the agent under **AI & Voice** first if you plan to
+place a call.
+
 With `--no-llm`, add a cloud provider key under **AI & Voice** in the Admin UI
 and point your agent at it. That is the usual setup once you're past the first
 look around: the LLM does the thinking, so it's the one worth moving off your

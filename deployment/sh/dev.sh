@@ -642,19 +642,20 @@ printf '%s\n' "$VERIFY_OUT" | grep -E '^(OK|SKIP) ' | while read -r verdict leg 
     if [ "$verdict" = "OK" ]; then ok "${label}: ${rest}"; else dim "${label}: ${rest}"; fi
 done
 
+# With no LLM there is no url to cross-check, so the seed check is just
+# whether the row is there.
 if [ "$OLLAMA_MODE" = "off" ]; then
-    SEEDED_URL=""
+    ok "database seeded"
 else
-SEEDED_URL=$(compose "${COMPOSE_PROFILE[@]}" exec -T postgres \
-    psql -U "${POSTGRES_USER:-voiceai}" -d "${POSTGRES_DB:-voiceai}" -tAc \
-    "select extra->>'base_url' from provider_configs where engine='ollama' limit 1" 2>/dev/null | tr -d '[:space:]' || echo "")
-if [ -n "$SEEDED_URL" ] && [ "$SEEDED_URL" != "$OLLAMA_URL" ]; then
-    warn "seeded LLM url is '$SEEDED_URL' but this run uses '$OLLAMA_URL' — reseed with --clean"
-else
-    ok "database seeded (llm url: ${SEEDED_URL:-$OLLAMA_URL})"
+    SEEDED_URL=$(compose "${COMPOSE_PROFILE[@]}" exec -T postgres \
+        psql -U "${POSTGRES_USER:-voiceai}" -d "${POSTGRES_DB:-voiceai}" -tAc \
+        "select extra->>'base_url' from provider_configs where engine='ollama' limit 1" 2>/dev/null | tr -d '[:space:]' || echo "")
+    if [ -n "$SEEDED_URL" ] && [ "$SEEDED_URL" != "$OLLAMA_URL" ]; then
+        warn "seeded LLM url is '$SEEDED_URL' but this run uses '$OLLAMA_URL' — reseed with --clean"
+    else
+        ok "database seeded (llm url: ${SEEDED_URL:-$OLLAMA_URL})"
+    fi
 fi
-fi
-[ "$OLLAMA_MODE" = "off" ] && ok "database seeded"
 
 # ── [7/7] ─────────────────────────────────────────────────────────────────────
 leg_line() {
@@ -665,8 +666,11 @@ leg_line() {
     fi
 }
 off_hint() {
-    [ "$WANT_LLM" = "1" ] && return 0
-    printf '\n  %sNo local LLM is running. Add a cloud provider key in the Admin UI\n  under AI & Voice, then point the agent at it.%s' "$DIM" "$RESET"
+    [ "$WANT_LLM" = "1" ] && [ "$WANT_STT" = "1" ] && [ "$WANT_TTS" = "1" ] && return 0
+    printf '\n  %sA disabled leg is skipped here, not switched off in the agent.\n' "$DIM"
+    [ "$WANT_LLM" = "0" ] && printf '  No local LLM is running: add a cloud provider key in the Admin UI\n  under AI & Voice, then point the agent at it.\n'
+    { [ "$WANT_STT" = "0" ] || [ "$WANT_TTS" = "0" ]; } && printf '  The default agent still uses Whisper/Kokoro, so a test call downloads\n  that model mid-call unless you repoint it first.\n'
+    printf '%s' "$RESET"
 }
 
 phase 7 "Ready!"
