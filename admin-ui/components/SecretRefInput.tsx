@@ -44,15 +44,24 @@ export function SecretRefInput({
         <span className="form-hint" style={{ marginTop: 0 }}>
           Encrypted. It can&apos;t be shown again.
         </span>
-        <button
-          type="button"
-          className="btn btn-ghost btn-sm"
-          style={{ marginLeft: "auto" }}
-          disabled={disabled}
-          onClick={() => setReplacing(true)}
-        >
-          Replace
-        </button>
+        <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            disabled={disabled}
+            onClick={() => setReplacing(true)}
+          >
+            Replace
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            disabled={disabled}
+            onClick={() => onChange("")}
+          >
+            Remove
+          </button>
+        </span>
       </div>
     );
   }
@@ -109,11 +118,18 @@ export function SecretRefInput({
 
 /** A pointer goes to api_key_ref verbatim; anything else is a credential and
  *  goes to api_key for the server to encrypt. */
-export function secretPayload(value: string): { api_key_ref?: string; api_key?: string } {
+export function secretPayload(
+  value: string,
+  original = "",
+): { api_key_ref?: string; api_key?: string } {
   const v = value.trim();
-  // Nothing typed means nothing to change. Clearing a credential is the
-  // Remove button's job, not an empty field's.
-  if (!v) return {};
-  if (/^(env|k8s|enc):/.test(v)) return { api_key_ref: v };
+  // Empty clears only when there was something to clear (the Remove button);
+  // otherwise the field is untouched and must not be sent.
+  if (!v) return original ? { api_key_ref: "" } : {};
+  // Anything scheme-shaped goes to api_key_ref, including a miscased or
+  // unknown scheme: the server rejects those with an actionable message,
+  // whereas treating "ENV:FOO" as a credential would encrypt the pointer and
+  // surface as a vendor 401 at call time instead.
+  if (/^[A-Za-z0-9_]+\s*:/.test(v)) return { api_key_ref: v };
   return { api_key: v };
 }

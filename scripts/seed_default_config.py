@@ -82,7 +82,7 @@ async def main() -> None:
         if match is not None:
             provider_ids[spec["role"]] = match["id"]
             # Skipping outright would pin an existing install to stale values.
-            drift = {k: spec[k] for k in ("model", "voice")
+            drift = {k: spec[k] for k in ("name", "model", "voice")
                      if spec.get(k) is not None and match.get(k) != spec[k]}
             want_extra = spec.get("extra") or {}
             have_extra = match.get("extra") or {}

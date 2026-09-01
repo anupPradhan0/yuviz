@@ -53,3 +53,38 @@ def test_no_credential_means_null_not_empty_string(key):
     # "" in a nullable column makes `api_key_ref IS NULL` lie.
     for blank in (None, "", "   "):
         assert resolve_api_key_input(None, blank) is None
+
+
+# --- Tenant scoping on the list route -------------------------------------
+# api_key_ref used to be a pointer; an enc: ref carries the sealed credential,
+# so an unscoped list is a cross-tenant credential read.
+
+from dataclasses import dataclass
+
+import pytest as _pytest
+from fastapi import HTTPException
+
+from services.config.routers.provider_configs import _require_tenant_access
+
+
+@dataclass
+class _User:
+    role: str
+    tenant_id: str | None
+
+
+def test_a_tenant_cannot_list_another_tenants_providers():
+    with _pytest.raises(HTTPException) as exc:
+        _require_tenant_access("tenant-A", _User(role="viewer", tenant_id="tenant-B"))
+    assert exc.value.status_code == 403
+
+
+def test_a_tenant_can_list_its_own_providers():
+    _require_tenant_access("tenant-A", _User(role="viewer", tenant_id="tenant-A"))
+
+
+def test_superadmin_and_the_service_account_stay_unscoped():
+    # The Conversation Service account has tenant_id=None and serves every
+    # tenant from one process — scoping it would break live calls.
+    _require_tenant_access("tenant-A", _User(role="superadmin", tenant_id="tenant-B"))
+    _require_tenant_access("tenant-A", _User(role="viewer", tenant_id=None))

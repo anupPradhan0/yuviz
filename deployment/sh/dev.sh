@@ -480,6 +480,8 @@ ok "containers started"
 # ── [4/7] ─────────────────────────────────────────────────────────────────────
 phase 4 "Downloading models..."
 
+case "$OLLAMA_MODEL" in *:*) WANT_TAG="$OLLAMA_MODEL" ;; *) WANT_TAG="${OLLAMA_MODEL}:latest" ;; esac
+
 if [ "$OLLAMA_MODE" = "off" ]; then
     ok "LLM disabled — skipping ${OLLAMA_MODEL} (and the CPU it would burn)"
 elif [ "$OLLAMA_MODE" = "container" ]; then
@@ -488,7 +490,7 @@ elif [ "$OLLAMA_MODE" = "container" ]; then
         [ "$(date +%s)" -ge "$deadline" ] && { fail "ollama did not come up within ${TIMEOUT}s"; cleanup_hint; exit 1; }
         sleep 3
     done
-    if compose "${COMPOSE_PROFILE[@]}" exec -T ollama ollama list 2>/dev/null | grep -qF "$OLLAMA_MODEL"; then
+    if compose "${COMPOSE_PROFILE[@]}" exec -T ollama ollama list 2>/dev/null | awk '{print $1}' | grep -qxF "$WANT_TAG"; then
         ok "${OLLAMA_MODEL} already present, skipping"
     else
         dim "pulling ${OLLAMA_MODEL} (first run only)"
@@ -496,7 +498,7 @@ elif [ "$OLLAMA_MODE" = "container" ]; then
         ok "${OLLAMA_MODEL} pulled"
     fi
 else
-    if curl -fsS -m 10 http://localhost:11434/api/tags 2>/dev/null | grep -qF "$OLLAMA_MODEL"; then
+    if curl -fsS -m 10 http://localhost:11434/api/tags 2>/dev/null | grep -qF "\"$WANT_TAG\""; then
         ok "${OLLAMA_MODEL} already present on host, skipping"
     else
         dim "pulling ${OLLAMA_MODEL} on the host"
