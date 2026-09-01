@@ -83,6 +83,7 @@ services:
       POSTGRES_DSN: ${POSTGRES_DSN}
       REDIS_URL: ${REDIS_URL}
       JWT_SECRET: ${JWT_SECRET}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${CONFIG_PORT:-8000}:8000"
     depends_on:
@@ -103,6 +104,8 @@ services:
       POSTGRES_DSN: ${POSTGRES_DSN}
       REDIS_URL: ${REDIS_URL}
       KNOWLEDGE_STORAGE_ROOT: /app/data/knowledge_documents
+      # Embedding providers resolve api_key_ref too (embedding_manager.py).
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${KNOWLEDGE_PORT:-8100}:8100"
     volumes:
@@ -133,6 +136,14 @@ services:
       VOICEAI_TTS_VOICE: af_sarah
       VOICEAI_STT_MODEL: ${VOICEAI_STT_MODEL:-small.en}
       VOICEAI_LLM_URL: ${OLLAMA_BASE_URL}
+      # Cloud LLM keys. The container's environment is an explicit allow-list,
+      # so a key in deployment/.env does NOT reach this process unless it is
+      # named here. Referenced from a provider_configs row as
+      # api_key_ref='env:GEMINI_API_KEY' — the row stores the reference, never
+      # the key itself (see services/conversation/secret_resolver.py).
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${CONVERSATION_PORT:-50051}:50051"
     volumes:

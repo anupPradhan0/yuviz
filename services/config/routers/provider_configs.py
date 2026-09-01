@@ -53,6 +53,7 @@ async def create_provider_config(
         language=body.language,
         region=body.region,
         api_key_ref=body.api_key_ref,
+        api_key=body.api_key,
         extra=body.extra,
         user_id=current_user.id,
         user_email=current_user.email,

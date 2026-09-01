@@ -16,6 +16,7 @@ import {
   updateProvider,
 } from "@/lib/api";
 import { Modal } from "@/components/Modal";
+import { SecretRefInput, secretPayload } from "./SecretRefInput";
 import { EMBEDDING_MODELS_BY_ENGINE, ENGINES_BY_ROLE, MODELS_BY_ENGINE, OTHER, VOICES_BY_ENGINE } from "@/lib/engineCatalog";
 
 const ALL_ROLES: ProviderRole[] = ["stt", "llm", "tts"];
@@ -45,7 +46,6 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
   const [customVoice, setCustomVoice] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [refVisible, setRefVisible] = useState(false);
 
   useEffect(() => {
     listTenants().then((ts) => {
@@ -93,13 +93,11 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
 
   const openCreate = () => {
     resetForm();
-    setRefVisible(false);
     setModalOpen(true);
   };
 
   const openEdit = (p: ProviderConfig) => {
     setEditing(p);
-    setRefVisible(false);
     setForm({ name: p.name, role: p.role, engine: p.engine, environment: p.environment, api_key_ref: p.api_key_ref || undefined });
     const models = MODELS_BY_ENGINE[p.engine];
     if (p.model) setModelChoice(models && models.includes(p.model) ? p.model : OTHER);
@@ -124,11 +122,14 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
           environment: form.environment,
           model,
           voice,
-          api_key_ref: form.api_key_ref,
+          // A pasted key goes to `api_key` (encrypted server-side); a
+          // pointer goes to api_key_ref verbatim. See secretPayload.
+          ...secretPayload(form.api_key_ref || ""),
         };
         await updateProvider(editing.id, body);
       } else {
-        await createProvider(tenantId, { ...form, model, voice });
+        const { api_key_ref: typed, ...rest } = form;
+        await createProvider(tenantId, { ...rest, model, voice, ...secretPayload(typed || "") });
       }
       setModalOpen(false);
       resetForm();
@@ -377,36 +378,12 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
         <div className="form-group">
           <label className="form-label">
             API Key Ref{" "}
-            <span className="hint">env:VAR_NAME, k8s:namespace/secret, or vault:path#field — never a raw key</span>
+            <span className="hint">paste it — we encrypt it</span>
           </label>
-          <div style={{ position: "relative" }}>
-            <input
-              className="form-input"
-              style={{ fontFamily: "var(--mono)", paddingRight: "2.5rem" }}
-              type={refVisible ? "text" : "password"}
-              value={form.api_key_ref || ""}
-              onChange={(e) => setForm({ ...form, api_key_ref: e.target.value })}
-              placeholder="env:DEEPGRAM_API_KEY"
-            />
-            <button
-              type="button"
-              onClick={() => setRefVisible((v) => !v)}
-              aria-label={refVisible ? "Hide ref" : "Show ref"}
-              style={{
-                position: "absolute",
-                right: "0.5rem",
-                top: "50%",
-                transform: "translateY(-50%)",
-                background: "none",
-                border: "none",
-                cursor: "pointer",
-                fontSize: "0.85rem",
-                color: "var(--muted, #888)",
-              }}
-            >
-              {refVisible ? "Hide" : "Show"}
-            </button>
-          </div>
+          <SecretRefInput
+            value={form.api_key_ref || ""}
+            onChange={(v) => setForm({ ...form, api_key_ref: v })}
+          />
         </div>
       </Modal>
     </>

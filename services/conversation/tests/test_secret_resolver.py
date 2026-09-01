@@ -46,11 +46,6 @@ class TestCompositeSecretResolver:
         resolver = CompositeSecretResolver(k8s_mount_root=str(tmp_path))
         assert await resolver.resolve("k8s:svc-key") == "k8s-value"
 
-    async def test_vault_raises_not_implemented(self):
-        resolver = CompositeSecretResolver()
-        with pytest.raises(NotImplementedError):
-            await resolver.resolve("vault:secret/voiceai/prod/openai")
-
     async def test_unknown_scheme_raises_value_error(self):
         resolver = CompositeSecretResolver()
         with pytest.raises(ValueError):

@@ -376,6 +376,26 @@ for secret in CONFIG_SERVICE_PASSWORD:32 JWT_SECRET:48; do
     ok "generated ${key}"
 done
 
+# SECRET_ENCRYPTION_KEY can't go through the loop above: it is a Fernet key,
+# which must be exactly 32 raw bytes in url-safe base64 (44 chars, trailing
+# '='), and `rand` strips every non-alphanumeric character — so it would
+# produce a string Fernet rejects. Without this, pasting a provider API key
+# in the Admin UI raises SecretEncryptionUnavailable and the operator gets an
+# opaque 500 on the headline setup step.
+if [ -z "$(grep "^SECRET_ENCRYPTION_KEY=" "$ENV_FILE" | cut -d= -f2-)" ]; then
+    fernet_key=$(head -c 32 /dev/urandom | base64 | LC_ALL=C tr '+/' '-_')
+    if [ "${#fernet_key}" -ne 44 ]; then
+        fail "could not generate SECRET_ENCRYPTION_KEY (got ${#fernet_key} of 44 chars)"
+        exit 1
+    fi
+    if ! sed -i.bak "s|^SECRET_ENCRYPTION_KEY=.*|SECRET_ENCRYPTION_KEY=${fernet_key}|" "$ENV_FILE"; then
+        fail "could not write SECRET_ENCRYPTION_KEY to ${ENV_FILE}"
+        exit 1
+    fi
+    rm -f "$ENV_FILE.bak"
+    ok "generated SECRET_ENCRYPTION_KEY"
+fi
+
 # Re-derived each run so toggling USE_HOST_OLLAMA needs no hand-editing.
 if ! sed -i.bak "s|^OLLAMA_BASE_URL=.*|OLLAMA_BASE_URL=${OLLAMA_URL}|" "$ENV_FILE"; then
     fail "could not write OLLAMA_BASE_URL to ${ENV_FILE}"
