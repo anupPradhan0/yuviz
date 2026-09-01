@@ -287,6 +287,7 @@ turned off (below) is skipped rather than failed.
 ./deployment/sh/dev.sh --no-llm        # run without the LLM
 ./deployment/sh/dev.sh --no-stt        # run without speech-to-text
 ./deployment/sh/dev.sh --no-tts        # run without text-to-speech
+./deployment/sh/dev.sh --llm-model qwen2.5   # a different Ollama model
 ./deployment/sh/dev.sh --verbose       # full build/pull output
 ./deployment/sh/dev.sh --timeout 600   # slower machines or CI
 ./deployment/sh/dev.sh --version       # versions, for bug reports
@@ -294,6 +295,24 @@ turned off (below) is skipped rather than failed.
 
 Re-running is always safe. Existing models are skipped, `deployment/.env` is
 never overwritten, and the database bootstrap is idempotent.
+
+### Choosing the Ollama model
+
+`--llm-model <tag>` picks which model to run; the default is `llama3.2`
+(~2 GB). The chosen tag is pulled in phase 4, written to
+`VOICEAI_LLM_MODEL` in `deployment/.env`, seeded onto the default agent's
+provider row, and used by the phase-6 LLM check — so all four agree.
+
+| Tag | Size |
+|-----|------|
+| `llama3.2` (default) | ~2 GB |
+| `qwen2.5:3b` | ~1.9 GB |
+| `gemma3:4b` | ~3.3 GB |
+| `qwen2.5` (7b) | ~4.7 GB |
+
+Any tag from [ollama.com/library](https://ollama.com/library) works — the
+list above is what the Admin UI offers, not a limit. Switching later is a
+re-run with the new flag; previously pulled models stay in the volume.
 
 ### Turning off LLM, STT or TTS
 

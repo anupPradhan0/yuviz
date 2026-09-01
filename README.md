@@ -52,6 +52,17 @@ exactly as normal.
 ./deployment/sh/dev.sh --no-tts      # no text-to-speech, no Kokoro (~313 MB)
 ```
 
+Pick a different local model with `--llm-model`; the default is `llama3.2`.
+Any tag from [ollama.com/library](https://ollama.com/library) works, and the
+one you choose is what gets pulled, seeded onto the default agent, and
+verified:
+
+```bash
+./deployment/sh/dev.sh --llm-model qwen2.5      # 4.7 GB
+./deployment/sh/dev.sh --llm-model gemma3:4b    # 3.3 GB
+./deployment/sh/dev.sh --llm-model qwen2.5:3b   # 1.9 GB, for a small laptop
+```
+
 Combine them freely — `--no-llm --no-stt --no-tts` starts the platform with no
 local inference at all. A disabled model is not downloaded, not loaded at
 startup, and dropped from the verification step; `--no-llm` also stops an

@@ -69,6 +69,9 @@ services:
       CONFIG_SERVICE_PASSWORD: ${CONFIG_SERVICE_PASSWORD}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
       VOICEAI_STT_MODEL: ${VOICEAI_STT_MODEL:-small.en}
+      # dev.sh --llm-model. The seed writes it into the default agent's
+      # provider row, so this and the conversation service must agree.
+      VOICEAI_LLM_MODEL: ${VOICEAI_LLM_MODEL:-llama3.2}
     depends_on:
       postgres:
         condition: service_healthy
@@ -135,6 +138,7 @@ services:
       VOICEAI_TTS_ENGINE: kokoro
       VOICEAI_TTS_VOICE: af_sarah
       VOICEAI_STT_MODEL: ${VOICEAI_STT_MODEL:-small.en}
+      VOICEAI_LLM_MODEL: ${VOICEAI_LLM_MODEL:-llama3.2}
       # dev.sh --no-stt / --no-tts. Off keeps the model out of startup (see
       # _prewarm_agents); default on, so a normal run is unchanged.
       VOICEAI_ENABLE_STT: ${VOICEAI_ENABLE_STT:-1}

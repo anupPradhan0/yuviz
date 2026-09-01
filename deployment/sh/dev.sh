@@ -8,6 +8,7 @@
 #   ./deployment/sh/dev.sh --no-llm     skip the LLM (no ollama container)
 #   ./deployment/sh/dev.sh --no-stt     skip speech-to-text (no whisper)
 #   ./deployment/sh/dev.sh --no-tts     skip text-to-speech (no kokoro)
+#   ./deployment/sh/dev.sh --llm-model M  Ollama model (default llama3.2)
 #   ./deployment/sh/dev.sh --verbose    full build output
 #   ./deployment/sh/dev.sh --timeout N  health budget (default 300s)
 #   ./deployment/sh/dev.sh --version    versions, for bug reports
@@ -30,6 +31,10 @@ VERBOSE=0
 WANT_LLM=1
 WANT_STT=1
 WANT_TTS=1
+# Which Ollama model to pull, seed and verify with. Any tag from
+# ollama.com/library works; the Admin UI can point an agent at a different
+# one afterwards, but only this one is downloaded here.
+OLLAMA_MODEL="llama3.2"
 ACTION="up"
 CURRENT_PHASE="startup"
 STARTED_WORK=0
@@ -109,10 +114,11 @@ while [ $# -gt 0 ]; do
         --no-llm)  WANT_LLM=0 ;;
         --no-stt)  WANT_STT=0 ;;
         --no-tts)  WANT_TTS=0 ;;
+        --llm-model) OLLAMA_MODEL="${2:?--llm-model needs a model name, e.g. qwen2.5}"; shift ;;
         --verbose) VERBOSE=1 ;;
         --timeout) TIMEOUT="${2:?--timeout needs a value in seconds}"; shift ;;
         --version) ACTION="version" ;;
-        -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) fail "unknown flag: $1 (try --help)"; exit 2 ;;
     esac
     shift
@@ -321,6 +327,7 @@ printf '  %-11s %s / %s\n' "OS/CPU:" "$(uname -s | tr '[:upper:]' '[:lower:]')" 
 printf '  %-11s %s\n' "RAM:"       "$RAM_H"
 printf '  %-11s %s\n' "Free disk:" "$DISK_H"
 printf '  %-11s %s\n' "Ollama:"    "$OLLAMA_MODE"
+[ "$WANT_LLM" = "1" ] && printf '  %-11s %s\n' "LLM model:" "$OLLAMA_MODEL"
 off_list=""
 [ "$WANT_LLM" = "0" ] && off_list="${off_list}LLM "
 [ "$WANT_STT" = "0" ] && off_list="${off_list}STT "
@@ -442,6 +449,7 @@ set_env() {
         printf '%s=%s\n' "$1" "$2" >> "$ENV_FILE"
     fi
 }
+set_env VOICEAI_LLM_MODEL "$OLLAMA_MODEL"
 set_env VOICEAI_ENABLE_STT "$WANT_STT"
 set_env VOICEAI_ENABLE_TTS "$WANT_TTS"
 
@@ -473,27 +481,27 @@ ok "containers started"
 phase 4 "Downloading models..."
 
 if [ "$OLLAMA_MODE" = "off" ]; then
-    ok "LLM disabled — skipping llama3.2 (~2 GB, and the CPU it would burn)"
+    ok "LLM disabled — skipping ${OLLAMA_MODEL} (and the CPU it would burn)"
 elif [ "$OLLAMA_MODE" = "container" ]; then
     deadline=$(( $(date +%s) + TIMEOUT ))
     until compose "${COMPOSE_PROFILE[@]}" exec -T ollama ollama list >/dev/null 2>&1; do
         [ "$(date +%s)" -ge "$deadline" ] && { fail "ollama did not come up within ${TIMEOUT}s"; cleanup_hint; exit 1; }
         sleep 3
     done
-    if compose "${COMPOSE_PROFILE[@]}" exec -T ollama ollama list 2>/dev/null | grep -q 'llama3.2'; then
-        ok "llama3.2 already present, skipping"
+    if compose "${COMPOSE_PROFILE[@]}" exec -T ollama ollama list 2>/dev/null | grep -qF "$OLLAMA_MODEL"; then
+        ok "${OLLAMA_MODEL} already present, skipping"
     else
-        dim "pulling llama3.2 (~2 GB, first run only)"
-        run_quiet compose "${COMPOSE_PROFILE[@]}" exec -T ollama ollama pull llama3.2
-        ok "llama3.2 pulled"
+        dim "pulling ${OLLAMA_MODEL} (first run only)"
+        run_quiet compose "${COMPOSE_PROFILE[@]}" exec -T ollama ollama pull "$OLLAMA_MODEL"
+        ok "${OLLAMA_MODEL} pulled"
     fi
 else
-    if curl -fsS -m 10 http://localhost:11434/api/tags 2>/dev/null | grep -q 'llama3.2'; then
-        ok "llama3.2 already present on host, skipping"
+    if curl -fsS -m 10 http://localhost:11434/api/tags 2>/dev/null | grep -qF "$OLLAMA_MODEL"; then
+        ok "${OLLAMA_MODEL} already present on host, skipping"
     else
-        dim "pulling llama3.2 on the host (~2 GB)"
-        ollama pull llama3.2
-        ok "llama3.2 pulled"
+        dim "pulling ${OLLAMA_MODEL} on the host"
+        ollama pull "$OLLAMA_MODEL"
+        ok "${OLLAMA_MODEL} pulled"
     fi
 fi
 
@@ -574,6 +582,7 @@ phase 6 "Running verification..."
 # STT rides on TTS's output, so it needs both.
 VERIFY_OUT=$(compose "${COMPOSE_PROFILE[@]}" exec -T \
     -e WANT_LLM="$WANT_LLM" -e WANT_STT="$WANT_STT" -e WANT_TTS="$WANT_TTS" \
+    -e OLLAMA_MODEL="$OLLAMA_MODEL" \
     conversation python - <<'PY' 2>&1
 import asyncio, os, sys
 
@@ -618,7 +627,8 @@ async def main():
         url = os.environ.get("VOICEAI_LLM_URL", "http://ollama:11434").rstrip("/")
         async with httpx.AsyncClient(timeout=180) as c:
             r = await c.post(f"{url}/api/generate", json={
-                "model": "llama3.2", "prompt": "Say hello in three words.", "stream": False})
+                "model": os.environ.get("OLLAMA_MODEL", "llama3.2"),
+                "prompt": "Say hello in three words.", "stream": False})
             r.raise_for_status()
             out = (r.json().get("response") or "").strip()
         if not out:
