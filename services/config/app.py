@@ -18,6 +18,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from libs.config_sdk.secrets import SecretEncryptionUnavailable
+
 from . import cache, db
 from . import phone_numbers as phone_numbers_service
 from .routers import (
@@ -82,6 +84,13 @@ app.include_router(audit_log.router)
 @app.exception_handler(LookupError)
 async def not_found_handler(request: Request, exc: LookupError) -> JSONResponse:
     return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(SecretEncryptionUnavailable)
+async def _secret_encryption_unavailable(_request, exc: SecretEncryptionUnavailable):
+    # A server misconfiguration, not a bad request — but the message says
+    # exactly what to set, so it has to reach the caller rather than 500.
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 @app.exception_handler(ValueError)
