@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS provider_configs (
     language            TEXT,
     region              TEXT,
     environment         TEXT NOT NULL DEFAULT 'prod' CHECK (environment IN ('prod', 'staging', 'dev')),
-    api_key_ref         TEXT,  -- reference ONLY — 'vault:...' | 'k8s:...' | 'env:...' — never a real key
+    api_key_ref         TEXT,  -- reference ONLY — 'enc:...' | 'k8s:...' | 'env:...' — never a real key
     extra               JSONB,
     fallback_config_id  UUID REFERENCES provider_configs(id),  -- Phase 7 stub
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -173,7 +173,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ── tool_provider_configs — Tool Execution Framework, mirrors provider_configs ──
 -- Same shape/discipline as provider_configs above: tenant-scoped, api_key_ref
--- is a REFERENCE ONLY ('env:...' | 'vault:...' | 'k8s:...'), never a real key
+-- is a REFERENCE ONLY ('env:...' | 'enc:...' | 'k8s:...'), never a real key
 -- (see services/conversation/secret_resolver.py's CompositeSecretResolver,
 -- reused unchanged for tools). `extra` holds engine-specific settings — for
 -- engine='cal_com': event_type_id (one event type per agent by design — see

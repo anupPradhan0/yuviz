@@ -64,7 +64,9 @@ export const MODELS_BY_ENGINE: Record<string, string[] | null> = {
   // transcribed as a wrong-language hallucination instead of ignored).
   faster_whisper: ["small.en", "tiny.en", "base.en", "medium.en", "tiny", "base", "small", "medium", "large-v3"],
   deepgram: ["nova-3", "nova-2"],
-  ollama: ["llama3.2", "llama3", "mistral", "phi3", "gemma2"],
+  // Local models, so the list is what dev.sh can pull rather than what an
+  // account is entitled to; `ollama pull <tag>` first, or dev.sh --llm-model.
+  ollama: ["llama3.2", "llama3", "qwen2.5", "mistral", "phi3", "gemma3:4b"],
   // Cheapest-capable first below, so the cheap option is the one a reader
   // reaches for. It is NOT what the form submits by default — the model
   // select starts blank ("— select a model —"), and a blank model means the

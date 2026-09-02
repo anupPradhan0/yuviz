@@ -87,7 +87,9 @@ class CompositeSecretResolver:
         if ref.startswith("enc:"):
             return await self._enc.resolve(ref)
         # Never log `ref` here — the likeliest cause is a raw API key pasted
-        # into the reference field, and echoing it leaks the key.
+        # into the reference field. A raw key has no colon, so its "scheme"
+        # would be the key itself; report a placeholder instead.
+        scheme = ref.split(":")[0] if ":" in ref else "<no scheme>"
         raise ValueError(
-            f"unrecognized secret ref scheme (expected env:/k8s:/enc:), got {ref.split(':')[0][:12]!r}"
+            f"unrecognized secret ref scheme (expected env:/k8s:/enc:), got {scheme[:12]!r}"
         )

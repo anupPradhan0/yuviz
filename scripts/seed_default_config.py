@@ -47,13 +47,14 @@ OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434"
 
 # Must match what the Conversation Service loads, or a second model is fetched.
 STT_MODEL = os.environ.get("VOICEAI_STT_MODEL") or "small"
+LLM_MODEL = os.environ.get("VOICEAI_LLM_MODEL") or "llama3.2"
 
 # Matches PipelineConfig's defaults (services/conversation/pipeline_config.py).
 PROVIDER_DEFAULTS = [
     {"role": "stt", "engine": "faster_whisper", "name": "FasterWhisper (default)",
      "model": STT_MODEL, "extra": {"device": "cpu", "compute_type": "int8"}},
-    {"role": "llm", "engine": "ollama", "name": "Ollama llama3.2 (default)",
-     "model": "llama3.2", "extra": {"temperature": 0.7, "base_url": OLLAMA_BASE_URL}},
+    {"role": "llm", "engine": "ollama", "name": f"Ollama {LLM_MODEL} (default)",
+     "model": LLM_MODEL, "extra": {"temperature": 0.7, "base_url": OLLAMA_BASE_URL}},
     # Kokoro, not macOS's `say` — found live 2026-08-04 while auditing
     # fork-reproducibility: `engine="macos"` shells out to a macOS-only
     # binary and silently can't work at all on Linux (or even reliably as
@@ -81,7 +82,7 @@ async def main() -> None:
         if match is not None:
             provider_ids[spec["role"]] = match["id"]
             # Skipping outright would pin an existing install to stale values.
-            drift = {k: spec[k] for k in ("model", "voice")
+            drift = {k: spec[k] for k in ("name", "model", "voice")
                      if spec.get(k) is not None and match.get(k) != spec[k]}
             want_extra = spec.get("extra") or {}
             have_extra = match.get("extra") or {}

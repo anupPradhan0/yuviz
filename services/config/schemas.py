@@ -145,8 +145,8 @@ class ToolProviderConfigCreate(BaseModel):
     # exists today (cal_com) is a cloud API requiring credentials — the
     # runtime already hard-fails without one (see provider_manager.py's
     # _make_cal_com), but only at call time, which is exactly what let a
-    # blank-key config through the Admin UI and silently broke a live call
-    # (2026-07-23). Caught here instead, at creation time. If a keyless
+    # blank-key config through the Admin UI and silently broke a live
+    # call. Caught here instead, at creation time. If a keyless
     # engine is ever added, revisit this back to optional + a per-engine
     # check, matching provider_configs' own per-role posture.
     api_key_ref: str

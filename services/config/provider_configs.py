@@ -157,8 +157,9 @@ async def update_provider_config(
     # `api_key` is a credential, not a column — popped before the
     # unknown-field check, encrypted, and folded into api_key_ref. Absent
     # from `fields` means untouched; present-but-empty is an explicit clear.
+    had_api_key = "api_key" in fields
     typed_key = fields.pop("api_key", None)
-    if typed_key or "api_key_ref" in fields:
+    if had_api_key or "api_key_ref" in fields:
         fields["api_key_ref"] = resolve_api_key_input(typed_key, fields.get("api_key_ref"))
 
     if not fields:

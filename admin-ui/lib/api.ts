@@ -120,6 +120,8 @@ export interface ProviderConfigCreate {
   language?: string;
   region?: string;
   api_key_ref?: string;
+  /** The credential itself; the server encrypts it into an enc: api_key_ref. */
+  api_key?: string;
   // Engine-specific knobs (jsonb). Known keys: speed (TTS rate multiplier,
   // 0.7-1.2, default 1.0 — all engines), wpm (macos legacy absolute rate),
   // model_id/lang_code/temperature/… per engine.
@@ -146,6 +148,7 @@ export interface ProviderConfigUpdate {
   language?: string | null;
   region?: string;
   api_key_ref?: string;
+  api_key?: string;
   // Replaces the whole extra object — spread the existing extra when
   // changing one key (the PATCH endpoint does not deep-merge).
   extra?: Record<string, unknown>;

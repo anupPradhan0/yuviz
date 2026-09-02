@@ -30,6 +30,11 @@ async def list_provider_configs(
     environment: Literal["prod", "staging", "dev"] | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
+    # Same scoping the by-id routes get via _authorize_provider, and for the
+    # same reason — more so now that api_key_ref can be an enc: ref carrying
+    # the credential itself rather than a pointer to one. Without this any
+    # authenticated user could list another tenant's provider rows by id.
+    _require_tenant_access(tenant_id, current_user)
     return await provider_configs_service.list_provider_configs(
         tenant_id, role=role, environment=environment,
     )
@@ -58,6 +63,15 @@ async def create_provider_config(
         user_id=current_user.id,
         user_email=current_user.email,
     )
+
+
+def _require_tenant_access(tenant_id: str, current_user: CurrentUser) -> None:
+    """Unscoped callers are superadmins and the Conversation Service's own
+    service account (tenant_id is None), which legitimately reads across
+    every tenant — see _authorize_provider for the full rationale."""
+    is_unscoped = current_user.role == "superadmin" or current_user.tenant_id is None
+    if not is_unscoped and tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="tenant_id does not match the caller's tenant")
 
 
 async def _authorize_provider(provider_id: str, current_user: CurrentUser) -> dict:

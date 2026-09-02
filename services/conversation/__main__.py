@@ -76,6 +76,16 @@ def _build_tts(cfg: PipelineConfig):
     return MacOSTTS(voice=cfg.tts.voice, speed=cfg.tts.macos_wpm)
 
 
+def _enabled(leg: str) -> bool:
+    """VOICEAI_ENABLE_STT / VOICEAI_ENABLE_TTS, set by deployment/sh/dev.sh's
+    --no-stt / --no-tts. Off means "don't spend startup on this leg" — the
+    models are hundreds of MB and are fetched the first time they're
+    touched, so warming them here is precisely what those flags exist to
+    avoid. Absent or anything but "0" means on: a real deployment sets
+    neither and behaves exactly as it always has."""
+    return os.environ.get(f"VOICEAI_ENABLE_{leg}", "1") != "0"
+
+
 async def _prewarm_agents(
     http_config_repo: HttpConfigRepository,
     provider_registry: ProviderRegistry,
@@ -85,24 +95,34 @@ async def _prewarm_agents(
     the exact same resolve_handler_deps() path a real call uses — so the
     first real call to any given agent never pays model-instantiation cost
     (e.g. FasterWhisper's ~1s CTranslate2 load) synchronously during
-    session_open. Confirmed live 2026-07-21: without this, whichever of the
-    two Conversation Service processes happens to serve an agent's first
-    call pays that cost mid-call, which read to the caller as added latency
-    and choppy/robotic audio.
+    session_open. Without this, whichever Conversation Service process
+    happens to serve an agent's first call pays that cost mid-call, which
+    read to the caller as added latency and choppy/robotic audio.
 
     Never raises — a Config Service that's unreachable or has zero tenants
     yet just means nothing gets prewarmed; the first real call still falls
     back to on-demand loading via AIProviderManager's existing cache-miss
     path, unchanged.
     """
+    log = logging.getLogger(__name__)
+
+    # Either flag is enough to skip the whole thing: resolve_handler_deps()
+    # builds all three providers together and that is where the cost lives
+    # (_make_faster_whisper awaits inst.load(), KokoroTTS builds a
+    # KPipeline), so there is no way to warm one leg without paying for the
+    # other. Checked here rather than per agent — the answer is the same for
+    # the whole process, and this way it costs no Config Service calls.
+    if not _enabled("STT") or not _enabled("TTS"):
+        log.info("prewarm: skipped (stt=%s tts=%s) — providers load on first use",
+                 _enabled("STT"), _enabled("TTS"))
+        return
+
     try:
         tenants = await http_config_repo.list_tenants()
     except Exception:
-        log = logging.getLogger(__name__)
         log.exception("prewarm: could not list tenants — skipping prewarm")
         return
 
-    log = logging.getLogger(__name__)
     for tenant in tenants:
         tenant_slug = tenant.get("slug")
         if not tenant_slug:

@@ -124,7 +124,7 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
           voice,
           // A pasted key goes to `api_key` (encrypted server-side); a
           // pointer goes to api_key_ref verbatim. See secretPayload.
-          ...secretPayload(form.api_key_ref || ""),
+          ...secretPayload(form.api_key_ref || "", editing.api_key_ref || ""),
         };
         await updateProvider(editing.id, body);
       } else {
@@ -383,6 +383,7 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
           <SecretRefInput
             value={form.api_key_ref || ""}
             onChange={(v) => setForm({ ...form, api_key_ref: v })}
+            canEncrypt
           />
         </div>
       </Modal>
