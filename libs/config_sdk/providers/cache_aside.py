@@ -131,6 +131,7 @@ def _provider_config_from_dict(row: dict[str, Any]) -> ProviderConfig:
         api_key_ref=row.get("api_key_ref"),
         extra=_parse_extra(row.get("extra")),
         updated_at=_parse_dt(row.get("updated_at")),
+        fallback_config_id=row.get("fallback_config_id"),
     )
 
 
@@ -190,10 +191,23 @@ class CacheAsideConfigProvider:
                 return None
             providers[role] = cfg
 
+        llm_fallback: ProviderConfig | None = None
+        if providers["llm"].fallback_config_id:
+            llm_fallback = await self.get_provider_config(providers["llm"].fallback_config_id)
+            if llm_fallback is None:
+                log.warning(
+                    "agent=%s/%s: llm.fallback_config_id=%r does not resolve to a real "
+                    "provider_configs row — proceeding with no fallback",
+                    tenant_slug, agent_slug, providers["llm"].fallback_config_id,
+                )
+
         return RuntimeConfig(
             tenant=tenant,
             agent=agent,
-            providers=ProviderConfigs(stt=providers["stt"], llm=providers["llm"], tts=providers["tts"]),
+            providers=ProviderConfigs(
+                stt=providers["stt"], llm=providers["llm"], tts=providers["tts"],
+                llm_fallback=llm_fallback,
+            ),
             conversation=ConversationInfo(
                 greeting=agent.greeting, system_prompt=agent.system_prompt,
                 end_call_prompt=agent.end_call_prompt,

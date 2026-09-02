@@ -14,7 +14,9 @@ import json
 
 from services.conversation.providers.interfaces import ChatMessage
 from services.conversation.tools.executor_registry import ExecutorRegistry
-from services.conversation.tools.llm_adapter import LLMAdapter, TokenEvent, ToolCallEvent, ToolCallStartedEvent
+from services.conversation.tools.llm_adapter import (
+    DeterministicSpokenEvent, LLMAdapter, TokenEvent, ToolCallEvent, ToolCallStartedEvent,
+)
 from services.conversation.tools.orchestrator import ToolCallOrchestrator
 from services.conversation.tools.policy_resolver import ResolvedToolPolicy
 from services.conversation.tools.registry import ToolRegistry
@@ -25,7 +27,8 @@ def _policy(tool_name: str = "book_appointment") -> ResolvedToolPolicy:
     defn = ToolRegistry().resolve(tool_name)
     return ResolvedToolPolicy(
         definition=defn, tool_provider_config_id="cfg1", engine="cal_com",
-        api_key_ref="env:X", extra={}, timeout_ms=None, max_calls_per_turn=None,
+        api_key_ref="env:X", secondary_api_key_ref=None,
+        extra={}, timeout_ms=None, max_calls_per_turn=None,
     )
 
 
@@ -75,7 +78,7 @@ class _ScriptedLLM:
             assert isinstance(e, TokenEvent), "plain generate() can't script a ToolCallEvent"
             yield e.text
 
-    async def generate_with_tools(self, messages, schemas):
+    async def generate_with_tools(self, messages, schemas, tool_choice=None):
         self.seen_messages.append(list(messages))
         events = self._scripted_calls[self.call_count]
         self.call_count += 1
@@ -132,6 +135,113 @@ async def test_tool_call_executes_folds_result_and_continues_to_final_answer():
 
     # Second generate_with_tools() call saw the folded-in history.
     assert len(llm.seen_messages[1]) == 3
+
+
+async def test_phone_number_confirmed_reaches_tool_execution_context():
+    """run_turn()'s phone_number_confirmed param (set by pipeline.py) must
+    reach ToolExecutionContext — CalendarExecutor's deterministic
+    confirmation gate reads it from there, not from history itself."""
+    llm = _ScriptedLLM([
+        [ToolCallEvent(tool_call_id="c1", tool_name="book_appointment", arguments={"requested_datetime": "x"})],
+        [TokenEvent(text="You're booked!")],
+    ])
+    executor = _FixedExecutor(ToolResult(status=ToolStatus.SUCCESS, payload={"booked": True, "booking_id": "b1"}))
+    registry = ExecutorRegistry()
+    registry.register("book_appointment", lambda provider: executor)
+
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([_policy()]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=registry,
+    )
+
+    history = [ChatMessage(role="user", content="book me tomorrow at 3")]
+    [e async for e in orchestrator.run_turn(
+        "agent1", "t1", "c1", "s1", history, phone_number_confirmed=True,
+    )]
+
+    assert executor.calls[0].context.phone_number_confirmed is True
+
+
+async def test_force_tool_name_forces_tool_choice_on_first_call_only():
+    """force_tool_name (set by pipeline.py on the one narrow condition
+    where the caller just confirmed their phone number — see
+    _caller_just_confirmed_phone_number) must reach the LLM as a real
+    tool_choice on the turn's first generate_with_tools() call, and must
+    NOT be re-forced on a second iteration within the same turn (e.g. a
+    forced call that itself needed a follow-up plain-text wrap-up)."""
+    llm = _ScriptedLLM([
+        [ToolCallEvent(tool_call_id="c1", tool_name="book_appointment", arguments={"requested_datetime": "x"})],
+        [TokenEvent(text="booked")],
+    ])
+    executor = _FixedExecutor(ToolResult(status=ToolStatus.SUCCESS, payload={"booked": True}))
+    registry = ExecutorRegistry()
+    registry.register("book_appointment", lambda provider: executor)
+
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([_policy()]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=registry,
+    )
+
+    seen_tool_choices = []
+    original_generate_with_tools = llm.generate_with_tools
+
+    async def spying_generate_with_tools(messages, schemas, tool_choice=None):
+        seen_tool_choices.append(tool_choice)
+        async for e in original_generate_with_tools(messages, schemas, tool_choice=tool_choice):
+            yield e
+
+    llm.generate_with_tools = spying_generate_with_tools
+
+    [e async for e in orchestrator.run_turn(
+        "agent1", "t1", "c1", "s1", [ChatMessage(role="user", content="yes")],
+        force_tool_name="book_appointment",
+    )]
+
+    assert seen_tool_choices == [
+        {"type": "function", "function": {"name": "book_appointment"}},
+        None,
+    ]
+
+
+async def test_deterministic_response_short_circuits_llm_narration():
+    """See ToolResult.deterministic_response's own docstring: when an
+    executor sets this (a real, confirmed booking), the orchestrator must
+    speak it verbatim and never call the LLM again for this turn — the
+    words were never the LLM's to choose, so there's nothing for a second
+    generate_with_tools() call to narrate. Confirmed live, repeatedly,
+    that letting the LLM narrate a tool result at all is exactly how a
+    real success gets fabricated into a false one on a later turn."""
+    llm = _ScriptedLLM([
+        [ToolCallEvent(tool_call_id="c1", tool_name="book_appointment", arguments={"requested_datetime": "x"})],
+        [TokenEvent(text="should never be requested")],
+    ])
+    executor = _FixedExecutor(ToolResult(
+        status=ToolStatus.SUCCESS, payload={"booked": True, "booking_id": "b1"},
+        deterministic_response="You're all set — I've booked your appointment for Friday at 3 PM.",
+    ))
+    registry = ExecutorRegistry()
+    registry.register("book_appointment", lambda provider: executor)
+
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([_policy()]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=registry,
+    )
+
+    events = [e async for e in orchestrator.run_turn(
+        "agent1", "t1", "c1", "s1", [ChatMessage(role="user", content="book me tomorrow at 3")],
+    )]
+
+    assert events == [
+        ToolCallStartedEvent(tool_name="book_appointment"),
+        DeterministicSpokenEvent(text="You're all set — I've booked your appointment for Friday at 3 PM."),
+    ]
+    assert llm.call_count == 1  # never asked to narrate the result
 
 
 async def test_max_tool_iterations_forces_final_generation_without_tools():

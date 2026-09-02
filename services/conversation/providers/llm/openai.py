@@ -100,7 +100,15 @@ class OpenAILLM:
                           "Keep responses concise and natural for speech.",
         temperature: float = 0.7,
         base_url:    str = _DEFAULT_BASE_URL,
-        timeout_s:   float = 30.0,
+        # 30s (the old default) left a caller in dead air that long when
+        # Groq's stream opened (200 OK logged) but then stalled with no
+        # token for a long stretch — a real, live-observed failure distinct
+        # from the fast-failing 429 rate-limit case, and far longer than
+        # the gateway's own ~19-20s patience, so FallbackLLM never got a
+        # chance to cut over to the secondary before the caller had already
+        # given up. Matches GeminiLLM's own timeout_s=10.0, fixed there
+        # for the identical reason (2026-08-02).
+        timeout_s:   float = 10.0,
     ) -> None:
         self._model       = model
         self._system      = system
@@ -151,6 +159,7 @@ class OpenAILLM:
 
     async def generate_with_tools(
         self, messages: list[ChatMessage], schemas: list[dict[str, Any]],
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> AsyncGenerator[TurnEvent, None]:
         all_messages = [_to_openai_message(m) for m in build_chat_messages(self._system, messages)]
         tools = [{"type": "function", "function": s} for s in schemas]
@@ -162,6 +171,19 @@ class OpenAILLM:
             "temperature": self._temperature,
             "tools":       tools,
         }
+        # Every call leaves tool_choice unset (API default: "auto"), giving
+        # the model full discretion on every turn — confirmed live,
+        # repeatedly, that this is a real contributing factor to fabricated
+        # booking claims: the model sometimes just declines to call the
+        # tool even on the exact turn it obviously should. tool_choice is
+        # the caller's lever to force it on that one specific turn (e.g.
+        # {"type": "function", "function": {"name": "book_appointment"}}
+        # right after the caller confirms their phone number) — see
+        # pipeline.py's _message_reads_back_phone_number for where that
+        # decision is actually made; this class only forwards whatever
+        # the caller passes.
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
 
         # Keyed by delta.tool_calls[].index — handles a vendor sending the
         # whole call in one chunk (index always 0, one iteration) or

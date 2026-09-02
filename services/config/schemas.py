@@ -115,6 +115,16 @@ class ProviderConfigUpdate(BaseModel):
     region:      str | None = None
     api_key_ref: str | None = None
     api_key:     str | None = None
+    # Replaces the whole extra object — service layer does not deep-merge
+    # (see provider_configs.update_provider_config). Was missing here even
+    # though the service layer and admin-ui's own TS type both already
+    # supported it — PATCHing extra silently 400'd with "no fields to
+    # update" since FastAPI drops any JSON key with no matching Pydantic
+    # field before exclude_unset=True ever runs.
+    extra:       dict[str, Any] | None = None
+    # Same gap as extra above: the DB column and _UPDATABLE_FIELDS already
+    # supported this (Phase 7 stub), the schema just never exposed it.
+    fallback_config_id: str | None = None
 
 
 class TelephonyConfigCreate(BaseModel):
@@ -150,6 +160,12 @@ class ToolProviderConfigCreate(BaseModel):
     # engine is ever added, revisit this back to optional + a per-engine
     # check, matching provider_configs' own per-role posture.
     api_key_ref: str
+    # See tool_provider_configs.secondary_api_key_ref's own schema.sql
+    # comment — a second, independent secret slot for an engine that needs
+    # two credentials (e.g. Cal.com's API key here, Twilio's Auth Token
+    # for optional SMS confirmations here). Optional: most engines never
+    # need it.
+    secondary_api_key_ref: str | None = None
     extra:       dict[str, Any] | None = None
 
 
@@ -157,6 +173,7 @@ class ToolProviderConfigUpdate(BaseModel):
     name:        str | None = None
     engine:      str | None = None
     api_key_ref: str | None = None
+    secondary_api_key_ref: str | None = None
     extra:       dict[str, Any] | None = None
 
 

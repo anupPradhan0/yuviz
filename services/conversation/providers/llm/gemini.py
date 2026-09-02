@@ -126,21 +126,45 @@ class GeminiLLM:
         shaped = build_chat_messages(self._system, messages)
         system_instruction = None
         contents: list[dict[str, Any]] = []
+        # Tool-call ids whose originating assistant message got flattened to
+        # plain text below (foreign-origin, no thought_signature) — the
+        # paired "tool"-role result must follow the same path, since a
+        # native functionResponse only makes sense pointing at a native
+        # functionCall right before it.
+        flattened_call_ids: set[str] = set()
         for m in shaped:
             if m["role"] == "system":
                 system_instruction = m["content"]
                 continue
             if m.get("tool_calls"):
+                # A tool call this class itself never produced — e.g. Groq/
+                # OpenAI's, replayed into history when this class is used as
+                # a fallback mid-conversation (see FallbackLLM) — carries no
+                # thought_signature, and Gemini's native functionCall part
+                # hard-400s without one ("missing a thought_signature") once
+                # any tool-calling has happened. There's no signature to
+                # echo back that this class didn't invent, so render it as
+                # plain text instead of Gemini's native function-calling
+                # grammar, which this message was never part of. Confirmed
+                # live: this broke a real call mid-booking-flow the first
+                # time Groq→Gemini fallback fired on a turn after an
+                # earlier tool call was already in history.
+                if not all((c.get("provider_metadata") or {}).get("thought_signature") for c in m["tool_calls"]):
+                    flattened_call_ids.update(c["id"] for c in m["tool_calls"])
+                    summary = "; ".join(f"{c['name']}({json.dumps(c['arguments'])})" for c in m["tool_calls"])
+                    contents.append({"role": "model", "parts": [{"text": f"[called {summary}]"}]})
+                    continue
                 parts = []
                 for c in m["tool_calls"]:
                     part: dict[str, Any] = {"functionCall": {"name": c["name"], "args": c["arguments"]}}
-                    sig = (c.get("provider_metadata") or {}).get("thought_signature")
-                    if sig:
-                        part["thoughtSignature"] = sig
+                    part["thoughtSignature"] = c["provider_metadata"]["thought_signature"]
                     parts.append(part)
                 contents.append({"role": "model", "parts": parts})
                 continue
             if m["role"] == "tool":
+                if m.get("tool_call_id") in flattened_call_ids:
+                    contents.append({"role": "user", "parts": [{"text": f"[tool result: {m['content']}]"}]})
+                    continue
                 try:
                     response_obj = json.loads(m["content"]) if m["content"] else {}
                 except json.JSONDecodeError:
@@ -205,6 +229,7 @@ class GeminiLLM:
 
     async def generate_with_tools(
         self, messages: list[ChatMessage], schemas: list[dict[str, Any]],
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> AsyncGenerator[TurnEvent, None]:
         """IToolAwareLLM companion to generate() — same client/auth, additive
         method. Gemini wraps the generic {name, description, parameters}
@@ -212,7 +237,13 @@ class GeminiLLM:
         OpenAI/Ollama's per-tool wrapper. A functionCall part, like a text
         part, arrives as a complete unit in whichever chunk it appears —
         never built up incrementally the way text streams — so plain-text
-        turns keep the same per-sentence TTS latency they have today."""
+        turns keep the same per-sentence TTS latency they have today.
+
+        tool_choice, when given as the same OpenAI-shaped dict every other
+        provider accepts ({"type": "function", "function": {"name": ...}}),
+        is translated to Gemini's own tool_config.function_calling_config
+        (mode="ANY" + allowed_function_names) — Gemini's real equivalent of
+        forcing one specific function call instead of leaving it optional."""
         system_instruction, contents = self._shape_contents(messages)
 
         payload: dict = {
@@ -220,6 +251,12 @@ class GeminiLLM:
             "generationConfig": {"temperature": self._temperature},
             "tools": [{"functionDeclarations": schemas}],
         }
+        if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+            forced_name = tool_choice.get("function", {}).get("name")
+            if forced_name:
+                payload["tool_config"] = {
+                    "function_calling_config": {"mode": "ANY", "allowed_function_names": [forced_name]},
+                }
         if system_instruction:
             payload["system_instruction"] = {"parts": [{"text": system_instruction}]}
 

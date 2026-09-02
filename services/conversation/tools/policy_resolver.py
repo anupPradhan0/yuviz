@@ -70,6 +70,11 @@ class ResolvedToolPolicy:
     tool_provider_config_id: str
     engine:                  str
     api_key_ref:             str | None
+    # See tool_provider_configs.secondary_api_key_ref's own schema.sql
+    # comment — a second, independent secret slot for an engine that needs
+    # two credentials (Cal.com's own API key in api_key_ref, Twilio's Auth
+    # Token here, for optional per-tenant SMS booking confirmations).
+    secondary_api_key_ref:   str | None
     extra:                   dict[str, Any]
     timeout_ms:              int | None
     max_calls_per_turn:      int | None
@@ -111,7 +116,8 @@ class ToolPolicyResolver:
             rows = await conn.fetch(
                 """
                 SELECT atp.tool_name, atp.timeout_ms, atp.max_calls_per_turn,
-                       tpc.id AS tool_provider_config_id, tpc.engine, tpc.api_key_ref, tpc.extra
+                       tpc.id AS tool_provider_config_id, tpc.engine, tpc.api_key_ref,
+                       tpc.secondary_api_key_ref, tpc.extra
                 FROM agent_tool_policies atp
                 JOIN tool_provider_configs tpc ON tpc.id = atp.tool_provider_config_id
                 WHERE atp.agent_id = $1 AND atp.enabled = true AND tpc.deleted_at IS NULL
@@ -139,6 +145,7 @@ class ToolPolicyResolver:
                 tool_provider_config_id=str(row["tool_provider_config_id"]),
                 engine=row["engine"],
                 api_key_ref=row["api_key_ref"],
+                secondary_api_key_ref=row["secondary_api_key_ref"],
                 extra=extra,
                 timeout_ms=row["timeout_ms"],
                 max_calls_per_turn=row["max_calls_per_turn"],
@@ -173,6 +180,7 @@ class ToolPolicyResolver:
                     tool_provider_config_id=source.tool_provider_config_id,
                     engine=source.engine,
                     api_key_ref=source.api_key_ref,
+                    secondary_api_key_ref=source.secondary_api_key_ref,
                     extra=source.extra,
                     timeout_ms=source.timeout_ms,
                     max_calls_per_turn=source.max_calls_per_turn,

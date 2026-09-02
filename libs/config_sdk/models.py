@@ -164,6 +164,7 @@ class ProviderConfig:
     api_key_ref: str | None
     extra: dict[str, Any] = field(default_factory=dict)
     updated_at: datetime | None = None
+    fallback_config_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -197,6 +198,11 @@ class ProviderConfigs:
     stt: ProviderConfig
     llm: ProviderConfig
     tts: ProviderConfig
+    # Only populated when llm.fallback_config_id resolves to a real,
+    # non-deleted provider_configs row — see CacheAsideConfigProvider.
+    # get_runtime_config() for the resolution. None means "no fallback
+    # configured," not "resolution failed."
+    llm_fallback: ProviderConfig | None = None
 
 
 @dataclass(frozen=True)

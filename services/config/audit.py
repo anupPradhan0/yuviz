@@ -22,7 +22,7 @@ import asyncpg
 
 from . import db
 
-_SECRET_REF_FIELDS = {"api_key_ref", "auth_token_ref", "password_hash"}
+_SECRET_REF_FIELDS = {"api_key_ref", "secondary_api_key_ref", "auth_token_ref", "password_hash"}
 
 
 def _redact(value: dict[str, Any] | None) -> dict[str, Any] | None:

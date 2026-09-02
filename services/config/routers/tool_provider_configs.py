@@ -40,6 +40,7 @@ async def create_tool_provider_config(
         tool_name=body.tool_name,
         engine=body.engine,
         api_key_ref=body.api_key_ref,
+        secondary_api_key_ref=body.secondary_api_key_ref,
         extra=body.extra,
         user_id=current_user.id,
         user_email=current_user.email,

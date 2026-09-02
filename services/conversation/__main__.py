@@ -213,7 +213,17 @@ async def serve(port: int, args: argparse.Namespace) -> None:
     # since different tenants/agents can resolve to different LLM engines.
     tool_registry = ToolRegistry()
     executor_registry = ExecutorRegistry()
-    executor_registry.register("book_appointment", lambda provider: CalendarExecutor(provider))
+    # Optional booking-confirmation SMS is now a per-tenant setting on the
+    # SAME tool_provider_config as the calendar engine itself (see
+    # provider_manager.py's _make_sms_provider) — CalComCalendarProvider
+    # exposes it as a plain `.sms_provider` attribute (not part of
+    # ICalendarProvider's own interface) precisely so this factory closure
+    # can pick it up without ToolProviderManager/ExecutorRegistry needing
+    # to know SMS exists at all.
+    executor_registry.register(
+        "book_appointment",
+        lambda provider: CalendarExecutor(provider, sms_provider=getattr(provider, "sms_provider", None)),
+    )
     executor_registry.register("cancel_appointment", lambda provider: CancelAppointmentExecutor(provider))
     executor_registry.register("reschedule_appointment", lambda provider: RescheduleAppointmentExecutor(provider))
     tool_provider_manager = ToolProviderManager(CompositeSecretResolver())
@@ -278,6 +288,14 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 executor_registry=executor_registry,
             )
 
+            # Whether the caller-ID-confirmation prompt block makes any
+            # sense for this agent at all — it talks about "before
+            # booking," which is actively confusing (and contradicts a
+            # reception-only agent's own "you cannot book" instruction) if
+            # book_appointment isn't actually enabled for it.
+            enabled_policies = await tool_policy_resolver.enabled_tools(runtime_config.agent.id)
+            has_booking_tool = any(p.definition.name == "book_appointment" for p in enabled_policies)
+
             return PipelineConversationHandler(
                 runtime_config, bundle,
                 sample_rate=cfg.sample_rate,
@@ -291,6 +309,7 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 caller_number=ctx.caller_did,
                 called_number=ctx.called_did,
                 knowledge=knowledge,
+                has_booking_tool=has_booking_tool,
             )
 
     # grpc.aio.server() defaults to SO_REUSEPORT, which lets a second process

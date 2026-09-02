@@ -33,6 +33,28 @@ class ToolResult:
     status:  ToolStatus
     payload: dict[str, Any] = field(default_factory=dict)
     error:   str | None = None
+    # Set by an executor (never the orchestrator — see orchestrator.py's own
+    # module docstring on staying tool-agnostic) when this exact outcome
+    # must reach the caller verbatim, with zero LLM discretion over the
+    # wording. When set, ToolCallOrchestrator speaks this text directly via
+    # a DeterministicSpokenEvent instead of looping back to the LLM for a
+    # free-text follow-up generate() call to narrate the result. Built for
+    # CalendarExecutor's real booking-success case — confirmed live,
+    # repeatedly, that an LLM asked to narrate "what just happened" will
+    # sometimes narrate a false "booked!" instead of having actually
+    # called the tool, no matter how the prompt is worded; a real success
+    # must never be put in a position where it could be confused with
+    # that failure mode.
+    deterministic_response: str | None = None
+    # The real, business-local wall-clock datetime this deterministic
+    # success actually confirmed (e.g. "2026-08-31T14:00:00") — set
+    # alongside deterministic_response so pipeline.py can tell a later
+    # turn's TRUTHFUL recap of this exact slot apart from a NEW, unconfirmed
+    # claim about a different one (e.g. a caller asking to reschedule,
+    # which the LLM sometimes narrates without ever calling
+    # reschedule_appointment — confirmed live). Only meaningful when
+    # deterministic_response is also set.
+    confirmed_datetime: str | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +97,15 @@ class ToolExecutionContext:
     # in to cancel may not be calling from the same number they booked
     # with, so those always ask the caller to state a phone number instead.
     caller_number:                 str = ""
+    # True once pipeline.py has seen the caller actually confirm
+    # caller_number on some earlier turn this call (see pipeline.py's
+    # _caller_just_confirmed_phone_number/_phone_number_confirmed) — a
+    # precomputed fact, not raw history, matching this dataclass's own
+    # "pure function of (request, context)" design (see module docstring):
+    # CalendarExecutor uses this to refuse booking against the ANI at all
+    # until it's true, rather than re-deriving "was this confirmed" from
+    # conversation history itself.
+    phone_number_confirmed:        bool = False
     conversation_history_snapshot: list[dict[str, Any]] = field(default_factory=list)
 
 

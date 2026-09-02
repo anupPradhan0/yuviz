@@ -116,12 +116,15 @@ class ICalendarProvider(Protocol):
         ...
 
     async def find_available_slots(
-        self, near_datetime: str, timezone: str, limit: int = 3,
+        self, near_datetime: str, timezone: str, limit: int = 50,
     ) -> list[AvailabilitySlot]:
-        """Candidate alternatives near near_datetime. An empty list is a
-        valid, non-error result (see design §12: 'not available, and
-        alternatives lookup also came up empty' still degrades to
-        SUCCESS/booked=false with an empty list, not FAILED)."""
+        """Candidate alternatives on near_datetime's own day specifically
+        (not a multi-day window — see cal_com.py's implementation comment
+        for why). An empty list is a valid, non-error result (see design
+        §12: 'not available, and alternatives lookup also came up empty'
+        still degrades to SUCCESS/booked=false with an empty list, not
+        FAILED) — correctly meaning that day is fully booked, not silently
+        borrowed from a different day."""
         ...
 
     async def book_appointment(

@@ -36,10 +36,14 @@ from ..directives import (
     TransferRequest,
     TransferType,
 )
+from .. import pipeline as pipeline_module
 from ..pipeline import (
     PipelineConversationHandler,
     _END_CALL_MARKER,
     _FALLBACK_GOODBYE,
+    _FIRST_TURN_FILLER,
+    _TOOL_CALL_FILLER_MIN_GAP_S,
+    _TOOL_CALL_FILLERS,
     _TRANSFER_FAILED_FALLBACK,
 )
 from ..provider_bundle import ProviderBundle
@@ -147,6 +151,7 @@ def _make_handler(
     end_call_prompt: str | None = None, transfer_prompt: str | None = None,
     farewell_message: str | None = None, transfer_announcement: str | None = None,
     tool_orchestrator=None, max_call_duration_s: int | None = None,
+    has_booking_tool: bool = False,
 ) -> PipelineConversationHandler:
     """Builds the minimal (RuntimeConfig, ProviderBundle) pair these tests
     need — PipelineConversationHandler's real constructor contract now (see
@@ -191,7 +196,10 @@ def _make_handler(
         tools=[], version=1, resolved_at=now,
     )
     bundle = ProviderBundle(stt=stt, llm=llm, tts=tts)
-    return PipelineConversationHandler(runtime_config, bundle, knowledge=knowledge, tool_orchestrator=tool_orchestrator)
+    return PipelineConversationHandler(
+        runtime_config, bundle, knowledge=knowledge, tool_orchestrator=tool_orchestrator,
+        has_booking_tool=has_booking_tool,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +254,37 @@ async def test_pipeline_produces_stt_then_tts():
     # Subsequent responses carry TTS audio.
     tts_responses = [r for r in responses if r.tts_payloads]
     assert tts_responses, "expected TTS chunks"
+
+
+@pytest.mark.asyncio
+async def test_first_turn_filler_spoken_before_the_real_response():
+    stt = _make_stt("hi there")
+    llm = _make_llm(["Real", " response", "."])
+    tts = _make_tts()
+
+    handler = _make_handler(stt, llm, tts, system_prompt="Be helpful.")
+    async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        pass
+
+    spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
+    assert spoken_texts[0] == _FIRST_TURN_FILLER
+    assert spoken_texts.count(_FIRST_TURN_FILLER) == 1
+
+
+@pytest.mark.asyncio
+async def test_first_turn_filler_not_repeated_on_later_turns():
+    stt = _make_stt("hi there")
+    llm = _make_llm(["Real", " response", "."])
+    tts = _make_tts()
+
+    handler = _make_handler(stt, llm, tts, system_prompt="Be helpful.")
+    async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        pass
+    async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        pass
+
+    spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
+    assert spoken_texts.count(_FIRST_TURN_FILLER) == 1
 
 
 @pytest.mark.asyncio
@@ -1894,6 +1933,10 @@ async def test_no_announcement_token_only_transfer_still_dispatches_without_audi
         stt, llm, tts, system_prompt="You are Alex.",
         transfer_type="cold", transfer_destination="1001",
     )
+    # Not this test's concern — see _FIRST_TURN_FILLER's own tests — so
+    # treat this as a turn beyond the first, keeping this test isolated to
+    # the announcement/no-announcement transfer-audio question it's for.
+    handler._first_turn_filler_spoken.add("s1")
     responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
     assert any(r.transfer_request for r in responses)
     assert not any(r.tts_payloads for r in responses)
@@ -1916,7 +1959,12 @@ class _FakeToolOrchestrator:
         self.seen_agent_id = None
         self.seen_history = None
 
-    async def run_turn(self, agent_id, tenant_id, call_id, session_id, history, caller_number="", cancel_event=None):
+    async def run_turn(
+        self, agent_id, tenant_id, call_id, session_id, history,
+        caller_number="", cancel_event=None, force_tool_name=None, phone_number_confirmed=False,
+    ):
+        self.seen_force_tool_name = force_tool_name
+        self.seen_phone_number_confirmed = phone_number_confirmed
         self.seen_agent_id = agent_id
         self.seen_history = list(history)
         self.seen_caller_number = caller_number
@@ -1955,6 +2003,478 @@ async def test_pipeline_without_tool_orchestrator_uses_llm_directly():
     responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
 
     assert any(r.tts_payloads for r in responses)
+
+
+@pytest.mark.asyncio
+async def test_tool_call_filler_burst_within_one_turn_speaks_only_once():
+    """Two tool calls back to back in the same turn (no real user speech
+    between them) must not each speak a filler — that's the same
+    "sounds broken" repetition the rotation exists to avoid, just via a
+    burst instead of identical wording. See _TOOL_CALL_FILLER_MIN_GAP_S."""
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    stt = _make_stt("book something")
+    llm = _make_llm(["unused"])
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _FakeToolOrchestrator([
+        ToolCallStartedEvent(tool_name="book_appointment"),
+        ToolCallStartedEvent(tool_name="book_appointment"),
+        ToolTokenEvent(text="Done."),
+    ])
+    handler = _make_handler(stt, llm, tts, system_prompt="You are a scheduler.", tool_orchestrator=orchestrator)
+
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+
+    spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
+    filler_count = sum(1 for t in spoken_texts if t in _TOOL_CALL_FILLERS)
+    assert filler_count == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_call_filler_rotates_across_separate_tool_calls(monkeypatch):
+    """Two tool calls on two separate, well-spaced turns (the real case —
+    a caller replying between them) each get a filler, and they aren't the
+    same phrase — see _TOOL_CALL_FILLERS."""
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(pipeline_module.time, "monotonic", lambda: clock["t"])
+
+    stt = _make_stt("book something")
+    llm = _make_llm(["unused"])
+    tts = _make_tts(b"\x00" * 640)
+    handler = _make_handler(stt, llm, tts, system_prompt="You are a scheduler.")
+
+    handler._tool_orchestrator = _FakeToolOrchestrator([ToolCallStartedEvent(tool_name="book_appointment")])
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+
+    clock["t"] += _TOOL_CALL_FILLER_MIN_GAP_S + 1.0
+    handler._tool_orchestrator = _FakeToolOrchestrator([ToolCallStartedEvent(tool_name="book_appointment")])
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+
+    spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
+    fillers_spoken = [t for t in spoken_texts if t in _TOOL_CALL_FILLERS]
+    assert len(fillers_spoken) == 2
+    assert fillers_spoken[0] != fillers_spoken[1]
+
+
+@pytest.mark.asyncio
+async def test_truthful_recap_after_real_booking_is_not_flagged():
+    """Confirmed live: a genuine, tool-confirmed booking success on one
+    turn, truthfully recapped by the LLM on a LATER turn (no tool call
+    needed that turn — nothing about the booking changed), got flagged as
+    a fresh fabrication anyway. Once _confirmed_booking_slot has the real
+    slot for this session, a later plain-text recap of THAT SAME slot
+    (same day-of-month and hour mentioned) must never be corrected or
+    counted."""
+    from ..tools.llm_adapter import DeterministicSpokenEvent as ToolDeterministicSpokenEvent
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    stt = _make_stt("book me tomorrow at 3")
+    llm = _make_llm(["should never be called"])
+    tts = _make_tts(b"\x00" * 640)
+    real_success_orchestrator = _FakeToolOrchestrator([
+        ToolCallStartedEvent(tool_name="book_appointment"),
+        ToolDeterministicSpokenEvent(
+            text="You're all set — I've booked your appointment for Friday, August 28 at 3:00 PM.",
+            confirmed_datetime="2026-08-28T15:00:00",
+        ),
+    ])
+    handler = _make_handler(
+        stt, llm, tts, system_prompt="You are a scheduler.",
+        tool_orchestrator=real_success_orchestrator, has_booking_tool=True,
+    )
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    # Second turn: no tool call this time, just a truthful recap of the
+    # SAME slot (day 28, hour 3 PM both mentioned again).
+    handler._tool_orchestrator = _FakeToolOrchestrator([
+        ToolTokenEvent(text="Just confirming — your appointment is booked for the 28th at 3 PM."),
+    ])
+    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    history = handler._get_history("s1")
+    assert history[-1].role == "assistant"
+    assert history[-1].content == "Just confirming — your appointment is booked for the 28th at 3 PM."
+
+
+@pytest.mark.asyncio
+async def test_reschedule_claim_to_a_different_time_is_still_flagged():
+    """The other half of the fix: a real booking succeeding once must NOT
+    give a free pass to a LATER claim about a genuinely different,
+    never-confirmed time — confirmed live, a caller's reschedule request
+    got a false "it's booked" for a new date/time with no
+    reschedule_appointment call behind it, and the old boolean-flag
+    version of this guard silently let it through."""
+    from ..tools.llm_adapter import DeterministicSpokenEvent as ToolDeterministicSpokenEvent
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    stt = _make_stt("book me tomorrow at 3")
+    llm = _make_llm(["should never be called"])
+    tts = _make_tts(b"\x00" * 640)
+    real_success_orchestrator = _FakeToolOrchestrator([
+        ToolCallStartedEvent(tool_name="book_appointment"),
+        ToolDeterministicSpokenEvent(
+            text="You're all set — I've booked your appointment for Friday, August 28 at 3:00 PM.",
+            confirmed_datetime="2026-08-28T15:00:00",
+        ),
+    ])
+    handler = _make_handler(
+        stt, llm, tts, system_prompt="You are a scheduler.",
+        tool_orchestrator=real_success_orchestrator, has_booking_tool=True,
+        transfer_type="warm", transfer_destination="1000", escalation_threshold=0,
+    )
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    # Second turn: caller asked to reschedule; no tool call happened, but
+    # the LLM claims a NEW, never-confirmed time (day 30, not day 28).
+    handler._tool_orchestrator = _FakeToolOrchestrator([
+        ToolTokenEvent(text="Sure, I've rescheduled your appointment to the 30th at 3 PM."),
+    ])
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert any(r.transfer_request for r in responses)
+    history = handler._get_history("s1")
+    assert history[-1].role == "system"
+
+
+@pytest.mark.asyncio
+async def test_fabricated_booking_claim_gets_corrected_in_history():
+    """Confirmed live: a local LLM narrated "Booked! ... demo
+    scheduled ..." with no real book_appointment call behind it (verified
+    against the real Cal.com API: zero bookings existed). The pipeline
+    can't unspeak the sentence, but it must append a correction to history
+    so the next turn doesn't compound the lie, and count it as a guardrail
+    violation."""
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+
+    stt = _make_stt("book me tomorrow at 3")
+    llm = _make_llm(["should never be called"])
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _FakeToolOrchestrator([ToolTokenEvent(text="Booked! Your appointment is confirmed.")])
+    handler = _make_handler(
+        stt, llm, tts, system_prompt="You are a scheduler.",
+        tool_orchestrator=orchestrator, has_booking_tool=True,
+    )
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    history = handler._get_history("s1")
+    assert history[-1].role == "system"
+    assert "did not call book_appointment" in history[-1].content
+    assert history[-2].role == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_fabricated_booking_claim_escalates_on_first_offense():
+    """Confirmed live: escalation_threshold=1 with two
+    consecutive fabricated "Booked!" turns never escalated, because (a)
+    the engine rejects when violation_count <= threshold (so threshold=1
+    actually requires 2+ violations, not 1), and (b) the fabrication count
+    was sharing a counter with the caller-frustration detector, which
+    resets on every polite caller turn — the caller here said "Sure,
+    thank you" between the two fabrications, wiping the count back to 0
+    each time. threshold=0 is the correct configuration for "transfer on
+    the very first fabrication," and the dedicated
+    _booking_fabrication_counter must not be reset by polite caller
+    turns."""
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+
+    stt = _make_stt("Sure, thank you.")
+    llm = _make_llm(["should never be called"])
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _FakeToolOrchestrator([ToolTokenEvent(text="Booked! Your demo is confirmed.")])
+    handler = _make_handler(
+        stt, llm, tts, system_prompt="You are a scheduler.",
+        tool_orchestrator=orchestrator, has_booking_tool=True,
+        transfer_type="warm", transfer_destination="1000", escalation_threshold=0,
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    transfer_responses = [r for r in responses if r.transfer_request]
+    assert len(transfer_responses) == 1
+    assert transfer_responses[0].transfer_request.destination == "1000"
+
+
+@pytest.mark.asyncio
+async def test_pending_transfer_survives_same_turn_end_call_marker():
+    """Confirmed live: the LLM's fabricated booking claim came
+    bundled with its own [[END_CALL]] marker in the very same turn (a
+    natural "wrap up and say goodbye" shape) — end_call used to be
+    processed unconditionally first and yielded HandlerResponse(end_call=
+    True), which tears the session down before the transfer_request
+    yielded later in the same generator could ever reach the servicer. A
+    pending transfer must win: no end_call HandlerResponse this turn, and
+    the transfer_request must still be yielded."""
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+
+    stt = _make_stt("book me tomorrow at 3")
+    llm = _make_llm(["should never be called"])
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _FakeToolOrchestrator([
+        ToolTokenEvent(text="Booked! Your appointment is confirmed. [[END_CALL]]"),
+    ])
+    handler = _make_handler(
+        stt, llm, tts, system_prompt="You are a scheduler.",
+        tool_orchestrator=orchestrator, has_booking_tool=True,
+        transfer_type="warm", transfer_destination="1000", escalation_threshold=0,
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert not any(r.end_call for r in responses)
+    transfer_responses = [r for r in responses if r.transfer_request]
+    assert len(transfer_responses) == 1
+    assert transfer_responses[0].transfer_request.destination == "1000"
+
+
+@pytest.mark.asyncio
+async def test_fabrication_triggered_transfer_speaks_specific_announcement():
+    """Product fix, confirmed live: a caller who just heard "Confirmed! ..."
+    followed immediately by a silent handoff to a human reads as the
+    system being broken, even though escalation is working as designed.
+    This transfer must speak a specific double-checking line instead of
+    (or in place of no) generic transfer_announcement."""
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+
+    stt = _make_stt("book me tomorrow at 3")
+    llm = _make_llm(["should never be called"])
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _FakeToolOrchestrator([ToolTokenEvent(text="Booked! Your appointment is confirmed.")])
+    handler = _make_handler(
+        stt, llm, tts, system_prompt="You are a scheduler.",
+        tool_orchestrator=orchestrator, has_booking_tool=True,
+        transfer_type="warm", transfer_destination="1000", escalation_threshold=0,
+        transfer_announcement="Please hold while I transfer you.",
+    )
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
+    assert any("double-check that booking" in t for t in spoken_texts)
+    assert "Please hold while I transfer you." not in spoken_texts
+
+
+@pytest.mark.asyncio
+async def test_frustration_triggered_transfer_still_uses_generic_announcement():
+    """A transfer NOT caused by booking fabrication (caller frustration
+    here) must keep using the agent's own configured transfer_announcement
+    — the specific double-checking line is only for the fabrication case."""
+    stt_frustrated = _make_stt("This is useless, you are not helping at all.")
+    llm = _make_llm(["I'm sorry to hear that."])
+    tts = _make_tts(b"\x00" * 640)
+    handler = _make_handler(
+        stt_frustrated, llm, tts,
+        transfer_type="cold", transfer_destination="1001", escalation_threshold=0,
+        transfer_announcement="Please hold while I transfer you.",
+    )
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
+    assert "Please hold while I transfer you." in spoken_texts
+    assert not any("double-check that booking" in t for t in spoken_texts)
+
+
+@pytest.mark.asyncio
+async def test_deterministic_spoken_event_reaches_tts_and_history():
+    """End-to-end pipeline wiring for a real, confirmed booking: the
+    DeterministicSpokenEvent's exact text must reach TTS and land in
+    history as this turn's assistant message, with no fabrication warning
+    (tool_calls_made already contains book_appointment by the time the
+    check runs) and no separate LLM narration."""
+    from ..tools.llm_adapter import DeterministicSpokenEvent as ToolDeterministicSpokenEvent
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    stt = _make_stt("book me tomorrow at 3")
+    llm = _make_llm(["should never be called"])
+    tts = _make_tts(b"\x00" * 640)
+    confirmation = "You're all set — I've booked your appointment for Friday at 3 PM."
+    orchestrator = _FakeToolOrchestrator([
+        ToolCallStartedEvent(tool_name="book_appointment"),
+        ToolDeterministicSpokenEvent(text=confirmation),
+    ])
+    handler = _make_handler(
+        stt, llm, tts, system_prompt="You are a scheduler.",
+        tool_orchestrator=orchestrator, has_booking_tool=True,
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert any(r.tts_payloads for r in responses)
+    history = handler._get_history("s1")
+    assert history[-1].role == "assistant"
+    assert history[-1].content == confirmation
+
+
+def test_message_reads_back_phone_number_matches_words_or_digits():
+    from ..pipeline import _message_reads_back_phone_number
+
+    assert _message_reads_back_phone_number("nine one eight nine seven one one eight eight two one one", "+918971188211")
+    assert _message_reads_back_phone_number("+91 8 9 7 1 1 8 8 2 1 1, is that right?", "+918971188211")
+    assert not _message_reads_back_phone_number("What's a good time for you?", "+918971188211")
+    assert not _message_reads_back_phone_number("nine one eight nine seven one one eight eight two one one", "")
+
+
+def test_caller_just_confirmed_phone_number_requires_readback_then_affirmative():
+    from ..pipeline import _caller_just_confirmed_phone_number
+
+    readback = ChatMessage(
+        role="assistant",
+        content="Let me confirm: nine one eight nine seven one one eight eight two one one. Is that right?",
+    )
+    assert _caller_just_confirmed_phone_number(
+        [readback, ChatMessage(role="user", content="Yes, correct.")], "+918971188211",
+    )
+    # Not affirmative — a new question instead of a yes/no.
+    assert not _caller_just_confirmed_phone_number(
+        [readback, ChatMessage(role="user", content="What time works for you?")], "+918971188211",
+    )
+    # Previous turn wasn't a phone readback at all.
+    not_readback = ChatMessage(role="assistant", content="What kind of business are you in?")
+    assert not _caller_just_confirmed_phone_number(
+        [not_readback, ChatMessage(role="user", content="Yes")], "+918971188211",
+    )
+
+
+@pytest.mark.asyncio
+async def test_phone_confirmation_forces_book_appointment_tool_choice():
+    """End-to-end pipeline wiring: right after a phone-number readback +
+    affirmative reply, _token_stream must pass force_tool_name to the
+    orchestrator — the one condition confirmed live, repeatedly, to be an
+    unambiguous "call the tool now" moment the LLM sometimes skips
+    anyway."""
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+
+    stt = _make_stt("Yes, correct.")
+    llm = _make_llm(["should never be called"])
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _FakeToolOrchestrator([ToolTokenEvent(text="booking now")])
+    handler = _make_handler(
+        stt, llm, tts, system_prompt="You are a scheduler.",
+        tool_orchestrator=orchestrator, has_booking_tool=True,
+    )
+    history = handler._get_history("s1")
+    history.append(ChatMessage(
+        role="assistant",
+        content="Let me confirm: nine one eight nine seven one one eight eight two one one. Is that right?",
+    ))
+    handler._caller_number = "+918971188211"
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert orchestrator.seen_force_tool_name == "book_appointment"
+
+
+@pytest.mark.asyncio
+async def test_no_phone_confirmation_does_not_force_tool_choice():
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+
+    stt = _make_stt("What kind of business are you in?")
+    llm = _make_llm(["should never be called"])
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _FakeToolOrchestrator([ToolTokenEvent(text="ok")])
+    handler = _make_handler(
+        stt, llm, tts, system_prompt="You are a scheduler.",
+        tool_orchestrator=orchestrator, has_booking_tool=True,
+    )
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert orchestrator.seen_force_tool_name is None
+    assert orchestrator.seen_phone_number_confirmed is False
+
+
+@pytest.mark.asyncio
+async def test_phone_confirmation_persists_to_a_later_turn():
+    """A caller confirming their number early in the call must still count
+    several turns later, when the actual booking attempt happens — not
+    just on the exact turn the confirmation occurred (see pipeline.py's
+    _phone_number_confirmed docstring: confirmed live, a caller who never
+    actually answered the read-back question still got booked against an
+    unconfirmed number, which this deterministic tracking now prevents)."""
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+
+    stt = _make_stt("Yes, correct.")
+    llm = _make_llm(["should never be called"])
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _FakeToolOrchestrator([ToolTokenEvent(text="ok")])
+    handler = _make_handler(
+        stt, llm, tts, system_prompt="You are a scheduler.",
+        tool_orchestrator=orchestrator, has_booking_tool=True,
+    )
+    history = handler._get_history("s1")
+    history.append(ChatMessage(
+        role="assistant",
+        content="Let me confirm: nine one eight nine seven one one eight eight two one one. Is that right?",
+    ))
+    handler._caller_number = "+918971188211"
+
+    # Turn 1: the confirmation itself.
+    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+    assert orchestrator.seen_phone_number_confirmed is True
+
+    # Turn 2: unrelated follow-up — no fresh readback/affirmative pair,
+    # but the earlier confirmation must still be remembered.
+    stt.transcribe.return_value = SttResult(text="tomorrow at 3pm works", confidence=0.95)
+    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+    assert orchestrator.seen_phone_number_confirmed is True
+
+
+@pytest.mark.asyncio
+async def test_real_booking_tool_call_is_not_flagged_as_fabricated():
+    """A turn where book_appointment genuinely ran must never get the
+    correction appended, even if the response text also happens to say
+    "booked" — that's the honest case."""
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent, ToolCallStartedEvent
+
+    stt = _make_stt("book me tomorrow at 3")
+    llm = _make_llm(["should never be called"])
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _FakeToolOrchestrator([
+        ToolCallStartedEvent(tool_name="book_appointment"),
+        ToolTokenEvent(text="Booked! Your appointment is confirmed."),
+    ])
+    handler = _make_handler(
+        stt, llm, tts, system_prompt="You are a scheduler.",
+        tool_orchestrator=orchestrator, has_booking_tool=True,
+    )
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    history = handler._get_history("s1")
+    assert history[-1].role == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_fabricated_booking_claim_not_flagged_without_booking_tool():
+    """has_booking_tool=False (e.g. a reception-only agent) must never
+    trigger this check at all — it has no book_appointment tool to have
+    skipped calling in the first place."""
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+
+    stt = _make_stt("book me tomorrow at 3")
+    llm = _make_llm(["should never be called"])
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _FakeToolOrchestrator([ToolTokenEvent(text="Booked! Your appointment is confirmed.")])
+    handler = _make_handler(
+        stt, llm, tts, system_prompt="You are a scheduler.",
+        tool_orchestrator=orchestrator, has_booking_tool=False,
+    )
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    history = handler._get_history("s1")
+    assert history[-1].role == "assistant"
 
 
 def _make_failing_llm(exc: Exception) -> MagicMock:

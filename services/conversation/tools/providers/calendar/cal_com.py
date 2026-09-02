@@ -41,6 +41,7 @@ from .interface import (
     AttendeeInfo, AvailabilitySlot, BookingResult, BookingSummary, CalendarProviderError,
     InvalidAttendeePhoneError, SlotUnavailableError,
 )
+from ..sms.interface import ISmsProvider
 
 log = logging.getLogger(__name__)
 
@@ -64,13 +65,23 @@ class CalComCalendarProvider:
         api_key:              str,
         event_type_id:        int,
         default_attendee_phone: str | None = None,
+        default_attendee_email: str | None = None,
         default_timezone:     str = "UTC",
         base_url:             str = _DEFAULT_BASE_URL,
         timeout_s:            float = 10.0,
+        sms_provider:         ISmsProvider | None = None,
     ) -> None:
         self._event_type_id = event_type_id
         self._default_attendee_phone = default_attendee_phone
+        self._default_attendee_email = default_attendee_email
         self._default_timezone = default_timezone
+        # Public, not a property with its own leading underscore — a
+        # per-tenant optional add-on read directly by the executor_registry
+        # factory closure in __main__.py (getattr(provider, "sms_provider",
+        # None)), not part of ICalendarProvider's own interface. See
+        # provider_manager.py's _make_sms_provider for why this lives here
+        # rather than as a second, independent tool_provider_config.
+        self.sms_provider = sms_provider
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=timeout_s,
@@ -83,6 +94,10 @@ class CalComCalendarProvider:
         return self._default_attendee_phone
 
     @property
+    def default_attendee_email(self) -> str | None:
+        return self._default_attendee_email
+
+    @property
     def default_timezone(self) -> str:
         # Configurable per tool_provider_config (extra.timezone) instead of
         # a hardcoded "UTC" everywhere — a tenant outside UTC/US would
@@ -91,12 +106,16 @@ class CalComCalendarProvider:
 
     def requires_attendee_phone(self) -> bool:
         # Cal.com's own event-type bookingFields schema is the authoritative
-        # source — this tenant's event type was reconfigured live 2026-07-27
-        # to require attendeePhoneNumber and make email optional (see module
-        # docstring). A per-provider-instance flag set from that at
-        # construction is a reasonable v1 simplification over querying the
-        # event type's live schema on every call; revisit if an event type's
-        # requiredness changes without redeploying this config.
+        # source — this tenant's event type was reconfigured live at one
+        # point to require attendeePhoneNumber (see module docstring). A
+        # per-provider-instance flag set from that at construction is a
+        # reasonable v1 simplification over querying the event type's live
+        # schema on every call; revisit if an event type's requiredness
+        # changes without redeploying this config. Confirmed live: this
+        # event type's email requirement has flipped at least twice
+        # (optional, then required again) with nothing here updated either
+        # time — book_appointment() now always sends a placeholder email
+        # unconditionally rather than trying to track that setting's drift.
         return True
 
     async def _slots_for_range(self, start_date: str, end_date: str, tz: str) -> dict[str, list[dict]]:
@@ -128,19 +147,25 @@ class CalComCalendarProvider:
         return False
 
     async def find_available_slots(
-        self, near_datetime: str, timezone: str, limit: int = 3,
+        self, near_datetime: str, timezone: str, limit: int = 50,
     ) -> list[AvailabilitySlot]:
+        # Scoped to near_datetime's own day only (confirmed live: this
+        # used to search a 7-day window and cap the flattened result at
+        # 3 total, so a caller asking "what's open tomorrow" could get
+        # alternatives from several days out instead of a complete, honest
+        # picture of tomorrow specifically). limit stays as a defensive
+        # cap, not the primary scoping mechanism — raised well past any
+        # realistic single day's slot count so it never truncates a real
+        # day in practice; a day that's genuinely fully booked correctly
+        # returns an empty list rather than silently borrowing from
+        # another day.
         start_date = near_datetime[:10]
-        end_date = _add_days(start_date, 7)
         try:
-            slots_by_date = await self._slots_for_range(start_date, end_date, timezone)
+            slots_by_date = await self._slots_for_range(start_date, start_date, timezone)
         except httpx.HTTPError as exc:
             raise CalendarProviderError(f"Cal.com unreachable: {exc}") from exc
 
-        flat: list[str] = []
-        for date_key in sorted(slots_by_date.keys()):
-            for slot in slots_by_date[date_key]:
-                flat.append(slot["start"])
+        flat = [slot["start"] for slot in slots_by_date.get(start_date, [])]
         return [AvailabilitySlot(start_iso=s) for s in flat[:limit]]
 
     async def book_appointment(
@@ -162,26 +187,43 @@ class CalComCalendarProvider:
                 "timeZone": attendee.timezone,
             },
         }
-        # Defense in depth only — this tenant's event type no longer
-        # requires email at all (Cal.com synthesizes its own placeholder),
-        # but pass a real one through if somehow present rather than
-        # discard it.
+        # A real email, if the LLM somehow has one, always goes on the
+        # attendee object itself too (distinct from bookingFieldsResponses
+        # below — this is the actual invitee record Cal.com would use for
+        # calendar invites, not a custom form question).
         if attendee.email:
             body["attendee"]["email"] = attendee.email
-        # title is a required custom bookingField on this event type
-        # (confirmed live 2026-08-02: every booking attempt was returning
-        # 400 "responses - {title}error_required_field" — the event type
-        # was reconfigured to require it at some point after this code was
-        # first written, and nothing here was updated to match). Always
-        # send one — event-type-level requiredness can vary per tenant, so
-        # a synthesized default costs nothing when the field turns out to
-        # be optional, but its absence hard-fails the whole booking when
-        # it's required, as it is here.
-        booking_fields_responses = {"title": f"Appointment for {attendee_name}"}
+        # title and email are both required custom bookingFields on this
+        # event type (confirmed live, in two separate incidents: title's
+        # 400 "responses - {title}error_required_field" was found first,
+        # and code added to always send one; months later, email's own
+        # 400 "responses - {email}error_required_field" surfaced the same
+        # way, because this tenant's event type has flipped email's
+        # requiredness at least twice with nothing here ever updated to
+        # match — see requires_attendee_phone()'s own comment). The
+        # product deliberately never asks a phone caller for their email
+        # (see the sales agent's own prompt), so there is usually no real
+        # one to send — fall back to this tool_provider_config's own
+        # default_attendee_email, and failing that, a synthesized
+        # placeholder. Always send one regardless of whatever Cal.com's
+        # event type currently requires: a placeholder costs nothing when
+        # the field turns out to be optional, but its absence silently
+        # hard-fails an otherwise-complete booking when required, exactly
+        # as it did here.
+        email = attendee.email or self._default_attendee_email or "caller@noreply.yuviz.ai"
+        booking_fields_responses = {
+            "title": f"Appointment for {attendee_name}",
+            "email": email,
+        }
         if notes:
             booking_fields_responses["notes"] = notes
         body["bookingFieldsResponses"] = booking_fields_responses
 
+        # Logged at INFO — the only way to answer "what did we
+        # actually send Cal.com" used to be asking the user to paste
+        # terminal output; httpx's own request logging never includes body
+        # content for any method, only method/URL/status.
+        log.info("Cal.com POST /v2/bookings body=%r", body)
         try:
             resp = await self._client.post(
                 "/v2/bookings", json=body, headers={"cal-api-version": _BOOKINGS_API_VERSION},
@@ -191,6 +233,7 @@ class CalComCalendarProvider:
 
         if resp.status_code >= 400:
             text = resp.text
+            log.info("Cal.com /v2/bookings returned %s: %s", resp.status_code, text)
             if _SLOT_CONFLICT_MESSAGE in text:
                 raise SlotUnavailableError(text)
             if _INVALID_PHONE_MESSAGE in text:
@@ -307,12 +350,6 @@ def _parse_local_iso(value: str, tz_name: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=ZoneInfo(tz_name))
     return dt.astimezone(dt_timezone.utc).replace(microsecond=0)
-
-
-def _add_days(date_str: str, days: int) -> str:
-    from datetime import timedelta
-    d = datetime.fromisoformat(date_str)
-    return (d + timedelta(days=days)).strftime("%Y-%m-%d")
 
 
 def _normalize_phone(phone: str) -> str:

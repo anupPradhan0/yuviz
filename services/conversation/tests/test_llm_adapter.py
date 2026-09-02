@@ -31,8 +31,9 @@ class _ToolAwareLLM:
     async def generate(self, messages):
         yield "should not be called when tools offered"
 
-    async def generate_with_tools(self, messages, schemas):
+    async def generate_with_tools(self, messages, schemas, tool_choice=None):
         self.seen_schemas = schemas
+        self.seen_tool_choice = tool_choice
         if self._tool_call:
             yield ToolCallEvent(tool_call_id="c1", tool_name="book_appointment", arguments={"start_time": "x"})
         else:

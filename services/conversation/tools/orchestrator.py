@@ -21,7 +21,9 @@ from typing import Any, AsyncGenerator
 from ..metrics import IMetrics
 from ..providers.interfaces import ChatMessage
 from .executor_registry import ExecutorRegistry
-from .llm_adapter import LLMAdapter, ToolCallEvent, ToolCallStartedEvent, TokenEvent, TurnEvent
+from .llm_adapter import (
+    DeterministicSpokenEvent, LLMAdapter, ToolCallEvent, ToolCallStartedEvent, TokenEvent, TurnEvent,
+)
 from .middleware import build_default_chain
 from .policy_resolver import ToolPolicyResolver
 from .provider_manager import ToolProviderManager
@@ -53,6 +55,7 @@ class ToolCallOrchestrator:
     async def run_turn(
         self, agent_id: str, tenant_id: str, call_id: str, session_id: str, history: list[ChatMessage],
         caller_number: str = "", cancel_event: "asyncio.Event | None" = None,
+        force_tool_name: str | None = None, phone_number_confirmed: bool = False,
     ) -> AsyncGenerator[TurnEvent, None]:
         policies = await self._policy_resolver.enabled_tools(agent_id)
         policies_by_name = {p.definition.name: p for p in policies}
@@ -60,10 +63,22 @@ class ToolCallOrchestrator:
 
         turn_id = str(uuid.uuid4())
         iteration = 0
+        # Only forced on this turn's very first generate() call — see
+        # pipeline.py's _message_reads_back_phone_number for the one
+        # narrow condition that sets force_tool_name at all (right after
+        # the caller confirms their phone number). Never re-forced on a
+        # later iteration within the same turn: once a tool call has
+        # already happened once, iterate normally rather than coercing a
+        # second forced call the model may have no reason to make.
+        tool_choice = (
+            {"type": "function", "function": {"name": force_tool_name}}
+            if force_tool_name else None
+        )
 
         while True:
             tool_call_happened = False
-            async for event in self._llm_adapter.generate(history, schemas):
+            this_call_tool_choice, tool_choice = tool_choice, None
+            async for event in self._llm_adapter.generate(history, schemas, tool_choice=this_call_tool_choice):
                 if isinstance(event, TokenEvent):
                     yield event
                     continue
@@ -76,9 +91,19 @@ class ToolCallOrchestrator:
 
                 result = await self._execute_tool_call(
                     event, policies_by_name, tenant_id, agent_id, call_id, session_id, turn_id, iteration,
-                    caller_number, cancel_event,
+                    caller_number, cancel_event, phone_number_confirmed,
                 )
                 _fold_tool_result_into_history(history, event, result)
+                if result.deterministic_response is not None:
+                    # This exact outcome must reach the caller verbatim —
+                    # see ToolResult.deterministic_response's own docstring.
+                    # No further LLM generate() call for this turn: the
+                    # words were never the LLM's to choose, so there is
+                    # nothing left for it to narrate.
+                    yield DeterministicSpokenEvent(
+                        text=result.deterministic_response, confirmed_datetime=result.confirmed_datetime,
+                    )
+                    return
                 if result.status == ToolStatus.FAILED and result.error == "cancelled":
                     # The caller barged in while this tool call was still in
                     # flight — see _execute_tool_call's own comment on why we
@@ -103,7 +128,7 @@ class ToolCallOrchestrator:
     async def _execute_tool_call(
         self, event: ToolCallEvent, policies_by_name: dict, tenant_id: str, agent_id: str,
         call_id: str, session_id: str, turn_id: str, iteration: int, caller_number: str = "",
-        cancel_event: "asyncio.Event | None" = None,
+        cancel_event: "asyncio.Event | None" = None, phone_number_confirmed: bool = False,
     ) -> ToolResult:
         policy = policies_by_name.get(event.tool_name)
         if policy is None:
@@ -134,6 +159,7 @@ class ToolCallOrchestrator:
                 deadline=time.monotonic() + timeout_ms / 1000,
                 request_id=str(uuid.uuid4()),
                 caller_number=caller_number,
+                phone_number_confirmed=phone_number_confirmed,
             ),
         )
 

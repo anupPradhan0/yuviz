@@ -168,6 +168,65 @@ async def test_runtime_config_missing_one_provider_role_returns_none():
     assert await provider.get_runtime_config("acme", "sup") is None
 
 
+async def test_runtime_config_resolves_llm_fallback_when_configured():
+    redis_repo = FakeRepo(
+        tenants={"acme": _tenant_row(
+            "acme", default_stt_config_id="stt1", default_llm_config_id="llm1", default_tts_config_id="tts1",
+        )},
+        agents={("acme", "sup"): _agent_row("sup")},
+        providers={
+            "stt1": _provider_row("stt1", "stt", "deepgram"),
+            "llm1": _provider_row("llm1", "llm", "groq", fallback_config_id="llm2"),
+            "llm2": _provider_row("llm2", "llm", "gemini"),
+            "tts1": _provider_row("tts1", "tts", "elevenlabs"),
+        },
+    )
+    provider = CacheAsideConfigProvider(redis_repo, FakeRepo())
+
+    rc = await provider.get_runtime_config("acme", "sup")
+    assert rc.providers.llm_fallback is not None
+    assert rc.providers.llm_fallback.engine == "gemini"
+
+
+async def test_runtime_config_llm_fallback_none_when_not_configured():
+    redis_repo = FakeRepo(
+        tenants={"acme": _tenant_row(
+            "acme", default_stt_config_id="stt1", default_llm_config_id="llm1", default_tts_config_id="tts1",
+        )},
+        agents={("acme", "sup"): _agent_row("sup")},
+        providers={
+            "stt1": _provider_row("stt1", "stt", "deepgram"),
+            "llm1": _provider_row("llm1", "llm", "groq"),
+            "tts1": _provider_row("tts1", "tts", "elevenlabs"),
+        },
+    )
+    provider = CacheAsideConfigProvider(redis_repo, FakeRepo())
+
+    rc = await provider.get_runtime_config("acme", "sup")
+    assert rc.providers.llm_fallback is None
+
+
+async def test_runtime_config_dangling_fallback_config_id_degrades_to_none():
+    # fallback_config_id points at a row that no longer exists (deleted, or
+    # never created) — must not fail the whole runtime config resolution.
+    redis_repo = FakeRepo(
+        tenants={"acme": _tenant_row(
+            "acme", default_stt_config_id="stt1", default_llm_config_id="llm1", default_tts_config_id="tts1",
+        )},
+        agents={("acme", "sup"): _agent_row("sup")},
+        providers={
+            "stt1": _provider_row("stt1", "stt", "deepgram"),
+            "llm1": _provider_row("llm1", "llm", "groq", fallback_config_id="ghost"),
+            "tts1": _provider_row("tts1", "tts", "elevenlabs"),
+        },
+    )
+    provider = CacheAsideConfigProvider(redis_repo, FakeRepo())
+
+    rc = await provider.get_runtime_config("acme", "sup")
+    assert rc is not None
+    assert rc.providers.llm_fallback is None
+
+
 async def test_get_prompt_returns_agent_greeting_and_prompt():
     redis_repo = FakeRepo(agents={("acme", "sup"): _agent_row("sup", greeting="Hi", system_prompt="Help.")})
     provider = CacheAsideConfigProvider(redis_repo, FakeRepo())

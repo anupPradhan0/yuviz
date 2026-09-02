@@ -63,4 +63,13 @@ class ProviderRegistry:
         stt = await self._manager.get(_to_ai_provider_config(providers.stt))
         llm = await self._manager.get(_to_ai_provider_config(providers.llm))
         tts = await self._manager.get(_to_ai_provider_config(providers.tts))
+        if providers.llm_fallback is not None:
+            from .providers.llm.fallback import FallbackLLM
+
+            secondary = await self._manager.get(_to_ai_provider_config(providers.llm_fallback))
+            llm = FallbackLLM(
+                llm, secondary,
+                primary_name=f"{providers.llm.engine}:{providers.llm.model}",
+                secondary_name=f"{providers.llm_fallback.engine}:{providers.llm_fallback.model}",
+            )
         return ProviderBundle(stt=stt, llm=llm, tts=tts)

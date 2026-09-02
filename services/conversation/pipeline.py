@@ -40,6 +40,7 @@ from .provider_bundle import ProviderBundle
 from .providers.interfaces import ChatMessage, SttResult
 from .session import HandlerResponse
 from .session_finalizer import FinalizationResult, SessionFinalizer
+from .tools.llm_adapter import DeterministicSpokenEvent
 from .tools.llm_adapter import TokenEvent as ToolTokenEvent
 from .tools.llm_adapter import ToolCallStartedEvent
 from .tools.orchestrator import ToolCallOrchestrator
@@ -117,7 +118,15 @@ def _build_caller_number_context(caller_number: str) -> str:
 
     Empty caller_number (browser test calls, some SIP trunks that don't
     pass ANI) returns "" — prompt is unchanged, agent falls back to
-    asking directly, today's existing behavior."""
+    asking directly, today's existing behavior.
+
+    Caller passes has_booking_tool from __main__.py's handler_factory
+    (ToolPolicyResolver.enabled_tools()) so this is never injected into an
+    agent with no book_appointment tool at all — confirmed live: a
+    reception-only agent (no booking capability, explicitly told "you
+    cannot book appointments") got this "Before booking, state this
+    number..." text anyway and started confirming phone numbers as if it
+    were about to book something, contradicting its own system_prompt."""
     if not caller_number:
         return ""
     spaced = " ".join(caller_number)
@@ -129,8 +138,128 @@ def _build_caller_number_context(caller_number: str) -> str:
         "repeat it in the tool call. If they say it's different or wrong, "
         "ask them to say the correct number one digit at a time, including "
         "country code, then read it back the same way to confirm before "
-        "you book anything."
+        "you book anything. "
+        "Confirmed live: a caller who doesn't actually answer that question "
+        "— changes the subject, asks something else, says something "
+        "unrelated — has NOT confirmed the number, even if the "
+        "conversation moves on. Never treat silence or a topic change as "
+        "confirmation. If you asked and never got a clear yes or a "
+        "corrected number, ask again before you book anything — do not "
+        "let the conversation drift into scheduling with an unconfirmed "
+        "number. "
+        "Confirmed live, repeatedly: once you already have a date, a time, "
+        "and the caller has confirmed this number, the very next thing you "
+        "do must be to actually call the booking tool — not read the "
+        "number back again, not ask another question, not say anything "
+        "about the appointment yourself. Confirming the same number twice "
+        "in a row, or saying anything that sounds like the appointment is "
+        "set, without that tool call having actually happened in this "
+        "exact turn, is the single most serious mistake you can make on "
+        "this call."
     )
+
+
+_DIGIT_WORDS = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+}
+_AFFIRMATIVE_RE = re.compile(
+    r"^\s*(yes|yeah|yep|yup|sure|correct|right|that'?s\s+(right|correct)|ok(ay)?)\b", re.IGNORECASE,
+)
+
+
+def _extract_spoken_digits(text: str) -> str:
+    """A digit confirmation readback can spell digits as words ("eight
+    nine seven") or as numerals ("8 9 7") depending on how the model
+    happens to phrase it this time — normalize both to one digit string
+    so the two representations compare equal."""
+    out = []
+    for word in re.findall(r"[A-Za-z]+|\d+", text):
+        if word.isdigit():
+            out.append(word)
+        else:
+            digit = _DIGIT_WORDS.get(word.lower())
+            if digit:
+                out.append(digit)
+    return "".join(out)
+
+
+def _message_reads_back_phone_number(text: str, caller_number: str) -> bool:
+    """True when `text` (an assistant turn) appears to have just spoken
+    the caller's own number back to them — the digit-confirmation moment
+    _build_caller_number_context() instructs the agent to do before
+    booking. Compares only the last 7 digits so country-code/leading-zero
+    formatting differences between what was injected and what the model
+    actually said don't cause a false negative."""
+    if not caller_number:
+        return False
+    target = re.sub(r"\D", "", caller_number)
+    if len(target) < 7:
+        return False
+    return target[-7:] in _extract_spoken_digits(text)
+
+
+def _caller_just_confirmed_phone_number(history: list[ChatMessage], caller_number: str) -> bool:
+    """The one narrow, deterministic condition worth forcing tool_choice
+    over: the immediately preceding assistant turn read the caller's
+    number back to them, and this turn's caller reply is a short
+    affirmative — the exact moment book_appointment should be called,
+    confirmed live, repeatedly, to instead sometimes get skipped entirely
+    with no explanation. history[-1] is this turn's just-appended caller
+    message (see on_speech_ended's own append, right before _llm_to_tts
+    runs); history[-2], if present and from the assistant, is the turn
+    being checked for the readback."""
+    if len(history) < 2 or history[-2].role != "assistant":
+        return False
+    if not _AFFIRMATIVE_RE.match(history[-1].content or ""):
+        return False
+    return _message_reads_back_phone_number(history[-2].content or "", caller_number)
+
+
+def _claim_matches_confirmed_slot(assistant_text: str, confirmed_datetime: str) -> bool:
+    """True when assistant_text appears to be describing the SAME slot
+    confirmed_datetime already real, truthfully — as opposed to a claim
+    about some OTHER time. Confirmed live: tracking only a boolean "a
+    booking succeeded at some point" let a later, genuinely different,
+    never-confirmed reschedule claim through too, since the flag never
+    reset. Crude but fails in the safer direction: both the day-of-month
+    and the hour (12-hour or 24-hour) must appear as numerals in the
+    text for a match; anything else — including a date this can't even
+    parse — is treated as NOT a match, so the fabrication check below
+    still runs rather than silently waving through a claim this function
+    isn't sure about."""
+    try:
+        dt = datetime.fromisoformat(confirmed_datetime)
+    except ValueError:
+        return False
+    digits_in_text = set(re.findall(r"\d+", assistant_text))
+    day_matches = str(dt.day) in digits_in_text
+    hour12 = dt.strftime("%I").lstrip("0") or "12"
+    hour_matches = hour12 in digits_in_text or str(dt.hour) in digits_in_text
+    return day_matches and hour_matches
+
+
+_BOOKING_CLAIM_RE = re.compile(
+    # rescheduled/re-booked included explicitly — confirmed live, a claim
+    # about a reschedule uses these words, and \bscheduled\b alone never
+    # matches "rescheduled" (no word boundary between "re" and
+    # "scheduled" — both are word characters).
+    r"\b(booked|rebooked|confirmed|scheduled|rescheduled|all set)\b", re.IGNORECASE,
+)
+_BOOKING_SUBJECT_RE = re.compile(
+    r"\b(appointment|demo|booking|meeting|slot)\b", re.IGNORECASE,
+)
+
+
+def _claims_booking_without_tool_call(assistant_text: str) -> bool:
+    """Heuristic, not a parser: a small local model can phrase a fabricated
+    confirmation in unlimited ways, so this only catches the common
+    "booked/confirmed/scheduled" + "appointment/demo/booking" pairing seen
+    in a real live incident (see call site's comment) — a
+    deliberate false-negative-tolerant backstop, not the primary fix
+    (the primary fix is the LLM actually calling the tool; this only
+    limits the blast radius when it doesn't)."""
+    return bool(_BOOKING_CLAIM_RE.search(assistant_text) and _BOOKING_SUBJECT_RE.search(assistant_text))
 
 
 def _build_end_call_instruction(condition: str | None, scripted: bool = False) -> str:
@@ -186,7 +315,48 @@ _FALLBACK_LLM_ERROR = "Sorry, I'm having a little trouble right now. Could you s
 # any tool, no per-agent/per-tool setup needed. Fixed, not per-agent
 # configurable for now — same posture as _FALLBACK_GOODBYE/_FALLBACK_LLM_ERROR,
 # revisit only if a real need for per-agent wording shows up.
-_TOOL_CALL_FILLER = "Let me check that for you."
+#
+# A rotating pool, not one fixed phrase — a multi-turn booking
+# conversation (try book -> unavailable -> check a different slot ->
+# book again) calls a tool on nearly every turn, and the ORIGINAL fix for
+# that (confirmed live: repeating "Let me check that for you" verbatim
+# each time sounded broken/annoying) was to only ever speak it once per
+# call. That made every retry after the first go completely silent again
+# — the same dead-air gap this filler exists to cover, just deferred to
+# the second tool call onward. Rotating wording answers the actual
+# complaint (identical repetition sounding robotic) without giving up
+# feedback on every real round-trip; see _TOOL_CALL_FILLER_MIN_GAP_S
+# below for the other half of "don't let repetition feel bad" — spacing,
+# not just wording.
+_TOOL_CALL_FILLERS = (
+    "Let me check that for you.",
+    "One moment.",
+    "Just a second.",
+    "Give me a moment.",
+)
+
+# A turn that internally retries a tool call more than once in a row (see
+# orchestrator.py's run_turn() while-loop — one LLM turn can make several
+# tool calls back to back with no real user speech between them) would
+# otherwise speak a different filler phrase after each one in rapid
+# succession — varied wording doesn't fix a *burst*, only literal
+# repetition does. Suppressing a filler that would land under this many
+# seconds since the last one spoken this call keeps the natural case (a
+# real gap while the caller is thinking/replying between tool calls)
+# unaffected, while collapsing a rapid-fire retry burst down to just its
+# first filler.
+_TOOL_CALL_FILLER_MIN_GAP_S = 4.0
+
+# Spoken immediately on the caller's very first utterance, before the LLM
+# call even starts — masks perceived latency on turn 1, which measured
+# real (Groq) LLM round-trip time of 800-1200ms, same order as later turns
+# (not a special cold-start spike — see project memory's first-turn
+# latency measurement). This doesn't reduce that real latency; it gives
+# the caller something natural to hear immediately instead of dead air
+# while it elapses, same masking rationale as _TOOL_CALL_FILLER above.
+# Deliberately generic/content-free (works no matter what the caller just
+# said) and fixed rather than per-agent, same posture as the other fillers.
+_FIRST_TURN_FILLER = "Mm-hmm, one moment."
 
 # Phase 3 of AI-to-human transfer (see project memory): [[TRANSFER ...]] is
 # now detected the same streaming-safe way [[END_CALL]] always has been —
@@ -290,6 +460,18 @@ def _build_transfer_failed_system_event(reason: str) -> str:
 # _FALLBACK_GOODBYE's "never leave dead air" reasoning above).
 _TRANSFER_FAILED_FALLBACK = "I'm sorry, I couldn't connect you to an agent right now."
 
+# Spoken instead of the agent's own transfer_announcement (if any) when a
+# fabricated booking claim is what triggered this specific transfer.
+# Product decision, confirmed live: without this, a caller who just heard
+# "Confirmed! I'll book..." got silently handed off to a human moments
+# later with zero explanation — which reads as the system being broken
+# even though escalation is working exactly as designed. Framing this as
+# a deliberate double-check, not a mystery hang-up, is the fix.
+_BOOKING_FABRICATION_TRANSFER_ANNOUNCEMENT = (
+    "Let me just double-check that booking with a team member to make sure "
+    "it's set up correctly — one moment."
+)
+
 
 class PipelineConversationHandler:
     """
@@ -342,6 +524,7 @@ class PipelineConversationHandler:
         knowledge:     IKnowledgeProvider | None = None,
         metrics:       IMetrics | None = None,
         tool_orchestrator: ToolCallOrchestrator | None = None,
+        has_booking_tool: bool = False,
     ) -> None:
         # default_system_prompt is a pipeline-wide fallback (PipelineConfig.
         # llm.system), not part of RuntimeConfig — it's what a resolved
@@ -380,11 +563,12 @@ class PipelineConversationHandler:
         self._transfer_announcement = (
             (runtime_config.conversation.transfer_announcement or "").strip() or None
         )
+        self._has_booking_tool = has_booking_tool
         system_prompt = runtime_config.conversation.system_prompt or default_system_prompt
         self._system_prompt = (
             system_prompt
             + _build_current_date_context()
-            + _build_caller_number_context(self._caller_number)
+            + (_build_caller_number_context(self._caller_number) if has_booking_tool else "")
             + _build_end_call_instruction(
                 runtime_config.conversation.end_call_prompt,
                 scripted=self._farewell_message is not None,
@@ -492,6 +676,43 @@ class PipelineConversationHandler:
         # (_pending_transfer, _transfer_requested below).
         self._transfer_engine = TransferDecisionEngine(self._metrics)
         self._guardrail_counter = GuardrailCounter()
+        # Deliberately separate from _guardrail_counter above: that one is
+        # reset every turn the caller's own utterance isn't flagged (see
+        # on_speech_ended's STT-guardrail block) — sharing it with the
+        # booking-fabrication check meant a polite caller's very next turn
+        # (e.g. "Sure, thank you") erased the fabrication count before it
+        # could ever exceed 1, so two consecutive fabricated "Booked!"
+        # claims in the same real call (confirmed live) never
+        # escalated. This counter only ever moves in response to the AI's
+        # own fabrication, never the caller's tone.
+        self._booking_fabrication_counter = GuardrailCounter()
+        # Sessions whose most recently *accepted* transfer was triggered by
+        # a fabricated booking claim, not caller frustration — checked once,
+        # right before choosing which line to speak ahead of the transfer
+        # (see _BOOKING_FABRICATION_TRANSFER_ANNOUNCEMENT's own comment).
+        self._fabrication_triggered_transfer: set[str] = set()
+        # session_id -> the real, business-local datetime (e.g.
+        # "2026-08-31T14:00:00") that a tool-confirmed booking actually
+        # landed on, most recent win — see the fabrication check's own
+        # comment for why a boolean "has a booking ever succeeded" isn't
+        # enough: confirmed live, once that was tracked as a one-way flag,
+        # a caller's LATER attempt to reschedule to a genuinely different,
+        # never-confirmed time got a free pass too, since the flag stayed
+        # true for the rest of the call regardless of what was being
+        # claimed. Comparing against the actual confirmed slot lets a
+        # truthful recap of THIS exact time through while still catching a
+        # fabricated claim about any OTHER time.
+        self._confirmed_booking_slot: dict[str, str] = {}
+        # Once _caller_just_confirmed_phone_number() fires true for a
+        # session, stays true for the rest of the call — a caller who
+        # confirms their number early shouldn't have to re-confirm it
+        # again right before the actual booking turn, which can be several
+        # turns later (see book_appointment's registry.py description for
+        # why CalendarExecutor refuses to book against the ANI at all
+        # without this: confirmed live, a caller who never actually
+        # answered the read-back question — changed the subject instead —
+        # still got booked against the unconfirmed number).
+        self._phone_number_confirmed: set[str] = set()
         # Per-session state — keyed by session_id.
         self._history:   dict[str, list[ChatMessage]] = {}
         self._cancelled: dict[str, asyncio.Event]     = {}
@@ -509,14 +730,21 @@ class PipelineConversationHandler:
         # transcripts until on_session_end — see on_transfer_failed() and
         # requirement "persist only during normal SessionEnd."
         self._pending_recovery_turns: dict[str, list[tuple[str, str, bool]]] = {}
-        # Tool-call filler (_TOOL_CALL_FILLER) fires at most once per CALL,
-        # not once per turn — confirmed live as a real bug otherwise: a
-        # multi-turn booking conversation (try book -> ask for phone number
-        # -> retry book) calls a tool on nearly every turn, and repeating
-        # "Let me check that for you" each time sounded broken/annoying to
-        # a real caller. Keyed by session_id, matching
+        # Tool-call filler rotation state — see _TOOL_CALL_FILLERS/
+        # _TOOL_CALL_FILLER_MIN_GAP_S's own comments. next index into the
+        # rotation, and the monotonic time the last one was actually
+        # spoken (not attempted — a gap-suppressed tool call doesn't
+        # advance either). Keyed by session_id, matching
         # _pending_recovery_turns's own per-session-on-one-handler pattern.
-        self._filler_spoken_for_session: set[str] = set()
+        self._tool_call_filler_index: dict[str, int] = {}
+        self._tool_call_filler_last_spoken: dict[str, float] = {}
+        # Separate from the above: fires at most once per call, on the
+        # caller's first utterance rather than a tool call — see
+        # _FIRST_TURN_FILLER's own comment. Kept as its own set since both
+        # are legitimately independent events that could both occur in the
+        # same call (a caller whose very first turn already asks to book
+        # something).
+        self._first_turn_filler_spoken: set[str] = set()
 
     # ── IConversationHandler ───────────────────────────────────────────────────
 
@@ -666,10 +894,21 @@ class PipelineConversationHandler:
 
         # ── 2. LLM ─────────────────────────────────────────────────────────────
         history = self._get_history(session_id)
+        is_first_turn = not history
         # Prepend per-agent system prompt as the first message if configured.
         if self._system_prompt and not history:
             history.append(ChatMessage(role="system", content=self._system_prompt))
         history.append(ChatMessage(role="user", content=stt_result.text))
+
+        # See _FIRST_TURN_FILLER's own comment — masks the caller's first
+        # wait (knowledge retrieval + LLM + TTS, all still to come below)
+        # instead of leaving them in silence for it. Spoken here, before
+        # any of that work starts, not overlapped with it — same posture
+        # as the tool-call filler elsewhere in this method.
+        if is_first_turn and session_id not in self._first_turn_filler_spoken:
+            self._first_turn_filler_spoken.add(session_id)
+            async for chunk in self._synthesize_sentence_stream(_FIRST_TURN_FILLER, session_id):
+                yield HandlerResponse(tts_payloads=[chunk])
 
         # ── Knowledge retrieval — exactly one call per turn, never zero,
         # never more than one. Folded into this turn's own user-message
@@ -696,6 +935,7 @@ class PipelineConversationHandler:
 
         directives: list[Directive] = []
         full_response: list[str] = []
+        tool_calls_made: list[str] = []
         end_call = False
         any_audio = False
         llm_t0 = time.monotonic()
@@ -703,7 +943,7 @@ class PipelineConversationHandler:
         first_audio_at: float | None = None
         try:
             async for chunk, tts_audio, marker_seen in self._llm_to_tts(
-                messages_for_llm, cancel_event, session_id, directives
+                messages_for_llm, cancel_event, session_id, directives, tool_calls_made
             ):
                 now = time.monotonic()
                 if first_token_at is None:
@@ -738,6 +978,41 @@ class PipelineConversationHandler:
         # raw token, not the cleaned text).
         assistant_text = DirectiveParser.parse("".join(full_response)).clean_text.strip()
 
+        # Confirmed live: a local Ollama model (qwen2.5:7b)
+        # narrated "Booked! You have a demo scheduled..." with zero real
+        # book_appointment call behind it — Cal.com had no such booking.
+        # generate_with_tools() only ever detects a tool call when Ollama's
+        # response actually populates message.tool_calls; a model that just
+        # writes prose instead is never flagged anywhere upstream. Can't
+        # unspeak a sentence already streamed to TTS (see _llm_to_tts's
+        # per-sentence-boundary synthesis), so this is damage control, not
+        # prevention: nudge the *next* turn to actually call the tool, and
+        # count it as a guardrail violation so repeat offenses escalate to
+        # a human via the existing TransferDecisionEngine path.
+        # Confirmed live, separately: a genuine booking success on an
+        # earlier turn, truthfully recapped by the LLM on a LATER turn
+        # (no tool call needed that turn — nothing about the booking
+        # changed), got flagged as a fresh fabrication anyway, since this
+        # check only ever looks at THIS turn's tool_calls_made. Comparing
+        # against the real confirmed slot (see _confirmed_booking_slot,
+        # set in _token_stream's DeterministicSpokenEvent handling) lets a
+        # truthful recap of THAT exact slot through without disabling the
+        # check for the rest of the call — confirmed live, separately
+        # again: a caller who later asked to reschedule to a genuinely
+        # different, never-confirmed time got a false claim about THAT
+        # new time waved through too, when this was tracked as a one-way
+        # "a booking happened at some point" flag instead.
+        recap_of_real_booking = (
+            session_id in self._confirmed_booking_slot
+            and _claim_matches_confirmed_slot(assistant_text, self._confirmed_booking_slot[session_id])
+        )
+        fabricated_booking_claim = (
+            self._has_booking_tool
+            and not recap_of_real_booking
+            and "book_appointment" not in tool_calls_made
+            and _claims_booking_without_tool_call(assistant_text)
+        )
+
         if full_response and not cancel_event.is_set():
             # A cancelled response (≥1 token, interrupted) is treated as zero
             # tokens: discard it so history only ever holds complete pairs.
@@ -745,6 +1020,21 @@ class PipelineConversationHandler:
             # a marker split across tokens is only contiguous once joined, and
             # it must never leak into history or get referenced in a later turn.
             history.append(ChatMessage(role="assistant", content=assistant_text))
+            if fabricated_booking_claim:
+                log.warning(
+                    "Possible fabricated booking claim (no book_appointment call this turn) "
+                    "session=%s text=%r", session_id, assistant_text,
+                )
+                history.append(ChatMessage(
+                    role="system",
+                    content=(
+                        "Correction: nothing was actually booked, confirmed, or scheduled just "
+                        "now — you did not call book_appointment. If the caller still wants an "
+                        "appointment, call book_appointment for real before saying anything is "
+                        "booked or confirmed."
+                    ),
+                ))
+                self.record_booking_fabrication(session_id)
             self._trim_history(session_id)
         else:
             # Barge-in, cancel, or LLM failure: remove the unpaired user message
@@ -763,10 +1053,58 @@ class PipelineConversationHandler:
                 ),
             )
 
+        # Phase 6: an LLM-emitted directive takes precedence over a pending
+        # escalation-threshold trigger from an earlier turn — either way,
+        # at most one TransferRequest is yielded per turn. This ordering
+        # (check the directive first; only fall back to a pending
+        # escalation trigger if there wasn't one) is orchestration the
+        # engine itself is deliberately not asked to arbitrate — see
+        # transfer_engine.py's module docstring: it evaluates one trigger
+        # at a time and stays a pure function, so "which trigger wins when
+        # two fire the same turn" is this caller's own sequencing, not
+        # engine policy. A caller barge-in during this turn
+        # (cancel_event.is_set()) makes the agent's decision stale, same
+        # reasoning as end_call below.
+        #
+        # Computed BEFORE the end_call block below (confirmed live):
+        # a fabricated booking claim that also happened to
+        # trip the LLM's own [[END_CALL]] marker in the same turn — a
+        # natural "wrap up and say goodbye" response shape — got its
+        # transfer silently dropped every time, because end_call used to
+        # be handled unconditionally first and yield HandlerResponse(
+        # end_call=True) before this code ever ran; the servicer tears the
+        # session down on that signal, so the transfer_request yielded
+        # afterward in the same generator never had anywhere to land.
+        # Handing off to a human is a strictly bigger deal than the agent's
+        # own decision to hang up, so a pending transfer must win outright.
+        transfer_request: TransferRequest | None = None
+        if not cancel_event.is_set():
+            transfer_directive = next(
+                (d for d in directives if isinstance(d, TransferDirective)), None,
+            )
+            if transfer_directive is not None:
+                decision = self._transfer_engine.evaluate(
+                    self._decision_context(session_id),
+                    TransferTrigger(type=TriggerType.LLM_DIRECTIVE, directive=transfer_directive),
+                )
+                if decision.accepted:
+                    transfer_request = decision.request
+                    self._transfer_requested.add(session_id)
+            # Fall through to a pending escalation-accepted request whenever
+            # the directive path produced nothing — including when a
+            # directive WAS emitted but the engine rejected it as
+            # already_transferring precisely BECAUSE that pending request
+            # exists. Without this, the accepted pending transfer would be
+            # starved for as long as the LLM keeps re-emitting directives.
+            if transfer_request is None:
+                transfer_request = self._pending_transfer.pop(session_id, None)
+
         # Signal the servicer to end the call once this turn's audio has
         # streamed — but not if the caller barged in (cancel_event.is_set()):
         # them talking means the agent's decision to end the call is stale.
-        if end_call and not cancel_event.is_set():
+        # Also not if a transfer is about to happen instead (see comment
+        # above) — ending the call would make the transfer unreachable.
+        if end_call and not cancel_event.is_set() and transfer_request is None:
             got_farewell_audio = False
             if self._farewell_message:
                 # Scripted farewell — spoken verbatim as the turn's closing
@@ -788,49 +1126,26 @@ class PipelineConversationHandler:
                 end_call_grace_period_ms=self._goodbye_grace_period_ms,
             )
 
-        # Phase 6: an LLM-emitted directive takes precedence over a pending
-        # escalation-threshold trigger from an earlier turn — either way,
-        # at most one TransferRequest is yielded per turn. This ordering
-        # (check the directive first; only fall back to a pending
-        # escalation trigger if there wasn't one) is orchestration the
-        # engine itself is deliberately not asked to arbitrate — see
-        # transfer_engine.py's module docstring: it evaluates one trigger
-        # at a time and stays a pure function, so "which trigger wins when
-        # two fire the same turn" is this caller's own sequencing, not
-        # engine policy. A caller barge-in during this turn
-        # (cancel_event.is_set()) makes the agent's decision stale, same
-        # reasoning as end_call above.
-        if not cancel_event.is_set():
-            transfer_directive = next(
-                (d for d in directives if isinstance(d, TransferDirective)), None,
+        if transfer_request is not None:
+            # A fabrication-triggered transfer always gets its own specific
+            # line (overrides whatever generic transfer_announcement this
+            # agent has configured, if any) — see that constant's comment
+            # for why a silent/generic handoff right after a false "booked"
+            # claim reads as the system being broken.
+            announcement = (
+                _BOOKING_FABRICATION_TRANSFER_ANNOUNCEMENT
+                if session_id in self._fabrication_triggered_transfer
+                else self._transfer_announcement
             )
-            transfer_request: TransferRequest | None = None
-            if transfer_directive is not None:
-                decision = self._transfer_engine.evaluate(
-                    self._decision_context(session_id),
-                    TransferTrigger(type=TriggerType.LLM_DIRECTIVE, directive=transfer_directive),
-                )
-                if decision.accepted:
-                    transfer_request = decision.request
-                    self._transfer_requested.add(session_id)
-            # Fall through to a pending escalation-accepted request whenever
-            # the directive path produced nothing — including when a
-            # directive WAS emitted but the engine rejected it as
-            # already_transferring precisely BECAUSE that pending request
-            # exists. Without this, the accepted pending transfer would be
-            # starved for as long as the LLM keeps re-emitting directives.
-            if transfer_request is None:
-                transfer_request = self._pending_transfer.pop(session_id, None)
-
-            if transfer_request is not None:
-                if self._transfer_announcement:
-                    # Scripted announcement — yielded as this turn's TTS so
-                    # the servicer holds the TransferRequest until it has
-                    # actually played (see servicer.py's pending_transfer),
-                    # exactly like an LLM-spoken acknowledgment would be.
-                    async for chunk in self._synthesize_sentence_stream(self._transfer_announcement, session_id):
-                        yield HandlerResponse(tts_payloads=[chunk])
-                yield HandlerResponse(transfer_request=transfer_request)
+            self._fabrication_triggered_transfer.discard(session_id)
+            if announcement:
+                # Scripted announcement — yielded as this turn's TTS so
+                # the servicer holds the TransferRequest until it has
+                # actually played (see servicer.py's pending_transfer),
+                # exactly like an LLM-spoken acknowledgment would be.
+                async for chunk in self._synthesize_sentence_stream(announcement, session_id):
+                    yield HandlerResponse(tts_payloads=[chunk])
+            yield HandlerResponse(transfer_request=transfer_request)
 
     async def on_cancel(self, session_id: str) -> None:
         self._cancel_event(session_id).set()
@@ -850,8 +1165,14 @@ class PipelineConversationHandler:
             self._pending_recovery_turns.pop(session_id, None)
         self._history.pop(session_id, None)
         self._cancelled.pop(session_id, None)
-        self._filler_spoken_for_session.discard(session_id)
-        self._guardrail_counter.forget(session_id)
+        self._tool_call_filler_index.pop(session_id, None)
+        self._tool_call_filler_last_spoken.pop(session_id, None)
+        self._first_turn_filler_spoken.discard(session_id)
+        self._guardrail_counter.reset(session_id)
+        self._booking_fabrication_counter.reset(session_id)
+        self._fabrication_triggered_transfer.discard(session_id)
+        self._confirmed_booking_slot.pop(session_id, None)
+        self._phone_number_confirmed.discard(session_id)
         self._pending_transfer.pop(session_id, None)
         self._transfer_requested.discard(session_id)
         try:
@@ -892,7 +1213,18 @@ class PipelineConversationHandler:
         counted but the engine never accepts, so a caller can call this
         unconditionally without checking whether escalation is configured.
         """
-        count = self._guardrail_counter.increment(session_id)
+        return self._evaluate_escalation(session_id, self._guardrail_counter.increment(session_id))
+
+    def record_booking_fabrication(self, session_id: str) -> TransferRequest | None:
+        """Same escalation mechanics as record_guardrail_violation(), but
+        counted on _booking_fabrication_counter — see that field's own
+        comment for why this can't share the caller-frustration counter."""
+        request = self._evaluate_escalation(session_id, self._booking_fabrication_counter.increment(session_id))
+        if request is not None:
+            self._fabrication_triggered_transfer.add(session_id)
+        return request
+
+    def _evaluate_escalation(self, session_id: str, count: int) -> TransferRequest | None:
         decision = self._transfer_engine.evaluate(
             self._decision_context(session_id),
             TransferTrigger(type=TriggerType.ESCALATION, violation_count=count),
@@ -1032,6 +1364,7 @@ class PipelineConversationHandler:
 
     async def _token_stream(
         self, history: list[ChatMessage], session_id: str, cancel_event: asyncio.Event,
+        tool_calls_made: list[str],
     ) -> AsyncGenerator[str | ToolCallStartedEvent, None]:
         """Token stream, identical shape to self._llm.generate() except for
         one addition — the seam that makes the rest of _llm_to_tts (sentence
@@ -1049,12 +1382,50 @@ class PipelineConversationHandler:
                 yield token
             return
 
+        # Force book_appointment specifically on the one turn where it's
+        # unambiguous the LLM should call it right now — see
+        # _caller_just_confirmed_phone_number's own docstring. has_booking_tool
+        # already gates whether this agent has the tool at all (same flag
+        # _build_caller_number_context checks) — no point forcing a tool
+        # this agent was never given.
+        just_confirmed = self._has_booking_tool and _caller_just_confirmed_phone_number(
+            history, self._caller_number,
+        )
+        force_tool_name = "book_appointment" if just_confirmed else None
+        if just_confirmed:
+            # Persists for the rest of the call, not just this one turn —
+            # see CalendarExecutor's own use of
+            # ToolExecutionContext.phone_number_confirmed for why a
+            # confirmation earned earlier in the call must still count on
+            # a LATER turn's booking attempt, not just the turn it
+            # happened on.
+            self._phone_number_confirmed.add(session_id)
+
         async for event in self._tool_orchestrator.run_turn(
             self._agent_id or "", self._tenant_id, self._call_id, session_id, history,
             caller_number=self._caller_number, cancel_event=cancel_event,
+            force_tool_name=force_tool_name,
+            phone_number_confirmed=session_id in self._phone_number_confirmed,
         ):
             if isinstance(event, ToolCallStartedEvent):
+                tool_calls_made.append(event.tool_name)
                 yield event
+                continue
+            if isinstance(event, DeterministicSpokenEvent):
+                # Unwrapped to plain text like a TokenEvent (same sentence-
+                # splitting/TTS path) rather than given its own handling —
+                # tool_calls_made already contains this turn's tool name by
+                # now (see ToolCallStartedEvent above), so the fabrication
+                # check downstream is already correctly inert for THIS
+                # turn's text; no special-casing needed beyond getting it
+                # spoken. But record the real confirmed slot persistently
+                # too — see _confirmed_booking_slot's own comment for why
+                # a later turn's truthful recap needs this to avoid a false
+                # fabrication flag, and why it must be the actual datetime,
+                # not just a boolean "a booking happened at some point."
+                if event.confirmed_datetime:
+                    self._confirmed_booking_slot[session_id] = event.confirmed_datetime
+                yield event.text
                 continue
             assert isinstance(event, ToolTokenEvent)
             yield event.text
@@ -1065,6 +1436,7 @@ class PipelineConversationHandler:
         cancel_event: asyncio.Event,
         session_id:   str,
         directives:   list[Directive],
+        tool_calls_made: list[str] | None = None,
     ) -> AsyncGenerator[tuple[str, bytes, bool], None]:
         """
         Stream LLM tokens, buffer into sentences, synthesise each sentence.
@@ -1086,20 +1458,31 @@ class PipelineConversationHandler:
         """
         stream_buf  = StreamBuffer()
         text_buffer = ""  # directive-free text awaiting a sentence boundary
+        if tool_calls_made is None:
+            tool_calls_made = []
         try:
-            async for item in self._token_stream(history, session_id, cancel_event):
+            async for item in self._token_stream(history, session_id, cancel_event, tool_calls_made):
                 if cancel_event.is_set():
                     break
                 if isinstance(item, ToolCallStartedEvent):
-                    # At most once per CALL (not per turn) — see
-                    # _filler_spoken_for_session's own comment for why.
-                    if session_id not in self._filler_spoken_for_session:
-                        self._filler_spoken_for_session.add(session_id)
+                    # Rotates through _TOOL_CALL_FILLERS, gap-suppressed by
+                    # _TOOL_CALL_FILLER_MIN_GAP_S — see both constants' own
+                    # comments for why neither alone was enough.
+                    now = time.monotonic()
+                    last_spoken = self._tool_call_filler_last_spoken.get(session_id)
+                    if last_spoken is None or (now - last_spoken) >= _TOOL_CALL_FILLER_MIN_GAP_S:
+                        self._tool_call_filler_last_spoken[session_id] = now
+                        idx = self._tool_call_filler_index.get(session_id, 0)
+                        self._tool_call_filler_index[session_id] = idx + 1
+                        phrase = _TOOL_CALL_FILLERS[idx % len(_TOOL_CALL_FILLERS)]
                         any_filler_chunk = False
-                        async for chunk in self._synthesize_sentence_stream(_TOOL_CALL_FILLER, session_id):
+                        async for chunk in self._synthesize_sentence_stream(phrase, session_id):
                             if not any_filler_chunk:
                                 any_filler_chunk = True
-                                log.info("Tool-call filler spoken tool=%s session=%s", item.tool_name, session_id)
+                                log.info(
+                                    "Tool-call filler spoken tool=%s phrase=%r session=%s",
+                                    item.tool_name, phrase, session_id,
+                                )
                             yield "", chunk, False
                     continue
                 token = item

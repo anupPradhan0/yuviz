@@ -18,7 +18,7 @@ from typing import Any
 
 from . import audit, db
 
-_UPDATABLE_FIELDS = {"name", "engine", "api_key_ref", "extra"}
+_UPDATABLE_FIELDS = {"name", "engine", "api_key_ref", "secondary_api_key_ref", "extra"}
 
 
 async def get_tool_provider_config(tool_provider_config_id: Any) -> dict[str, Any] | None:
@@ -52,6 +52,7 @@ async def create_tool_provider_config(
     tool_name: str,
     engine: str,
     api_key_ref: str | None = None,
+    secondary_api_key_ref: str | None = None,
     extra: dict[str, Any] | None = None,
     user_id: Any | None = None,
     user_email: str | None = None,
@@ -62,9 +63,10 @@ async def create_tool_provider_config(
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
-                "INSERT INTO tool_provider_configs (tenant_id, name, tool_name, engine, api_key_ref, extra) "
-                "VALUES ($1, $2, $3, $4, $5, $6::jsonb) RETURNING *",
-                tenant_id, name, tool_name, engine, api_key_ref,
+                "INSERT INTO tool_provider_configs "
+                "(tenant_id, name, tool_name, engine, api_key_ref, secondary_api_key_ref, extra) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb) RETURNING *",
+                tenant_id, name, tool_name, engine, api_key_ref, secondary_api_key_ref,
                 _json.dumps(extra) if extra is not None else None,
             )
             result = dict(row)

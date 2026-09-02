@@ -31,8 +31,8 @@ _SLOTS_RESPONSE = {
 }
 
 
-def _make_provider(handler) -> CalComCalendarProvider:
-    provider = CalComCalendarProvider(api_key="test-key", event_type_id=123)
+def _make_provider(handler, **kwargs) -> CalComCalendarProvider:
+    provider = CalComCalendarProvider(api_key="test-key", event_type_id=123, **kwargs)
     provider._client = httpx.AsyncClient(base_url="https://api.cal.com", transport=httpx.MockTransport(handler))
     return provider
 
@@ -68,6 +68,24 @@ async def test_check_availability_localizes_a_naive_datetime_to_the_given_timezo
     assert await provider.check_availability("2026-07-23T06:00:00", "America/New_York") is True
 
 
+async def test_find_available_slots_scoped_to_requested_day_only():
+    """Confirmed live: this used to query a 7-day window and flatten the
+    result across all of them, so a caller asking "what's open tomorrow"
+    could get alternatives from several days out — not what they asked
+    about. The Cal.com request itself must now span exactly one day."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["start"] == "2026-07-23"
+        assert request.url.params["end"] == "2026-07-23"
+        return httpx.Response(200, json=_SLOTS_RESPONSE)
+
+    provider = _make_provider(handler)
+    slots = await provider.find_available_slots("2026-07-23T09:00:00.000Z", "UTC")
+
+    assert [s.start_iso for s in slots] == [
+        "2026-07-23T10:00:00.000Z", "2026-07-23T10:15:00.000Z", "2026-07-23T10:30:00.000Z",
+    ]
+
+
 async def test_find_available_slots_returns_up_to_limit():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_SLOTS_RESPONSE)
@@ -101,6 +119,51 @@ async def test_book_appointment_success():
 
     assert result.booking_id == "abc123"
     assert result.meeting_url == "https://app.cal.com/video/abc123"
+
+
+async def test_book_appointment_sends_placeholder_email_when_none_configured():
+    # Real production bug, confirmed live: Cal.com rejected every booking
+    # attempt with 400 "responses - {email}error_required_field" — this
+    # event type requires email as a custom bookingField (its requiredness
+    # has flipped at least twice with nothing ever updated to match, see
+    # cal_com.py's own comment), and nothing here ever sent one at all. The
+    # product deliberately never asks a phone caller for their email, so a
+    # synthesized placeholder must always be sent regardless.
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["bookingFieldsResponses"]["email"] == "caller@noreply.yuviz.ai"
+        return httpx.Response(200, json={"status": "success", "data": {"uid": "abc123"}})
+
+    provider = _make_provider(handler)
+    await provider.book_appointment(
+        "2026-07-24T10:00:00.000Z", AttendeeInfo(name="Jane", phone="+14155551234"),
+    )
+
+
+async def test_book_appointment_uses_configured_default_attendee_email():
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["bookingFieldsResponses"]["email"] == "leads@acmerealty.example.com"
+        return httpx.Response(200, json={"status": "success", "data": {"uid": "abc123"}})
+
+    provider = _make_provider(handler, default_attendee_email="leads@acmerealty.example.com")
+    await provider.book_appointment(
+        "2026-07-24T10:00:00.000Z", AttendeeInfo(name="Jane", phone="+14155551234"),
+    )
+
+
+async def test_book_appointment_uses_a_real_attendee_email_when_given():
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["bookingFieldsResponses"]["email"] == "jane@example.com"
+        assert body["attendee"]["email"] == "jane@example.com"
+        return httpx.Response(200, json={"status": "success", "data": {"uid": "abc123"}})
+
+    provider = _make_provider(handler, default_attendee_email="leads@acmerealty.example.com")
+    await provider.book_appointment(
+        "2026-07-24T10:00:00.000Z",
+        AttendeeInfo(name="Jane", phone="+14155551234", email="jane@example.com"),
+    )
 
 
 async def test_book_appointment_localizes_a_naive_datetime_to_the_attendee_timezone():

@@ -60,6 +60,25 @@ class ToolCallStartedEvent(TurnEvent):
     tool_name: str
 
 
+@dataclass(frozen=True)
+class DeterministicSpokenEvent(TurnEvent):
+    """Text that must reach the caller verbatim, with zero LLM discretion
+    over its wording — see ToolCallOrchestrator.run_turn()'s own comment
+    for why a real, successful booking is spoken this way instead of
+    handing the tool result back to the LLM for a free-text follow-up
+    generate() call. Confirmed live, repeatedly: an LLM asked to narrate
+    "what just happened" will sometimes narrate a false "booked!" instead
+    of actually calling the tool, no matter how the prompt is worded —
+    this event exists so a genuine success can never be confused with
+    that failure mode, because the words the caller hears were never the
+    LLM's to choose in the first place."""
+    text: str
+    # Mirrors ToolResult.confirmed_datetime — see that field's own
+    # docstring for why pipeline.py needs the real confirmed slot, not
+    # just a boolean "a booking succeeded at some point this session."
+    confirmed_datetime: str | None = None
+
+
 @runtime_checkable
 class IToolAwareLLM(Protocol):
     """Optional companion to ILLM. A provider class implements this
@@ -67,6 +86,7 @@ class IToolAwareLLM(Protocol):
 
     def generate_with_tools(
         self, messages: list[ChatMessage], schemas: list[dict[str, Any]],
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> AsyncGenerator[TurnEvent, None]:
         ...
 
@@ -82,9 +102,10 @@ class LLMAdapter:
 
     async def generate(
         self, messages: list[ChatMessage], schemas: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> AsyncGenerator[TurnEvent, None]:
         if schemas and isinstance(self._llm, IToolAwareLLM):
-            async for event in self._llm.generate_with_tools(messages, schemas):
+            async for event in self._llm.generate_with_tools(messages, schemas, tool_choice=tool_choice):
                 yield event
             return
 
