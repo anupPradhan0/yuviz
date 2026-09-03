@@ -146,6 +146,15 @@ async def _prewarm_agents(
             if resolved is None:
                 log.warning("prewarm: tenant=%s agent=%s did not resolve — skipping", tenant_slug, agent_slug)
                 continue
+            _, bundle = resolved
+            # Object construction != model loaded — Ollama needs a real
+            # request first (see OllamaLLM.warm()). No-op for cloud LLMs.
+            warm = getattr(bundle.llm, "warm", None)
+            if warm is not None:
+                try:
+                    await warm()
+                except Exception:
+                    log.exception("prewarm: LLM warm() failed tenant=%s agent=%s", tenant_slug, agent_slug)
             log.info("prewarm: tenant=%s agent=%s providers ready", tenant_slug, agent_slug)
 
 
@@ -213,19 +222,16 @@ async def serve(port: int, args: argparse.Namespace) -> None:
     # since different tenants/agents can resolve to different LLM engines.
     tool_registry = ToolRegistry()
     executor_registry = ExecutorRegistry()
-    # Optional booking-confirmation SMS is now a per-tenant setting on the
-    # SAME tool_provider_config as the calendar engine itself (see
-    # provider_manager.py's _make_sms_provider) — CalComCalendarProvider
-    # exposes it as a plain `.sms_provider` attribute (not part of
-    # ICalendarProvider's own interface) precisely so this factory closure
-    # can pick it up without ToolProviderManager/ExecutorRegistry needing
-    # to know SMS exists at all.
+    # Booking-confirmation SMS is its own independently configured tool
+    # ("send_sms", engine="twilio") — ToolCallOrchestrator resolves it as
+    # book_appointment's companion (see ToolDefinition.companion_tool_name)
+    # and passes it here as the second argument.
     executor_registry.register(
         "book_appointment",
-        lambda provider: CalendarExecutor(provider, sms_provider=getattr(provider, "sms_provider", None)),
+        lambda provider, companion=None: CalendarExecutor(provider, sms_provider=companion),
     )
-    executor_registry.register("cancel_appointment", lambda provider: CancelAppointmentExecutor(provider))
-    executor_registry.register("reschedule_appointment", lambda provider: RescheduleAppointmentExecutor(provider))
+    executor_registry.register("cancel_appointment", lambda provider, companion=None: CancelAppointmentExecutor(provider))
+    executor_registry.register("reschedule_appointment", lambda provider, companion=None: RescheduleAppointmentExecutor(provider))
     tool_provider_manager = ToolProviderManager(CompositeSecretResolver())
     tool_policy_resolver = await ToolPolicyResolver.connect(
         os.environ.get("POSTGRES_DSN"), tool_registry,

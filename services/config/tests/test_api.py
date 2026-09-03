@@ -15,6 +15,7 @@ import uuid
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from libs.config_sdk.secrets import generate_key
 from services.config import auth
 from services.config import users as users_service
 from services.config.app import app
@@ -365,6 +366,44 @@ class TestProviderConfigEndpoints:
         resp = await client.get(f"/providers/{create.json()['id']}/voices")
         assert resp.status_code == 400
 
+    async def test_update_to_blank_api_key_ref_is_400(self, client, test_tenant):
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Deepgram", "role": "stt", "engine": "deepgram", "api_key_ref": "env:DG_KEY"},
+        )
+        provider_id = create.json()["id"]
+
+        resp = await client.patch(f"/providers/{provider_id}", json={"api_key_ref": ""})
+        assert resp.status_code == 400
+
+    async def test_update_to_blank_api_key_ref_with_new_api_key_is_allowed(self, client, test_tenant, monkeypatch):
+        monkeypatch.setenv("SECRET_ENCRYPTION_KEY", generate_key())
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Deepgram", "role": "stt", "engine": "deepgram", "api_key_ref": "env:DG_KEY"},
+        )
+        provider_id = create.json()["id"]
+
+        resp = await client.patch(f"/providers/{provider_id}", json={"api_key_ref": "", "api_key": "dg_live_secret"})
+        assert resp.status_code == 200
+        assert resp.json()["api_key_ref"].startswith("enc:")
+
+    async def test_update_with_both_api_key_and_a_real_api_key_ref_is_400(self, client, test_tenant, monkeypatch):
+        # Sending both non-blank is ambiguous, not a legitimate rotation
+        # (that pairs api_key with a *blank* api_key_ref) — likely a UI bug
+        # upstream, so this must not silently prefer one over the other.
+        monkeypatch.setenv("SECRET_ENCRYPTION_KEY", generate_key())
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Deepgram", "role": "stt", "engine": "deepgram", "api_key_ref": "env:DG_KEY"},
+        )
+        provider_id = create.json()["id"]
+
+        resp = await client.patch(
+            f"/providers/{provider_id}", json={"api_key_ref": "env:OTHER_KEY", "api_key": "dg_live_secret"},
+        )
+        assert resp.status_code == 400
+
     async def test_voices_requires_api_key_ref(self, client, test_tenant):
         create = await client.post(
             f"/tenants/{test_tenant['id']}/providers",
@@ -687,12 +726,23 @@ class TestToolProviderConfigEndpoints:
         assert resp.status_code == 201
         assert resp.json()["api_key_ref"] == "env:CAL_API_KEY"
 
-    async def test_create_with_missing_api_key_ref_is_422(self, client, test_tenant):
+    async def test_create_with_neither_api_key_ref_nor_api_key_is_400(self, client, test_tenant):
+        # Both are optional in the schema now (an admin may supply either)
+        # — the router itself requires at least one.
         resp = await client.post(
             f"/tenants/{test_tenant['id']}/tool-providers",
             json={"name": "X", "tool_name": "book_appointment", "engine": "cal_com"},
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 400
+
+    async def test_create_with_api_key_encrypts_it(self, client, test_tenant, monkeypatch):
+        monkeypatch.setenv("SECRET_ENCRYPTION_KEY", generate_key())
+        resp = await client.post(
+            f"/tenants/{test_tenant['id']}/tool-providers",
+            json={"name": "X", "tool_name": "book_appointment", "engine": "cal_com", "api_key": "cal_live_secret"},
+        )
+        assert resp.status_code == 201
+        assert resp.json()["api_key_ref"].startswith("enc:")
 
     async def test_create_with_blank_api_key_ref_is_400(self, client, test_tenant):
         resp = await client.post(
@@ -702,6 +752,8 @@ class TestToolProviderConfigEndpoints:
         assert resp.status_code == 400
 
     async def test_update_to_blank_api_key_ref_is_400(self, client, test_tenant):
+        # A cleared cal_com api_key_ref fails silently until the next live
+        # booking attempt — must not go through without a replacement.
         create = await client.post(
             f"/tenants/{test_tenant['id']}/tool-providers",
             json={
@@ -713,6 +765,42 @@ class TestToolProviderConfigEndpoints:
 
         resp = await client.patch(f"/tool-providers/{tpc_id}", json={"api_key_ref": ""})
         assert resp.status_code == 400
+
+    async def test_update_to_blank_api_key_ref_with_new_api_key_is_allowed(self, client, test_tenant, monkeypatch):
+        # Not a clear — a rotation. The blank api_key_ref is the frontend's
+        # placeholder for "nothing typed here", paired with a real
+        # replacement in api_key.
+        monkeypatch.setenv("SECRET_ENCRYPTION_KEY", generate_key())
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/tool-providers",
+            json={
+                "name": "X", "tool_name": "book_appointment", "engine": "cal_com",
+                "api_key_ref": "env:CAL_API_KEY",
+            },
+        )
+        tpc_id = create.json()["id"]
+
+        resp = await client.patch(
+            f"/tool-providers/{tpc_id}", json={"api_key_ref": "", "api_key": "cal_live_new_secret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["api_key_ref"].startswith("enc:")
+
+    async def test_update_with_api_key_encrypts_it(self, client, test_tenant, monkeypatch):
+        monkeypatch.setenv("SECRET_ENCRYPTION_KEY", generate_key())
+        create = await client.post(
+            f"/tenants/{test_tenant['id']}/tool-providers",
+            json={
+                "name": "X", "tool_name": "book_appointment", "engine": "cal_com",
+                "api_key_ref": "env:CAL_API_KEY",
+            },
+        )
+        tpc_id = create.json()["id"]
+
+        resp = await client.patch(f"/tool-providers/{tpc_id}", json={"api_key": "cal_live_new_secret"})
+        assert resp.status_code == 200
+        assert resp.json()["api_key_ref"].startswith("enc:")
+
 
 
 class TestCarrierEndpoints:

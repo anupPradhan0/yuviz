@@ -110,6 +110,22 @@ export CONFIG_SERVICE_PASSWORD='<the-same-password>'
 shell and fails loudly if it's unset, rather than falling back to a
 hardcoded default.
 
+Provider credentials pasted into the Admin UI (or stored via
+`api_key`/`secondary_api_key_ref` on a provider/tool config) are encrypted
+at rest with the `enc:` scheme (`libs/config_sdk/secrets.py`) — both the
+Config Service and every Conversation Service instance need the same
+Fernet key to encrypt/decrypt them:
+
+```bash
+./venv/bin/python3 -c "from libs.config_sdk.secrets import generate_key; print(generate_key())"
+export SECRET_ENCRYPTION_KEY='<the-generated-value>'
+```
+
+Generate this once and keep it — losing it means every `enc:`-stored
+credential becomes permanently undecryptable, not just hard to find.
+`scripts/start_local.sh`'s `start_config_service()`/`_conv_env()` both
+fail loudly if it's unset, same posture as `CONFIG_SERVICE_PASSWORD`.
+
 ## 6. Seed a default agent
 
 ```bash

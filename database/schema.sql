@@ -47,7 +47,6 @@ CREATE TABLE IF NOT EXISTS provider_configs (
     environment         TEXT NOT NULL DEFAULT 'prod' CHECK (environment IN ('prod', 'staging', 'dev')),
     api_key_ref         TEXT,  -- reference ONLY — 'enc:...' | 'k8s:...' | 'env:...' — never a real key
     extra               JSONB,
-    fallback_config_id  UUID REFERENCES provider_configs(id),  -- Phase 7 stub
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at          TIMESTAMPTZ
@@ -189,16 +188,6 @@ CREATE TABLE IF NOT EXISTS tool_provider_configs (
     tool_name           TEXT NOT NULL,  -- matches a static ToolRegistry key, e.g. 'book_appointment'
     engine              TEXT NOT NULL,  -- e.g. 'cal_com'
     api_key_ref         TEXT,
-    -- A second, independent secret slot — added for optional per-tenant
-    -- SMS booking confirmations (extra.sms_enabled/sms_account_sid/
-    -- sms_from_number alongside this, all on the SAME cal_com row, since
-    -- "does this calendar integration also text-confirm" is a property of
-    -- that one integration, not a separate tool). api_key_ref already
-    -- holds Cal.com's own API key; Twilio's Auth Token needs a slot of
-    -- its own rather than overloading that one. Same reference-only
-    -- discipline and redaction treatment as api_key_ref (see
-    -- services/config/audit.py's _SECRET_REF_FIELDS).
-    secondary_api_key_ref TEXT,
     extra               JSONB,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),

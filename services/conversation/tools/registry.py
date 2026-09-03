@@ -94,6 +94,10 @@ _BOOK_APPOINTMENT = ToolDefinition(
         "required": ["requested_datetime"],
     },
     category="calendar",
+    # If this agent also has "send_sms" enabled, CalendarExecutor gets that
+    # provider too — see ToolCallOrchestrator's generic companion
+    # resolution and ToolDefinition.companion_tool_name's own docstring.
+    companion_tool_name="send_sms",
 )
 
 
@@ -174,10 +178,27 @@ _RESCHEDULE_APPOINTMENT = ToolDefinition(
     category="calendar",
 )
 
+# send_sms is admin-configurable (its own tool_provider_config/
+# agent_tool_policies row, same as book_appointment) but llm_visible=False
+# keeps it out of the schemas list orchestrator.py offers the LLM — it's a
+# deterministic side effect CalendarExecutor triggers itself after a
+# successful booking, never something the model decides to call. This
+# entry exists only so ToolPolicyResolver.enabled_tools()'s registry
+# lookup for tool_name="send_sms" succeeds; its schema content is never
+# read since it never reaches an LLM.
+_SEND_SMS = ToolDefinition(
+    name="send_sms",
+    description="Internal — never LLM-callable; sends a booking confirmation text.",
+    parameters_schema={},
+    category="notifications",
+    llm_visible=False,
+)
+
 _DEFAULT_TOOLS: dict[str, ToolDefinition] = {
     _BOOK_APPOINTMENT.name: _BOOK_APPOINTMENT,
     _CANCEL_APPOINTMENT.name: _CANCEL_APPOINTMENT,
     _RESCHEDULE_APPOINTMENT.name: _RESCHEDULE_APPOINTMENT,
+    _SEND_SMS.name: _SEND_SMS,
 }
 
 

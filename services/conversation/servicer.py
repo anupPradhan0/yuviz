@@ -40,8 +40,19 @@ def _consume_pending_transfer(tr, interrupted: bool, sid: str):
     dropped it (the LLM re-emits the directive if the caller still wants a
     human), or the destination is empty (defense in depth; pipeline.py's
     session-setup validation normally prevents that config from ever
-    producing a directive)."""
-    if interrupted:
+    producing a directive).
+
+    The barge-in-drops-it reasoning only holds for tr.trigger=="llm_directive":
+    that's the caller's own request, so if they still want a human they'll
+    just ask again. An "escalation_threshold" transfer is the SYSTEM's own
+    decision (caller frustration, or a fabricated booking claim the caller
+    has no way to know was false) — nothing prompts it to recur just
+    because the caller says something unrelated in between. Confirmed live:
+    a caller saying "Thank you" right after a fabricated
+    "booked!" claim silently cancelled the safety-net transfer meant to
+    catch exactly that — the correction was lost with no way to retrigger
+    it. An escalation transfer must always go out once accepted."""
+    if interrupted and tr.trigger != "escalation_threshold":
         log.info(
             "Converse: pending TransferRequest dropped "
             "(barge-in during acknowledgment) transfer_id=%s session=%s",

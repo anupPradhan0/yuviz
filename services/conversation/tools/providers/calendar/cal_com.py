@@ -41,7 +41,6 @@ from .interface import (
     AttendeeInfo, AvailabilitySlot, BookingResult, BookingSummary, CalendarProviderError,
     InvalidAttendeePhoneError, SlotUnavailableError,
 )
-from ..sms.interface import ISmsProvider
 
 log = logging.getLogger(__name__)
 
@@ -69,19 +68,11 @@ class CalComCalendarProvider:
         default_timezone:     str = "UTC",
         base_url:             str = _DEFAULT_BASE_URL,
         timeout_s:            float = 10.0,
-        sms_provider:         ISmsProvider | None = None,
     ) -> None:
         self._event_type_id = event_type_id
         self._default_attendee_phone = default_attendee_phone
         self._default_attendee_email = default_attendee_email
         self._default_timezone = default_timezone
-        # Public, not a property with its own leading underscore — a
-        # per-tenant optional add-on read directly by the executor_registry
-        # factory closure in __main__.py (getattr(provider, "sms_provider",
-        # None)), not part of ICalendarProvider's own interface. See
-        # provider_manager.py's _make_sms_provider for why this lives here
-        # rather than as a second, independent tool_provider_config.
-        self.sms_provider = sms_provider
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=timeout_s,
@@ -219,11 +210,11 @@ class CalComCalendarProvider:
             booking_fields_responses["notes"] = notes
         body["bookingFieldsResponses"] = booking_fields_responses
 
-        # Logged at INFO — the only way to answer "what did we
-        # actually send Cal.com" used to be asking the user to paste
-        # terminal output; httpx's own request logging never includes body
-        # content for any method, only method/URL/status.
-        log.info("Cal.com POST /v2/bookings body=%r", body)
+        # DEBUG, not INFO — this body carries the caller's phone/email;
+        # httpx's own request logging never includes body content for any
+        # method, only method/URL/status, so this is still the only way to
+        # see what was actually sent, just not at a level that's on in prod.
+        log.debug("Cal.com POST /v2/bookings body=%r", body)
         try:
             resp = await self._client.post(
                 "/v2/bookings", json=body, headers={"cal-api-version": _BOOKINGS_API_VERSION},

@@ -85,7 +85,9 @@ async def test_full_resolution_returns_runtime_config_and_provider_bundle():
     assert result is not None
     runtime_config, bundle = result
     assert isinstance(bundle.stt, FakeProviderInstance) and bundle.stt.cfg.engine == "fake_stt"
-    assert isinstance(bundle.llm, FakeProviderInstance) and bundle.llm.cfg.engine == "fake_llm"
+    # bundle.llm is always RetryOnceLLM-wrapped (see provider_bundle.py) —
+    # unwrap to reach the real instance this test is actually checking.
+    assert isinstance(bundle.llm._llm, FakeProviderInstance) and bundle.llm._llm.cfg.engine == "fake_llm"
     assert isinstance(bundle.tts, FakeProviderInstance) and bundle.tts.cfg.engine == "fake_tts"
     assert runtime_config.conversation.greeting == "Hi there"
     assert runtime_config.conversation.system_prompt == "Be helpful."

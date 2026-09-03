@@ -31,6 +31,14 @@ export function asBrowsableTtsEngine(engine: string | undefined): BrowsableTtsEn
   return BROWSABLE_TTS_ENGINES.includes(engine as BrowsableTtsEngine) ? (engine as BrowsableTtsEngine) : null;
 }
 
+// Local engines run on the same machine as the Conversation Service with
+// no account/credential of their own — showing an API Key field for them
+// is not just unnecessary, it's misleading (nothing reads it). Matches
+// each role's own local entries in ENGINES_BY_ROLE below exactly.
+export const LOCAL_ENGINES: ReadonlySet<string> = new Set([
+  "faster_whisper", "ollama", "macos", "kokoro",
+]);
+
 export const ENGINES_BY_ROLE: Record<ProviderRole, EngineOption[]> = {
   stt: [
     { value: "faster_whisper", label: "FasterWhisper (local)" },

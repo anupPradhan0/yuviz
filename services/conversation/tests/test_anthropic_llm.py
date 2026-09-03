@@ -226,6 +226,35 @@ async def test_generate_with_tools_shapes_tool_call_and_result_natively():
     ]}
 
 
+async def test_generate_with_tools_translates_forced_tool_choice():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, content=_text_body("ok"))
+
+    llm = _make_llm(handler)
+    forced = {"type": "function", "function": {"name": "book_appointment"}}
+    _ = [e async for e in llm.generate_with_tools(
+        [ChatMessage(role="user", content="hi")], SCHEMAS, tool_choice=forced,
+    )]
+
+    assert seen["tool_choice"] == {"type": "tool", "name": "book_appointment"}
+
+
+async def test_generate_with_tools_omits_tool_choice_by_default():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, content=_text_body("ok"))
+
+    llm = _make_llm(handler)
+    _ = [e async for e in llm.generate_with_tools([ChatMessage(role="user", content="hi")], SCHEMAS)]
+
+    assert "tool_choice" not in seen
+
+
 async def test_generate_with_tools_survives_malformed_tool_input():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=_sse(

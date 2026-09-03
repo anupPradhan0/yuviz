@@ -477,7 +477,7 @@ async def test_pipeline_session_end_clears_history():
         pass
 
     await handler.on_session_end("s1", "hangup")
-    assert "s1" not in handler._history
+    assert "s1" not in handler._sessions
 
 
 # ---------------------------------------------------------------------------
@@ -1061,7 +1061,7 @@ async def test_on_speech_ended_cancelled_turn_records_partial_latency():
 
     gen = handler.on_speech_ended("s1", _silence(), 200, -20.0)
     await gen.__anext__()  # consume just the stt_text response
-    handler._cancelled["s1"].set()
+    handler._sessions["s1"].cancelled.set()
     async for _ in gen:
         pass
 
@@ -1756,10 +1756,10 @@ async def test_transfer_requested_bookkeeping_cleared_on_session_end():
 
     r1 = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
     assert sum(1 for r in r1 if r.transfer_request) == 1
-    assert "s1" in handler._transfer_requested
+    assert handler._session("s1").transfer_requested
 
     await handler.on_session_end("s1", "stream_ended")
-    assert "s1" not in handler._transfer_requested
+    assert not handler._session("s1").transfer_requested
 
 
 # ---------------------------------------------------------------------------
@@ -1773,9 +1773,9 @@ def test_on_transfer_cancelled_clears_duplicate_suppression_flag():
         _make_stt(), _make_llm(), _make_tts(),
         transfer_type="cold", transfer_destination="1001",
     )
-    handler._transfer_requested.add("s1")
+    handler._session("s1").transfer_requested = True
     handler.on_transfer_cancelled("s1")
-    assert "s1" not in handler._transfer_requested
+    assert not handler._session("s1").transfer_requested
 
 
 @pytest.mark.asyncio
@@ -1791,11 +1791,11 @@ async def test_retry_after_barge_in_cancelled_transfer_is_not_treated_as_duplica
 
     r1 = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
     assert sum(1 for r in r1 if r.transfer_request) == 1
-    assert "s1" in handler._transfer_requested
+    assert handler._session("s1").transfer_requested
 
     # Barge-in during the acknowledgment drops the pending dispatch.
     handler.on_transfer_cancelled("s1")
-    assert "s1" not in handler._transfer_requested
+    assert not handler._session("s1").transfer_requested
 
     r2 = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
     assert sum(1 for r in r2 if r.transfer_request) == 1
@@ -1809,10 +1809,10 @@ async def test_on_transfer_failed_clears_duplicate_suppression_flag():
         _make_stt(), _make_llm(["Sorry about that."]), _make_tts(),
         transfer_type="cold", transfer_destination="1001",
     )
-    handler._transfer_requested.add("s1")
+    handler._session("s1").transfer_requested = True
     async for _ in handler.on_transfer_failed("s1", "1001", "hangup_before_bridge"):
         pass
-    assert "s1" not in handler._transfer_requested
+    assert not handler._session("s1").transfer_requested
 
 
 @pytest.mark.asyncio
@@ -1840,7 +1840,7 @@ async def test_pending_escalation_not_starved_by_rejected_directive():
     # storing a pending accepted request and setting the duplicate guard.
     assert handler.record_guardrail_violation("s1") is None
     assert handler.record_guardrail_violation("s1") is not None
-    assert "s1" in handler._transfer_requested
+    assert handler._session("s1").transfer_requested
 
     # This turn's LLM also emits a directive -> engine rejects it as
     # already_transferring -> the pending request must still go out.
@@ -1936,7 +1936,7 @@ async def test_no_announcement_token_only_transfer_still_dispatches_without_audi
     # Not this test's concern — see _FIRST_TURN_FILLER's own tests — so
     # treat this as a turn beyond the first, keeping this test isolated to
     # the announcement/no-announcement transfer-audio question it's for.
-    handler._first_turn_filler_spoken.add("s1")
+    handler._session("s1").first_turn_filler_spoken = True
     responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
     assert any(r.transfer_request for r in responses)
     assert not any(r.tts_payloads for r in responses)

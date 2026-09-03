@@ -59,7 +59,10 @@ class ToolCallOrchestrator:
     ) -> AsyncGenerator[TurnEvent, None]:
         policies = await self._policy_resolver.enabled_tools(agent_id)
         policies_by_name = {p.definition.name: p for p in policies}
-        schemas = [p.definition.to_generic_schema() for p in policies] if policies else None
+        # llm_visible=False tools (e.g. send_sms) are admin-configurable but
+        # never offered to the model — see ToolDefinition's own docstring.
+        llm_schemas = [p.definition.to_generic_schema() for p in policies if p.definition.llm_visible]
+        schemas = llm_schemas or None
 
         turn_id = str(uuid.uuid4())
         iteration = 0
@@ -141,7 +144,23 @@ class ToolCallOrchestrator:
             log.exception("ToolCallOrchestrator: provider construction failed tool=%s", event.tool_name)
             return ToolResult(status=ToolStatus.FAILED, error="provider_unavailable")
 
-        executor = self._executor_registry.resolve(event.tool_name, provider)
+        # Generic — this orchestrator never hardcodes a tool name (see
+        # module docstring); it only follows whatever companion_tool_name
+        # the resolved tool's own definition declares, if any.
+        companion = None
+        companion_tool_name = policy.definition.companion_tool_name
+        if companion_tool_name is not None:
+            companion_policy = policies_by_name.get(companion_tool_name)
+            if companion_policy is not None:
+                try:
+                    companion = await self._provider_manager.get(companion_policy)
+                except Exception:
+                    log.exception(
+                        "ToolCallOrchestrator: companion provider construction failed tool=%s companion=%s",
+                        event.tool_name, companion_tool_name,
+                    )
+
+        executor = self._executor_registry.resolve(event.tool_name, provider, companion)
         if executor is None:
             log.error("ToolCallOrchestrator: no executor registered for tool_name=%r", event.tool_name)
             return ToolResult(status=ToolStatus.FAILED, error="no_executor_registered")

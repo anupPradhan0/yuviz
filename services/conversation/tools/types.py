@@ -65,6 +65,16 @@ class ToolDefinition:
     description:       str
     parameters_schema: dict[str, Any]
     category:          str = ""
+    # False for a tool an admin can configure/enable per agent but the LLM
+    # must never see or call itself (e.g. send_sms — a deterministic
+    # post-booking side effect, not a decision the model makes). Checked
+    # by orchestrator.py when building the schemas list offered to the LLM.
+    llm_visible:       bool = True
+    # Another tool_name whose provider this one's executor also needs
+    # (e.g. book_appointment -> send_sms) — resolved generically by
+    # ToolCallOrchestrator (see its own docstring on staying provider-
+    # agnostic: it reads this field rather than hardcoding any tool name).
+    companion_tool_name: str | None = None
 
     def to_generic_schema(self) -> dict[str, Any]:
         """Vendor-neutral {name, description, parameters} shape — every
@@ -97,14 +107,9 @@ class ToolExecutionContext:
     # in to cancel may not be calling from the same number they booked
     # with, so those always ask the caller to state a phone number instead.
     caller_number:                 str = ""
-    # True once pipeline.py has seen the caller actually confirm
-    # caller_number on some earlier turn this call (see pipeline.py's
-    # _caller_just_confirmed_phone_number/_phone_number_confirmed) — a
-    # precomputed fact, not raw history, matching this dataclass's own
-    # "pure function of (request, context)" design (see module docstring):
-    # CalendarExecutor uses this to refuse booking against the ANI at all
-    # until it's true, rather than re-deriving "was this confirmed" from
-    # conversation history itself.
+    # True once the caller has confirmed caller_number this call (see
+    # pipeline.py's _caller_just_confirmed_phone_number) — CalendarExecutor
+    # refuses to book against the ANI until this is true.
     phone_number_confirmed:        bool = False
     conversation_history_snapshot: list[dict[str, Any]] = field(default_factory=list)
 

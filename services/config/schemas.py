@@ -122,9 +122,6 @@ class ProviderConfigUpdate(BaseModel):
     # update" since FastAPI drops any JSON key with no matching Pydantic
     # field before exclude_unset=True ever runs.
     extra:       dict[str, Any] | None = None
-    # Same gap as extra above: the DB column and _UPDATABLE_FIELDS already
-    # supported this (Phase 7 stub), the schema just never exposed it.
-    fallback_config_id: str | None = None
 
 
 class TelephonyConfigCreate(BaseModel):
@@ -148,24 +145,16 @@ class TelephonyConfigUpdate(BaseModel):
 class ToolProviderConfigCreate(BaseModel):
     name:        str
     # 'tool_name' matches the static catalog in services/conversation/tools/
-    # registry.py (ToolRegistry) — only "book_appointment" exists there today.
+    # registry.py (ToolRegistry) — "book_appointment"/"send_sms" today.
     tool_name:   str
     engine:      str
-    # Required, unlike provider_configs.api_key_ref: every tool engine that
-    # exists today (cal_com) is a cloud API requiring credentials — the
-    # runtime already hard-fails without one (see provider_manager.py's
-    # _make_cal_com), but only at call time, which is exactly what let a
-    # blank-key config through the Admin UI and silently broke a live
-    # call. Caught here instead, at creation time. If a keyless
-    # engine is ever added, revisit this back to optional + a per-engine
-    # check, matching provider_configs' own per-role posture.
-    api_key_ref: str
-    # See tool_provider_configs.secondary_api_key_ref's own schema.sql
-    # comment — a second, independent secret slot for an engine that needs
-    # two credentials (e.g. Cal.com's API key here, Twilio's Auth Token
-    # for optional SMS confirmations here). Optional: most engines never
-    # need it.
-    secondary_api_key_ref: str | None = None
+    # One of api_key_ref/api_key is required — every tool engine today
+    # (cal_com, twilio) is a cloud API requiring credentials; the router
+    # checks that at least one was given (see resolve_api_key_input()).
+    api_key_ref: str | None = None
+    # The credential itself, encrypted before it reaches Postgres — see
+    # provider_configs.resolve_api_key_input().
+    api_key:     str | None = None
     extra:       dict[str, Any] | None = None
 
 
@@ -173,7 +162,7 @@ class ToolProviderConfigUpdate(BaseModel):
     name:        str | None = None
     engine:      str | None = None
     api_key_ref: str | None = None
-    secondary_api_key_ref: str | None = None
+    api_key:     str | None = None
     extra:       dict[str, Any] | None = None
 
 

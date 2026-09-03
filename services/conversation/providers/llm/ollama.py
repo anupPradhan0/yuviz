@@ -114,6 +114,16 @@ class OllamaLLM:
                 if token:
                     yield token
 
+    async def warm(self) -> None:
+        # One real request so the model loads into memory before a live
+        # call needs it — _KEEP_ALIVE only avoids reload on later idle
+        # gaps, not the first request ever. Called from prewarm only.
+        try:
+            async for _ in self.generate([ChatMessage(role="user", content="Hi")]):
+                pass
+        except Exception:
+            log.exception("OllamaLLM: warm() failed model=%s", self._model)
+
     async def generate_with_tools(
         self, messages: list[ChatMessage], schemas: list[dict[str, Any]],
         tool_choice: str | dict[str, Any] | None = None,
@@ -126,11 +136,16 @@ class OllamaLLM:
         doesn't call a tool keeps the exact same per-sentence TTS latency
         it has today.
 
-        tool_choice: accepted for IToolAwareLLM interface parity with
-        openai.py, but Ollama's /api/chat has no documented equivalent to
-        OpenAI's tool_choice — silently ignored rather than sent as an
-        unknown field the server might reject."""
+        tool_choice: no real force-a-tool primitive on /api/chat, so a forced
+        choice narrows the tools list to just that one instead — confirmed
+        live, qwen2.5:7b reliably takes the only tool it's offered."""
         all_messages = [_to_ollama_message(m) for m in build_chat_messages(self._system, messages)]
+        effective_schemas = schemas
+        if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+            forced_name = tool_choice.get("function", {}).get("name")
+            narrowed = [s for s in schemas if s.get("name") == forced_name]
+            if narrowed:
+                effective_schemas = narrowed
         payload = {
             "model":    self._model,
             "messages": all_messages,
@@ -138,7 +153,7 @@ class OllamaLLM:
             # Ollama's tool wire format matches OpenAI's — a generic
             # {name, description, parameters} schema wrapped in
             # {"type": "function", "function": ...}.
-            "tools":    [{"type": "function", "function": s} for s in schemas],
+            "tools":    [{"type": "function", "function": s} for s in effective_schemas],
             "options":  {"temperature": self._temperature},
             "keep_alive": _KEEP_ALIVE,
         }

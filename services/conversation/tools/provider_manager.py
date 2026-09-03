@@ -19,34 +19,10 @@ from .policy_resolver import ResolvedToolPolicy
 
 log = logging.getLogger(__name__)
 
-ProviderFactory = Callable[[ResolvedToolPolicy, str | None, str | None], Awaitable[Any]]
+ProviderFactory = Callable[[ResolvedToolPolicy, str | None], Awaitable[Any]]
 
 
-def _make_sms_provider(policy: ResolvedToolPolicy, secondary_api_key: str | None) -> Any:
-    """Optional, per-tenant — see tool_provider_configs.secondary_api_key_ref's
-    own schema.sql comment for why this lives on the SAME cal_com row rather
-    than a separate tool_provider_config. All three of extra.sms_account_sid,
-    extra.sms_from_number, and secondary_api_key_ref (the Twilio Auth Token)
-    must be present; any missing piece just leaves SMS off for this tenant,
-    same "feature simply off, not an error" posture as CalendarExecutor's own
-    sms_provider=None handling."""
-    if not policy.extra.get("sms_enabled"):
-        return None
-    account_sid = policy.extra.get("sms_account_sid")
-    from_number = policy.extra.get("sms_from_number")
-    if not (account_sid and from_number and secondary_api_key):
-        log.warning(
-            "tool_provider_config id=%s has sms_enabled=true but is missing "
-            "sms_account_sid/sms_from_number/secondary_api_key_ref — SMS stays off",
-            policy.tool_provider_config_id,
-        )
-        return None
-    from .providers.sms.twilio import TwilioSmsProvider
-
-    return TwilioSmsProvider(account_sid=account_sid, auth_token=secondary_api_key, from_number=from_number)
-
-
-async def _make_cal_com(policy: ResolvedToolPolicy, api_key: str | None, secondary_api_key: str | None) -> Any:
+async def _make_cal_com(policy: ResolvedToolPolicy, api_key: str | None) -> Any:
     from .providers.calendar.cal_com import CalComCalendarProvider
 
     if not api_key:
@@ -66,12 +42,30 @@ async def _make_cal_com(policy: ResolvedToolPolicy, api_key: str | None, seconda
         default_attendee_phone=policy.extra.get("default_attendee_phone"),
         default_attendee_email=policy.extra.get("default_attendee_email"),
         default_timezone=policy.extra.get("timezone") or "UTC",
-        sms_provider=_make_sms_provider(policy, secondary_api_key),
     )
+
+
+async def _make_twilio_sms(policy: ResolvedToolPolicy, api_key: str | None) -> Any:
+    from .providers.sms.twilio import TwilioSmsProvider
+
+    if not api_key:
+        raise ValueError(
+            f"tool_provider_config id={policy.tool_provider_config_id!r} engine='twilio' "
+            "has no api_key_ref configured — the Twilio Auth Token is required"
+        )
+    account_sid = policy.extra.get("account_sid")
+    from_number = policy.extra.get("from_number")
+    if not (account_sid and from_number):
+        raise ValueError(
+            f"tool_provider_config id={policy.tool_provider_config_id!r} engine='twilio' "
+            "is missing extra.account_sid/from_number"
+        )
+    return TwilioSmsProvider(account_sid=account_sid, auth_token=api_key, from_number=from_number)
 
 
 _DEFAULT_REGISTRY: dict[str, ProviderFactory] = {
     "cal_com": _make_cal_com,
+    "twilio": _make_twilio_sms,
 }
 
 
@@ -99,11 +93,7 @@ class ToolProviderManager:
                 raise ValueError(f"no tool provider factory registered for engine={policy.engine!r}")
 
             api_key = await self._secret_resolver.resolve(policy.api_key_ref) if policy.api_key_ref else None
-            secondary_api_key = (
-                await self._secret_resolver.resolve(policy.secondary_api_key_ref)
-                if policy.secondary_api_key_ref else None
-            )
-            instance = await factory(policy, api_key, secondary_api_key)
+            instance = await factory(policy, api_key)
             self._instances[policy.tool_provider_config_id] = instance
             return instance
 

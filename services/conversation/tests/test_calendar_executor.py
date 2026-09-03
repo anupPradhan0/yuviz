@@ -234,11 +234,14 @@ class _FakeSmsProvider:
 
 
 async def test_successful_booking_sends_confirmation_sms():
+    import asyncio
+
     sms = _FakeSmsProvider()
     executor = CalendarExecutor(_FakeProvider(available=True), sms_provider=sms)
     result = await executor.execute(_request(
         requested_datetime="2026-07-24T10:00:00", caller_number="+14155551234",
     ))
+    await asyncio.sleep(0)  # let the fire-and-forget send actually run
 
     assert result.status == ToolStatus.SUCCESS
     assert sms.sent == [("+14155551234", sms.sent[0][1])]
@@ -246,11 +249,14 @@ async def test_successful_booking_sends_confirmation_sms():
 
 
 async def test_confirmation_sms_includes_timezone_abbreviation():
+    import asyncio
+
     sms = _FakeSmsProvider()
     executor = CalendarExecutor(
         _FakeProvider(available=True, default_timezone="Asia/Kolkata"), sms_provider=sms,
     )
     await executor.execute(_request(requested_datetime="2026-07-24T10:00:00", caller_number="+14155551234"))
+    await asyncio.sleep(0)
 
     assert "IST" in sms.sent[0][1]
 
@@ -266,20 +272,24 @@ async def test_no_sms_provider_configured_does_not_break_booking():
     assert "text" not in result.deterministic_response.lower()
 
 
-async def test_deterministic_response_mentions_sms_only_when_actually_sent():
-    """The caller must never be told a text was sent unless one really
-    was — same "never claim something that didn't happen" discipline as
-    the rest of this executor's deterministic_response usage."""
+async def test_deterministic_response_mentions_sms_whenever_attempted():
+    """Fire-and-forget: the confirmation is spoken before the send's real
+    outcome is known, so it must use an honest future-tense claim ("I'll
+    text you") whenever a send was attempted — regardless of whether that
+    send later succeeds or fails."""
     sms = _FakeSmsProvider()
     executor = CalendarExecutor(_FakeProvider(available=True), sms_provider=sms)
     result = await executor.execute(_request(
         requested_datetime="2026-07-24T10:00:00", caller_number="+14155551234",
     ))
 
-    assert "confirmation text" in result.deterministic_response.lower()
+    assert "text you a confirmation" in result.deterministic_response.lower()
 
 
-async def test_deterministic_response_does_not_mention_sms_when_send_failed():
+async def test_deterministic_response_still_mentions_sms_when_send_later_fails():
+    """The spoken confirmation can't know the outcome yet (fire-and-forget,
+    never awaited) — a later failure is only logged, not reflected in
+    wording already spoken."""
     from services.conversation.tools.providers.sms.interface import SmsProviderError
 
     sms = _FakeSmsProvider(raises=SmsProviderError("twilio down"))
@@ -288,7 +298,7 @@ async def test_deterministic_response_does_not_mention_sms_when_send_failed():
         requested_datetime="2026-07-24T10:00:00", caller_number="+14155551234",
     ))
 
-    assert "text" not in result.deterministic_response.lower()
+    assert "text you a confirmation" in result.deterministic_response.lower()
 
 
 async def test_no_phone_number_skips_sms_send():
@@ -298,6 +308,28 @@ async def test_no_phone_number_skips_sms_send():
 
     assert result.status == ToolStatus.SUCCESS
     assert sms.sent == []
+
+
+async def test_slow_sms_send_does_not_block_confirmation():
+    import asyncio
+
+    class _SlowSmsProvider:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, str]] = []
+
+        async def send_sms(self, to_number: str, body: str) -> None:
+            await asyncio.sleep(10)
+            self.sent.append((to_number, body))
+
+    sms = _SlowSmsProvider()
+    executor = CalendarExecutor(_FakeProvider(available=True), sms_provider=sms)
+
+    result = await asyncio.wait_for(executor.execute(_request(
+        requested_datetime="2026-07-24T10:00:00", caller_number="+14155551234",
+    )), timeout=1.0)
+
+    assert result.status == ToolStatus.SUCCESS
+    assert "text you a confirmation" in result.deterministic_response.lower()
 
 
 async def test_sms_send_failure_does_not_affect_booking_result():

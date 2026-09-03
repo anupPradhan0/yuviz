@@ -31,26 +31,12 @@ from typing import Any, AsyncGenerator
 import httpx
 
 from ..interfaces import ChatMessage
-from . import build_chat_messages
+from . import build_chat_messages, raise_with_body_logged
 from ...tools.llm_adapter import TokenEvent, ToolCallEvent, TurnEvent
 
 log = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "https://api.openai.com"
-
-
-async def _raise_with_body_logged(resp: httpx.Response) -> None:
-    """httpx.Response.raise_for_status() never surfaces the response body,
-    so a 4xx/429 here otherwise reaches the caller as a bare 'Client error'
-    with no indication of what OpenAI/Groq actually rejected — confirmed
-    live 2026-07-24 (Groq 429s and a 400 with no visible detail). Read the
-    body before raising so the next occurrence is diagnosable from the log
-    alone."""
-    if resp.is_success:
-        return
-    body = await resp.aread()
-    log.error("OpenAILLM: HTTP %s error body=%s", resp.status_code, body.decode(errors="replace"))
-    resp.raise_for_status()
 
 
 def _to_openai_message(m: dict[str, Any]) -> dict[str, Any]:
@@ -104,10 +90,8 @@ class OpenAILLM:
         # Groq's stream opened (200 OK logged) but then stalled with no
         # token for a long stretch — a real, live-observed failure distinct
         # from the fast-failing 429 rate-limit case, and far longer than
-        # the gateway's own ~19-20s patience, so FallbackLLM never got a
-        # chance to cut over to the secondary before the caller had already
-        # given up. Matches GeminiLLM's own timeout_s=10.0, fixed there
-        # for the identical reason (2026-08-02).
+        # the gateway's own ~19-20s patience. Matches GeminiLLM's own
+        # timeout_s=10.0, fixed there for the identical reason.
         timeout_s:   float = 10.0,
     ) -> None:
         self._model       = model
@@ -138,7 +122,7 @@ class OpenAILLM:
         async with self._client.stream(
             "POST", "/v1/chat/completions", json=payload,
         ) as resp:
-            await _raise_with_body_logged(resp)
+            await raise_with_body_logged(resp, log=log, provider="OpenAILLM")
             async for line in resp.aiter_lines():
                 if not line.startswith("data: "):
                     continue
@@ -194,7 +178,7 @@ class OpenAILLM:
         async with self._client.stream(
             "POST", "/v1/chat/completions", json=payload,
         ) as resp:
-            await _raise_with_body_logged(resp)
+            await raise_with_body_logged(resp, log=log, provider="OpenAILLM")
             async for line in resp.aiter_lines():
                 if not line.startswith("data: "):
                     continue

@@ -1,8 +1,27 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
+import httpx
+
 from ..interfaces import ChatMessage
+
+
+async def raise_with_body_logged(resp: httpx.Response, *, log: logging.Logger, provider: str) -> None:
+    """httpx.Response.raise_for_status() never surfaces the response body,
+    so a 4xx/429 here otherwise reaches the caller as a bare 'Client error'
+    with no indication of what the vendor actually rejected — confirmed
+    live, repeatedly, across providers (Groq 429s and 400s, a Gemini 400
+    deep into a tool-calling turn, both with no visible detail otherwise).
+    Read the body before raising so the next occurrence is diagnosable
+    from the log alone. Shared by every ILLM provider; only the logger and
+    provider name differ."""
+    if resp.is_success:
+        return
+    body = await resp.aread()
+    log.error("%s: HTTP %s error body=%s", provider, resp.status_code, body.decode(errors="replace"))
+    resp.raise_for_status()
 
 
 def build_chat_messages(system: str, messages: list[ChatMessage]) -> list[dict[str, Any]]:

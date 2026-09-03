@@ -115,7 +115,7 @@ async def test_retry_enabled_retries_up_to_max():
 
 async def test_executor_registry_resolves_factory_with_provider():
     registry = ExecutorRegistry()
-    registry.register("book_appointment", lambda provider: _FixedExecutor(ToolResult(status=ToolStatus.SUCCESS)))
+    registry.register("book_appointment", lambda provider, companion=None: _FixedExecutor(ToolResult(status=ToolStatus.SUCCESS)))
 
     executor = registry.resolve("book_appointment", provider=object())
     assert executor is not None
