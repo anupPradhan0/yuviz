@@ -127,11 +127,22 @@ def _build_current_date_context() -> str:
 
 
 def _build_caller_number_context(caller_number: str) -> str:
-    """Surfaces the ANI to the LLM (CalendarExecutor already uses it as
-    attendee_phone, but the LLM never sees the digits otherwise, so it
-    can't proactively confirm them). Empty caller_number -> "" (browser
-    calls, no ANI). has_booking_tool gates this so a non-booking agent
-    never gets booking-flow instructions injected."""
+    """CalendarExecutor already defaults attendee_phone to the caller's
+    real ANI (request.context.caller_number) when the LLM doesn't supply
+    one explicitly — but the LLM itself never sees those digits anywhere
+    in its context, so it can only ever ask for a number from scratch, the
+    exact STT-mis-transcription risk this is meant to avoid (confirmed
+    live: a spoken-and-mis-heard digit got confirmed and booked wrong).
+    Pre-spaced digit-by-digit here, matching the digit-confirmation
+    guardrail's own formatting convention, both so the instruction reads
+    naturally and so the LLM's first exposure to "how to write this
+    number" is already in the safe, TTS-speaks-each-digit shape.
+
+    Empty caller_number (browser test calls, some SIP trunks that don't
+    pass ANI) returns "" — prompt is unchanged, agent falls back to
+    asking directly, today's existing behavior. has_booking_tool gates
+    this call site so a non-booking agent never gets booking-flow
+    instructions injected."""
     if not caller_number:
         return ""
     spaced = " ".join(caller_number)
