@@ -197,7 +197,32 @@ def test_variable_declared_only_on_a_later_step_warns_at_earlier_use():
     ]))
     warnings = graph_warnings(graph)
     assert any(
-        w.id == "n1" and "policy_number" in w.message and "before any earlier step" in w.message
+        w.id == "n1" and "policy_number" in w.message and "before every path" in w.message
+        for w in warnings
+    )
+
+
+def test_variable_must_be_captured_on_every_path_not_just_one():
+    # start → lookup → use  OR  start → use (skip). lookup captures account_id;
+    # the skip branch never does, so use_account must still warn.
+    graph = parse_graph({
+        "nodes": [
+            _node("start", "start", "greeting"),
+            _node("lookup", "agent", "lookup",
+                  extraction={"enabled": True, "variables": [{"name": "account_id"}]}),
+            _node("use", "agent", "use_account", prompt="Account {{ account_id }}"),
+            _node("end", "end", "bye"),
+        ],
+        "edges": [
+            _edge("e1", "start", "lookup", "need lookup"),
+            _edge("e2", "lookup", "use", "got it"),
+            _edge("e3", "start", "use", "skip lookup"),
+            _edge("e4", "use", "end", "done"),
+        ],
+    })
+    warnings = graph_warnings(graph)
+    assert any(
+        w.id == "use" and "account_id" in w.message and "before every path" in w.message
         for w in warnings
     )
 
@@ -251,6 +276,8 @@ def test_render_substitutes_falls_back_and_never_leaks_braces():
     assert render("Hi {{ name }}", {"name": "Ada"}) == "Hi Ada"
     assert render("Hi {{ name | there }}", {}) == "Hi there"
     assert render("Hi {{ name }}", {}) == "Hi "
+    assert render("Hi {{123}}", {}) == "Hi "
+    assert render("Hi {{ }}", {}) == "Hi "
 
 
 def test_malformed_tools_and_delay_do_not_crash_validation():
@@ -262,6 +289,42 @@ def test_malformed_tools_and_delay_do_not_crash_validation():
     ]))
     assert graph.start.tools == []
     assert graph.start.delayed_start_ms == 0
+
+
+def test_malformed_data_greeting_and_speech_do_not_crash():
+    # Non-object data must not AttributeError — lands as a clean validation error.
+    errors = _errors({
+        "nodes": [
+            {"id": "n1", "type": "start", "data": "oops"},
+            {"id": "n2", "type": "end", "data": {"name": "goodbye"}},
+        ],
+        "edges": [],
+    })
+    assert any(e.field == "name" for e in errors)
+
+    graph = parse_graph(_graph(
+        nodes=[
+            _node("n1", "start", "greeting", greeting=123),
+            _node("n2", "agent", "booking", prompt="ok"),
+            _node("n3", "end", "goodbye"),
+        ],
+        edges=[
+            _edge("e1", "n1", "n2", "go", transition_speech=99),
+            _edge("e2", "n2", "n3", "booked"),
+        ],
+    ))
+    assert graph.start.greeting == "123"
+    assert graph.start.out_edges[0].transition_speech == "99"
+
+
+def test_null_extraction_name_is_ignored():
+    graph = parse_graph(_graph(nodes=[
+        _node("n1", "start", "greeting",
+              extraction={"enabled": True, "variables": [{"name": None}]}),
+        _node("n2", "agent", "booking", prompt="ok"),
+        _node("n3", "end", "goodbye"),
+    ]))
+    assert graph.declared_variables() == set()
 
 
 def test_the_starter_graph_carries_the_tools_it_is_given():

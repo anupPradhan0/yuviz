@@ -38,7 +38,10 @@ CALL_CONTEXT_VARIABLES = (
 
 # Deliberately not Jinja2: templates include caller-influenced values, and
 # full Jinja would be a sandbox-escape surface with no upside here.
+# Valid: {{ name }} / {{ name | fallback }}. A second pattern catches any
+# other {{ ... }} so render() can strip it instead of leaving braces in TTS.
 _TEMPLATE_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\|([^}]*))?\}\}")
+_ANY_BRACES_RE = re.compile(r"\{\{[^}]*\}\}")
 
 
 @dataclass(frozen=True)
@@ -171,40 +174,77 @@ class WorkflowGraph:
             for node in self.nodes.values()
         }
 
-    def _ancestors(self, node_id: str) -> set[str]:
-        """Nodes that can run before `node_id` on some path from start (not self)."""
+    def _incoming(self) -> dict[str, list[str]]:
         incoming: dict[str, list[str]] = {nid: [] for nid in self.nodes}
         for node in self.nodes.values():
             for edge in node.out_edges:
                 incoming[edge.target].append(edge.source)
-        seen: set[str] = set()
-        stack = list(incoming.get(node_id, ()))
-        while stack:
-            pred = stack.pop()
-            if pred == node_id or pred in seen:
-                continue
-            seen.add(pred)
-            stack.extend(incoming.get(pred, ()))
-        return seen & self.reachable()
+        return incoming
 
     def _variables_available_at(self, node_id: str, *, leaving: bool = False) -> set[str]:
-        """Names filled before this node's prompt renders — or, if `leaving`,
-        also this node's own extraction (runs on the outbound transition,
-        before transition_speech is spoken)."""
+        """Vars guaranteed on *every* path from start to this node.
+
+        Must-def dataflow (not "any ancestor"): a skip-branch that bypasses
+        the capturing step must not clear the warning. Extraction runs when
+        leaving a step, so `leaving=True` also includes this node's own vars
+        (for transition_speech).
+        """
         declared = self._declared_by()
-        available = set().union(*(declared[a] for a in self._ancestors(node_id)))
+        reachable = self.reachable()
+        if node_id not in reachable:
+            return set()
+
+        incoming = self._incoming()
+        universe: set[str] = set().union(*(declared.values())) if declared else set()
+
+        # available_in[n] = vars guaranteed when entering n.
+        available_in: dict[str, set[str]] = {
+            nid: set(universe) for nid in reachable
+        }
+        available_in[self.start_node_id] = set()
+
+        changed = True
+        while changed:
+            changed = False
+            for nid in reachable:
+                if nid == self.start_node_id:
+                    continue
+                preds = [p for p in incoming[nid] if p in reachable]
+                if not preds:
+                    new_in: set[str] = set()
+                else:
+                    new_in = None  # type: ignore[assignment]
+                    for pred in preds:
+                        out_pred = available_in[pred] | declared.get(pred, set())
+                        new_in = out_pred if new_in is None else (new_in & out_pred)
+                    new_in = new_in or set()
+                if new_in != available_in[nid]:
+                    available_in[nid] = new_in
+                    changed = True
+
+        result = set(available_in[node_id])
         if leaving:
-            available |= declared.get(node_id, set())
-        return available
+            result |= declared.get(node_id, set())
+        return result
 
 
 def template_variables(text: str) -> set[str]:
     return {m.group(1) for m in _TEMPLATE_RE.finditer(text or "")}
 
 
+def malformed_templates(text: str) -> list[str]:
+    """`{{ ... }}` chunks that are not a valid {{ name }} / {{ name | fallback }}."""
+    found: list[str] = []
+    for m in _ANY_BRACES_RE.finditer(text or ""):
+        chunk = m.group(0)
+        if not _TEMPLATE_RE.fullmatch(chunk):
+            found.append(chunk)
+    return found
+
+
 def render(text: str, variables: dict[str, Any]) -> str:
-    """Substitute {{ name }} / {{ name | fallback }}. Unknown vars never
-    leave literal `{{ x }}` in speech (that ends up in call recordings)."""
+    """Substitute {{ name }} / {{ name | fallback }}. Unknown or malformed
+    placeholders never leave literal `{{ ... }}` in speech (TTS/recordings)."""
     if not text:
         return text or ""
 
@@ -214,7 +254,21 @@ def render(text: str, variables: dict[str, Any]) -> str:
             return (m.group(2) or "").strip()
         return str(value)
 
-    return _TEMPLATE_RE.sub(_sub, text)
+    text = _TEMPLATE_RE.sub(_sub, text)
+    # Neutralize anything still matching {{ ... }} (e.g. {{123}}, {{ }}).
+    return _ANY_BRACES_RE.sub("", text)
+
+
+def _data_object(raw: dict[str, Any]) -> dict[str, Any]:
+    data = raw.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _parse_extraction(raw: Any) -> Extraction | None:
@@ -225,16 +279,16 @@ def _parse_extraction(raw: Any) -> Extraction | None:
         raw_vars = []
     variables = tuple(
         ExtractionVariable(
-            name=str(v.get("name", "")).strip(),
-            type=str(v.get("type", "string")),
-            prompt=str(v.get("prompt", "")),
+            name=str(v.get("name") or "").strip(),
+            type=str(v.get("type") or "string"),
+            prompt=str(v.get("prompt") or ""),
         )
         for v in raw_vars
-        if isinstance(v, dict) and str(v.get("name", "")).strip()
+        if isinstance(v, dict) and str(v.get("name") or "").strip()
     )
     return Extraction(
         enabled=bool(raw.get("enabled", False)),
-        prompt=str(raw.get("prompt", "")),
+        prompt=str(raw.get("prompt") or ""),
         variables=variables,
     )
 
@@ -255,66 +309,69 @@ def _delayed_start_ms(raw: Any) -> int:
 
 
 def _node_from_raw(raw: dict[str, Any]) -> Node:
-    data = raw.get("data") or {}
+    data = _data_object(raw)
+    greeting = data.get("greeting")
     return Node(
-        id=str(raw.get("id", "")),
-        type=str(raw.get("type", "")),
-        name=str(data.get("name", "")).strip(),
-        prompt=str(data.get("prompt", "")),
-        greeting=data.get("greeting"),
+        id=str(raw.get("id") or ""),
+        type=str(raw.get("type") or ""),
+        name=str(data.get("name") or "").strip(),
+        prompt=str(data.get("prompt") or ""),
+        greeting=None if greeting is None else str(greeting),
         delayed_start_ms=_delayed_start_ms(data.get("delayed_start_ms")),
         tools=_str_list(data.get("tools")),
         knowledge_base_ids=_str_list(data.get("knowledge_base_ids")),
         extraction=_parse_extraction(data.get("extraction")),
-        transfer_destination=data.get("transfer_destination") or None,
-        disposition=data.get("disposition") or None,
+        transfer_destination=_optional_str(data.get("transfer_destination")),
+        disposition=_optional_str(data.get("disposition")),
     )
 
 
 def _edge_from_raw(raw: dict[str, Any]) -> Edge:
-    data = raw.get("data") or {}
-    speech = (data.get("transition_speech") or "").strip() or None
+    data = _data_object(raw)
+    speech = str(data.get("transition_speech") or "").strip() or None
     return Edge(
-        id=str(raw.get("id", "")),
-        source=str(raw.get("source", "")),
-        target=str(raw.get("target", "")),
-        label=str(data.get("label", "")).strip(),
-        condition=str(data.get("condition", "")).strip(),
+        id=str(raw.get("id") or ""),
+        source=str(raw.get("source") or ""),
+        target=str(raw.get("target") or ""),
+        label=str(data.get("label") or "").strip(),
+        condition=str(data.get("condition") or "").strip(),
         transition_speech=speech,
     )
 
 
 def parse_graph(raw: dict[str, Any]) -> WorkflowGraph:
     """Raises WorkflowInvalid — never returns a partial graph."""
-    errors = _structural_errors(raw)
+    errors, graph = _validate_and_build(raw)
     if errors:
         raise WorkflowInvalid(errors)
-
-    nodes = {n.id: n for n in (_node_from_raw(r) for r in raw.get("nodes") or [])}
-    for raw_edge in raw.get("edges") or []:
-        edge = _edge_from_raw(raw_edge)
-        nodes[edge.source].out_edges.append(edge)
-
-    start_id = next(n.id for n in nodes.values() if n.type == "start")
-    return WorkflowGraph(nodes=nodes, start_node_id=start_id)
+    assert graph is not None
+    return graph
 
 
 def _structural_errors(raw: Any) -> list[WorkflowError]:
     """Every rule here is a runtime break (docs/workflow.md §5.1)."""
+    errors, _ = _validate_and_build(raw)
+    return errors
+
+
+def _validate_and_build(
+    raw: Any,
+) -> tuple[list[WorkflowError], WorkflowGraph | None]:
+    """Validate once and reuse the coerced nodes/edges — no second parse."""
     errors: list[WorkflowError] = []
 
     def err(kind: str, id_: str | None, field_: str | None, message: str) -> None:
         errors.append(WorkflowError(kind=kind, id=id_, field=field_, message=message))
 
     if not isinstance(raw, dict):
-        return [WorkflowError("workflow", None, None, "workflow must be an object")]
+        return [WorkflowError("workflow", None, None, "workflow must be an object")], None
 
     raw_nodes = raw.get("nodes")
     if not isinstance(raw_nodes, list) or not raw_nodes:
-        return [WorkflowError("workflow", None, "nodes", "workflow has no nodes")]
+        return [WorkflowError("workflow", None, "nodes", "workflow has no nodes")], None
     raw_edges = raw.get("edges") or []
     if not isinstance(raw_edges, list):
-        return [WorkflowError("workflow", None, "edges", "edges must be a list")]
+        return [WorkflowError("workflow", None, "edges", "edges must be a list")], None
 
     nodes: dict[str, Node] = {}
     for raw_node in raw_nodes:
@@ -334,7 +391,7 @@ def _structural_errors(raw: Any) -> list[WorkflowError]:
             err("node", node.id, "name", "This step needs a name — it's what you'll see in your call logs")
         nodes[node.id] = node
     if errors:
-        return errors
+        return errors, None
 
     # Names appear in logs/transcripts — duplicates make analytics unusable.
     seen_names: dict[str, str] = {}
@@ -410,9 +467,6 @@ def _structural_errors(raw: Any) -> list[WorkflowError]:
             err("node", node.id, None,
                 "Nothing can lead back into the starting point — it's where every call begins")
         if node.type == "transfer" and not str(node.transfer_destination or "").strip():
-            # Runtime hands off using this field; unset is a break once the
-            # agent-level transfer fallback is gone (and is wrong today if
-            # the agent has no destination either).
             err("node", node.id, "transfer_destination",
                 f"{node.name!r} hands the call to a human, so it needs a destination number")
         if node.is_terminal and out_edges[node.id]:
@@ -435,12 +489,56 @@ def _structural_errors(raw: Any) -> list[WorkflowError]:
                     "only one of them would ever fire — give one a different name")
             by_tool_name[edge.tool_name] = edge
 
-    return errors
+    if errors:
+        return errors, None
+
+    for node in nodes.values():
+        node.out_edges = list(out_edges[node.id])
+    start_id = next(n.id for n in nodes.values() if n.type == "start")
+    return [], WorkflowGraph(nodes=nodes, start_node_id=start_id)
+
+
+def _warn_templates(
+    warnings: list[WorkflowError],
+    *,
+    kind: str,
+    id_: str,
+    field_name: str,
+    text: str,
+    available: set[str],
+    declared_anywhere: set[str],
+    node_name: str | None = None,
+    always_on: bool = False,
+) -> None:
+    for chunk in malformed_templates(text):
+        warnings.append(WorkflowError(
+            kind, id_, field_name,
+            f"{chunk} isn't a valid placeholder — use {{{{ name }}}} "
+            "(letters/numbers/underscore only)",
+        ))
+    for name in sorted(template_variables(text) - available):
+        if always_on:
+            msg = (
+                f"{{{{ {name} }}}} is in the always-on instruction, so it has to come from "
+                "the call itself (or contact data) — a later step can't fill it in time"
+            )
+        elif name in declared_anywhere:
+            where = f"on {node_name!r}" if node_name else "on this connection"
+            msg = (
+                f"{{{{ {name} }}}} is used {where} before every path captures it, "
+                "so it will come out blank when the agent speaks"
+            )
+        else:
+            msg = (
+                f"Nothing in this flow provides {{{{ {name} }}}}, so it will come out "
+                "blank when the agent speaks. Check the spelling, or have a step capture it"
+            )
+        warnings.append(WorkflowError(kind, id_, field_name, msg))
 
 
 def graph_warnings(graph: WorkflowGraph, known_variables: Iterable[str] = ()) -> list[WorkflowError]:
     """Non-blocking editor mistakes: unreachable steps, {{ vars }} not filled
-    yet at the point they are spoken (extraction runs when leaving a step)."""
+    on every path before they are spoken (extraction runs when leaving a step)."""
     warnings: list[WorkflowError] = []
     reachable = graph.reachable()
     always = set(CALL_CONTEXT_VARIABLES) | set(known_variables)
@@ -448,13 +546,11 @@ def graph_warnings(graph: WorkflowGraph, known_variables: Iterable[str] = ()) ->
 
     for node in graph.nodes.values():
         if node.is_unwired:
-            # Prepended on every step from the first turn — only always-on vars.
-            for name in sorted(template_variables(node.prompt) - always):
-                warnings.append(WorkflowError(
-                    "node", node.id, "prompt",
-                    f"{{{{ {name} }}}} is in the always-on instruction, so it has to come from "
-                    "the call itself (or contact data) — a later step can't fill it in time",
-                ))
+            _warn_templates(
+                warnings, kind="node", id_=node.id, field_name="prompt",
+                text=node.prompt, available=always, declared_anywhere=declared_anywhere,
+                node_name=node.name, always_on=True,
+            )
             continue
         if node.id not in reachable:
             warnings.append(WorkflowError(
@@ -463,37 +559,21 @@ def graph_warnings(graph: WorkflowGraph, known_variables: Iterable[str] = ()) ->
             ))
             continue
 
-        # Prompt/greeting render on entry — this step's own extraction is too late.
         on_entry = always | graph._variables_available_at(node.id, leaving=False)
         for field_name, text in (("prompt", node.prompt), ("greeting", node.greeting or "")):
-            for name in sorted(template_variables(text) - on_entry):
-                if name in declared_anywhere:
-                    msg = (
-                        f"{{{{ {name} }}}} is used on {node.name!r} before any earlier step "
-                        "captures it, so it will come out blank when the agent speaks"
-                    )
-                else:
-                    msg = (
-                        f"Nothing in this flow provides {{{{ {name} }}}}, so it will come out "
-                        "blank when the agent speaks. Check the spelling, or have a step capture it"
-                    )
-                warnings.append(WorkflowError("node", node.id, field_name, msg))
+            _warn_templates(
+                warnings, kind="node", id_=node.id, field_name=field_name,
+                text=text, available=on_entry, declared_anywhere=declared_anywhere,
+                node_name=node.name,
+            )
 
-        # transition_speech is spoken after this step's extraction on the way out.
         on_leave = always | graph._variables_available_at(node.id, leaving=True)
         for edge in node.out_edges:
-            for name in sorted(template_variables(edge.transition_speech or "") - on_leave):
-                if name in declared_anywhere:
-                    msg = (
-                        f"{{{{ {name} }}}} is used on this connection before any earlier step "
-                        "captures it, so it will come out blank when the agent speaks"
-                    )
-                else:
-                    msg = (
-                        f"Nothing in this flow provides {{{{ {name} }}}}, so it will come out "
-                        "blank when the agent speaks. Check the spelling, or have a step capture it"
-                    )
-                warnings.append(WorkflowError("edge", edge.id, "transition_speech", msg))
+            _warn_templates(
+                warnings, kind="edge", id_=edge.id, field_name="transition_speech",
+                text=edge.transition_speech or "", available=on_leave,
+                declared_anywhere=declared_anywhere,
+            )
 
     return warnings
 
