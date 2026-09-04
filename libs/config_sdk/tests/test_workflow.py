@@ -186,6 +186,66 @@ def test_declared_and_call_context_variables_do_not_warn():
     assert graph_warnings(graph) == []
 
 
+def test_variable_declared_only_on_a_later_step_warns_at_earlier_use():
+    # Extraction runs when leaving a step — a later declaration cannot fill
+    # an earlier prompt, even though declared_variables() would include it.
+    graph = parse_graph(_graph(nodes=[
+        _node("n1", "start", "greeting", prompt="Hello {{ policy_number }}"),
+        _node("n2", "agent", "booking", prompt="ok",
+              extraction={"enabled": True, "variables": [{"name": "policy_number"}]}),
+        _node("n3", "end", "goodbye"),
+    ]))
+    warnings = graph_warnings(graph)
+    assert any(
+        w.id == "n1" and "policy_number" in w.message and "before any earlier step" in w.message
+        for w in warnings
+    )
+
+
+def test_transition_speech_may_use_vars_extracted_on_the_same_step():
+    graph = parse_graph(_graph(
+        nodes=[
+            _node("n1", "start", "greeting",
+                  extraction={"enabled": True, "variables": [{"name": "policy_number"}]}),
+            _node("n2", "agent", "booking", prompt="ok"),
+            _node("n3", "end", "goodbye"),
+        ],
+        edges=[
+            _edge("e1", "n1", "n2", "go",
+                  transition_speech="Got policy {{ policy_number }}"),
+            _edge("e2", "n2", "n3", "booked"),
+        ],
+    ))
+    assert graph_warnings(graph) == []
+
+
+def test_transfer_node_requires_a_destination():
+    errors = _errors({
+        "nodes": [
+            _node("n1", "start", "greeting"),
+            _node("n2", "transfer", "to_human", prompt="Connecting you now."),
+        ],
+        "edges": [_edge("e1", "n1", "n2", "needs a person")],
+    })
+    assert any(e.id == "n2" and e.field == "transfer_destination" for e in errors)
+
+
+def test_transfer_node_with_destination_is_valid():
+    graph = parse_graph({
+        "nodes": [
+            _node("n1", "start", "greeting"),
+            _node("n2", "transfer", "to_human", prompt="Connecting you now.",
+                  transfer_destination="+15551212"),
+            _node("n3", "end", "goodbye"),
+        ],
+        "edges": [
+            _edge("e1", "n1", "n2", "needs a person"),
+            _edge("e2", "n1", "n3", "all done"),
+        ],
+    })
+    assert graph.nodes["n2"].transfer_destination == "+15551212"
+
+
 def test_render_substitutes_falls_back_and_never_leaks_braces():
     # Unrendered {{ x }} reaching TTS ends up in the call recording.
     assert render("Hi {{ name }}", {"name": "Ada"}) == "Hi Ada"

@@ -152,12 +152,50 @@ class WorkflowGraph:
         return found
 
     def declared_variables(self) -> set[str]:
+        """Flat set of names any enabled extraction may produce (order ignored).
+        Prefer `_variables_available_at` / `graph_warnings` for render-time checks."""
         return {
             v.name
             for node in self.nodes.values()
-            if node.extraction is not None
+            if node.extraction is not None and node.extraction.enabled
             for v in node.extraction.variables
         }
+
+    def _declared_by(self) -> dict[str, set[str]]:
+        return {
+            node.id: (
+                {v.name for v in node.extraction.variables}
+                if node.extraction is not None and node.extraction.enabled
+                else set()
+            )
+            for node in self.nodes.values()
+        }
+
+    def _ancestors(self, node_id: str) -> set[str]:
+        """Nodes that can run before `node_id` on some path from start (not self)."""
+        incoming: dict[str, list[str]] = {nid: [] for nid in self.nodes}
+        for node in self.nodes.values():
+            for edge in node.out_edges:
+                incoming[edge.target].append(edge.source)
+        seen: set[str] = set()
+        stack = list(incoming.get(node_id, ()))
+        while stack:
+            pred = stack.pop()
+            if pred == node_id or pred in seen:
+                continue
+            seen.add(pred)
+            stack.extend(incoming.get(pred, ()))
+        return seen & self.reachable()
+
+    def _variables_available_at(self, node_id: str, *, leaving: bool = False) -> set[str]:
+        """Names filled before this node's prompt renders — or, if `leaving`,
+        also this node's own extraction (runs on the outbound transition,
+        before transition_speech is spoken)."""
+        declared = self._declared_by()
+        available = set().union(*(declared[a] for a in self._ancestors(node_id)))
+        if leaving:
+            available |= declared.get(node_id, set())
+        return available
 
 
 def template_variables(text: str) -> set[str]:
@@ -371,6 +409,12 @@ def _structural_errors(raw: Any) -> list[WorkflowError]:
         if node.type == "start" and in_count[node.id]:
             err("node", node.id, None,
                 "Nothing can lead back into the starting point — it's where every call begins")
+        if node.type == "transfer" and not str(node.transfer_destination or "").strip():
+            # Runtime hands off using this field; unset is a break once the
+            # agent-level transfer fallback is gone (and is wrong today if
+            # the agent has no destination either).
+            err("node", node.id, "transfer_destination",
+                f"{node.name!r} hands the call to a human, so it needs a destination number")
         if node.is_terminal and out_edges[node.id]:
             err("node", node.id, None,
                 f"{node.name!r} " + ("hands the call to a human" if node.type == "transfer" else "ends the call")
@@ -395,26 +439,62 @@ def _structural_errors(raw: Any) -> list[WorkflowError]:
 
 
 def graph_warnings(graph: WorkflowGraph, known_variables: Iterable[str] = ()) -> list[WorkflowError]:
-    """Non-blocking editor mistakes: unreachable steps, undefined {{ vars }}."""
+    """Non-blocking editor mistakes: unreachable steps, {{ vars }} not filled
+    yet at the point they are spoken (extraction runs when leaving a step)."""
     warnings: list[WorkflowError] = []
     reachable = graph.reachable()
+    always = set(CALL_CONTEXT_VARIABLES) | set(known_variables)
+    declared_anywhere = graph.declared_variables()
+
     for node in graph.nodes.values():
         if node.is_unwired:
+            # Prepended on every step from the first turn — only always-on vars.
+            for name in sorted(template_variables(node.prompt) - always):
+                warnings.append(WorkflowError(
+                    "node", node.id, "prompt",
+                    f"{{{{ {name} }}}} is in the always-on instruction, so it has to come from "
+                    "the call itself (or contact data) — a later step can't fill it in time",
+                ))
             continue
         if node.id not in reachable:
             warnings.append(WorkflowError(
                 "node", node.id, None,
                 f"No path leads to {node.name!r}, so no call will ever reach it",
             ))
-    resolvable = (
-        set(CALL_CONTEXT_VARIABLES) | graph.declared_variables() | set(known_variables)
-    )
-    for name in sorted(graph.template_variables() - resolvable):
-        warnings.append(WorkflowError(
-            "workflow", None, None,
-            f"Nothing in this flow provides {{{{ {name} }}}}, so it will come out blank when the "
-            "agent speaks. Check the spelling, or have a step capture it",
-        ))
+            continue
+
+        # Prompt/greeting render on entry — this step's own extraction is too late.
+        on_entry = always | graph._variables_available_at(node.id, leaving=False)
+        for field_name, text in (("prompt", node.prompt), ("greeting", node.greeting or "")):
+            for name in sorted(template_variables(text) - on_entry):
+                if name in declared_anywhere:
+                    msg = (
+                        f"{{{{ {name} }}}} is used on {node.name!r} before any earlier step "
+                        "captures it, so it will come out blank when the agent speaks"
+                    )
+                else:
+                    msg = (
+                        f"Nothing in this flow provides {{{{ {name} }}}}, so it will come out "
+                        "blank when the agent speaks. Check the spelling, or have a step capture it"
+                    )
+                warnings.append(WorkflowError("node", node.id, field_name, msg))
+
+        # transition_speech is spoken after this step's extraction on the way out.
+        on_leave = always | graph._variables_available_at(node.id, leaving=True)
+        for edge in node.out_edges:
+            for name in sorted(template_variables(edge.transition_speech or "") - on_leave):
+                if name in declared_anywhere:
+                    msg = (
+                        f"{{{{ {name} }}}} is used on this connection before any earlier step "
+                        "captures it, so it will come out blank when the agent speaks"
+                    )
+                else:
+                    msg = (
+                        f"Nothing in this flow provides {{{{ {name} }}}}, so it will come out "
+                        "blank when the agent speaks. Check the spelling, or have a step capture it"
+                    )
+                warnings.append(WorkflowError("edge", edge.id, "transition_speech", msg))
+
     return warnings
 
 
