@@ -1,0 +1,33 @@
+---
+description: How to review code changes in this repo (read-only unless asked to fix)
+alwaysApply: false
+---
+
+# Code review
+
+When asked to review: **do not modify code** unless explicitly asked to fix.
+
+Review the actual diff and relevant surrounding code (callers, schema, auth).
+
+## Priority order
+
+1. Correctness
+2. Security / tenant isolation
+3. Data integrity (soft delete, FKs, cache write-through)
+4. API compatibility
+5. Error handling
+6. Concurrency / idempotency
+7. Performance (complexity, redundant work)
+8. Cleanliness (unused/duplicated code) — not personal style
+
+## Finding format
+
+`[P0]` Critical · `[P1]` High · `[P2]` Medium · `[P3]` Low
+
+Each finding: severity, file/line, problem, why it matters, recommended fix.
+
+Only real, actionable issues — no nitpicks on style that matches the repo.
+
+## Verdict
+
+End with one of: `APPROVE` · `APPROVE WITH FIXES` · `REQUEST CHANGES`

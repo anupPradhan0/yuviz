@@ -1,0 +1,30 @@
+---
+description: Multi-tenant isolation, auth, and secrets — critical invariants
+alwaysApply: true
+---
+
+# Tenant isolation & security
+
+yuviz is multi-tenant. Isolation is a hard invariant.
+
+## Identity
+
+- Never trust tenant_id, user id, email, or role from the client body/query/headers.
+- Use `CurrentUser` from verified JWT (`services/config/deps.get_current_user`).
+- `superadmin` may be unscoped (`tenant_id` null); `admin`/`viewer` are tenant-scoped.
+- Writes that mutate config require `require_role("superadmin", "admin")` (viewer is read-only).
+
+## Data access
+
+- Scope owned-data queries by tenant (UUID `tenant_id` on most tables; `calls.tenant_id` is a slug — follow existing call code).
+- Reject cross-tenant FK assignment (e.g. agent pointing at another tenant's provider) — see existing checks in `agents.py` / provider routers and `test_*cross_tenant*`.
+- Soft-delete with `deleted_at`; don't hard-delete unless the surrounding code already does.
+- Enforce authorization server-side in routers/services; UI checks are not enough.
+
+## Secrets
+
+- Never log, commit, or return decrypted API keys, JWT secrets, passwords, or `SECRET_ENCRYPTION_KEY`.
+- Store credentials as `enc:` / `k8s:` / `env:` refs via `libs/config_sdk/secrets.py` — never plaintext in Postgres.
+- Do not commit `deployment/.env` or invent hardcoded fallbacks for real secrets.
+
+When a change touches owned data, auth, roles, or permissions: explicitly consider cross-tenant impact and prefer a regression test for both allowed and rejected access.
