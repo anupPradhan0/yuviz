@@ -1,0 +1,31 @@
+---
+description: Testing and verification expectations for yuviz changes
+alwaysApply: true
+---
+
+# Testing
+
+## When to add tests
+
+- Bug fix → add/adjust a regression test when practical.
+- New business logic → add tests in the nearest existing `tests/` package.
+- Isolation-sensitive behavior → cover **allowed** access and **cross-tenant reject**.
+
+Follow existing pytest layout: `services/<svc>/tests/test_*.py`, `libs/*/tests/`. Gateway: GoogleTest under `tests/`, run via `ctest`.
+
+## How to run
+
+```bash
+pytest                                 # or a focused path
+pytest services/config/tests/test_api.py -k cross_tenant
+ctest --test-dir build --output-on-failure   # C++ after cmake build
+cd admin-ui && npm run lint                  # UI
+```
+
+Config Service tests share a session-scoped asyncio loop (see `pyproject.toml`) — don't "fix" that without understanding why.
+
+## Before claiming done
+
+Run the checks that matter for the change. Never claim pass unless executed.
+
+No repo-wide mypy/ruff is configured — don't invent a gate. Prefer pytest for Python behavior.
