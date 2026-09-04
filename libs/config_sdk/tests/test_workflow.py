@@ -278,6 +278,12 @@ def test_render_substitutes_falls_back_and_never_leaks_braces():
     assert render("Hi {{ name }}", {}) == "Hi "
     assert render("Hi {{123}}", {}) == "Hi "
     assert render("Hi {{ }}", {}) == "Hi "
+    # Unbalanced closing braces are typos — strip, don't speak them.
+    assert render("Hi {{ name }", {}) == "Hi "
+    assert render("Hi {{ name", {}) == "Hi "
+    # Valid fallback may contain `{` without false-positive stripping.
+    assert render("Hi {{ name | a{b }}", {"name": "Ada"}) == "Hi Ada"
+    assert render("Hi {{ name | a{b }}", {}) == "Hi a{b"
 
 
 def test_malformed_tools_and_delay_do_not_crash_validation():

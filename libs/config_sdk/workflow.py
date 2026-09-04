@@ -39,9 +39,10 @@ CALL_CONTEXT_VARIABLES = (
 # Deliberately not Jinja2: templates include caller-influenced values, and
 # full Jinja would be a sandbox-escape surface with no upside here.
 # Valid: {{ name }} / {{ name | fallback }}. A second pattern catches any
-# other {{ ... }} so render() can strip it instead of leaving braces in TTS.
+# other {{ ... }} (closing braces optional) so typos like {{ name } never
+# reach TTS. [^}]* (not [^{}]*) so a valid fallback may contain `{`.
 _TEMPLATE_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\|([^}]*))?\}\}")
-_ANY_BRACES_RE = re.compile(r"\{\{[^}]*\}\}")
+_ANY_BRACES_RE = re.compile(r"\{\{[^}]*\}{0,2}")
 
 
 @dataclass(frozen=True)
