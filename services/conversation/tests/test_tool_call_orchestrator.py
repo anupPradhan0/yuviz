@@ -557,7 +557,7 @@ async def test_a_local_tool_does_not_consume_a_tool_iteration():
     local_tools, _ = _local()
     executor = _FixedExecutor(ToolResult(status=ToolStatus.SUCCESS, payload={"booked": True}))
     registry = ExecutorRegistry()
-    registry.register("book_appointment", lambda provider: executor)
+    registry.register("book_appointment", lambda provider, companion=None: executor)
     orchestrator = ToolCallOrchestrator(
         llm_adapter=LLMAdapter(llm),
         policy_resolver=_FakePolicyResolver([_policy()]),
@@ -589,9 +589,9 @@ async def test_local_tool_schemas_are_offered_alongside_policy_tools():
     seen: list[list[dict]] = []
     original = llm.generate_with_tools
 
-    async def _record(messages, schemas):
+    async def _record(messages, schemas, tool_choice=None):
         seen.append(schemas)
-        async for e in original(messages, schemas):
+        async for e in original(messages, schemas, tool_choice=tool_choice):
             yield e
 
     llm.generate_with_tools = _record
@@ -653,9 +653,9 @@ async def test_a_callable_tool_source_is_re_read_after_every_local_call():
     seen: list[list[str]] = []
     original = llm.generate_with_tools
 
-    async def _record(messages, schemas):
+    async def _record(messages, schemas, tool_choice=None):
         seen.append([s["name"] for s in (schemas or [])])
-        async for e in original(messages, schemas):
+        async for e in original(messages, schemas, tool_choice=tool_choice):
             yield e
 
     llm.generate_with_tools = _record

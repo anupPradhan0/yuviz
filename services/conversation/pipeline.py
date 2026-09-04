@@ -925,8 +925,15 @@ class PipelineConversationHandler:
         # wait (knowledge retrieval + LLM + TTS, all still to come below)
         # instead of leaving them in silence for it. Spoken here, before
         # any of that work starts, not overlapped with it — same posture
-        # as the tool-call filler elsewhere in this method.
-        if is_first_turn and not self._session(session_id).first_turn_filler_spoken:
+        # as the tool-call filler elsewhere in this method. Skipped for
+        # text_only: there is no silence to cover in a chat panel, and a
+        # filler that lands as its own agent bubble before the real reply
+        # (or before the failure fallback) reads as a broken turn.
+        if (
+            is_first_turn
+            and not self._text_only
+            and not self._session(session_id).first_turn_filler_spoken
+        ):
             self._session(session_id).first_turn_filler_spoken = True
             async for response in self._speak(_FIRST_TURN_FILLER, session_id):
                 yield response

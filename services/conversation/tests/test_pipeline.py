@@ -2200,8 +2200,10 @@ async def test_fabrication_triggered_transfer_speaks_specific_announcement():
     """Product fix, confirmed live: a caller who just heard "Confirmed! ..."
     followed immediately by a silent handoff to a human reads as the
     system being broken, even though escalation is working as designed.
-    This transfer must speak a specific double-checking line instead of
-    (or in place of no) generic transfer_announcement."""
+    This transfer must speak a specific double-checking line.
+    (Agent-level transfer_announcement was removed with the workflow
+    migration — end/transfer wording lives on the graph — so there is no
+    generic announcement to assert against anymore.)"""
     from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
 
     stt = _make_stt("book me tomorrow at 3")
@@ -2212,35 +2214,34 @@ async def test_fabrication_triggered_transfer_speaks_specific_announcement():
         stt, llm, tts, system_prompt="You are a scheduler.",
         tool_orchestrator=orchestrator, has_booking_tool=True,
         transfer_type="warm", transfer_destination="1000", escalation_threshold=0,
-        transfer_announcement="Please hold while I transfer you.",
     )
 
     [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
 
     spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
     assert any("double-check that booking" in t for t in spoken_texts)
-    assert "Please hold while I transfer you." not in spoken_texts
 
 
 @pytest.mark.asyncio
-async def test_frustration_triggered_transfer_still_uses_generic_announcement():
+async def test_frustration_triggered_transfer_does_not_use_fabrication_announcement():
     """A transfer NOT caused by booking fabrication (caller frustration
-    here) must keep using the agent's own configured transfer_announcement
-    — the specific double-checking line is only for the fabrication case."""
+    here) must NOT speak the fabrication-specific double-checking line —
+    that line is only for the fabrication case. Generic agent-level
+    transfer_announcement no longer exists post-workflow; the handoff is
+    silent unless a transfer node's own prompt produced speech earlier."""
     stt_frustrated = _make_stt("This is useless, you are not helping at all.")
     llm = _make_llm(["I'm sorry to hear that."])
     tts = _make_tts(b"\x00" * 640)
     handler = _make_handler(
         stt_frustrated, llm, tts,
         transfer_type="cold", transfer_destination="1001", escalation_threshold=0,
-        transfer_announcement="Please hold while I transfer you.",
     )
 
-    [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
 
     spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
-    assert "Please hold while I transfer you." in spoken_texts
     assert not any("double-check that booking" in t for t in spoken_texts)
+    assert any(r.transfer_request is not None for r in responses)
 
 
 @pytest.mark.asyncio
