@@ -87,3 +87,5 @@ No repo-wide Python linter/typechecker is configured; do not invent one. Prefer 
 - Do not rewrite the Gateway media path, Redis DID cache design, or secret `enc:` scheme without a clear need.
 - Do not claim tests/lint/build passed unless they were run.
 - Prefer the smallest change that fixes the problem; no speculative abstractions.
+- **Never commit or push** — stop and ask the user to review and do it themselves.
+- **Never attribute Cursor/AI** as author, co-author, contributor, or collaborator in commits, PRs, or Git metadata.

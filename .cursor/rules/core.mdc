@@ -40,4 +40,6 @@ Minimize shell narration; batch related checks; don't paste command output unles
 ## Git
 
 - Inspect the diff before finishing; no debug leftovers or secrets.
-- Do not commit, rewrite history, or force-push unless the user asks.
+- **Never commit or push.** Stop when ready; ask the user to review and run commit/push themselves.
+- Never rewrite history or force-push.
+- **Attribution:** do not add or mention Cursor, AI, Copilot, or similar as author, co-author, contributor, or collaborator in commits, PRs, or any Git metadata (`Co-authored-by`, committer identity, PR body, etc.).
