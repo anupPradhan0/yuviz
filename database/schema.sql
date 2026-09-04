@@ -170,6 +170,12 @@ DO $$ BEGIN
         CHECK (max_call_duration_s IS NULL OR max_call_duration_s BETWEEN 30 AND 7200);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- Conversation workflow (draft vs published). Greeting/system_prompt columns
+-- stay until the later agent→workflow migration; runtime still reads them.
+-- workflow_draft is editor autosave (may be invalid); workflow is publish-only.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS workflow       JSONB;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS workflow_draft JSONB;
+
 -- ── tool_provider_configs — Tool Execution Framework, mirrors provider_configs ──
 -- Same shape/discipline as provider_configs above: tenant-scoped, api_key_ref
 -- is a REFERENCE ONLY ('env:...' | 'enc:...' | 'k8s:...'), never a real key
@@ -241,6 +247,20 @@ ALTER TABLE users ALTER COLUMN password_hash SET NOT NULL;
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_service_account BOOLEAN NOT NULL DEFAULT false;
 UPDATE users SET is_service_account = true WHERE lower(email) LIKE '%@internal.%' AND is_service_account = false;
+
+-- Append-only publish history. Rollback republishes an old version as a new
+-- one rather than rewriting the log.
+CREATE TABLE IF NOT EXISTS agent_workflow_versions (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id     UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    version      INT  NOT NULL,
+    graph        JSONB NOT NULL,
+    published_by UUID REFERENCES users(id),
+    published_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    note         TEXT,
+    UNIQUE (agent_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_awv_agent ON agent_workflow_versions(agent_id, version DESC);
 
 -- ── audit_log — append-only, written in the same transaction as the mutation ─
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -527,9 +547,26 @@ DROP TRIGGER IF EXISTS tenants_version ON tenants;
 CREATE TRIGGER tenants_version BEFORE UPDATE ON tenants
     FOR EACH ROW EXECUTE FUNCTION bump_config_version();
 
+-- Draft autosaves must not bump config_version (thousands of keystrokes);
+-- publishing agents.workflow still bumps and propagates via Redis.
+CREATE OR REPLACE FUNCTION bump_agent_config_version() RETURNS TRIGGER AS $$
+BEGIN
+    IF to_jsonb(NEW) - 'workflow_draft' - 'updated_at' - 'config_version'
+     = to_jsonb(OLD) - 'workflow_draft' - 'updated_at' - 'config_version'
+    THEN
+        NEW.config_version := OLD.config_version;
+        NEW.updated_at := OLD.updated_at;
+        RETURN NEW;
+    END IF;
+    NEW.config_version := OLD.config_version + 1;
+    NEW.updated_at := now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 DROP TRIGGER IF EXISTS agents_version ON agents;
 CREATE TRIGGER agents_version BEFORE UPDATE ON agents
-    FOR EACH ROW EXECUTE FUNCTION bump_config_version();
+    FOR EACH ROW EXECUTE FUNCTION bump_agent_config_version();
 
 -- ── Remaining indexes ────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_agents_tenant ON agents(tenant_id);

@@ -151,6 +151,11 @@ class Agent:
     # Mirrors agents.max_call_duration_s — see Policies.max_call_duration_s's
     # own comment for what this controls. None = unlimited.
     max_call_duration_s: int | None = None
+    # Published / draft conversation graphs (agents.workflow*). None = no
+    # graph yet; live calls still use greeting/system_prompt until runtime
+    # consumes these in a later PR.
+    workflow: dict[str, Any] | None = None
+    workflow_draft: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +216,8 @@ class ConversationInfo:
     # Scripted spoken lines (see Agent.farewell_message/transfer_announcement).
     farewell_message: str | None = None
     transfer_announcement: str | None = None
+    workflow: dict[str, Any] | None = None
+    workflow_draft: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

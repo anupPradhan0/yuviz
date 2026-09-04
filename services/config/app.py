@@ -98,6 +98,17 @@ async def bad_request_handler(request: Request, exc: ValueError) -> JSONResponse
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
+@app.exception_handler(asyncpg.UniqueViolationError)
+async def unique_violation_handler(
+    request: Request, exc: asyncpg.UniqueViolationError,
+) -> JSONResponse:
+    """Duplicate agent slug is a client conflict, not a 500."""
+    return JSONResponse(
+        status_code=409,
+        content={"detail": "That name or slug is already taken in this account."},
+    )
+
+
 @app.exception_handler(asyncpg.ForeignKeyViolationError)
 async def fk_violation_handler(
     request: Request, exc: asyncpg.ForeignKeyViolationError,
