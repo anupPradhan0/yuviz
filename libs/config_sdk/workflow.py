@@ -1,27 +1,12 @@
 """
-Workflow graph model — the single definition both planes share (see
-docs/workflow.md §5.1). Config Service validates a graph here on publish;
-Conversation Service walks the same parsed object at runtime. Dataclass
-only, no pydantic: this SDK is dataclass-only today and gains no
-dependency for this.
+Shared workflow graph model + validation (docs/workflow.md §5.1).
 
-A graph is a state machine over a call. One node is active at a time; it
-owns the system prompt and the tools reachable while it is active. Each
-outgoing edge is registered with the LLM as a callable function whose name
-is the edge label and whose description is the edge condition — the model
-advances the conversation by calling it (see services/conversation/workflow/).
+Config validates on publish; conversation walks the same object at runtime.
+Dataclass-only (no pydantic) to match the rest of this SDK.
 
-parse_graph() raises rather than returning a partial graph: every rule it
-enforces is a runtime break (a dangling edge target is a KeyError mid-call,
-a node with no outgoing edge traps the model until max_call_duration_s).
-graph_warnings() is the other half — real editor mistakes that are not
-runtime breaks (an unreachable node, a {{ variable }} nothing ever
-defines), reported so the editor can surface them without blocking a
-publish.
-
-Cycles are allowed and deliberately not checked: "the caller has another
-question" looping back to a Q&A node is correct behavior, and runaway
-loops are already bounded by agents.max_call_duration_s.
+parse_graph() raises on runtime-breaking rules; graph_warnings() reports
+editor mistakes that should not block publish. Cycles are allowed — loops
+back to Q&A are valid; runaway calls are bounded by max_call_duration_s.
 """
 
 from __future__ import annotations
@@ -32,57 +17,34 @@ from typing import Any, Iterable
 
 NODE_TYPES = ("start", "agent", "transfer", "end", "global")
 TERMINAL_NODE_TYPES = ("end", "transfer")
-# Not a step in the call — a `global` node carries the always-on instruction
-# prepended to every step's prompt, and is deliberately wired to nothing. It
-# is the one node type exempt from the connectivity rules below, so the two
-# places that ask "is this node part of the flow?" ask it here rather than
-# spelling out the type each time (ported from Dograh's NodeType.globalNode).
+# `global` is always-on prompt text, not a call step — exempt from wiring rules.
 UNWIRED_NODE_TYPES = ("global",)
 
-# Disposition codes the platform itself understands (ported from Dograh's
-# disposition_codes.py, minus their telephony-status-derived ones). An end
-# node may carry any string — the calls-list filter reads distinct values
-# out of the column rather than a hardcoded list, so a tenant-invented code
-# shows up without a code change. These are only the ones anything in the
-# platform reasons about.
-#
-# Written by the runtime, never chosen in the editor: the agent ended the
-# call with [[END_CALL]] from a node that was not an end node, so the graph
-# reported no code of its own. Usually means the graph is missing an edge
-# for however the conversation actually finished.
+# Platform-recognized disposition codes. End nodes may use any string;
+# tenants invent codes freely. ENDED_EARLY is written by the runtime when
+# the agent hangs up outside an end node (missing edge), never by the editor.
 ENDED_EARLY = "ended_early"
 SYSTEM_DISPOSITIONS = (
     "completed", "qualified", "not_qualified", "transferred", "abandoned", "failed",
     ENDED_EARLY,
 )
 
-# Always available to {{ }} rendering, supplied by the pipeline per call
-# (see WorkflowRunner's `variables`). Anything outside this set must be
-# declared by some node's extraction config or come from campaign contact
-# data — graph_warnings() flags what neither covers.
+# Always supplied by the pipeline per call. Other {{ vars }} must come from
+# extraction config or campaign contact data, or graph_warnings() flags them.
 CALL_CONTEXT_VARIABLES = (
     "caller_number", "called_number", "direction", "agent_name",
     "current_date", "current_time", "business_name",
 )
 
-# {{ name }} or {{ name | fallback text }}. Deliberately not Jinja2 (which
-# is already a dependency): these strings are rendered with caller-
-# influenced extracted values in them, and full Jinja on that is a
-# sandbox-escape surface with no upside here.
+# Deliberately not Jinja2: templates include caller-influenced values, and
+# full Jinja would be a sandbox-escape surface with no upside here.
 _TEMPLATE_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\|([^}]*))?\}\}")
 
 
 @dataclass(frozen=True)
 class WorkflowError:
-    """Structured so the editor can paint the offending node or edge red
-    with the message attached, instead of one toast the operator has to go
-    hunting from.
-
-    `message` is written for the person drawing the flow, not for whoever
-    wrote this file — it is rendered verbatim in the editor's problem list
-    (admin-ui/components/workflow/WorkflowPanel.tsx), so it says what to do
-    about it and avoids "node", "edge" and "LLM" in favour of the words the
-    UI itself uses: step, connection, agent."""
+    """Editor-facing problem: paint this node/edge red. Messages use UI words
+    (step, connection, agent), not implementation jargon."""
     kind:    str          # "node" | "edge" | "workflow"
     id:      str | None
     field:   str | None
@@ -123,9 +85,8 @@ class Edge:
 
     @property
     def tool_name(self) -> str:
-        """The label, as a function name the LLM can call. Two labels that
-        collapse to the same name ("yes" and "Yes!") are rejected at
-        validation — the second would silently shadow the first."""
+        # Labels that collapse to the same name ("yes" / "Yes!") are rejected
+        # at validation — the second would silently shadow the first.
         return re.sub(r"[^a-z0-9]+", "_", self.label.lower()).strip("_")
 
 
@@ -164,9 +125,7 @@ class WorkflowGraph:
 
     @property
     def global_prompt(self) -> str:
-        """The always-on instruction, prepended to every step's own prompt.
-        Empty string when the graph has no global node — an agent whose
-        every instruction is per-step is a legitimate graph, not an error."""
+        """Always-on instruction prepended to every step. Empty if none."""
         for node in self.nodes.values():
             if node.is_unwired:
                 return node.prompt
@@ -184,8 +143,6 @@ class WorkflowGraph:
         return seen
 
     def template_variables(self) -> set[str]:
-        """Every {{ var }} referenced anywhere in the graph — prompts,
-        greeting, transition speech."""
         found: set[str] = set()
         for node in self.nodes.values():
             for text in (node.prompt, node.greeting or ""):
@@ -203,16 +160,13 @@ class WorkflowGraph:
         }
 
 
-# ── Rendering ────────────────────────────────────────────────────────────
-
 def template_variables(text: str) -> set[str]:
     return {m.group(1) for m in _TEMPLATE_RE.finditer(text or "")}
 
 
 def render(text: str, variables: dict[str, Any]) -> str:
-    """Substitute {{ name }} / {{ name | fallback }}. An unknown variable
-    with no fallback renders as the empty string, never as a literal
-    `{{ x }}` — that is the failure mode that ends up in a call recording."""
+    """Substitute {{ name }} / {{ name | fallback }}. Unknown vars never
+    leave literal `{{ x }}` in speech (that ends up in call recordings)."""
     if not text:
         return text or ""
 
@@ -225,18 +179,19 @@ def render(text: str, variables: dict[str, Any]) -> str:
     return _TEMPLATE_RE.sub(_sub, text)
 
 
-# ── Parsing ──────────────────────────────────────────────────────────────
-
 def _parse_extraction(raw: Any) -> Extraction | None:
     if not isinstance(raw, dict):
         return None
+    raw_vars = raw.get("variables") or []
+    if not isinstance(raw_vars, list):
+        raw_vars = []
     variables = tuple(
         ExtractionVariable(
             name=str(v.get("name", "")).strip(),
             type=str(v.get("type", "string")),
             prompt=str(v.get("prompt", "")),
         )
-        for v in raw.get("variables") or []
+        for v in raw_vars
         if isinstance(v, dict) and str(v.get("name", "")).strip()
     )
     return Extraction(
@@ -244,6 +199,21 @@ def _parse_extraction(raw: Any) -> Extraction | None:
         prompt=str(raw.get("prompt", "")),
         variables=variables,
     )
+
+
+def _str_list(raw: Any) -> list[str]:
+    # Reject non-lists (e.g. a string would iterate character-by-character).
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw]
+
+
+def _delayed_start_ms(raw: Any) -> int:
+    try:
+        value = int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, value)
 
 
 def _node_from_raw(raw: dict[str, Any]) -> Node:
@@ -254,9 +224,9 @@ def _node_from_raw(raw: dict[str, Any]) -> Node:
         name=str(data.get("name", "")).strip(),
         prompt=str(data.get("prompt", "")),
         greeting=data.get("greeting"),
-        delayed_start_ms=int(data.get("delayed_start_ms") or 0),
-        tools=[str(t) for t in (data.get("tools") or [])],
-        knowledge_base_ids=[str(k) for k in (data.get("knowledge_base_ids") or [])],
+        delayed_start_ms=_delayed_start_ms(data.get("delayed_start_ms")),
+        tools=_str_list(data.get("tools")),
+        knowledge_base_ids=_str_list(data.get("knowledge_base_ids")),
         extraction=_parse_extraction(data.get("extraction")),
         transfer_destination=data.get("transfer_destination") or None,
         disposition=data.get("disposition") or None,
@@ -277,7 +247,7 @@ def _edge_from_raw(raw: dict[str, Any]) -> Edge:
 
 
 def parse_graph(raw: dict[str, Any]) -> WorkflowGraph:
-    """Raises WorkflowInvalid(errors) — never returns a partial graph."""
+    """Raises WorkflowInvalid — never returns a partial graph."""
     errors = _structural_errors(raw)
     if errors:
         raise WorkflowInvalid(errors)
@@ -292,8 +262,7 @@ def parse_graph(raw: dict[str, Any]) -> WorkflowGraph:
 
 
 def _structural_errors(raw: Any) -> list[WorkflowError]:
-    """Every rule here is a runtime break, not a style preference — see the
-    validation table in docs/workflow.md §5.1."""
+    """Every rule here is a runtime break (docs/workflow.md §5.1)."""
     errors: list[WorkflowError] = []
 
     def err(kind: str, id_: str | None, field_: str | None, message: str) -> None:
@@ -312,7 +281,7 @@ def _structural_errors(raw: Any) -> list[WorkflowError]:
     nodes: dict[str, Node] = {}
     for raw_node in raw_nodes:
         if not isinstance(raw_node, dict):
-            err("workflow", None, "nodes", "every node must be an object")
+            err("workflow", None, "nodes", "every step must be an object")
             continue
         node = _node_from_raw(raw_node)
         if not node.id:
@@ -329,8 +298,7 @@ def _structural_errors(raw: Any) -> list[WorkflowError]:
     if errors:
         return errors
 
-    # Names appear in logs, transcripts and analytics — duplicates make
-    # every "which stage did this call die in" answer a lie.
+    # Names appear in logs/transcripts — duplicates make analytics unusable.
     seen_names: dict[str, str] = {}
     for node in nodes.values():
         clash = seen_names.get(node.name.lower())
@@ -348,8 +316,7 @@ def _structural_errors(raw: Any) -> list[WorkflowError]:
     if not any(n.type == "end" for n in nodes.values()):
         err("workflow", None, None,
             "Add a step that ends the call, otherwise the conversation has no way to finish")
-    # Two of them would silently concatenate in whatever order the nodes
-    # happen to be stored, which is a prompt nobody wrote.
+    # Multiple globals would concatenate in storage order — a prompt nobody wrote.
     globals_ = [n for n in nodes.values() if n.is_unwired]
     if len(globals_) > 1:
         err("workflow", None, None,
@@ -359,17 +326,18 @@ def _structural_errors(raw: Any) -> list[WorkflowError]:
     edges: list[Edge] = []
     for raw_edge in raw_edges:
         if not isinstance(raw_edge, dict):
-            err("workflow", None, "edges", "every edge must be an object")
+            err("workflow", None, "edges", "every connection must be an object")
             continue
         edge = _edge_from_raw(raw_edge)
         if edge.source not in nodes:
-            err("edge", edge.id, "source", f"edge source {edge.source!r} is not a node in this workflow")
+            err("edge", edge.id, "source",
+                f"This connection points from unknown step {edge.source!r} — remove it or fix the id")
             continue
         if edge.target not in nodes:
-            err("edge", edge.id, "target", f"edge target {edge.target!r} is not a node in this workflow")
+            err("edge", edge.id, "target",
+                f"This connection points to unknown step {edge.target!r} — remove it or fix the id")
             continue
-        # A brand-new connection is missing both at once, and reporting it
-        # twice for one thing the operator hasn't got to yet is just noise.
+        # Brand-new connections lack both fields — one message, not two.
         if not edge.label and not edge.condition:
             err("edge", edge.id, "condition",
                 "This connection isn't set up yet — it needs a short name and a description of "
@@ -395,9 +363,6 @@ def _structural_errors(raw: Any) -> list[WorkflowError]:
 
     for node in nodes.values():
         if node.is_unwired:
-            # Nothing leads in or out of a global node by design. React Flow
-            # gives it no handles, so an edge touching one can only come from
-            # a hand-written graph.
             if in_count[node.id] or out_edges[node.id]:
                 err("node", node.id, None,
                     f"{node.name!r} applies to every step, so it isn't part of the flow — "
@@ -414,9 +379,7 @@ def _structural_errors(raw: Any) -> list[WorkflowError]:
             err("node", node.id, None,
                 f"{node.name!r} has no way out. A call that reaches it would be stuck there "
                 "until it hits the time limit — connect it to another step, or make it end the call")
-        # "yes" and "Yes!" both become yes; whichever schema is registered
-        # second silently shadows the first. This is the rule that actually
-        # fires in practice.
+        # "yes" / "Yes!" both become `yes` — second schema silently shadows the first.
         by_tool_name: dict[str, Edge] = {}
         for edge in out_edges[node.id]:
             if not edge.tool_name:
@@ -432,15 +395,12 @@ def _structural_errors(raw: Any) -> list[WorkflowError]:
 
 
 def graph_warnings(graph: WorkflowGraph, known_variables: Iterable[str] = ()) -> list[WorkflowError]:
-    """Editor mistakes that are not runtime breaks: a node nothing routes
-    to, a {{ variable }} no node ever produces. Surfaced, never blocking —
-    a half-built graph is a normal thing to publish once the reachable part
-    of it is correct."""
+    """Non-blocking editor mistakes: unreachable steps, undefined {{ vars }}."""
     warnings: list[WorkflowError] = []
     reachable = graph.reachable()
     for node in graph.nodes.values():
         if node.is_unwired:
-            continue          # never reachable, and that is the point
+            continue
         if node.id not in reachable:
             warnings.append(WorkflowError(
                 "node", node.id, None,
@@ -458,27 +418,14 @@ def graph_warnings(graph: WorkflowGraph, known_variables: Iterable[str] = ()) ->
     return warnings
 
 
-# ── The starter graph ────────────────────────────────────────────────────
-
 def starter_graph(
     greeting: str = "", system_prompt: str = "", tools: list[str] | None = None,
 ) -> dict[str, Any]:
-    """The graph every agent is born with (see services/config/agents.py's
-    create_agent). Three nodes: the always-on instruction, the step the call
-    starts in, and a way to finish. Not two — the validator rejects a
-    non-terminal step with no way out, so start alone could never publish.
+    """Default React Flow JSON for a new agent: global + start + end.
 
-    `tools` goes on the start node — the only non-terminal step here, so the
-    only one that can hold any. A brand-new agent has no enabled tools yet
-    and correctly gets none; migrate_workflow_text.py passes the agent's
-    existing ones, because Node.tools is default-deny and an agent that
-    silently lost every tool the moment it gained a graph would be a
-    behaviour change nobody asked for.
-
-    Returned as the same raw React Flow dict the editor round-trips, not a
-    WorkflowGraph — every consumer stores it as JSON, and admin-ui's own
-    STARTER (lib/workflowApi.ts) mirrors it node for node so a graph drawn
-    by the editor and one created by the server are the same shape.
+    `tools` goes on start (the only non-terminal). Migrations must pass the
+    agent's existing tools — Node.tools is default-deny, so omitting them
+    would silently disable booking/etc. the moment a graph is attached.
     """
     return {
         "version": 1,

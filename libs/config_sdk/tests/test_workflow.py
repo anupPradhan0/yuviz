@@ -1,8 +1,4 @@
-"""
-Graph model + validation. Pure functions, no infra — every rule enforced
-here is a runtime break, so each one gets the case that would actually
-happen in a call.
-"""
+"""Graph model + validation — pure functions, one case per runtime-breaking rule."""
 
 from __future__ import annotations
 
@@ -64,8 +60,7 @@ def test_edge_label_becomes_a_callable_tool_name():
 
 
 def test_two_labels_collapsing_to_the_same_tool_name_is_rejected():
-    # "yes" and "Yes!" both become `yes` — whichever schema is registered
-    # second silently shadows the first, and the transition never fires.
+    # "yes" / "Yes!" both become `yes` — second would silently shadow the first.
     errors = _errors(_graph(edges=[
         _edge("e1", "n1", "n2", "yes"),
         _edge("e2", "n1", "n3", "Yes!"),
@@ -115,7 +110,7 @@ def test_exactly_one_start_and_at_least_one_end():
 
 
 def test_duplicate_node_names_are_rejected():
-    # They appear in logs and transcripts — duplicates make analytics lie.
+    # Names appear in logs/transcripts — duplicates make analytics lie.
     errors = _errors(_graph(nodes=[
         _node("n1", "start", "same"), _node("n2", "agent", "same"), _node("n3", "end", "done"),
     ]))
@@ -131,9 +126,7 @@ def test_an_edge_with_no_condition_is_rejected():
 
 
 def test_a_brand_new_connection_reports_one_problem_not_two():
-    """It's missing both a name and a condition the instant it's drawn —
-    saying so twice is noise about something the operator simply hasn't got
-    to yet."""
+    # Missing both name and condition at draw time — one message, not two.
     errors = _errors(_graph(edges=[
         _edge("e1", "n1", "n2", "", condition=""),
         _edge("e2", "n2", "n3", "booked"),
@@ -144,8 +137,7 @@ def test_a_brand_new_connection_reports_one_problem_not_two():
 
 
 def test_error_messages_are_written_for_the_person_drawing_the_flow():
-    """These strings are rendered verbatim in the editor's problem list, so
-    they must not leak the vocabulary of the implementation."""
+    # Rendered verbatim in the editor — must not leak implementation jargon.
     jargon = ("node", "edge", "LLM", "tool name", "outgoing")
     errors = _errors(_graph(edges=[_edge("e1", "n1", "n3", "done")]))
     for e in errors:
@@ -153,8 +145,7 @@ def test_error_messages_are_written_for_the_person_drawing_the_flow():
 
 
 def test_cycles_are_allowed():
-    # "the caller has another question" looping back to Q&A is correct
-    # behavior, not a bug — runaway loops are bounded by max_call_duration_s.
+    # Q&A loops are valid; runaway calls are bounded by max_call_duration_s.
     graph = parse_graph(_graph(edges=[
         _edge("e1", "n1", "n2", "go"),
         _edge("e2", "n2", "n3", "booked"),
@@ -196,19 +187,25 @@ def test_declared_and_call_context_variables_do_not_warn():
 
 
 def test_render_substitutes_falls_back_and_never_leaks_braces():
-    # An unrendered {{ x }} reaching TTS is the failure mode that ends up
-    # in a call recording.
+    # Unrendered {{ x }} reaching TTS ends up in the call recording.
     assert render("Hi {{ name }}", {"name": "Ada"}) == "Hi Ada"
     assert render("Hi {{ name | there }}", {}) == "Hi there"
     assert render("Hi {{ name }}", {}) == "Hi "
 
 
+def test_malformed_tools_and_delay_do_not_crash_validation():
+    # Hand-edited JSON can send a string tools field or non-int delay.
+    graph = parse_graph(_graph(nodes=[
+        _node("n1", "start", "greeting", tools="book_appointment", delayed_start_ms="nope"),
+        _node("n2", "agent", "booking", prompt="ok"),
+        _node("n3", "end", "goodbye"),
+    ]))
+    assert graph.start.tools == []
+    assert graph.start.delayed_start_ms == 0
+
+
 def test_the_starter_graph_carries_the_tools_it_is_given():
-    """Node.tools is default-deny, so migrate_workflow_text.py has to hand
-    an existing agent's enabled tools through to the start node — the only
-    non-terminal step a starter graph has. Without this an agent that could
-    book yesterday silently cannot today."""
+    # Node.tools is default-deny — migrations must pass existing tools through.
     graph = parse_graph(starter_graph("hi", "be nice", ["book_appointment"]))
     assert graph.start.tools == ["book_appointment"]
-    # A brand-new agent has no policies yet and correctly gets none.
     assert parse_graph(starter_graph("hi", "be nice")).start.tools == []
