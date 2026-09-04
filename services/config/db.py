@@ -19,12 +19,8 @@ _pool: asyncpg.Pool | None = None
 
 
 def json_col(value: Any) -> Any:
-    """Decode one JSONB column read straight off a row.
-
-    asyncpg hands JSONB back as a string unless a codec is registered on the
-    pool, and none is — write sites pass `json.dumps(...)` into `$n::jsonb`,
-    so a pool-wide codec would double-encode. Decode at read sites instead.
-    """
+    """Decode a JSONB column. asyncpg returns strings (no pool codec — writers
+    already pass json.dumps into $n::jsonb, so a codec would double-encode)."""
     if value is None or not isinstance(value, str):
         return value
     try:

@@ -213,7 +213,6 @@ class CacheAsideConfigProvider:
                 farewell_message=agent.farewell_message,
                 transfer_announcement=agent.transfer_announcement,
                 workflow=agent.workflow,
-                workflow_draft=agent.workflow_draft,
             ),
             media=MediaInfo(
                 voice=providers["tts"].voice,

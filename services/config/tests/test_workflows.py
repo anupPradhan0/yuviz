@@ -1,12 +1,4 @@
-"""
-Workflow draft/publish/versions against real Postgres — same
-tests-that-touch-infra convention as the rest of this directory.
-
-Mocked Postgres would let every interesting thing here slide: that a draft
-autosave does NOT bump config_version (a trigger, not Python), that
-publishing does, that the versions table cascades with its agent, and that
-a graph which fails validation never reaches the `workflow` column at all.
-"""
+"""Workflow draft/publish/versions against real Postgres."""
 
 from __future__ import annotations
 
@@ -33,18 +25,14 @@ GRAPH = {
     ],
 }
 
-# n2 has no way out — the model would be trapped there until the call hits
-# its duration limit.
+# n2 has no outbound edge — validation should reject as a dead end.
 DEAD_END = {
     "version": 1,
     "nodes": GRAPH["nodes"],
     "edges": [GRAPH["edges"][0]],
 }
 
-
 AGENT_PROMPT = "Be helpful."
-# What create_agent() gives the agent below — the always-on instruction ends
-# up on the graph's global node, not on a column beside it.
 CREATED_GRAPH = starter_graph("", AGENT_PROMPT)
 
 
@@ -56,14 +44,11 @@ async def _agent(test_tenant, slug="wf-agent"):
 
 
 async def test_draft_autosave_does_not_bump_config_version(test_tenant, pool):
-    """The editor autosaves on a debounce while an operator types. Bumping
-    config_version on each would inflate it by thousands and make
-    updated_at meaningless, for a column no call ever reads."""
     agent = await _agent(test_tenant)
     before = await pool.fetchrow("SELECT config_version, updated_at FROM agents WHERE id = $1", agent["id"])
 
     await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=GRAPH)
-    await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=GRAPH)   # byte-identical
+    await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=GRAPH)
     await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=DEAD_END)
 
     after = await pool.fetchrow("SELECT config_version, updated_at FROM agents WHERE id = $1", agent["id"])
@@ -72,14 +57,10 @@ async def test_draft_autosave_does_not_bump_config_version(test_tenant, pool):
 
     state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
     assert state["workflow_draft"] == DEAD_END
-    # Still running the graph it was created with — drafting a broken one
-    # changes nothing a call can see.
     assert state["workflow"] == CREATED_GRAPH and state["published"] is True
 
 
 async def test_a_normal_agent_edit_still_bumps_config_version(test_tenant, pool):
-    """The draft exemption must not have disabled versioning generally —
-    config_version is what drives Redis invalidation for every other field."""
     agent = await _agent(test_tenant)
     updated = await agents.update_agent(
         agent["id"], tenant_slug=test_tenant["slug"], name="Renamed",
@@ -93,7 +74,7 @@ async def test_publish_writes_the_live_graph_bumps_version_and_appends_history(t
 
     result = await workflows.publish(agent["id"], tenant_slug=test_tenant["slug"])
 
-    # 2, not 1: creating the agent published its starter graph as version 1.
+    # create_agent already published starter as version 1
     assert result["version"] == 2
     assert result["config_version"] == agent["config_version"] + 1
     assert result["warnings"] == []
@@ -107,8 +88,6 @@ async def test_publish_writes_the_live_graph_bumps_version_and_appends_history(t
 
 
 async def test_an_invalid_graph_can_never_reach_the_live_column(test_tenant):
-    """The whole point of the draft/publish split: a broken graph cannot
-    reach a phone call."""
     agent = await _agent(test_tenant)
     await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=DEAD_END)
 
@@ -117,17 +96,12 @@ async def test_an_invalid_graph_can_never_reach_the_live_column(test_tenant):
 
     assert any(e.id == "n2" and "no way out" in e.message for e in exc.value.errors)
     state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
-    # The agent is still running the graph it had; the broken one got no
-    # further than the draft column, and no version was appended for it.
     assert state["workflow"] == CREATED_GRAPH
     versions = await workflows.list_versions(agent["id"], test_tenant["slug"])
     assert [v["version"] for v in versions] == [1]
 
 
 async def test_a_new_agent_is_born_running_a_graph(test_tenant):
-    """The agent IS its workflow: there is no moment, and no sequence of
-    calls, that produces an agent with nothing to run. Creation publishes
-    the starter graph in the same transaction as the row."""
     agent = await _agent(test_tenant)
 
     state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
@@ -141,8 +115,6 @@ async def test_a_new_agent_is_born_running_a_graph(test_tenant):
 
 
 async def test_the_system_prompt_given_at_create_lands_on_the_global_node(test_tenant):
-    """Not on a column the graph reads from — the always-applies step IS the
-    agent's global instruction (docs/workflow.md §9.1)."""
     agent = await _agent(test_tenant, slug="wf-global")
     state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
     node = next(n for n in state["workflow"]["nodes"] if n["type"] == "global")
@@ -150,8 +122,6 @@ async def test_the_system_prompt_given_at_create_lands_on_the_global_node(test_t
 
 
 async def test_the_greeting_given_at_create_lands_on_the_start_node(test_tenant):
-    """Not on a column the graph then has to override — the start node is
-    where the first thing the caller hears lives."""
     agent = await agents.create_agent(
         tenant_id=test_tenant["id"], slug="wf-greet", name="Greeter",
         greeting="Thanks for calling Acme.",
@@ -162,8 +132,6 @@ async def test_the_greeting_given_at_create_lands_on_the_start_node(test_tenant)
 
 
 async def test_a_caller_supplied_graph_is_validated_at_create(test_tenant):
-    """Same gate as publish — an unvalidated graph must not reach the
-    `workflow` column by going in through the side door."""
     with pytest.raises(workflows.WorkflowValidationError):
         await agents.create_agent(
             tenant_id=test_tenant["id"], slug="wf-bad", name="Broken",
@@ -172,8 +140,6 @@ async def test_a_caller_supplied_graph_is_validated_at_create(test_tenant):
 
 
 async def test_warnings_do_not_block_a_publish(test_tenant):
-    """An unreachable node is an editor mistake, not a runtime break —
-    surfaced, never blocking."""
     orphaned = {
         "version": 1,
         "nodes": GRAPH["nodes"] + [
@@ -201,10 +167,10 @@ async def test_rollback_republishes_as_a_new_version_never_rewriting_history(tes
     ]}
     await workflows.publish(agent["id"], tenant_slug=test_tenant["slug"], graph=changed)
 
-    # v1 is the starter graph from create, so GRAPH is v2 and `changed` is v3.
+    # v1 = starter, GRAPH = v2, changed = v3 → rollback of v2 appends v4
     result = await workflows.rollback(agent["id"], tenant_slug=test_tenant["slug"], version=2)
 
-    assert result["version"] == 4            # appended, not a rewrite of v2
+    assert result["version"] == 4
     state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
     assert state["workflow"] == GRAPH
     versions = await workflows.list_versions(agent["id"], test_tenant["slug"])
@@ -212,10 +178,7 @@ async def test_rollback_republishes_as_a_new_version_never_rewriting_history(tes
     assert versions[0]["note"] == "rollback to version 2"
 
 
-
-async def test_another_tenants_agent_id_is_indistinguishable_from_missing(test_tenant, pool):
-    """Same tenant-scoping guarantee agents.update_agent has — an agent_id
-    from another tenant must not be publishable through this path."""
+async def test_another_tenants_agent_id_is_indistinguishable_from_missing(test_tenant):
     agent = await _agent(test_tenant)
     with pytest.raises(LookupError):
         await workflows.save_draft(agent["id"], tenant_slug="not-this-tenant", graph=GRAPH)

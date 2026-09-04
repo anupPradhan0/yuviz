@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -16,6 +17,16 @@ router = APIRouter(prefix="/tenants/{tenant_slug}/agents", tags=["agents"])
 async def _resolve_tenant(tenant_slug: str) -> dict:
     return await get_or_404(
         tenants_service.get_tenant(tenant_slug), f"tenant {tenant_slug!r} not found",
+    )
+
+
+def _validation_error(exc: workflows_service.WorkflowValidationError) -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content={
+            "detail": "workflow is not valid",
+            "errors": [e.to_dict() for e in exc.errors],
+        },
     )
 
 
@@ -49,6 +60,11 @@ async def create_agent(
         )
     except workflows_service.WorkflowValidationError as exc:
         return _validation_error(exc)
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(
+            status_code=409,
+            detail="That name or slug is already taken in this account.",
+        )
 
 
 @router.get("/{agent_slug}")
@@ -86,20 +102,6 @@ async def delete_agent(
     )
 
 
-# Workflow draft/publish/versions — one agent column, same (tenant, agent) scope.
-
-
-def _validation_error(exc: workflows_service.WorkflowValidationError) -> JSONResponse:
-    """Structured errors for the editor; top-level `errors` matches /validate."""
-    return JSONResponse(
-        status_code=400,
-        content={
-            "detail": "This flow isn't valid, so nothing was published.",
-            "errors": [e.to_dict() for e in exc.errors],
-        },
-    )
-
-
 @router.get("/{agent_id}/workflow")
 async def get_workflow(
     tenant_slug: str, agent_id: str, current_user: CurrentUser = Depends(get_current_user),
@@ -124,7 +126,6 @@ async def validate_workflow(
     body: WorkflowDraft,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """Same check publish runs, without publishing."""
     try:
         return {"valid": True, "warnings": workflows_service.validate(body.graph)}
     except workflows_service.WorkflowValidationError as exc:

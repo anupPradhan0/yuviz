@@ -170,9 +170,7 @@ DO $$ BEGIN
         CHECK (max_call_duration_s IS NULL OR max_call_duration_s BETWEEN 30 AND 7200);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
--- Conversation workflow (draft vs published). Greeting/system_prompt columns
--- stay until the later agent→workflow migration; runtime still reads them.
--- workflow_draft is editor autosave (may be invalid); workflow is publish-only.
+-- Draft autosave (may be invalid) vs published live graph.
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS workflow       JSONB;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS workflow_draft JSONB;
 
@@ -248,8 +246,7 @@ ALTER TABLE users ALTER COLUMN password_hash SET NOT NULL;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_service_account BOOLEAN NOT NULL DEFAULT false;
 UPDATE users SET is_service_account = true WHERE lower(email) LIKE '%@internal.%' AND is_service_account = false;
 
--- Append-only publish history. Rollback republishes an old version as a new
--- one rather than rewriting the log.
+-- Append-only publish history (rollback republishes as a new version).
 CREATE TABLE IF NOT EXISTS agent_workflow_versions (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     agent_id     UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -547,8 +544,7 @@ DROP TRIGGER IF EXISTS tenants_version ON tenants;
 CREATE TRIGGER tenants_version BEFORE UPDATE ON tenants
     FOR EACH ROW EXECUTE FUNCTION bump_config_version();
 
--- Draft autosaves must not bump config_version (thousands of keystrokes);
--- publishing agents.workflow still bumps and propagates via Redis.
+-- Skip config_version bump when only workflow_draft changed (editor autosave).
 CREATE OR REPLACE FUNCTION bump_agent_config_version() RETURNS TRIGGER AS $$
 BEGIN
     IF to_jsonb(NEW) - 'workflow_draft' - 'updated_at' - 'config_version'

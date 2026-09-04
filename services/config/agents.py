@@ -18,9 +18,7 @@ from libs.config_sdk.workflow import starter_graph
 
 from . import audit, cache, db
 
-# `workflow` is deliberately absent — only publish/create may write a
-# validated graph (see workflows.py). Greeting/system_prompt stay patchable
-# until the later agent→workflow migration removes those columns.
+# `workflow` is absent — only publish/create may write a validated graph.
 _UPDATABLE_FIELDS = {
     "name", "greeting", "system_prompt", "goodbye_grace_ms", "language",
     "stt_config_id", "llm_config_id", "tts_config_id",
@@ -40,7 +38,7 @@ def _cache_key(tenant_slug: str, agent_slug: str) -> str:
 
 
 def _row(row: Any) -> dict[str, Any]:
-    """One agents row as a dict, with JSONB columns decoded (see db.json_col)."""
+    """Decode JSONB columns on an agents row (see db.json_col)."""
     out = dict(row)
     for column in _JSON_COLUMNS:
         if column in out:
@@ -149,14 +147,12 @@ async def create_agent(
     user_id: Any | None = None,
     user_email: str | None = None,
 ) -> dict[str, Any]:
-    """Create the agent with greeting/system_prompt columns (still used by
-    live calls) and a published starter workflow in the same transaction.
+    """Create agent + published starter workflow in one transaction.
 
-    A caller-supplied `workflow` is validated first — same gate as publish —
-    so nothing unvalidated reaches the live column. Greeting/system_prompt
-    still seed the starter graph when no workflow is passed.
+    Caller-supplied `workflow` is validated like publish; otherwise
+    greeting/system_prompt seed starter_graph().
     """
-    # Deferred: workflows.py imports this module for its cache key.
+    # Deferred import: workflows.py imports this module for its cache key.
     from .workflows import validate
 
     graph = workflow if workflow is not None else starter_graph(greeting, system_prompt)

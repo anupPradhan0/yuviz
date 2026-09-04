@@ -1,29 +1,12 @@
 """
-Workflow draft/publish/versions — the write side of agents.workflow (see
-docs/workflow.md §4.2).
+Workflow draft/publish/versions for agents.workflow (docs/workflow.md §4.2).
 
-Three states, and the split is the whole point:
+- workflow_draft: editor autosave; may be invalid; never read by a call
+- workflow: live graph; only written by publish/create after validation
+- agent_workflow_versions: append-only publish history (rollback republishes)
 
-  workflow_draft            the editor autosaves here. May be invalid, may
-                            be half-drawn. Never read by a call.
-  workflow                  what live calls execute. Only ever written by
-                            publish() (and create_agent, which publishes the
-                            starter graph), and publish validates first — a
-                            broken graph cannot reach a phone call. Never
-                            NULL: an agent IS its workflow, so there is no
-                            un-publish that would leave it with nothing to
-                            run.
-  agent_workflow_versions   every publish appends. Rollback republishes an
-                            old version as a new one; the log is never
-                            rewritten, so "what was live at 3pm yesterday"
-                            stays answerable.
-
-Deliberately not routed through agents.update_agent(): `workflow` is not an
-operator-settable field, it is the output of a validated publish, and
-keeping it out of _UPDATABLE_FIELDS is what guarantees no PATCH can slip an
-unvalidated graph onto a live agent. The cache-invalidation and audit
-discipline is the same as that module's, though — same key, same
-in-transaction audit write.
+`workflow` is intentionally absent from agents._UPDATABLE_FIELDS so PATCH
+cannot put an unvalidated graph on a live agent.
 """
 
 from __future__ import annotations
@@ -43,9 +26,7 @@ from . import audit, cache, db
 
 
 class WorkflowValidationError(Exception):
-    """Carries the structured per-node/per-edge errors the editor paints
-    the canvas with — never a single flattened string (see
-    docs/workflow.md §5.1)."""
+    """Structured per-node/per-edge errors for the editor (docs/workflow.md §5.1)."""
 
     def __init__(self, errors: list[WorkflowError]) -> None:
         self.errors = errors
@@ -53,8 +34,7 @@ class WorkflowValidationError(Exception):
 
 
 def validate(graph: dict[str, Any]) -> list[dict[str, Any]]:
-    """Errors block a publish; warnings never do. Returns the warnings and
-    raises WorkflowValidationError on any error."""
+    """Raise WorkflowValidationError on errors; return warnings (never blocking)."""
     try:
         parsed = parse_graph(graph)
     except WorkflowInvalid as exc:
@@ -63,10 +43,7 @@ def validate(graph: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 async def _locked_agent(conn: Any, agent_id: Any, tenant_slug: str) -> dict[str, Any]:
-    """Same tenant-scoped SELECT ... FOR UPDATE as agents.update_agent() —
-    an agent_id belonging to another tenant is indistinguishable from
-    "doesn't exist", and the lock keeps a concurrent publish from reading a
-    stale version number."""
+    """Tenant-scoped SELECT ... FOR UPDATE (same shape as agents.update_agent)."""
     row = await conn.fetchrow(
         "SELECT a.* FROM agents a JOIN tenants t ON t.id = a.tenant_id "
         "WHERE a.id = $1 AND t.slug = $2 AND a.deleted_at IS NULL FOR UPDATE OF a",
@@ -78,8 +55,6 @@ async def _locked_agent(conn: Any, agent_id: Any, tenant_slug: str) -> dict[str,
 
 
 def _as_graph(value: Any) -> dict[str, Any] | None:
-    # Shared with agents.py and calls.py, which have the same JSONB-comes-
-    # back-as-a-string problem — see db.json_col for why no pool-wide codec.
     return db.json_col(value)
 
 
@@ -103,10 +78,7 @@ async def get_workflow(agent_id: Any, tenant_slug: str) -> dict[str, Any]:
 async def save_draft(
     agent_id: Any, *, tenant_slug: str, graph: dict[str, Any],
 ) -> dict[str, Any]:
-    """Autosave target. Never validated, never audited: a draft is
-    keystrokes, not a config change — auditing every debounced save would
-    bury the publish that actually matters. No cache invalidation either,
-    since nothing caches or reads a draft."""
+    """Autosave. Not validated, audited, or cache-invalidated — drafts are keystrokes."""
     pool = await db.get_pool()
     async with pool.acquire() as conn:
         await _locked_agent(conn, agent_id, tenant_slug)
@@ -126,14 +98,9 @@ async def publish(
     user_id: Any | None = None,
     user_email: str | None = None,
 ) -> dict[str, Any]:
-    """Validates, then writes the live graph, appends a version, and bumps
-    config_version through the existing agents_version trigger — which is
-    exactly what makes the graph propagate over the Redis invalidation path
-    every other agent field already uses.
+    """Validate, write live graph + draft, append a version, bump config_version.
 
-    graph=None publishes whatever is in workflow_draft, which is what the
-    editor's Publish button does; passing one explicitly is for rollback
-    (see rollback()) and API callers with no draft.
+    graph=None publishes workflow_draft (editor Publish button).
     """
     pool = await db.get_pool()
     async with pool.acquire() as conn:
@@ -179,12 +146,9 @@ async def publish(
     }
 
 
-
-
 async def list_versions(agent_id: Any, tenant_slug: str, limit: int = 50) -> list[dict[str, Any]]:
-    """Summaries, not graphs — the version list is a picker, and shipping
-    every full graph would make it heavy for no reason. get_version()
-    fetches the one an operator actually wants back."""
+    """Version summaries only; use get_version() for a full graph."""
+    limit = max(1, min(limit, 200))
     pool = await db.get_pool()
     rows = await pool.fetch(
         """
@@ -195,7 +159,7 @@ async def list_versions(agent_id: Any, tenant_slug: str, limit: int = 50) -> lis
         JOIN agents a ON a.id = v.agent_id
         JOIN tenants t ON t.id = a.tenant_id
         LEFT JOIN users u ON u.id = v.published_by
-        WHERE v.agent_id = $1 AND t.slug = $2
+        WHERE v.agent_id = $1 AND t.slug = $2 AND a.deleted_at IS NULL
         ORDER BY v.version DESC
         LIMIT $3
         """,
@@ -209,7 +173,7 @@ async def get_version(agent_id: Any, tenant_slug: str, version: int) -> dict[str
     row = await pool.fetchrow(
         "SELECT v.* FROM agent_workflow_versions v "
         "JOIN agents a ON a.id = v.agent_id JOIN tenants t ON t.id = a.tenant_id "
-        "WHERE v.agent_id = $1 AND t.slug = $2 AND v.version = $3",
+        "WHERE v.agent_id = $1 AND t.slug = $2 AND v.version = $3 AND a.deleted_at IS NULL",
         agent_id, tenant_slug, version,
     )
     if row is None:
@@ -223,8 +187,7 @@ async def rollback(
     agent_id: Any, *, tenant_slug: str, version: int,
     user_id: Any | None = None, user_email: str | None = None,
 ) -> dict[str, Any]:
-    """Republishes an old version as a NEW one — append-only, never a
-    rewrite of history."""
+    """Republish an old version as a new append-only entry."""
     old_version = await get_version(agent_id, tenant_slug, version)
     if old_version is None:
         raise LookupError(f"workflow version {version} not found for agent {agent_id}")

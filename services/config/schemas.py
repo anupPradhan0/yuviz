@@ -46,8 +46,7 @@ class AgentCreate(BaseModel):
     stt_config_id:  str | None = None
     llm_config_id:  str | None = None
     tts_config_id:  str | None = None
-    # None = starter_graph(greeting, system_prompt). Validated like publish.
-    workflow: dict | None = None
+    workflow: dict | None = None  # None → starter_graph; validated like publish
 
 
 class AgentUpdate(BaseModel):
@@ -88,13 +87,11 @@ class AgentUpdate(BaseModel):
 
 
 class WorkflowDraft(BaseModel):
-    """Raw React Flow save format — validated by libs/config_sdk/workflow.py."""
     graph: dict[str, Any]
 
 
 class WorkflowPublish(BaseModel):
-    # graph=None publishes whatever is in workflow_draft.
-    graph: dict[str, Any] | None = None
+    graph: dict[str, Any] | None = None  # None → publish workflow_draft
     note:  str | None = None
 
 
