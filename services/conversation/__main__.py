@@ -146,6 +146,15 @@ async def _prewarm_agents(
             if resolved is None:
                 log.warning("prewarm: tenant=%s agent=%s did not resolve — skipping", tenant_slug, agent_slug)
                 continue
+            _, bundle = resolved
+            # Object construction != model loaded — Ollama needs a real
+            # request first (see OllamaLLM.warm()). No-op for cloud LLMs.
+            warm = getattr(bundle.llm, "warm", None)
+            if warm is not None:
+                try:
+                    await warm()
+                except Exception:
+                    log.exception("prewarm: LLM warm() failed tenant=%s agent=%s", tenant_slug, agent_slug)
             log.info("prewarm: tenant=%s agent=%s providers ready", tenant_slug, agent_slug)
 
 
@@ -213,9 +222,16 @@ async def serve(port: int, args: argparse.Namespace) -> None:
     # since different tenants/agents can resolve to different LLM engines.
     tool_registry = ToolRegistry()
     executor_registry = ExecutorRegistry()
-    executor_registry.register("book_appointment", lambda provider: CalendarExecutor(provider))
-    executor_registry.register("cancel_appointment", lambda provider: CancelAppointmentExecutor(provider))
-    executor_registry.register("reschedule_appointment", lambda provider: RescheduleAppointmentExecutor(provider))
+    # Booking-confirmation SMS is its own independently configured tool
+    # ("send_sms", engine="twilio") — ToolCallOrchestrator resolves it as
+    # book_appointment's companion (see ToolDefinition.companion_tool_name)
+    # and passes it here as the second argument.
+    executor_registry.register(
+        "book_appointment",
+        lambda provider, companion=None: CalendarExecutor(provider, sms_provider=companion),
+    )
+    executor_registry.register("cancel_appointment", lambda provider, companion=None: CancelAppointmentExecutor(provider))
+    executor_registry.register("reschedule_appointment", lambda provider, companion=None: RescheduleAppointmentExecutor(provider))
     tool_provider_manager = ToolProviderManager(CompositeSecretResolver())
     tool_policy_resolver = await ToolPolicyResolver.connect(
         os.environ.get("POSTGRES_DSN"), tool_registry,
@@ -278,6 +294,14 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 executor_registry=executor_registry,
             )
 
+            # Whether the caller-ID-confirmation prompt block makes any
+            # sense for this agent at all — it talks about "before
+            # booking," which is actively confusing (and contradicts a
+            # reception-only agent's own "you cannot book" instruction) if
+            # book_appointment isn't actually enabled for it.
+            enabled_policies = await tool_policy_resolver.enabled_tools(runtime_config.agent.id)
+            has_booking_tool = any(p.definition.name == "book_appointment" for p in enabled_policies)
+
             return PipelineConversationHandler(
                 runtime_config, bundle,
                 sample_rate=cfg.sample_rate,
@@ -291,6 +315,7 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 caller_number=ctx.caller_did,
                 called_number=ctx.called_did,
                 knowledge=knowledge,
+                has_booking_tool=has_booking_tool,
             )
 
     # grpc.aio.server() defaults to SO_REUSEPORT, which lets a second process

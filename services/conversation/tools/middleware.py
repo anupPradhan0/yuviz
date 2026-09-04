@@ -33,15 +33,23 @@ NextCall = Callable[[ToolExecutionRequest], Awaitable[ToolResult]]
 
 class LoggingMiddleware:
     async def __call__(self, request: ToolExecutionRequest, call_next: NextCall) -> ToolResult:
+        # arguments/payload logged here — confirmed live this
+        # was previously the only gap in an otherwise-verifiable tool-call
+        # chain: neither the LLM's arguments nor the executor's returned
+        # payload were ever logged anywhere, so "did the LLM send the right
+        # requested_datetime" and "did the tool actually report booked=true"
+        # could only ever be answered by asking the user to paste terminal
+        # output, never by reading a log directly.
         log.info(
-            "tool_call start tool=%s call_id=%s tenant=%s agent=%s",
+            "tool_call start tool=%s call_id=%s tenant=%s agent=%s arguments=%r",
             request.tool_name, request.tool_call_id,
-            request.context.tenant_id, request.context.agent_id,
+            request.context.tenant_id, request.context.agent_id, request.arguments,
         )
         result = await call_next(request)
         log.info(
-            "tool_call done tool=%s call_id=%s status=%s",
+            "tool_call done tool=%s call_id=%s status=%s payload=%r error=%r",
             request.tool_name, request.tool_call_id, result.status.value,
+            result.payload, result.error,
         )
         return result
 

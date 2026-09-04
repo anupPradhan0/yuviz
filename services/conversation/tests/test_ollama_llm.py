@@ -41,6 +41,28 @@ async def test_generate_yields_streamed_tokens():
     assert tokens == ["Hello", " world"]
 
 
+async def test_warm_sends_a_real_request():
+    seen = {"called": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["called"] = True
+        body = _ndjson_body({"message": {"role": "assistant", "content": "hi"}, "done": True})
+        return httpx.Response(200, content=body)
+
+    llm = _make_llm(handler)
+    await llm.warm()
+
+    assert seen["called"] is True
+
+
+async def test_warm_swallows_errors():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=b"boom")
+
+    llm = _make_llm(handler)
+    await llm.warm()  # must not raise
+
+
 async def test_generate_with_tools_sends_wrapped_schema():
     seen_payload = {}
 
@@ -98,6 +120,45 @@ async def test_generate_with_tools_still_streams_plain_text_incrementally():
     events = [e async for e in llm.generate_with_tools([ChatMessage(role="user", content="say hi")], schemas)]
 
     assert events == [TokenEvent(text="Hi"), TokenEvent(text=" there")]
+
+
+async def test_generate_with_tools_narrows_schemas_to_forced_tool():
+    seen_payload = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_payload.update(json.loads(request.content))
+        body = _ndjson_body({"message": {"role": "assistant", "content": "ok"}, "done": True})
+        return httpx.Response(200, content=body)
+
+    llm = _make_llm(handler)
+    schemas = [
+        {"name": "book_appointment", "description": "Book it", "parameters": {"type": "object"}},
+        {"name": "cancel_appointment", "description": "Cancel it", "parameters": {"type": "object"}},
+    ]
+    forced = {"type": "function", "function": {"name": "book_appointment"}}
+    _ = [e async for e in llm.generate_with_tools(
+        [ChatMessage(role="user", content="hi")], schemas, tool_choice=forced,
+    )]
+
+    assert seen_payload["tools"] == [{"type": "function", "function": schemas[0]}]
+
+
+async def test_generate_with_tools_sends_all_schemas_without_tool_choice():
+    seen_payload = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_payload.update(json.loads(request.content))
+        body = _ndjson_body({"message": {"role": "assistant", "content": "ok"}, "done": True})
+        return httpx.Response(200, content=body)
+
+    llm = _make_llm(handler)
+    schemas = [
+        {"name": "book_appointment", "description": "Book it", "parameters": {"type": "object"}},
+        {"name": "cancel_appointment", "description": "Cancel it", "parameters": {"type": "object"}},
+    ]
+    _ = [e async for e in llm.generate_with_tools([ChatMessage(role="user", content="hi")], schemas)]
+
+    assert seen_payload["tools"] == [{"type": "function", "function": s} for s in schemas]
 
 
 async def test_generate_with_tools_shapes_tool_call_and_result_natively():

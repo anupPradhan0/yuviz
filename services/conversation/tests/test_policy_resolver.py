@@ -16,7 +16,8 @@ def _policy(tool_name: str, tool_provider_config_id: str = "cfg1") -> ResolvedTo
     defn = ToolRegistry().resolve(tool_name)
     return ResolvedToolPolicy(
         definition=defn, tool_provider_config_id=tool_provider_config_id, engine="cal_com",
-        api_key_ref="env:CAL_API_KEY", extra={"event_type_id": 123}, timeout_ms=None, max_calls_per_turn=None,
+        api_key_ref="env:CAL_API_KEY",
+        extra={"event_type_id": 123}, timeout_ms=None, max_calls_per_turn=None,
     )
 
 

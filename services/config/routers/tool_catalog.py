@@ -8,16 +8,22 @@ tool_name/display shape overlaps services/conversation/tools/registry.py's
 ToolRegistry (the actual LLM-facing schema catalog). They aren't unified
 because Config Service and Conversation Service are deliberately separate
 deployables with no shared import today (see architecture_decisions:
-Gateway/ConvSvc/Config Service responsibility boundaries). Revisit once a
-second INDEPENDENTLY CONFIGURABLE tool exists — cancel_appointment doesn't
-count (see below), so this is still a single-entry list.
+Gateway/ConvSvc/Config Service responsibility boundaries).
 
-cancel_appointment (added 2026-07-23) is deliberately NOT listed here: it's
-never independently configured by an admin — ToolPolicyResolver
-auto-derives it from book_appointment's own tool_provider_config (same
-Cal.com account/event type), since there's no real scenario where a tenant
-wants booking without cancellation. See
+cancel_appointment/reschedule_appointment are deliberately NOT listed
+here: neither is ever independently configured by an admin —
+ToolPolicyResolver auto-derives both from book_appointment's own
+tool_provider_config (same Cal.com account/event type), since there's no
+real scenario where a tenant wants booking without them. See
 services/conversation/tools/policy_resolver.py's _AUTO_DERIVED_COMPANIONS.
+
+send_sms IS independently configured (its own tool_provider_config, its
+own agent_tool_policies row, added/edited/enabled here exactly like
+book_appointment) — but it's never LLM-callable; see
+services/conversation/tools/types.py's ToolDefinition.llm_visible and
+registry.py's own entry for why. book_appointment's executor picks it up
+automatically when both are enabled for the same agent (see
+ToolDefinition.companion_tool_name), no linking step needed here.
 """
 
 from __future__ import annotations
@@ -66,6 +72,38 @@ _CATALOG = [
                         "type": "text",
                         "required": False,
                         "help": "Used only for sessions with no caller ID at all (e.g. a browser test call) and no phone number given. Leave blank to have the agent ask instead.",
+                    },
+                ],
+            },
+        ],
+    },
+    {
+        "tool_name": "send_sms",
+        "display_name": "Send SMS Confirmation",
+        "description": (
+            "Texts the caller a confirmation after a successful booking. Independent of any SMS "
+            "notification your calendar provider's own account might separately send — this is "
+            "this platform's own text, sent through the provider configured below."
+        ),
+        "category": "notifications",
+        "engines": [
+            {
+                "engine": "twilio",
+                "display_name": "Twilio",
+                "extra_fields": [
+                    {
+                        "key": "account_sid",
+                        "label": "Twilio Account SID",
+                        "type": "text",
+                        "required": True,
+                        "help": "Starts with AC... — found on your Twilio Console dashboard.",
+                    },
+                    {
+                        "key": "from_number",
+                        "label": "Twilio Phone Number",
+                        "type": "text",
+                        "required": True,
+                        "help": "The Twilio number confirmations are sent from, e.g. +19998887777.",
                     },
                 ],
             },

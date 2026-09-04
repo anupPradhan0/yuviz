@@ -32,14 +32,15 @@ async def create_tool_provider_config(
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
     await _resolve_tenant_id(tenant_id)
-    if not body.api_key_ref.strip():
-        raise HTTPException(status_code=400, detail="api_key_ref must not be blank")
+    if not ((body.api_key_ref or "").strip() or (body.api_key or "").strip()):
+        raise HTTPException(status_code=400, detail="api_key_ref or api_key is required")
     return await tool_provider_configs_service.create_tool_provider_config(
         tenant_id=tenant_id,
         name=body.name,
         tool_name=body.tool_name,
         engine=body.engine,
         api_key_ref=body.api_key_ref,
+        api_key=body.api_key,
         extra=body.extra,
         user_id=current_user.id,
         user_email=current_user.email,
@@ -65,7 +66,10 @@ async def update_tool_provider_config(
     fields = body.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(status_code=400, detail="request body has no fields to update")
-    if "api_key_ref" in fields and not (fields["api_key_ref"] or "").strip():
+    # A cleared key fails silently until the next real call to this
+    # provider — allowed only when paired with a real replacement in the
+    # same request (a rotation, not a clear).
+    if "api_key_ref" in fields and not (fields["api_key_ref"] or "").strip() and not (fields.get("api_key") or "").strip():
         raise HTTPException(status_code=400, detail="api_key_ref must not be blank")
     return await tool_provider_configs_service.update_tool_provider_config(
         tool_provider_config_id, user_id=current_user.id, user_email=current_user.email, **fields,

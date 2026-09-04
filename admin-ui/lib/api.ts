@@ -600,7 +600,7 @@ export const listAllTodaysActivity = async (tenants: Tenant[]): Promise<TodaysAc
 export interface ToolCatalogExtraField {
   key: string;
   label: string;
-  type: "text" | "number";
+  type: "text" | "number" | "boolean";
   required: boolean;
   help?: string;
 }
@@ -638,6 +638,15 @@ export interface ToolProviderConfigCreate {
   tool_name: string;
   engine: string;
   api_key_ref?: string;
+  api_key?: string;
+  extra?: Record<string, unknown>;
+}
+
+export interface ToolProviderConfigUpdate {
+  name?: string;
+  engine?: string;
+  api_key_ref?: string;
+  api_key?: string;
   extra?: Record<string, unknown>;
 }
 
@@ -648,8 +657,17 @@ export const listToolProviderConfigs = (tenantId: string, filters?: { toolName?:
   return request<ToolProviderConfig[]>(`/tenants/${tenantId}/tool-providers${qs ? `?${qs}` : ""}`);
 };
 
+export const getToolProviderConfig = (toolProviderConfigId: string) =>
+  request<ToolProviderConfig>(`/tool-providers/${toolProviderConfigId}`);
+
 export const createToolProviderConfig = (tenantId: string, body: ToolProviderConfigCreate) =>
   request<ToolProviderConfig>(`/tenants/${tenantId}/tool-providers`, { method: "POST", body: JSON.stringify(body) });
+
+export const updateToolProviderConfig = (toolProviderConfigId: string, body: ToolProviderConfigUpdate) =>
+  request<ToolProviderConfig>(`/tool-providers/${toolProviderConfigId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
 
 export const deleteToolProviderConfig = (toolProviderConfigId: string) =>
   request<void>(`/tool-providers/${toolProviderConfigId}`, { method: "DELETE" });

@@ -30,16 +30,36 @@ from .types import ToolDefinition
 _BOOK_APPOINTMENT = ToolDefinition(
     name="book_appointment",
     description=(
-        "Book a calendar appointment for the caller. Only call this once "
-        "you know the date and time they want; ask a natural follow-up "
-        "question first if either is missing. Never ask for an email or "
-        "phone number up front — the caller's number is already known "
-        "from the call itself in almost every case. If the result comes "
-        "back with missing_fields containing attendee_phone and "
-        "reason=invalid_phone_number, the number on file was rejected as "
-        "not a real phone number (not just missing) — tell the caller "
-        "that number didn't go through and ask them to state a different "
-        "one, then call this tool again with that number."
+        "Book a calendar appointment. Call this only once you know the date "
+        "and time; ask first if either is missing. Never ask for email or "
+        "phone number up front — the caller's number is already known from "
+        "the call. "
+        "If missing_fields includes attendee_phone with "
+        "reason=invalid_phone_number, the number on file was invalid — ask "
+        "the caller for a different one and call this tool again with it. "
+        "If missing_fields includes attendee_phone with "
+        "reason=phone_not_confirmed, you have not actually gotten the "
+        "caller to confirm their number on file yet — state it back one "
+        "digit at a time and ask if it's the best number to reach them, "
+        "then wait for a clear yes (or a corrected number, read back the "
+        "same way) before calling this tool again. Do not call this tool "
+        "again until you have that clear confirmation. "
+        "If booked=false with an available_slots list, the requested time "
+        "was not available — that is not a booking. Offer one or two of "
+        "those slots, and once the caller picks a new time, call this tool "
+        "again with it. Never say something is booked unless the MOST "
+        "RECENT call to this tool returned booked=true — repeating an "
+        "earlier booked=true after a later attempt failed is the same "
+        "error as never calling the tool. "
+        "If you offered the caller more than one time option, a bare "
+        "'yes'/'sure' does not say which one they mean — restate the ONE "
+        "specific time you're about to book and wait for a reply that "
+        "clearly confirms that time before calling. Skip this only when "
+        "the caller already named one single, unambiguous time themselves. "
+        "You must actually invoke this function to book anything — never "
+        "say an appointment is booked, confirmed, or scheduled unless this "
+        "function was called and returned that result; describing a "
+        "booking in words instead is a serious error."
     ),
     parameters_schema={
         "type": "object",
@@ -74,6 +94,10 @@ _BOOK_APPOINTMENT = ToolDefinition(
         "required": ["requested_datetime"],
     },
     category="calendar",
+    # If this agent also has "send_sms" enabled, CalendarExecutor gets that
+    # provider too — see ToolCallOrchestrator's generic companion
+    # resolution and ToolDefinition.companion_tool_name's own docstring.
+    companion_tool_name="send_sms",
 )
 
 
@@ -154,10 +178,27 @@ _RESCHEDULE_APPOINTMENT = ToolDefinition(
     category="calendar",
 )
 
+# send_sms is admin-configurable (its own tool_provider_config/
+# agent_tool_policies row, same as book_appointment) but llm_visible=False
+# keeps it out of the schemas list orchestrator.py offers the LLM — it's a
+# deterministic side effect CalendarExecutor triggers itself after a
+# successful booking, never something the model decides to call. This
+# entry exists only so ToolPolicyResolver.enabled_tools()'s registry
+# lookup for tool_name="send_sms" succeeds; its schema content is never
+# read since it never reaches an LLM.
+_SEND_SMS = ToolDefinition(
+    name="send_sms",
+    description="Internal — never LLM-callable; sends a booking confirmation text.",
+    parameters_schema={},
+    category="notifications",
+    llm_visible=False,
+)
+
 _DEFAULT_TOOLS: dict[str, ToolDefinition] = {
     _BOOK_APPOINTMENT.name: _BOOK_APPOINTMENT,
     _CANCEL_APPOINTMENT.name: _CANCEL_APPOINTMENT,
     _RESCHEDULE_APPOINTMENT.name: _RESCHEDULE_APPOINTMENT,
+    _SEND_SMS.name: _SEND_SMS,
 }
 
 

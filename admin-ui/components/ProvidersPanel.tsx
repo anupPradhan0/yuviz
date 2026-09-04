@@ -17,7 +17,7 @@ import {
 } from "@/lib/api";
 import { Modal } from "@/components/Modal";
 import { SecretRefInput, secretPayload } from "./SecretRefInput";
-import { EMBEDDING_MODELS_BY_ENGINE, ENGINES_BY_ROLE, MODELS_BY_ENGINE, OTHER, VOICES_BY_ENGINE } from "@/lib/engineCatalog";
+import { EMBEDDING_MODELS_BY_ENGINE, ENGINES_BY_ROLE, LOCAL_ENGINES, MODELS_BY_ENGINE, OTHER, VOICES_BY_ENGINE } from "@/lib/engineCatalog";
 
 const ALL_ROLES: ProviderRole[] = ["stt", "llm", "tts"];
 const ENVIRONMENTS: ProviderEnvironment[] = ["prod", "staging", "dev"];
@@ -84,7 +84,10 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
   };
 
   const handleEngineChange = (engine: string) => {
-    setForm({ ...form, engine });
+    // Local engines have no credential of their own — drop whatever was
+    // typed for the previous (cloud) engine rather than silently saving
+    // it against one that will never read it.
+    setForm({ ...form, engine, api_key_ref: LOCAL_ENGINES.has(engine) ? undefined : form.api_key_ref });
     setModelChoice("");
     setCustomModel("");
     setVoiceChoice("");
@@ -309,6 +312,14 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
           <div className="form-group">
             <label className="form-label">
               Model {form.role === "embedding" && <span className="hint">leave unset to use the engine&apos;s default</span>}
+              {form.role === "stt" && form.engine === "faster_whisper" && (
+                <span className="hint">
+                  prefer a .en model (e.g. base.en) for English-only agents — the plain multilingual
+                  models (base, small, …) auto-detect language per utterance and can mis-hear unclear
+                  audio as a different language entirely, causing the agent to reply in the wrong
+                  language mid-call
+                </span>
+              )}
             </label>
             {modelOptions ? (
               <>
@@ -375,17 +386,19 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
           </div>
         )}
 
-        <div className="form-group">
-          <label className="form-label">
-            API Key Ref{" "}
-            <span className="hint">paste it — we encrypt it</span>
-          </label>
-          <SecretRefInput
-            value={form.api_key_ref || ""}
-            onChange={(v) => setForm({ ...form, api_key_ref: v })}
-            canEncrypt
-          />
-        </div>
+        {!LOCAL_ENGINES.has(form.engine) && (
+          <div className="form-group">
+            <label className="form-label">
+              API Key Ref{" "}
+              <span className="hint">paste it — we encrypt it</span>
+            </label>
+            <SecretRefInput
+              value={form.api_key_ref || ""}
+              onChange={(v) => setForm({ ...form, api_key_ref: v })}
+              canEncrypt
+            />
+          </div>
+        )}
       </Modal>
     </>
   );

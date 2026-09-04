@@ -37,27 +37,12 @@ from typing import Any, AsyncGenerator
 import httpx
 
 from ..interfaces import ChatMessage
-from . import build_chat_messages
+from . import build_chat_messages, raise_with_body_logged
 from ...tools.llm_adapter import TokenEvent, ToolCallEvent, TurnEvent
 
 log = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com"
-
-
-async def _raise_with_body_logged(resp: httpx.Response) -> None:
-    """httpx.Response.raise_for_status() never surfaces the response body,
-    so a 4xx here otherwise reaches the caller as a bare 'Client error 400'
-    with no indication of which part of the payload Gemini rejected — a
-    real 400 on a late-conversation turn (several retried tool calls deep)
-    gave no actionable detail. Read the
-    body before raising so the next occurrence is diagnosable from the log
-    alone."""
-    if resp.is_success:
-        return
-    body = await resp.aread()
-    log.error("GeminiLLM: HTTP %s error body=%s", resp.status_code, body.decode(errors="replace"))
-    resp.raise_for_status()
 
 
 def _tool_name_for_call_id(shaped: list[dict[str, Any]], tool_call_id: str | None) -> str:
@@ -97,14 +82,13 @@ class GeminiLLM:
                           "Keep responses concise and natural for speech.",
         temperature: float = 0.7,
         base_url:    str = _DEFAULT_BASE_URL,
-        # 30s left a caller sitting in dead air for a full 30 seconds
-        # before any fallback spoke — Gemini's
+        # 30s left a caller sitting in dead air for a full 30 seconds — Gemini's
         # streamGenerateContent endpoint occasionally never sends even its
         # first byte (httpx.ReadTimeout while still waiting on response
         # headers, not a slow-but-progressing stream). 10s cuts that wait
-        # dramatically; see generate()/generate_with_tools()'s retry-once
-        # logic for why this is safe to shorten without losing legitimate
-        # slow-but-working requests.
+        # dramatically; RetryOnceLLM (provider_bundle.py) is what makes this
+        # safe to shorten — a genuinely slow-but-working request that trips
+        # this timeout still gets one retry before failing the turn.
         timeout_s:   float = 10.0,
     ) -> None:
         self._model       = model
@@ -126,21 +110,43 @@ class GeminiLLM:
         shaped = build_chat_messages(self._system, messages)
         system_instruction = None
         contents: list[dict[str, Any]] = []
+        # Tool-call ids whose originating assistant message got flattened to
+        # plain text below (foreign-origin, no thought_signature) — the
+        # paired "tool"-role result must follow the same path, since a
+        # native functionResponse only makes sense pointing at a native
+        # functionCall right before it.
+        flattened_call_ids: set[str] = set()
         for m in shaped:
             if m["role"] == "system":
                 system_instruction = m["content"]
                 continue
             if m.get("tool_calls"):
+                # A tool call this class itself never produced — e.g. Groq's
+                # or OpenAI's, replayed into history if this engine was ever
+                # switched to mid-conversation — carries no thought_signature,
+                # and Gemini's native functionCall part hard-400s without one
+                # ("missing a thought_signature") once any tool-calling has
+                # happened. There's no signature to echo back that this
+                # class didn't invent, so render it as plain text instead of
+                # Gemini's native function-calling grammar, which this
+                # message was never part of. Confirmed live: this broke a
+                # real call mid-booking-flow the first time this happened.
+                if not all((c.get("provider_metadata") or {}).get("thought_signature") for c in m["tool_calls"]):
+                    flattened_call_ids.update(c["id"] for c in m["tool_calls"])
+                    summary = "; ".join(f"{c['name']}({json.dumps(c['arguments'])})" for c in m["tool_calls"])
+                    contents.append({"role": "model", "parts": [{"text": f"[called {summary}]"}]})
+                    continue
                 parts = []
                 for c in m["tool_calls"]:
                     part: dict[str, Any] = {"functionCall": {"name": c["name"], "args": c["arguments"]}}
-                    sig = (c.get("provider_metadata") or {}).get("thought_signature")
-                    if sig:
-                        part["thoughtSignature"] = sig
+                    part["thoughtSignature"] = c["provider_metadata"]["thought_signature"]
                     parts.append(part)
                 contents.append({"role": "model", "parts": parts})
                 continue
             if m["role"] == "tool":
+                if m.get("tool_call_id") in flattened_call_ids:
+                    contents.append({"role": "user", "parts": [{"text": f"[tool result: {m['content']}]"}]})
+                    continue
                 try:
                     response_obj = json.loads(m["content"]) if m["content"] else {}
                 except json.JSONDecodeError:
@@ -169,42 +175,33 @@ class GeminiLLM:
         params = {"alt": "sse"}
         headers = {"x-goog-api-key": self._api_key}
 
-        # Retry once, but only if the timeout hit before a single token came
-        # back — Gemini's streamGenerateContent occasionally never sends
-        # even its first byte. A retry after
-        # tokens have already reached the caller/TTS would duplicate or
-        # corrupt the turn, so it's only safe here, before anything's been
-        # yielded yet.
-        for attempt in range(2):
-            yielded_any = False
-            try:
-                async with self._client.stream("POST", path, params=params, headers=headers, json=payload) as resp:
-                    await _raise_with_body_logged(resp)
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        data_str = line[len("data: "):]
-                        try:
-                            data = json.loads(data_str)
-                        except json.JSONDecodeError:
-                            log.warning("GeminiLLM: malformed JSON line=%r", line)
-                            continue
-                        candidates = data.get("candidates") or []
-                        if not candidates:
-                            continue
-                        for part in candidates[0].get("content", {}).get("parts", []):
-                            token = part.get("text", "")
-                            if token:
-                                yielded_any = True
-                                yield token
-                return
-            except httpx.TimeoutException:
-                if yielded_any or attempt == 1:
-                    raise
-                log.warning("GeminiLLM: request timed out with no output yet, retrying once")
+        # No retry here — RetryOnceLLM (provider_bundle.py) already wraps
+        # every ILLM, including this one, and retries once on any exception
+        # raised before a token yields. A second, provider-local retry loop
+        # used to live here too, which meant Gemini alone got double-
+        # retried against every other provider's single retry.
+        async with self._client.stream("POST", path, params=params, headers=headers, json=payload) as resp:
+            await raise_with_body_logged(resp, log=log, provider="GeminiLLM")
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data_str = line[len("data: "):]
+                try:
+                    data = json.loads(data_str)
+                except json.JSONDecodeError:
+                    log.warning("GeminiLLM: malformed JSON line=%r", line)
+                    continue
+                candidates = data.get("candidates") or []
+                if not candidates:
+                    continue
+                for part in candidates[0].get("content", {}).get("parts", []):
+                    token = part.get("text", "")
+                    if token:
+                        yield token
 
     async def generate_with_tools(
         self, messages: list[ChatMessage], schemas: list[dict[str, Any]],
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> AsyncGenerator[TurnEvent, None]:
         """IToolAwareLLM companion to generate() — same client/auth, additive
         method. Gemini wraps the generic {name, description, parameters}
@@ -212,7 +209,13 @@ class GeminiLLM:
         OpenAI/Ollama's per-tool wrapper. A functionCall part, like a text
         part, arrives as a complete unit in whichever chunk it appears —
         never built up incrementally the way text streams — so plain-text
-        turns keep the same per-sentence TTS latency they have today."""
+        turns keep the same per-sentence TTS latency they have today.
+
+        tool_choice, when given as the same OpenAI-shaped dict every other
+        provider accepts ({"type": "function", "function": {"name": ...}}),
+        is translated to Gemini's own tool_config.function_calling_config
+        (mode="ANY" + allowed_function_names) — Gemini's real equivalent of
+        forcing one specific function call instead of leaving it optional."""
         system_instruction, contents = self._shape_contents(messages)
 
         payload: dict = {
@@ -220,6 +223,12 @@ class GeminiLLM:
             "generationConfig": {"temperature": self._temperature},
             "tools": [{"functionDeclarations": schemas}],
         }
+        if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+            forced_name = tool_choice.get("function", {}).get("name")
+            if forced_name:
+                payload["tool_config"] = {
+                    "function_calling_config": {"mode": "ANY", "allowed_function_names": [forced_name]},
+                }
         if system_instruction:
             payload["system_instruction"] = {"parts": [{"text": system_instruction}]}
 
@@ -229,51 +238,42 @@ class GeminiLLM:
         params = {"alt": "sse"}
         headers = {"x-goog-api-key": self._api_key}
 
-        # Same retry-once-if-nothing-yielded-yet posture as generate() —
-        # see its comment for why this is only safe before any output
-        # (token or tool call) has reached the caller.
-        for attempt in range(2):
-            yielded_any = False
-            try:
-                async with self._client.stream("POST", path, params=params, headers=headers, json=payload) as resp:
-                    await _raise_with_body_logged(resp)
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        data_str = line[len("data: "):]
-                        try:
-                            data = json.loads(data_str)
-                        except json.JSONDecodeError:
-                            log.warning("GeminiLLM: malformed JSON line=%r", line)
-                            continue
-                        candidates = data.get("candidates") or []
-                        if not candidates:
-                            continue
-                        saw_tool_call = False
-                        for i, part in enumerate(candidates[0].get("content", {}).get("parts", [])):
-                            fn_call = part.get("functionCall")
-                            if fn_call:
-                                saw_tool_call = True
-                                yielded_any = True
-                                sig = part.get("thoughtSignature")
-                                yield ToolCallEvent(
-                                    tool_call_id=fn_call.get("id") or f"call_{i}",
-                                    tool_name=fn_call.get("name", ""),
-                                    arguments=fn_call.get("args") or {},
-                                    provider_metadata={"thought_signature": sig} if sig else None,
-                                )
-                                continue
-                            token = part.get("text", "")
-                            if token:
-                                yielded_any = True
-                                yield TokenEvent(text=token)
-                        if saw_tool_call:
-                            return
-                return
-            except httpx.TimeoutException:
-                if yielded_any or attempt == 1:
-                    raise
-                log.warning("GeminiLLM: request timed out with no output yet, retrying once")
+        # No retry here — see generate()'s comment: RetryOnceLLM already
+        # wraps every provider uniformly, so a second, Gemini-local retry
+        # loop would double-retry instead of matching every other engine's
+        # single retry.
+        async with self._client.stream("POST", path, params=params, headers=headers, json=payload) as resp:
+            await raise_with_body_logged(resp, log=log, provider="GeminiLLM")
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data_str = line[len("data: "):]
+                try:
+                    data = json.loads(data_str)
+                except json.JSONDecodeError:
+                    log.warning("GeminiLLM: malformed JSON line=%r", line)
+                    continue
+                candidates = data.get("candidates") or []
+                if not candidates:
+                    continue
+                saw_tool_call = False
+                for i, part in enumerate(candidates[0].get("content", {}).get("parts", [])):
+                    fn_call = part.get("functionCall")
+                    if fn_call:
+                        saw_tool_call = True
+                        sig = part.get("thoughtSignature")
+                        yield ToolCallEvent(
+                            tool_call_id=fn_call.get("id") or f"call_{i}",
+                            tool_name=fn_call.get("name", ""),
+                            arguments=fn_call.get("args") or {},
+                            provider_metadata={"thought_signature": sig} if sig else None,
+                        )
+                        continue
+                    token = part.get("text", "")
+                    if token:
+                        yield TokenEvent(text=token)
+                if saw_tool_call:
+                    return
 
     async def aclose(self) -> None:
         await self._client.aclose()

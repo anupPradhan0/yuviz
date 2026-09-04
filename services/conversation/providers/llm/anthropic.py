@@ -23,7 +23,7 @@ from typing import Any, AsyncGenerator
 import httpx
 
 from ..interfaces import ChatMessage
-from . import build_chat_messages
+from . import build_chat_messages, raise_with_body_logged
 from ...tools.llm_adapter import TokenEvent, ToolCallEvent, TurnEvent
 
 log = logging.getLogger(__name__)
@@ -43,16 +43,6 @@ _EFFORT_MODELS = (
     "claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-mythos-5",
     "claude-opus-4-8", "claude-opus-4-7",
 )
-
-
-async def _raise_with_body_logged(resp: httpx.Response) -> None:
-    """Same as openai.py/gemini.py's twin: raise_for_status() drops the body,
-    which is the only place a 400 says what it rejected."""
-    if resp.is_success:
-        return
-    body = await resp.aread()
-    log.error("AnthropicLLM: HTTP %s error body=%s", resp.status_code, body.decode(errors="replace"))
-    resp.raise_for_status()
 
 
 class AnthropicLLM:
@@ -162,7 +152,7 @@ class AnthropicLLM:
         # _shape_messages handles tool history even here: the orchestrator's
         # forced-final-generation replays it with no tools offered (openai.py).
         async with self._client.stream("POST", "/v1/messages", json=self._payload(messages)) as resp:
-            await _raise_with_body_logged(resp)
+            await raise_with_body_logged(resp, log=log, provider="AnthropicLLM")
             async for line in resp.aiter_lines():
                 data = self._decode(line)
                 if data is None or data.get("type") != "content_block_delta":
@@ -173,10 +163,13 @@ class AnthropicLLM:
 
     async def generate_with_tools(
         self, messages: list[ChatMessage], schemas: list[dict[str, Any]],
+        tool_choice: str | dict[str, Any] | None = None,
     ) -> AsyncGenerator[TurnEvent, None]:
         """IToolAwareLLM companion to generate() — same client/auth. The
         generic schema's "parameters" becomes "input_schema"; that rename is
-        the only difference from what OpenAI/Gemini are handed."""
+        the only difference from what OpenAI/Gemini are handed.
+
+        tool_choice is translated to Anthropic's {"type": "tool", "name": ...}."""
         payload = self._payload(messages)
         payload["tools"] = [
             {
@@ -186,6 +179,10 @@ class AnthropicLLM:
             }
             for s in schemas
         ]
+        if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+            forced_name = tool_choice.get("function", {}).get("name")
+            if forced_name:
+                payload["tool_choice"] = {"type": "tool", "name": forced_name}
 
         # Keyed by block index: a turn can open several tool_use blocks, and
         # their argument fragments interleave only by index, never by order.
@@ -194,7 +191,7 @@ class AnthropicLLM:
         accumulating: dict[int, dict[str, Any]] = {}
 
         async with self._client.stream("POST", "/v1/messages", json=payload) as resp:
-            await _raise_with_body_logged(resp)
+            await raise_with_body_logged(resp, log=log, provider="AnthropicLLM")
             async for line in resp.aiter_lines():
                 data = self._decode(line)
                 if data is None:

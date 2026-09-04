@@ -60,7 +60,10 @@ class ProviderRegistry:
         self._manager = manager
 
     async def resolve(self, providers: ProviderConfigs) -> ProviderBundle:
+        from .providers.llm.retry import RetryOnceLLM
+
         stt = await self._manager.get(_to_ai_provider_config(providers.stt))
         llm = await self._manager.get(_to_ai_provider_config(providers.llm))
         tts = await self._manager.get(_to_ai_provider_config(providers.tts))
+        llm = RetryOnceLLM(llm, name=f"{providers.llm.engine}:{providers.llm.model}")
         return ProviderBundle(stt=stt, llm=llm, tts=tts)

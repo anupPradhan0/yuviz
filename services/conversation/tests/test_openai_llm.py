@@ -85,6 +85,26 @@ async def test_generate_ignores_malformed_json_lines():
     assert tokens == ["ok"]
 
 
+async def test_generate_ignores_reasoning_only_deltas():
+    """Same real shape as generate_with_tools' own version of this test
+    (see its docstring) — a reasoning-model delta with no "content" key at
+    all must never surface as a yielded token, on this plain (no-tools)
+    path too."""
+    body = (
+        b'data: {"choices":[{"delta":{"reasoning":"Thinking...","channel":"analysis"}}]}\n'
+        b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n'
+        b"data: [DONE]\n"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body)
+
+    llm = _make_llm(handler)
+    tokens = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
+
+    assert tokens == ["Hello"]
+
+
 # ── generate_with_tools() — also exercised live via Groq (OpenAI-compatible,
 # confirmed 2026-07-24, see module docstring) ──────────────────────────────
 
@@ -153,6 +173,85 @@ async def test_generate_with_tools_incrementally_streamed_arguments():
     assert events == [ToolCallEvent(
         tool_call_id="call_xyz", tool_name="book_appointment",
         arguments={"requested_datetime": "2026-07-25T14:00:00"},
+    )]
+
+
+async def test_generate_with_tools_forwards_tool_choice_when_given():
+    """tool_choice defaults to unset (API default "auto", full model
+    discretion) — confirmed live, repeatedly, that this is a real
+    contributing factor to fabricated booking claims. When the caller
+    (pipeline.py, on the one narrow condition where forcing a specific
+    tool call is unambiguous) passes one, it must reach the real payload
+    verbatim."""
+    seen_payload = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_payload.update(__import__("json").loads(request.content))
+        return httpx.Response(200, content=_tool_call_chunk_sse('{"choices": [{"delta": {}, "finish_reason": "stop"}]}'))
+
+    llm = _make_llm(handler)
+    forced = {"type": "function", "function": {"name": "book_appointment"}}
+    _ = [e async for e in llm.generate_with_tools(
+        [ChatMessage(role="user", content="hi")], [{"name": "book_appointment", "parameters": {}}],
+        tool_choice=forced,
+    )]
+
+    assert seen_payload["tool_choice"] == forced
+
+
+async def test_generate_with_tools_omits_tool_choice_by_default():
+    seen_payload = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_payload.update(__import__("json").loads(request.content))
+        return httpx.Response(200, content=_tool_call_chunk_sse('{"choices": [{"delta": {}, "finish_reason": "stop"}]}'))
+
+    llm = _make_llm(handler)
+    _ = [e async for e in llm.generate_with_tools(
+        [ChatMessage(role="user", content="hi")], [{"name": "book_appointment", "parameters": {}}],
+    )]
+
+    assert "tool_choice" not in seen_payload
+
+
+async def test_generate_with_tools_ignores_reasoning_only_deltas():
+    """Real shape captured live against Groq's openai/gpt-oss-120b
+    (a reasoning model): dozens of delta chunks carrying only {"reasoning":
+    "...", "channel": "analysis"} — no "content" key at all — stream before
+    the model's actual tool call or answer. These are the model's internal
+    chain-of-thought, never meant to be spoken; delta.get("content") or ""
+    already silently no-ops on them since there's no content key to find,
+    but that safety property deserves its own explicit test — a future
+    change that stops defaulting missing content to "" would otherwise
+    start speaking the model's reasoning aloud via TTS with nothing here to
+    catch it. Exactly one ToolCallEvent must still come through once the
+    real tool_calls chunk arrives."""
+    import json as _json
+    from services.conversation.tools.llm_adapter import ToolCallEvent
+
+    body = _tool_call_chunk_sse(
+        _json.dumps({"choices": [{"delta": {"role": "assistant", "content": ""}, "finish_reason": None}]}),
+        _json.dumps({"choices": [{"delta": {"reasoning": "The", "channel": "analysis"}, "finish_reason": None}]}),
+        _json.dumps({"choices": [{"delta": {"reasoning": " user wants", "channel": "analysis"}, "finish_reason": None}]}),
+        _json.dumps({"choices": [{"delta": {"reasoning": " to book.", "channel": "analysis"}, "finish_reason": None}]}),
+        _json.dumps({"choices": [{"delta": {"tool_calls": [{
+            "id": "fc_1afc81e1", "type": "function", "index": 0,
+            "function": {"name": "book_appointment", "arguments": '{"attendee_name":"Jane","requested_datetime":"2026-08-28T15:00:00"}'},
+        }]}, "finish_reason": None}]}),
+        _json.dumps({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body)
+
+    llm = _make_llm(handler)
+    events = [e async for e in llm.generate_with_tools(
+        [ChatMessage(role="user", content="book a demo")], [{"name": "book_appointment", "parameters": {}}],
+    )]
+
+    assert events == [ToolCallEvent(
+        tool_call_id="fc_1afc81e1", tool_name="book_appointment",
+        arguments={"attendee_name": "Jane", "requested_datetime": "2026-08-28T15:00:00"},
     )]
 
 

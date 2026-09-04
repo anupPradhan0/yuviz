@@ -42,6 +42,14 @@ start_ollama() {
 # ── Block 5: Config Service (REST API, port 8000) ────────────────────────────
 start_config_service() {
   export POSTGRES_DSN="postgresql://satish@localhost:5432/voiceai"
+  # Decrypts/encrypts provider_configs.api_key_ref's enc: scheme (Vault's
+  # replacement — see libs/config_sdk/secrets.py). Same "fail loudly, never
+  # a hardcoded fallback" posture as CONFIG_SERVICE_PASSWORD below: generate
+  # one with `./venv/bin/python3 -c "from libs.config_sdk.secrets import
+  # generate_key; print(generate_key())"` and export the SAME value here
+  # and in _conv_env() — a mismatch between the two just means whichever
+  # service didn't encrypt a given secret can't decrypt it either.
+  export SECRET_ENCRYPTION_KEY="${SECRET_ENCRYPTION_KEY:?set this in your shell — see docs/setup.md, never commit the real value}"
   cd "$REPO"
   python3 -m uvicorn services.config.app:app --host 0.0.0.0 --port 8000
 }
@@ -81,6 +89,9 @@ _conv_env() {
   export CONFIG_SERVICE_EMAIL="conversation-service@internal.yuviz.ai"
   export CONFIG_SERVICE_PASSWORD="${CONFIG_SERVICE_PASSWORD:?set this in your shell — see docs/setup.md §4, never commit the real value}"
   export KNOWLEDGE_SERVICE_URL="http://localhost:8100"
+  # Must be the SAME value start_config_service() exports — see its own
+  # comment on this variable.
+  export SECRET_ENCRYPTION_KEY="${SECRET_ENCRYPTION_KEY:?set this in your shell — see docs/setup.md, never commit the real value}"
 }
 start_conv1() {
   _conv_env

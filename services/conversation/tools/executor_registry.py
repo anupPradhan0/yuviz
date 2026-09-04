@@ -16,7 +16,10 @@ class IToolExecutor(Protocol):
     async def execute(self, request: ToolExecutionRequest) -> ToolResult: ...
 
 
-ExecutorFactory = Callable[[Any], IToolExecutor]
+# Second positional arg is an optional companion provider (see
+# ToolDefinition.companion_tool_name) — None for every factory that
+# doesn't declare one; only book_appointment's uses it today.
+ExecutorFactory = Callable[[Any, Any], IToolExecutor]
 
 
 class ExecutorRegistry:
@@ -26,8 +29,8 @@ class ExecutorRegistry:
     def register(self, tool_name: str, factory: ExecutorFactory) -> None:
         self._factories[tool_name] = factory
 
-    def resolve(self, tool_name: str, provider: Any) -> IToolExecutor | None:
+    def resolve(self, tool_name: str, provider: Any, companion: Any = None) -> IToolExecutor | None:
         factory = self._factories.get(tool_name)
         if factory is None:
             return None
-        return factory(provider)
+        return factory(provider, companion)

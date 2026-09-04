@@ -37,6 +37,19 @@ export function SecretRefInput({
   // something else leaves the stored credential alone.
   const replace = (v: string) => onChange(v);
 
+  const trimmed = value.trim();
+  let warning: string | null = null;
+  if (trimmed && !isStored(value)) {
+    if (mode === "key" && /\s/.test(trimmed)) {
+      // The one shape a real key never has — the classic mistake is
+      // pasting a whole header line ("Authorization: Bearer sk-...")
+      // instead of just the token.
+      warning = 'This looks like it includes extra text, not just the key — e.g. paste "sk-..." alone, not "Authorization: Bearer sk-...".';
+    } else if (mode === "ref" && !/^(env|k8s):\S+$/i.test(trimmed)) {
+      warning = 'This doesn\'t look like a pointer — use env:VAR_NAME or k8s:namespace/secret.';
+    }
+  }
+
   if (isStored(value) && !replacing) {
     return (
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -49,7 +62,11 @@ export function SecretRefInput({
             type="button"
             className="btn btn-ghost btn-sm"
             disabled={disabled}
-            onClick={() => setReplacing(true)}
+            onClick={() => {
+              if (confirm("Replace the saved key? The old one is discarded as soon as you save the new one.")) {
+                setReplacing(true);
+              }
+            }}
           >
             Replace
           </button>
@@ -57,7 +74,11 @@ export function SecretRefInput({
             type="button"
             className="btn btn-ghost btn-sm"
             disabled={disabled}
-            onClick={() => onChange("")}
+            onClick={() => {
+              if (confirm("Remove this key? Whatever uses it will stop working until you add a replacement and save.")) {
+                onChange("");
+              }
+            }}
           >
             Remove
           </button>
@@ -90,6 +111,11 @@ export function SecretRefInput({
           {visible ? "Hide" : "Show"}
         </button>
       </div>
+      {warning && (
+        <div className="form-hint" style={{ color: "var(--amber)" }}>
+          {warning}
+        </div>
+      )}
       <div className="form-hint">
         {mode === "key" && canEncrypt ? (
           <>
@@ -129,7 +155,10 @@ export function secretPayload(
   // Anything scheme-shaped goes to api_key_ref, including a miscased or
   // unknown scheme: the server rejects those with an actionable message,
   // whereas treating "ENV:FOO" as a credential would encrypt the pointer and
-  // surface as a vendor 401 at call time instead.
-  if (/^[A-Za-z0-9_]+\s*:/.test(v)) return { api_key_ref: v };
+  // surface as a vendor 401 at call time instead. Requiring no whitespace
+  // anywhere is what keeps this from also catching a pasted header line
+  // like "Authorization: Bearer sk-..." — every real ref is one unbroken
+  // token, but that mistake has a space right after its colon.
+  if (/^[A-Za-z0-9_]+:\S+$/.test(v)) return { api_key_ref: v };
   return { api_key: v };
 }

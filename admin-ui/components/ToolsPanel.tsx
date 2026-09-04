@@ -9,12 +9,20 @@ import {
   createAgentToolPolicy,
   createToolProviderConfig,
   deleteAgentToolPolicy,
+  getToolProviderConfig,
   listAgentToolPolicies,
   listToolCatalog,
   updateAgentToolPolicy,
+  updateToolProviderConfig,
 } from "@/lib/api";
-import { SecretRefInput } from "./SecretRefInput";
+import { SecretRefInput, secretPayload } from "./SecretRefInput";
 import { Modal } from "@/components/Modal";
+
+// String and boolean extra-field values share one state bag — the number/
+// text inputs read/write strings, the boolean ones (checkboxes) read/write
+// actual booleans, converted to real JSON types only when building the
+// save payload.
+type ExtraValue = string | boolean;
 
 export function ToolsPanel({ tenantId, agentId }: { tenantId: string; agentId: string }) {
   const [catalog, setCatalog] = useState<ToolCatalogEntry[]>([]);
@@ -23,11 +31,16 @@ export function ToolsPanel({ tenantId, agentId }: { tenantId: string; agentId: s
   const [error, setError] = useState<string | null>(null);
 
   const [configuring, setConfiguring] = useState<{ entry: ToolCatalogEntry; engine: ToolCatalogEngine } | null>(null);
+  // Set only when editing an existing tool_provider_config (vs. creating a
+  // new one) — same modal, different save action.
+  const [editingConfigId, setEditingConfigId] = useState<string | null>(null);
   const [configName, setConfigName] = useState("");
   const [configApiKeyRef, setConfigApiKeyRef] = useState("");
-  const [configExtra, setConfigExtra] = useState<Record<string, string>>({});
+  const [configOriginalApiKeyRef, setConfigOriginalApiKeyRef] = useState("");
+  const [configExtra, setConfigExtra] = useState<Record<string, ExtraValue>>({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [loadingExisting, setLoadingExisting] = useState(false);
 
   const refresh = async () => {
     setLoading(true);
@@ -69,12 +82,45 @@ export function ToolsPanel({ tenantId, agentId }: { tenantId: string; agentId: s
     withErrorHandling(() => deleteAgentToolPolicy(agentId, policy.tool_name));
   };
 
+  const defaultExtraFor = (engine: ToolCatalogEngine): Record<string, ExtraValue> =>
+    Object.fromEntries(engine.extra_fields.map((f) => [f.key, f.type === "boolean" ? false : ""]));
+
   const openConfig = (entry: ToolCatalogEntry, engine: ToolCatalogEngine) => {
     setConfiguring({ entry, engine });
+    setEditingConfigId(null);
     setConfigName(`${entry.display_name} (${engine.display_name})`);
     setConfigApiKeyRef("");
-    setConfigExtra(Object.fromEntries(engine.extra_fields.map((f) => [f.key, ""])));
+    setConfigOriginalApiKeyRef("");
+    setConfigExtra(defaultExtraFor(engine));
     setSaveError(null);
+  };
+
+  const openEditConfig = async (policy: AgentToolPolicy) => {
+    const entry = catalog.find((e) => e.tool_name === policy.tool_name);
+    const engine = entry?.engines.find((en) => en.engine === policy.tool_provider_config_engine);
+    if (!entry || !engine) return;
+    setLoadingExisting(true);
+    setError(null);
+    try {
+      const cfg = await getToolProviderConfig(policy.tool_provider_config_id);
+      setConfiguring({ entry, engine });
+      setEditingConfigId(cfg.id);
+      setConfigName(cfg.name);
+      setConfigApiKeyRef(cfg.api_key_ref ?? "");
+      setConfigOriginalApiKeyRef(cfg.api_key_ref ?? "");
+      const extra = defaultExtraFor(engine);
+      for (const field of engine.extra_fields) {
+        const stored = cfg.extra?.[field.key];
+        if (stored === undefined || stored === null) continue;
+        extra[field.key] = field.type === "boolean" ? Boolean(stored) : String(stored);
+      }
+      setConfigExtra(extra);
+      setSaveError(null);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setLoadingExisting(false);
+    }
   };
 
   const handleSaveConfig = async () => {
@@ -84,22 +130,36 @@ export function ToolsPanel({ tenantId, agentId }: { tenantId: string; agentId: s
     try {
       const extra: Record<string, unknown> = {};
       for (const field of configuring.engine.extra_fields) {
-        const raw = configExtra[field.key] ?? "";
+        if (field.type === "boolean") {
+          extra[field.key] = Boolean(configExtra[field.key]);
+          continue;
+        }
+        const raw = (configExtra[field.key] as string) ?? "";
         if (raw === "") continue;
         extra[field.key] = field.type === "number" ? Number(raw) : raw;
       }
-      const providerConfig = await createToolProviderConfig(tenantId, {
-        name: configName,
-        tool_name: configuring.entry.tool_name,
-        engine: configuring.engine.engine,
-        api_key_ref: configApiKeyRef,
-        extra,
-      });
-      await createAgentToolPolicy(agentId, {
-        tool_name: configuring.entry.tool_name,
-        tool_provider_config_id: providerConfig.id,
-      });
+
+      if (editingConfigId) {
+        await updateToolProviderConfig(editingConfigId, {
+          name: configName,
+          ...secretPayload(configApiKeyRef, configOriginalApiKeyRef),
+          extra,
+        });
+      } else {
+        const providerConfig = await createToolProviderConfig(tenantId, {
+          name: configName,
+          tool_name: configuring.entry.tool_name,
+          engine: configuring.engine.engine,
+          ...secretPayload(configApiKeyRef),
+          extra,
+        });
+        await createAgentToolPolicy(agentId, {
+          tool_name: configuring.entry.tool_name,
+          tool_provider_config_id: providerConfig.id,
+        });
+      }
       setConfiguring(null);
+      setEditingConfigId(null);
       await refresh();
     } catch (e) {
       setSaveError(e instanceof ApiError ? e.detail : String(e));
@@ -110,7 +170,9 @@ export function ToolsPanel({ tenantId, agentId }: { tenantId: string; agentId: s
 
   const missingRequired =
     !configApiKeyRef.trim() ||
-    (configuring?.engine.extra_fields.some((f) => f.required && !(configExtra[f.key] ?? "").trim()) ?? true);
+    (configuring?.engine.extra_fields.some(
+      (f) => f.type !== "boolean" && f.required && !((configExtra[f.key] as string) ?? "").trim(),
+    ) ?? true);
 
   if (loading) return <div className="empty-state">Loading…</div>;
 
@@ -137,6 +199,14 @@ export function ToolsPanel({ tenantId, agentId }: { tenantId: string; agentId: s
                 <input type="checkbox" checked={p.enabled} onChange={(e) => handleToggleEnabled(p, e.target.checked)} />
                 <span className="toggle-slider" />
               </label>
+              <button
+                className="btn btn-ghost btn-sm"
+                disabled={loadingExisting}
+                title={`Edit ${p.tool_provider_config_name}`}
+                onClick={() => openEditConfig(p)}
+              >
+                Edit
+              </button>
               <button className="btn btn-danger btn-sm" onClick={() => handleRemove(p)}>
                 Remove
               </button>
@@ -170,7 +240,11 @@ export function ToolsPanel({ tenantId, agentId }: { tenantId: string; agentId: s
 
       <Modal
         open={!!configuring}
-        title={configuring ? `Configure ${configuring.entry.display_name}` : ""}
+        title={
+          configuring
+            ? `${editingConfigId ? "Edit" : "Configure"} ${configuring.entry.display_name}`
+            : ""
+        }
         onClose={() => setConfiguring(null)}
         footer={
           <>
@@ -178,7 +252,7 @@ export function ToolsPanel({ tenantId, agentId }: { tenantId: string; agentId: s
               Cancel
             </button>
             <button className="btn btn-primary btn-sm" onClick={handleSaveConfig} disabled={saving || !configName || missingRequired}>
-              {saving ? "Adding…" : "Add Tool"}
+              {saving ? "Saving…" : editingConfigId ? "Save Changes" : "Add Tool"}
             </button>
           </>
         }
@@ -198,29 +272,41 @@ export function ToolsPanel({ tenantId, agentId }: { tenantId: string; agentId: s
             </div>
             <div className="form-group">
               <label className="form-label">
-                API Key Reference <span className="required">*</span>{" "}
-                <span className="hint">e.g. env:CAL_API_KEY — never a raw key, see Secret Manager</span>
+                API Key <span className="required">*</span>
               </label>
-              <SecretRefInput
-                value={configApiKeyRef}
-                onChange={setConfigApiKeyRef}
-                placeholder="env:CAL_API_KEY"
-              />
+              <SecretRefInput value={configApiKeyRef} onChange={setConfigApiKeyRef} canEncrypt />
             </div>
-            {configuring.engine.extra_fields.map((field) => (
-              <div className="form-group" key={field.key}>
-                <label className="form-label">
-                  {field.label} {field.required && <span className="required">*</span>}
-                  {field.help && <span className="hint"> {field.help}</span>}
-                </label>
-                <input
-                  className="form-input"
-                  type={field.type === "number" ? "number" : "text"}
-                  value={configExtra[field.key] ?? ""}
-                  onChange={(e) => setConfigExtra({ ...configExtra, [field.key]: e.target.value })}
-                />
-              </div>
-            ))}
+            {configuring.engine.extra_fields.map((field) =>
+              field.type === "boolean" ? (
+                <div className="form-group" key={field.key} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <label className="toggle-switch">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(configExtra[field.key])}
+                      onChange={(e) => setConfigExtra({ ...configExtra, [field.key]: e.target.checked })}
+                    />
+                    <span className="toggle-slider" />
+                  </label>
+                  <span className="form-label" style={{ margin: 0 }}>
+                    {field.label}
+                    {field.help && <span className="hint"> {field.help}</span>}
+                  </span>
+                </div>
+              ) : (
+                <div className="form-group" key={field.key}>
+                  <label className="form-label">
+                    {field.label} {field.required && <span className="required">*</span>}
+                    {field.help && <span className="hint"> {field.help}</span>}
+                  </label>
+                  <input
+                    className="form-input"
+                    type={field.type === "number" ? "number" : "text"}
+                    value={(configExtra[field.key] as string) ?? ""}
+                    onChange={(e) => setConfigExtra({ ...configExtra, [field.key]: e.target.value })}
+                  />
+                </div>
+              ),
+            )}
           </>
         )}
       </Modal>

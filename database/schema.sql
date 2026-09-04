@@ -47,7 +47,6 @@ CREATE TABLE IF NOT EXISTS provider_configs (
     environment         TEXT NOT NULL DEFAULT 'prod' CHECK (environment IN ('prod', 'staging', 'dev')),
     api_key_ref         TEXT,  -- reference ONLY — 'enc:...' | 'k8s:...' | 'env:...' — never a real key
     extra               JSONB,
-    fallback_config_id  UUID REFERENCES provider_configs(id),  -- Phase 7 stub
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at          TIMESTAMPTZ

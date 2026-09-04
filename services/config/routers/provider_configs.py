@@ -124,6 +124,11 @@ async def update_provider_config(
     fields = body.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(status_code=400, detail="request body has no fields to update")
+    # A cleared key fails silently until the next real call to this
+    # provider — allowed only when paired with a real replacement in the
+    # same request (a rotation, not a clear).
+    if "api_key_ref" in fields and not (fields["api_key_ref"] or "").strip() and not (fields.get("api_key") or "").strip():
+        raise HTTPException(status_code=400, detail="api_key_ref must not be blank")
     return await provider_configs_service.update_provider_config(
         provider_id, user_id=current_user.id, user_email=current_user.email, **fields,
     )

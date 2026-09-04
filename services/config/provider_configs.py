@@ -33,9 +33,16 @@ def resolve_api_key_input(api_key: str | None, api_key_ref: str | None) -> str |
     encrypted, a pointer is stored verbatim, and a raw key pasted into the
     pointer field is rejected — that mistake stored a live Gemini key in
     plaintext. None means no credential, i.e. a NULL column."""
+    ref = (api_key_ref or "").strip()
+    if api_key and ref:
+        # Ambiguous, not a legitimate double-write — the real "replace this
+        # ref with a typed key" case sends api_key_ref="" alongside api_key
+        # (see secretPayload() in the Admin UI), so ref is blank there.
+        # Both non-blank at once means something upstream picked the wrong
+        # field, not a real caller intent.
+        raise ValueError("send either api_key or api_key_ref, not both")
     if api_key:
         return encrypt_secret(api_key.strip())
-    ref = (api_key_ref or "").strip()
     if not ref:
         return None
     if ref.startswith(_SECRET_SCHEMES):
@@ -48,7 +55,7 @@ def resolve_api_key_input(api_key: str | None, api_key_ref: str | None) -> str |
 
 _UPDATABLE_FIELDS = {
     "name", "engine", "model", "voice", "language", "region", "environment",
-    "api_key_ref", "extra", "fallback_config_id",
+    "api_key_ref", "extra",
 }
 
 # Conversation Service subscribes to this channel (see

@@ -193,7 +193,9 @@ class CacheAsideConfigProvider:
         return RuntimeConfig(
             tenant=tenant,
             agent=agent,
-            providers=ProviderConfigs(stt=providers["stt"], llm=providers["llm"], tts=providers["tts"]),
+            providers=ProviderConfigs(
+                stt=providers["stt"], llm=providers["llm"], tts=providers["tts"],
+            ),
             conversation=ConversationInfo(
                 greeting=agent.greeting, system_prompt=agent.system_prompt,
                 end_call_prompt=agent.end_call_prompt,

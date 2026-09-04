@@ -40,12 +40,32 @@ async def _make_cal_com(policy: ResolvedToolPolicy, api_key: str | None) -> Any:
         api_key=api_key,
         event_type_id=int(event_type_id),
         default_attendee_phone=policy.extra.get("default_attendee_phone"),
+        default_attendee_email=policy.extra.get("default_attendee_email"),
         default_timezone=policy.extra.get("timezone") or "UTC",
     )
 
 
+async def _make_twilio_sms(policy: ResolvedToolPolicy, api_key: str | None) -> Any:
+    from .providers.sms.twilio import TwilioSmsProvider
+
+    if not api_key:
+        raise ValueError(
+            f"tool_provider_config id={policy.tool_provider_config_id!r} engine='twilio' "
+            "has no api_key_ref configured — the Twilio Auth Token is required"
+        )
+    account_sid = policy.extra.get("account_sid")
+    from_number = policy.extra.get("from_number")
+    if not (account_sid and from_number):
+        raise ValueError(
+            f"tool_provider_config id={policy.tool_provider_config_id!r} engine='twilio' "
+            "is missing extra.account_sid/from_number"
+        )
+    return TwilioSmsProvider(account_sid=account_sid, auth_token=api_key, from_number=from_number)
+
+
 _DEFAULT_REGISTRY: dict[str, ProviderFactory] = {
     "cal_com": _make_cal_com,
+    "twilio": _make_twilio_sms,
 }
 
 
