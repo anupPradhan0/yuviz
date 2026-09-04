@@ -5,11 +5,6 @@ identity — replaces the previous "trust an X-User-Email header" stand-in
 verifies the password once and issues a signed token carrying the user's
 id/email/role/tenant_id; every subsequent request verifies the signature
 and expiry only, no DB round-trip required to authenticate a request.
-
-JWT_SECRET must be set via env — deliberately NO fallback. A hardcoded
-default in a public repo would be the signing key, letting anyone forge a
-superadmin token; fail loud instead, same posture as SECRET_ENCRYPTION_KEY.
-Knowledge/DID/Campaigns verify tokens minted here, so they share the value.
 """
 
 from __future__ import annotations
