@@ -19,6 +19,7 @@ import pytest_asyncio
 
 os.environ.setdefault("POSTGRES_DSN", "postgresql://satish@localhost:5432/voiceai")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
+os.environ.setdefault("JWT_SECRET", "dev-only-insecure-secret-do-not-deploy-" * 2)
 
 from services.config import auth, cache, db  # noqa: E402  (env defaults must land first)
 from services.config import users as users_service  # noqa: E402

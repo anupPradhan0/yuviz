@@ -18,7 +18,7 @@ import uvicorn
 
 def main() -> None:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-    port = int(os.environ.get("PORT", "8400"))
+    port = int(os.environ.get("PORT", "8500"))  # 8400 collides with services.campaigns
     uvicorn.run("services.vobiz.app:app", host="0.0.0.0", port=port, log_level="info")
 
 

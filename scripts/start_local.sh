@@ -50,6 +50,8 @@ start_config_service() {
   # and in _conv_env() — a mismatch between the two just means whichever
   # service didn't encrypt a given secret can't decrypt it either.
   export SECRET_ENCRYPTION_KEY="${SECRET_ENCRYPTION_KEY:?set this in your shell — see docs/setup.md, never commit the real value}"
+  # Signs the login JWTs; same value every service below must export.
+  export JWT_SECRET="${JWT_SECRET:?set this in your shell — see docs/setup.md, never commit the real value}"
   cd "$REPO"
   python3 -m uvicorn services.config.app:app --host 0.0.0.0 --port 8000
 }
@@ -59,6 +61,7 @@ start_knowledge_service() {
   export POSTGRES_DSN="postgresql://satish@localhost:5432/voiceai"
   export REDIS_URL="redis://localhost:6379/0"
   export KNOWLEDGE_STORAGE_ROOT="$REPO/data/knowledge_documents"
+  export JWT_SECRET="${JWT_SECRET:?set this in your shell — see docs/setup.md, never commit the real value}"
   cd "$REPO"
   python3 -m uvicorn services.knowledge.app:app --host 0.0.0.0 --port 8100
 }
@@ -77,6 +80,7 @@ start_knowledge_worker() {
 # block needed for it.
 start_campaigns_service() {
   export POSTGRES_DSN="postgresql://satish@localhost:5432/voiceai"
+  export JWT_SECRET="${JWT_SECRET:?set this in your shell — see docs/setup.md, never commit the real value}"
   cd "$REPO"
   python3 -m uvicorn services.campaigns.app:app --host 0.0.0.0 --port 8400
 }
