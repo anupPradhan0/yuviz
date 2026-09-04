@@ -30,6 +30,14 @@ Audio contract (matches AUDIO_CODEC_PCM_S16LE in the proto exactly):
 responsible for resampling/converting its mic capture to this format
 before sending — see components/TestAgentPanel.tsx.
 
+Text chat (?mode=text) skips the audio contract entirely: the browser sends
+{"type":"text_input","text":...} and receives {"type":"agent_text",...},
+and Conversation Service runs the turn with STT and TTS switched off (see
+SessionOpenRequest.text_only). Everything between — the workflow graph, its
+transitions, per-node tools, knowledge retrieval, extraction, end-call and
+transfer handling — is the identical code a voice call runs, which is the
+only reason testing a workflow this way is worth anything.
+
 v1 is push-to-talk, not continuous VAD: the browser sends a
 {"type":"speech_ended"} control message when the caller releases the
 talk button, which this bridge turns directly into a
@@ -133,7 +141,17 @@ async def _browser_to_grpc(
             continue
 
         kind = control.get("type")
-        if kind == "speech_ended":
+        if kind == "text_input":
+            text = str(control.get("text", "")).strip()
+            if not text:
+                continue
+            # Same watchdog as a spoken turn: an LLM that never answers
+            # would otherwise leave the chat sitting on "Thinking…".
+            response_watchdog.arm()
+            await call.write(pb.GatewayMessage(text_input=pb.TextInput(
+                session_id=session_id, text=text,
+            )))
+        elif kind == "speech_ended":
             utterance_num += 1
             if current_utterance is not None:
                 _write_wav_dump(session_id, utterance_num, bytes(current_utterance))
@@ -168,14 +186,45 @@ class ResponseWatchdog:
     the timeout, and the browser should say so instead of hanging on
     'Thinking...' indefinitely."""
 
-    def __init__(self, ws: ServerConnection, timeout_s: float = 8.0) -> None:
+    def __init__(
+        self, ws: ServerConnection, timeout_s: float | None = None, text_mode: bool = False,
+    ) -> None:
+        # 8s suits a GPU or a hosted LLM. CPU inference is far slower — a 3B
+        # model on CPU takes ~17s per turn, so the default fires mid-think and
+        # tells the browser "no response" for a reply that is still coming
+        # (confirmed live 2026-08-28). Raise it with WEBCALL_RESPONSE_TIMEOUT_S
+        # rather than sitting behind a watchdog that is faster than the stack
+        # it is watching.
+        if timeout_s is None:
+            timeout_s = float(os.environ.get("WEBCALL_RESPONSE_TIMEOUT_S", "8"))
         self._ws = ws
         self._timeout_s = timeout_s
+        # The default message blames the microphone, which is nonsense
+        # advice for someone who just typed a sentence.
+        self._text_mode = text_mode
         self._task: asyncio.Task | None = None
 
     def arm(self) -> None:
         self.disarm()
         self._task = asyncio.create_task(self._fire())
+
+    # Anything arriving at all proves a *voice* turn isn't stuck: the first
+    # thing back is either the STT result or an error, and both mean the
+    # pipeline is alive.
+    #
+    # A text turn is different. The service echoes the caller's own words
+    # back as stt_result the moment it receives them — always, immediately,
+    # before the model has been asked anything. Disarming on that made the
+    # watchdog dead code in exactly the mode it matters most in: with a slow
+    # or unreachable LLM the chat sat on "Thinking…" with nothing to
+    # eventually say otherwise. So in text mode only a message that ends the
+    # turn counts.
+    _TEXT_TURN_ENDING = frozenset({"agent_text", "end_call", "error", "transfer_request"})
+
+    def saw(self, which: str) -> None:
+        if self._text_mode and which not in self._TEXT_TURN_ENDING:
+            return
+        self.disarm()
 
     def disarm(self) -> None:
         if self._task and not self._task.done():
@@ -189,6 +238,10 @@ class ResponseWatchdog:
             await self._ws.send(json.dumps({
                 "type": "no_response",
                 "message": (
+                    f"No response after {self._timeout_s:.0f}s — the model is still "
+                    "thinking or is unreachable. Check the agent's LLM provider, or "
+                    "raise WEBCALL_RESPONSE_TIMEOUT_S if it is simply slow."
+                    if self._text_mode else
                     f"No response after {self._timeout_s:.0f}s — the agent likely didn't "
                     "recognize any speech in that recording (silence, background noise, or "
                     "audio too quiet/unclear). Try again, speaking clearly and a bit louder."
@@ -204,8 +257,8 @@ async def _grpc_to_browser(ws: ServerConnection, call, response_watchdog: Respon
     browser — TTS audio payloads as binary frames, everything else as a
     small JSON text frame."""
     async for msg in call:
-        response_watchdog.disarm()  # anything arriving at all proves the turn isn't stuck
         which = msg.WhichOneof("payload")
+        response_watchdog.saw(which or "")
         if which == "tts_chunk":
             # A chunk can legitimately carry an empty payload (seen live:
             # the chunk right before is_final) — nothing to actually play,
@@ -222,6 +275,22 @@ async def _grpc_to_browser(ws: ServerConnection, call, response_watchdog: Respon
                 "type": "stt_result", "text": msg.stt_result.text,
                 "confidence": msg.stt_result.confidence,
             }))
+        elif which == "agent_text":
+            await ws.send(json.dumps({
+                "type": "agent_text", "text": msg.agent_text.text,
+            }))
+        elif which == "transfer_request":
+            # A browser test has no human-transfer path to execute, so this
+            # is reported, never acted on. It is reported rather than
+            # dropped (as it used to be) because `transfer` is a first-class
+            # workflow node type: a test that reaches one and shows nothing
+            # reads as the stage having done nothing at all. Both panels
+            # render it as a note and stop.
+            await ws.send(json.dumps({
+                "type": "transfer",
+                "destination": msg.transfer_request.destination,
+                "reason": msg.transfer_request.reason,
+            }))
         elif which == "tts_started":
             await ws.send(json.dumps({"type": "tts_started"}))
         elif which == "cancel_ack":
@@ -233,12 +302,20 @@ async def _grpc_to_browser(ws: ServerConnection, call, response_watchdog: Respon
             }))
             if msg.error.fatal:
                 return
+        elif which == "workflow_node_changed":
+            # Lets the workflow editor highlight the stage the call is
+            # actually in, live — the difference between "the transition
+            # didn't fire" being a guess and something you watch happen.
+            await ws.send(json.dumps({
+                "type": "workflow_node", "node_id": msg.workflow_node_changed.node_id,
+                "node_name": msg.workflow_node_changed.node_name,
+                "node_type": msg.workflow_node_changed.node_type,
+            }))
         elif which == "end_call":
             await ws.send(json.dumps({
                 "type": "end_call", "reason": msg.end_call.reason,
             }))
-        # transfer_request/conversation_finalized: no human-transfer path
-        # exists in a browser test call — deliberately not forwarded.
+        # conversation_finalized: nothing the browser can act on.
 
 
 async def _handle_connection(ws: ServerConnection) -> None:
@@ -270,9 +347,14 @@ async def _handle_connection(ws: ServerConnection) -> None:
             sample_rate=SAMPLE_RATE,
             channels=1,
             direction="test",
+            # ?draft=1 — hear an unpublished graph before publishing it.
+            use_workflow_draft=params.get("draft") in ("1", "true"),
+            # ?mode=text — type at the agent instead of talking to it. No
+            # audio flows in either direction; STT and TTS are skipped.
+            text_only=params.get("mode") == "text",
         )))
 
-        response_watchdog = ResponseWatchdog(ws)
+        response_watchdog = ResponseWatchdog(ws, text_mode=params.get("mode") == "text")
         try:
             await asyncio.gather(
                 _browser_to_grpc(ws, call, session_id, response_watchdog),

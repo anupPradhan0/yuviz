@@ -41,17 +41,23 @@ class TenantUpdate(BaseModel):
 class AgentCreate(BaseModel):
     slug:           str
     name:           str
+    # Not columns — these seed the starter graph the agent is created with
+    # (see agents.create_agent): the greeting lands on its start node, the
+    # prompt on its global node. Editing them afterwards happens on the
+    # canvas, which is why AgentUpdate has no equivalent.
     greeting:       str = ""
     system_prompt:  str = ""
     stt_config_id:  str | None = None
     llm_config_id:  str | None = None
     tts_config_id:  str | None = None
+    # None = the server's starter graph (libs/config_sdk/workflow.py's
+    # starter_graph). Same raw React Flow dict the editor round-trips, and
+    # validated on create exactly as a publish would be.
+    workflow: dict | None = None
 
 
 class AgentUpdate(BaseModel):
     name:                 str | None = None
-    greeting:             str | None = None
-    system_prompt:        str | None = None
     goodbye_grace_ms:     int | None = None
     language:             str | None = None
     stt_config_id:        str | None = None
@@ -70,12 +76,8 @@ class AgentUpdate(BaseModel):
     transfer_waiting_experience: Literal["announcement_moh", "announcement_silence"] | None = None
     # Condition-clause overrides for the [[END_CALL]]/[[TRANSFER]] trigger
     # instructions; None/empty = built-in defaults (see pipeline.py).
-    end_call_prompt:      str | None = None
-    transfer_prompt:      str | None = None
     # Exact scripted lines the agent speaks when ending/transferring;
     # None/empty = LLM chooses the wording (see pipeline.py).
-    farewell_message:      str | None = None
-    transfer_announcement: str | None = None
     status:               Literal["active", "inactive"] | None = None
     # Admin-configured hard ceiling on call length, in seconds; None = no
     # limit set (leaves the column NULL — unlimited, the pre-existing
@@ -83,6 +85,22 @@ class AgentUpdate(BaseModel):
     # duration_s_check) so a bad value is rejected at config time instead
     # of failing the INSERT/UPDATE.
     max_call_duration_s:  int | None = Field(default=None, ge=30, le=7200)
+
+
+class WorkflowDraft(BaseModel):
+    """Raw React Flow save format, stored verbatim so canvas positions
+    round-trip — see docs/workflow.md §4.1. Deliberately not modeled field
+    by field here: the real definition lives in libs/config_sdk/workflow.py
+    (both planes share it), and a second pydantic mirror of it in this file
+    would be the drift problem that doc's §2.2 argues against."""
+    graph: dict[str, Any]
+
+
+class WorkflowPublish(BaseModel):
+    # graph=None publishes whatever is in workflow_draft — what the
+    # editor's Publish button sends.
+    graph: dict[str, Any] | None = None
+    note:  str | None = None
 
 
 class ProviderConfigCreate(BaseModel):

@@ -142,6 +142,8 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
             called_did=open_req.called_did,
             direction=open_req.direction,
             script_id=open_req.script_id,
+            use_workflow_draft=open_req.use_workflow_draft,
+            text_only=open_req.text_only,
         )
 
         bus     = EventBus()
@@ -194,6 +196,11 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
         # Synthesize the agent's opening line and stream it to the caller.
         # Audio arriving from the gateway during synthesis accumulates in msg_q.
         async for response in session.greet():
+            # A text-chat session opens with the same line, as text.
+            if response.agent_text:
+                yield pb.ServiceMessage(
+                    agent_text=pb.AgentText(session_id=sid, text=response.agent_text)
+                )
             if response.tts_payloads:
                 yield pb.ServiceMessage(
                     tts_started=pb.TtsStarted(session_id=sid)
@@ -369,6 +376,23 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                     trigger=tr.trigger,
                                 ))
                                 turn_transfer = tr
+                            # Observability only — the gateway ignores this
+                            # message entirely; the admin UI's test-call
+                            # panel uses it to light up the active node on
+                            # the workflow canvas as the call moves.
+                            if response.node_changed is not None:
+                                nc = response.node_changed
+                                log.info(
+                                    "Converse: workflow node=%s type=%s session=%s",
+                                    nc.node_name, nc.node_type, sid,
+                                )
+                                yield pb.ServiceMessage(
+                                    workflow_node_changed=pb.WorkflowNodeChanged(
+                                        session_id=sid, node_id=nc.node_id,
+                                        node_name=nc.node_name, node_type=nc.node_type,
+                                        via=nc.via,
+                                    )
+                                )
                             # Send STT result immediately — advances C++ FSM
                             # Recognizing→Thinking before SttTimeout (8 s) fires.
                             if response.stt_text:
@@ -484,6 +508,103 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                             out = _consume_pending_transfer(turn_transfer, False, sid)
                             if out is not None:
                                 yield out
+
+                elif payload_case == "text_input":
+                    # Text-chat turn (Admin UI). Deliberately its own branch
+                    # rather than a mode flag threaded through the
+                    # speech_ended one above: almost everything there exists
+                    # to drive the C++ gateway's audio FSM — tts_started,
+                    # the empty is_final drain chunk, holding EndCall and
+                    # TransferRequest until playback finishes. None of it
+                    # has a meaning when there is no audio and no gateway,
+                    # and pretending otherwise is how a chat turn would end
+                    # up gated on a playback_finished that never arrives.
+                    ti = msg.text_input
+                    if not open_req.text_only:
+                        # The handler would run the turn and synthesize a
+                        # reply nobody asked for and nobody receives — this
+                        # branch only forwards agent_text, which a non-text
+                        # session never sets. Refuse rather than burn a TTS
+                        # round-trip into the void.
+                        log.warning(
+                            "Converse: ignoring text_input on a session that did not "
+                            "request text_only session=%s", sid,
+                        )
+                        continue
+                    end_call_requested    = False
+                    end_call_grace_period = 0
+
+                    async for response in session.text_input(ti.text):
+                        if response.node_changed is not None:
+                            nc = response.node_changed
+                            log.info(
+                                "Converse: workflow node=%s type=%s session=%s",
+                                nc.node_name, nc.node_type, sid,
+                            )
+                            yield pb.ServiceMessage(
+                                workflow_node_changed=pb.WorkflowNodeChanged(
+                                    session_id=sid, node_id=nc.node_id,
+                                    node_name=nc.node_name, node_type=nc.node_type,
+                                    via=nc.via,
+                                )
+                            )
+                        # Echoed back so the client renders the turn it
+                        # actually got, not the string it optimistically
+                        # drew — the two differ once anything upstream
+                        # normalises the text.
+                        if response.stt_text:
+                            yield pb.ServiceMessage(
+                                stt_result=pb.SttResult(
+                                    session_id=sid, trace_id=ti.trace_id,
+                                    text=response.stt_text,
+                                    confidence=response.stt_confidence, is_final=True,
+                                )
+                            )
+                        if response.agent_text:
+                            yield pb.ServiceMessage(
+                                agent_text=pb.AgentText(
+                                    session_id=sid, trace_id=ti.trace_id,
+                                    text=response.agent_text,
+                                )
+                            )
+                        if response.end_call:
+                            end_call_requested    = True
+                            end_call_grace_period = response.end_call_grace_period_ms
+                        if response.transfer_request:
+                            tr = response.transfer_request
+                            log.info(
+                                "Converse: transfer requested (text chat) trigger=%s "
+                                "type=%s destination=%s session=%s",
+                                tr.trigger, tr.transfer_type.value, tr.destination, sid,
+                            )
+                            bus.publish(TransferRequested(
+                                session_id=tr.session_id,
+                                tenant_id=tr.tenant_id,
+                                call_id=tr.call_id,
+                                transfer_type=tr.transfer_type.value,
+                                destination=tr.destination,
+                                reason=tr.reason,
+                                trigger=tr.trigger,
+                            ))
+                            # Nothing is playing, so there is nothing to hold
+                            # it behind — same path the voice branch takes
+                            # for a turn that produced no TTS.
+                            out = _consume_pending_transfer(tr, False, sid)
+                            if out is not None:
+                                yield out
+
+                    if end_call_requested:
+                        log.info(
+                            "Converse: sending EndCall (text chat) grace_period_ms=%d "
+                            "session=%s", end_call_grace_period, sid,
+                        )
+                        yield pb.ServiceMessage(
+                            end_call=pb.EndCall(
+                                session_id=sid,
+                                reason="agent_ended_call",
+                                grace_period_ms=end_call_grace_period,
+                            )
+                        )
 
                 elif payload_case == "cancel_generation":
                     await session.cancel()

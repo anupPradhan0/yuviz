@@ -48,6 +48,7 @@ message GatewayMessage {
     TransferInitiated       transfer_initiated = 6;
     TransferCompleted       transfer_completed = 7;
     TransferFailed          transfer_failed    = 8;
+    TextInput               text_input         = 9;
   }
 }
 
@@ -89,6 +90,21 @@ message SessionOpenRequest {
 
   // "inbound" | "outbound"; informational today, from the WS metadata frame.
   string direction           = 12;
+
+  // Run the agent's UNPUBLISHED workflow draft instead of its live graph
+  // (docs/workflow.md §6.4). Only ever set by the admin UI's own test-call
+  // path (services/webcall) so an operator can hear a change before
+  // publishing it to real traffic; the gateway never sets it, and an agent
+  // with no draft ignores it.
+  bool use_workflow_draft    = 13;
+
+  // Text-chat session (Admin UI only). No audio flows in either direction:
+  // the client sends TextInput instead of AudioChunk/SpeechEnded, and the
+  // service answers with AgentText instead of TtsChunk. Skips STT and TTS
+  // entirely so a workflow's prompts, transitions, tools and extraction
+  // can be exercised without a microphone or a loaded voice model.
+  // A real telephony call never sets this.
+  bool text_only             = 14;
 }
 
 // Raw PCM inbound audio (microphone → gateway → service).
@@ -118,6 +134,15 @@ message PlaybackFinished {
 // The service should run STT on the accumulated audio buffer and begin the
 // STT → LLM → TTS pipeline.  Sent once per utterance after all AudioChunk
 // messages for that utterance have been delivered.
+// One caller turn, typed rather than spoken (text_only sessions). Takes the
+// place of the AudioChunk stream plus SpeechEndedNotification that a voice
+// turn is made of — everything downstream of STT is identical.
+message TextInput {
+  string session_id = 1;
+  string trace_id   = 2;
+  string text       = 3;
+}
+
 message SpeechEndedNotification {
   string session_id  = 1;
   string trace_id    = 2;
@@ -193,7 +218,22 @@ message ServiceMessage {
     EndCall             end_call             = 7;
     TransferRequest     transfer_request     = 8;
     ConversationFinalized conversation_finalized = 9;
+    WorkflowNodeChanged workflow_node_changed = 10;
+    AgentText           agent_text           = 11;
   }
+}
+
+// The active workflow node changed (docs/workflow.md §6.4). Observability
+// only — the gateway ignores it entirely, and nothing about call handling
+// depends on it being delivered. The admin UI's test-call panel lights up
+// the current node on the canvas as the call moves, which turns "the
+// transition didn't fire" from a guess into something you watch happen.
+message WorkflowNodeChanged {
+  string session_id = 1;
+  string node_id    = 2;
+  string node_name  = 3;
+  string node_type  = 4;  // "start" | "agent" | "transfer" | "end"
+  string via        = 5;  // the edge tool name that caused the move; empty on entry
 }
 
 // Sent once after SessionOpenRequest is accepted.
@@ -232,6 +272,16 @@ message TtsChunk {
 }
 
 // Acknowledges a CancelGeneration — sent after generation is aborted.
+// The agent's reply as text, for a text_only session. One per turn, sent
+// where the TtsChunk stream would otherwise be — the reply is complete, not
+// streamed token by token: a chat transcript has no latency argument for
+// partial delivery the way spoken audio does.
+message AgentText {
+  string session_id = 1;
+  string trace_id   = 2;
+  string text       = 3;
+}
+
 message CancelAck {
   string session_id = 1;
   string trace_id   = 2;

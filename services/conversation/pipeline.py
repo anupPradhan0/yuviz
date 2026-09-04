@@ -39,9 +39,10 @@ from .guardrails import GuardrailCounter, GuardrailDetector
 from .metrics import IMetrics, NullMetrics
 from .provider_bundle import ProviderBundle
 from .providers.interfaces import ChatMessage, SttResult
-from .session import HandlerResponse
+from .session import HandlerResponse, NodeChanged
 from .session_finalizer import FinalizationResult, SessionFinalizer
 from .tools.llm_adapter import DeterministicSpokenEvent
+from .tools.llm_adapter import LocalToolCompletedEvent
 from .tools.llm_adapter import TokenEvent as ToolTokenEvent
 from .tools.llm_adapter import ToolCallStartedEvent
 from .tools.orchestrator import ToolCallOrchestrator
@@ -51,6 +52,13 @@ from .transfer_engine import (
     TransferDecisionEngine,
     TransferTrigger,
     TriggerType,
+)
+from .workflow import (
+    ContextSummarizer,
+    VariableExtractor,
+    WorkflowRunner,
+    graph_for,
+    summary_threshold_for,
 )
 
 log = logging.getLogger(__name__)
@@ -75,7 +83,6 @@ class _SessionState:
     confirmed_booking_slot:          str | None = None
     phone_number_confirmed:          bool = False
 
-
 # Sentence boundary splitter.  Rules:
 #   • Always split after ! or ? (never abbreviations).
 #   • Split after . only when NOT preceded by a known title abbreviation
@@ -97,14 +104,17 @@ _SENTENCE_RE = re.compile(
 # the response for "goodbye"/"bye", avoids false positives from casual
 # mentions and needs no function-calling support from the LLM.
 _END_CALL_MARKER = "[[END_CALL]]"
-# The *condition* is per-agent configurable (agents.end_call_prompt — a
-# "When ..." clause); the token mechanics below it are fixed and always
-# appended by _build_end_call_instruction(), so a custom prompt can never
-# break directive parsing. Empty/None config = this default, byte-identical
-# to the historical hardcoded instruction.
-_END_CALL_CONDITION_DEFAULT = (
-    "When the conversation is genuinely finished (the caller says "
-    "goodbye, has no more questions, or the issue is resolved)"
+# Fixed wording, appended to every step's prompt. It used to be per-agent
+# configurable (agents.end_call_prompt), which put "when does this call end?"
+# in two places: here, and the graph's end steps. The graph is the answer —
+# this is only the safety net for a caller who finishes somewhere no
+# connection covers, so it needs no per-agent tuning.
+_END_CALL_INSTRUCTION = (
+    "\n\nWhen the conversation is genuinely finished (the caller says "
+    "goodbye, has no more questions, or the issue is resolved), end your "
+    f"final reply with the exact token {_END_CALL_MARKER} on its own, after "
+    "your spoken words. Only use this token when you are truly ending the "
+    "call — never say it out loud or explain it to the caller."
 )
 
 
@@ -277,25 +287,6 @@ def _claims_booking_without_tool_call(assistant_text: str) -> bool:
     limits the blast radius when it doesn't)."""
     return bool(_BOOKING_CLAIM_RE.search(assistant_text) and _BOOKING_SUBJECT_RE.search(assistant_text))
 
-
-def _build_end_call_instruction(condition: str | None, scripted: bool = False) -> str:
-    """scripted=True when the agent has a configured farewell_message: the
-    LLM is told to emit only the token — pipeline.py speaks the scripted
-    line itself (deterministic wording, no LLM paraphrase)."""
-    cond = (condition or "").strip().rstrip(".,;") or _END_CALL_CONDITION_DEFAULT
-    if scripted:
-        return (
-            f"\n\n{cond}, reply with ONLY the exact token {_END_CALL_MARKER} "
-            "and no other words — the system will speak the farewell message "
-            "itself. Never say the token out loud or explain it to the caller."
-        )
-    return (
-        f"\n\n{cond}, end your "
-        f"final reply with the exact token {_END_CALL_MARKER} on its own, after "
-        "your spoken words. Only use this token when you are truly ending the "
-        "call — never say it out loud or explain it to the caller."
-    )
-
 # Fallback farewell synthesised when the LLM emits the end-call marker with
 # no spoken text (e.g. replying to "tear down the call" with only the
 # marker). Without this, tts_started_sent never flips true on the gateway
@@ -303,11 +294,17 @@ def _build_end_call_instruction(condition: str | None, scripted: bool = False) -
 # would never hang up on its own, forcing the caller to disconnect manually.
 _FALLBACK_GOODBYE = "Goodbye."
 
+# Ceiling on the workflow's own teardown work (a final extraction pass plus
+# whatever background extractions are still in flight) — see
+# on_session_end. Shorter than VariableExtractor's own 8s per-call timeout
+# on purpose: this runs after the caller has already gone.
+_FINISH_WORKFLOW_TIMEOUT_S = 3.0
+
 # Spoken when policies.max_call_duration_s is exceeded (see
 # PipelineConversationHandler.on_speech_ended's check, right after STT).
-# Fixed rather than per-agent configurable, same posture as
-# _FALLBACK_LLM_ERROR below — deliberately not agent.farewell_message,
-# since that line is written for a natural end-of-conversation goodbye and
+# Fixed rather than drawn from the graph, same posture as
+# _FALLBACK_LLM_ERROR below — deliberately not an end step's closing words,
+# since those are written for a natural end-of-conversation goodbye and
 # would misleadingly imply the conversation just happened to finish, not
 # that a time limit cut it off.
 _MAX_DURATION_GOODBYE = (
@@ -359,37 +356,26 @@ _FIRST_TURN_FILLER = "Mm-hmm, one moment."
 # resulting TransferRequest to the gateway (held until the acknowledgment
 # turn's audio finishes playing), and the gateway executes it over ESL
 # (uuid_transfer).
-# Same condition/mechanics split as _END_CALL_CONDITION_DEFAULT above:
-# the condition clause is per-agent configurable (agents.transfer_prompt),
-# the token mechanics (with the config-sourced destination) are fixed.
-_TRANSFER_CONDITION_DEFAULT = (
+# Fixed wording, for the same reason as _END_CALL_INSTRUCTION above: a
+# transfer step in the graph is where "hand this call over" is configured,
+# so this is only the anywhere-in-the-call escape hatch. The destination and
+# type still come from config — those are operational, not conversational.
+_TRANSFER_CONDITION = (
     "If the caller explicitly asks to speak to a human agent or "
     "representative"
 )
 
 
-def _build_transfer_instruction(
-    condition: str | None, transfer_type: str, destination: str,
-    scripted: bool = False,
-) -> str:
-    """scripted=True when the agent has a configured transfer_announcement —
-    same LLM-emits-only-the-token treatment as _build_end_call_instruction."""
-    cond = (condition or "").strip().rstrip(".,;") or _TRANSFER_CONDITION_DEFAULT
+def _build_transfer_instruction(transfer_type: str, destination: str) -> str:
     token = (
         f'[[TRANSFER type="{transfer_type}" destination="{destination}" '
         'reason="caller_requested_human"]]'
     )
-    if scripted:
-        return (
-            f"\n\n{cond}, reply with ONLY the exact token {token} and no "
-            "other words — the system will play the transfer announcement "
-            "itself. Never say the token out loud or explain it to the caller."
-        )
     return (
-        f"\n\n{cond}, briefly acknowledge that you will connect them, then "
-        f"end your reply with the exact token {token} on its own, after your "
-        "spoken words. Only use this token when that condition is met — "
-        "never say it out loud or explain it to the caller."
+        f"\n\n{_TRANSFER_CONDITION}, briefly acknowledge that you will connect "
+        f"them, then end your reply with the exact token {token} on its own, "
+        "after your spoken words. Only use this token when that condition is "
+        "met — never say it out loud or explain it to the caller."
     )
 
 # Phase 5F fail-fast config validation: shapes a transfer destination may
@@ -427,7 +413,8 @@ def transfer_destination_problem(destination: str | None) -> str | None:
 # input for one turn only — never stored in history, same "augment this
 # turn's content, don't pollute future turns" treatment RAG context already
 # gets (see on_speech_ended's messages_for_llm comment) — so it can't recur
-# or confuse a later turn. Deliberately not a change to _system_prompt/
+# or confuse a later turn. Deliberately not a change to the composed
+# node prompt or
 # _END_CALL_INSTRUCTION: the agent's fixed personality/instructions are
 # untouched — the LLM generates the actual wording using its existing
 # prompt, never a hardcoded recovery sentence (that only exists as
@@ -445,6 +432,7 @@ def _build_transfer_failed_system_event(reason: str) -> str:
 # Fixed fallback apology if the LLM produces no usable text at all (mirrors
 # _FALLBACK_GOODBYE's "never leave dead air" reasoning above).
 _TRANSFER_FAILED_FALLBACK = "I'm sorry, I couldn't connect you to an agent right now."
+
 
 # Spoken instead of the agent's own transfer_announcement (if any) when a
 # fabricated booking claim is what triggered this specific transfer.
@@ -500,7 +488,6 @@ class PipelineConversationHandler:
         provider_bundle: ProviderBundle,
         sample_rate:   int = 16_000,
         max_history:   int = 10,
-        default_system_prompt: str = "",
         transcripts:   TranscriptBuilder | None = None,
         tenant_id:     str = "",
         call_id:       str = "",
@@ -511,17 +498,18 @@ class PipelineConversationHandler:
         metrics:       IMetrics | None = None,
         tool_orchestrator: ToolCallOrchestrator | None = None,
         has_booking_tool: bool = False,
+        use_workflow_draft: bool = False,
+        text_only:     bool = False,
     ) -> None:
-        # default_system_prompt is a pipeline-wide fallback (PipelineConfig.
-        # llm.system), not part of RuntimeConfig — it's what a resolved
-        # agent with no custom system_prompt of its own gets, same "or
-        # cfg.llm.system" behavior this class had before this refactor.
         self._stt          = provider_bundle.stt
         self._llm          = provider_bundle.llm
         self._tts          = provider_bundle.tts
         self._sample_rate  = sample_rate
         self._max_history  = max_history
-        self._greeting     = runtime_config.conversation.greeting
+        # Text-chat session (Admin UI): no STT ran and no TTS will run, so
+        # every place the pipeline would have spoken yields the words
+        # instead. See _speak() and the proto's text_only.
+        self._text_only    = text_only
         self._transcripts  = transcripts
         self._tenant_id    = tenant_id
         self._call_id      = call_id
@@ -537,29 +525,22 @@ class PipelineConversationHandler:
         # insert outright, not just be cosmetically wrong.
         self._agent_id             = runtime_config.agent.id or None
         self._agent_config_version = runtime_config.version or None
-        # Overrides llm.system when non-empty.  Append the end-call marker
-        # instruction here (not conditionally later) so every agent gets the
-        # capability regardless of whether it has a custom system_prompt.
-        # Scripted spoken lines (agents.farewell_message/transfer_announcement)
-        # — when set, pipeline synthesizes these verbatim at end-call/transfer
-        # and the injected instructions tell the LLM to emit only the token.
-        self._farewell_message = (
-            (runtime_config.conversation.farewell_message or "").strip() or None
-        )
-        self._transfer_announcement = (
-            (runtime_config.conversation.transfer_announcement or "").strip() or None
-        )
+        # What the agent says at each moment of the call now lives entirely in
+        # the graph — the always-on instruction on its global node, the
+        # closing words on its end steps (docs/workflow.md §9.1). What is
+        # left here is mechanics: date grounding, optional caller-number
+        # booking context, and the two directive tokens, which are fixed so
+        # no configuration can break the parser. Handed to WorkflowRunner,
+        # which slots each node's own prompt in front of it — see
+        # WorkflowRunner.system_prompt(). Unconditional now: there is no
+        # agent without a graph, so there is no case where the end-call
+        # token has no prompt to be appended to.
         self._has_booking_tool = has_booking_tool
-        system_prompt = runtime_config.conversation.system_prompt or default_system_prompt
-        self._system_prompt = (
-            system_prompt
-            + _build_current_date_context()
+        self._prompt_suffix = (
+            _build_current_date_context()
             + (_build_caller_number_context(self._caller_number) if has_booking_tool else "")
-            + _build_end_call_instruction(
-                runtime_config.conversation.end_call_prompt,
-                scripted=self._farewell_message is not None,
-            )
-        ) if system_prompt else ""
+            + _END_CALL_INSTRUCTION
+        )
         self._goodbye_grace_period_ms = runtime_config.policies.goodbye_grace_ms
         # Admin-configured hard ceiling on call length (agents.max_call_
         # duration_s) — None means unlimited, the pre-existing behavior.
@@ -619,18 +600,14 @@ class PipelineConversationHandler:
                     "agent's Escalation config",
                     runtime_config.agent.slug, tt, problem,
                 )
-            elif self._system_prompt:
+            else:
                 # Auto-inject the transfer trigger instruction — same "append
                 # to the prompt here, not conditionally later" treatment as
-                # _END_CALL_INSTRUCTION above, and same gate on a non-empty
-                # base prompt. Config validated above: a transfer the LLM can
-                # request but nothing can complete would strand callers
-                # mid-"connecting you now".
-                self._system_prompt += _build_transfer_instruction(
-                    runtime_config.conversation.transfer_prompt,
-                    tt,
-                    self._transfer_destination_default,
-                    scripted=self._transfer_announcement is not None,
+                # _END_CALL_INSTRUCTION above. Config validated above: a
+                # transfer the LLM can request but nothing can complete would
+                # strand callers mid-"connecting you now".
+                self._prompt_suffix += _build_transfer_instruction(
+                    tt, self._transfer_destination_default,
                 )
         # tenant.slug/agent.slug are real and non-empty on both the
         # Config-SDK-backed path and the legacy YAML-fallback path (see
@@ -659,7 +636,7 @@ class PipelineConversationHandler:
         # Phase 6: the single arbiter of *when* to transfer — see
         # transfer_engine.py. Stateless; this handler still owns all
         # per-session state it reads (guardrail count) and produces
-        # (_pending_transfer, _transfer_requested below).
+        # (pending_transfer / transfer_requested on _SessionState).
         self._transfer_engine = TransferDecisionEngine(self._metrics)
         self._guardrail_counter = GuardrailCounter()
         # Deliberately separate from _guardrail_counter above: that one is
@@ -680,6 +657,68 @@ class PipelineConversationHandler:
         # _session() below; on_session_end() drops the whole entry in one
         # line instead of one pop/discard per field.
         self._sessions: dict[str, _SessionState] = {}
+        # Conversation workflow (docs/workflow.md). Always present — an agent
+        # IS its workflow (§9.1), graph_for() falls back to the starter graph
+        # rather than returning None, and there is no single-prompt mode left
+        # to branch on.
+        self._last_reported_node_id: str | None = None
+        now = datetime.now(timezone.utc)
+        self._extractor = VariableExtractor(self._llm, self._on_variables_extracted)
+        # Threshold derived from this pipeline's own trim cap rather than
+        # taken as a default — the two are the same constraint, and chosen
+        # separately they drifted far enough apart to disable
+        # summarization entirely (see summary_threshold_for).
+        self._summarizer = ContextSummarizer(
+            self._llm, threshold_msgs=summary_threshold_for(max_history),
+        )
+        graph = graph_for(runtime_config, draft=use_workflow_draft)
+        self._workflow = WorkflowRunner(
+            graph,
+            # The always-on instruction comes from the graph's own global
+            # node — see WorkflowRunner.__init__. Nothing beside the graph
+            # contributes conversation text any more.
+            base_suffix=self._prompt_suffix,
+            variables={
+                "caller_number": caller_number,
+                "called_number": called_number,
+                "direction":     direction,
+                "agent_name":    runtime_config.agent.name,
+                "business_name": runtime_config.tenant.name,
+                "current_date":  now.strftime("%Y-%m-%d"),
+                "current_time":  now.strftime("%H:%M"),
+                # ponytail: per-contact campaign fields (docs/workflow.md
+                # §5.7's second source) would slot in here — they have
+                # nowhere to come from today: campaign_contacts stores
+                # only phone_number/name, and no channel-variable path
+                # carries either to this process. Wire it when contacts
+                # grow custom fields; this dict is the only seam it needs.
+            },
+            extractor=self._extractor,
+            summarizer=self._summarizer,
+        )
+        if (
+            any(n.type == "transfer" for n in graph.nodes.values())
+            and self._transfer_type_default in ("", "none")
+        ):
+            # Same fail-loud-at-setup posture as the transfer-destination
+            # validation above: a transfer node the engine will always
+            # reject is a caller stranded mid-"connecting you now".
+            log.error(
+                "Workflow for agent %s has a transfer node but the agent's "
+                "transfer_type is 'none' — those transfers will be rejected; "
+                "set warm/cold on the agent's Escalation config",
+                runtime_config.agent.slug,
+            )
+        log.info(
+            "Workflow active for agent %s: %d nodes, starting at %r",
+            runtime_config.agent.slug, len(graph.nodes), graph.start.name,
+        )
+
+    def _on_variables_extracted(self, values: dict) -> None:
+        """Extraction results merge into the runner, so later nodes' prompts
+        can reference them, and get persisted to calls.extracted_variables
+        at session end."""
+        self._workflow.update_variables(values)
 
     # ── IConversationHandler ───────────────────────────────────────────────────
 
@@ -690,9 +729,15 @@ class PipelineConversationHandler:
                 self._direction, self._caller_number, self._called_number,
                 self._agent_id, self._agent_config_version,
             )
-        if not self._greeting:
+        # Speaking the instant the line opens gets the first syllable
+        # clipped on some outbound carriers — the start node can hold off.
+        # 0 (the default) is the behavior every call has today.
+        if self._workflow.delayed_start_ms > 0:
+            await asyncio.sleep(self._workflow.delayed_start_ms / 1000)
+        text = self._workflow.greeting() or ""
+        if not text:
             return []
-        return [chunk async for chunk in self._synthesize_sentence_stream(self._greeting, session_id)]
+        return [chunk async for chunk in self._synthesize_sentence_stream(text, session_id)]
 
     async def on_audio(self, session_id: str, payload: bytes) -> HandlerResponse:
         # Audio is also accumulated by ConversationSession (still the source
@@ -760,6 +805,44 @@ class PipelineConversationHandler:
         log.info("STT result=%r session=%s", stt_result.text, session_id)
         yield HandlerResponse(stt_text=stt_result.text, stt_confidence=stt_result.confidence)
 
+        async for response in self._run_turn(
+            session_id, stt_result.text, stt_result.confidence, cancel_event, turn_start, stt_ms,
+        ):
+            yield response
+
+    async def on_text(
+        self, session_id: str, text: str,
+    ) -> AsyncGenerator[HandlerResponse, None]:
+        """A typed caller turn (text_only sessions — see the proto's
+        TextInput). Everything downstream of STT is the same code the voice
+        path runs, so a workflow tested in the chat panel is the workflow
+        that will run on a call: same prompts, same transitions, same tool
+        narrowing, same extraction, same end/transfer handling."""
+        text = text.strip()
+        if not text:
+            return
+        # Fresh per-turn cancel event, same contract as on_speech_ended's.
+        cancel_event = asyncio.Event()
+        self._session(session_id).cancelled = cancel_event
+        yield HandlerResponse(stt_text=text, stt_confidence=1.0)
+        async for response in self._run_turn(
+            session_id, text, 1.0, cancel_event, time.monotonic(), None,
+        ):
+            yield response
+
+    async def _run_turn(
+        self,
+        session_id:   str,
+        user_text:    str,
+        confidence:   float,
+        cancel_event: asyncio.Event,
+        turn_start:   float,
+        stt_ms:       float | None,
+    ) -> AsyncGenerator[HandlerResponse, None]:
+        """One conversation turn, from the caller's words to the agent's
+        reply. Split out of on_speech_ended so on_text can reach it without
+        a microphone; `stt_ms` is None for a typed turn, where there was no
+        recognition step to time."""
         # Deterministic, inline caller-frustration/abuse signal (see
         # guardrails.py) — the "real detector" record_guardrail_violation()
         # was built to receive. Runs on the transcript already in hand: no
@@ -771,7 +854,7 @@ class PipelineConversationHandler:
         # surfaces near its end (see the transfer_request block below): the
         # agent still finishes responding to this utterance normally, then
         # the transfer follows right after, same as an LLM-emitted directive.
-        violation = GuardrailDetector.check(stt_result.text)
+        violation = GuardrailDetector.check(user_text)
         if violation is not None:
             log.info(
                 "Guardrail violation category=%s matched=%r session=%s",
@@ -790,7 +873,7 @@ class PipelineConversationHandler:
         # transcribed/recorded, but before the LLM call, so we never pay for
         # (and then discard) a generated response. Skips the LLM entirely and
         # speaks a fixed, deterministic wrap-up line — same "scripted, not
-        # LLM-judged" posture as farewell_message/[[END_CALL]], and reliable
+        # LLM-judged" posture as _FALLBACK_GOODBYE, and reliable
         # regardless of what the model would have said. See __init__ for why
         # this is a per-turn check rather than a separate timer task.
         if (
@@ -802,23 +885,24 @@ class PipelineConversationHandler:
                 self._max_call_duration_s, session_id,
             )
             got_audio = False
-            async for chunk in self._synthesize_sentence_stream(_MAX_DURATION_GOODBYE, session_id):
+            async for response in self._speak(_MAX_DURATION_GOODBYE, session_id):
                 got_audio = True
-                yield HandlerResponse(tts_payloads=[chunk])
+                yield response
             if not got_audio:
                 # Synthesis failed outright — fall back so tts_started_sent
                 # still flips true on the gateway side (see servicer.py);
                 # otherwise EndCall below would be silently dropped, same
                 # reasoning as _FALLBACK_GOODBYE.
-                async for chunk in self._synthesize_sentence_stream(_FALLBACK_GOODBYE, session_id):
-                    yield HandlerResponse(tts_payloads=[chunk])
+                async for response in self._speak(_FALLBACK_GOODBYE, session_id):
+                    yield response
             if self._transcripts is not None:
                 self._transcripts.record_turn(
-                    session_id, stt_result.text, stt_result.confidence,
+                    session_id, user_text, confidence,
                     _MAX_DURATION_GOODBYE, False,
                     latency=TurnLatency(
-                        stt_ms=stt_ms, stt_engine=type(self._stt).__name__,
-                        tts_engine=type(self._tts).__name__,
+                        stt_ms=stt_ms,
+                        stt_engine=None if self._text_only else type(self._stt).__name__,
+                        tts_engine=None if self._text_only else type(self._tts).__name__,
                     ),
                 )
             yield HandlerResponse(
@@ -829,11 +913,13 @@ class PipelineConversationHandler:
 
         # ── 2. LLM ─────────────────────────────────────────────────────────────
         history = self._get_history(session_id)
-        is_first_turn = not history
         # Prepend per-agent system prompt as the first message if configured.
-        if self._system_prompt and not history:
-            history.append(ChatMessage(role="system", content=self._system_prompt))
-        history.append(ChatMessage(role="user", content=stt_result.text))
+        # history[0] is always the active node's composed prompt —
+        # _refresh_node_prompt inserts it when the history is empty and
+        # replaces it every turn after that.
+        is_first_turn = not history
+        self._refresh_node_prompt(history)
+        history.append(ChatMessage(role="user", content=user_text))
 
         # See _FIRST_TURN_FILLER's own comment — masks the caller's first
         # wait (knowledge retrieval + LLM + TTS, all still to come below)
@@ -842,8 +928,8 @@ class PipelineConversationHandler:
         # as the tool-call filler elsewhere in this method.
         if is_first_turn and not self._session(session_id).first_turn_filler_spoken:
             self._session(session_id).first_turn_filler_spoken = True
-            async for chunk in self._synthesize_sentence_stream(_FIRST_TURN_FILLER, session_id):
-                yield HandlerResponse(tts_payloads=[chunk])
+            async for response in self._speak(_FIRST_TURN_FILLER, session_id):
+                yield response
 
         # ── Knowledge retrieval — exactly one call per turn, never zero,
         # never more than one. Folded into this turn's own user-message
@@ -859,12 +945,15 @@ class PipelineConversationHandler:
         # turn is the standard, safe RAG prompting pattern and leaves
         # exactly one system message in the conversation, always.
         messages_for_llm = history
-        if self._knowledge is not None:
-            context = await self._retrieve_context(stt_result.text, session_id)
+        # In workflow mode retrieval is per-stage: a node with no knowledge
+        # base attached does no retrieval at all, the same restrictive
+        # reading as its tool list. Unchanged for every other agent.
+        if self._knowledge is not None and self._workflow.knowledge_enabled():
+            context = await self._retrieve_context(user_text, session_id)
             if context is not None and context.chunks:
                 augmented = ChatMessage(
                     role="user",
-                    content=f"{self._format_context(context)}\n\nCaller's question: {stt_result.text}",
+                    content=f"{self._format_context(context)}\n\nCaller's question: {user_text}",
                 )
                 messages_for_llm = history[:-1] + [augmented]
 
@@ -878,7 +967,8 @@ class PipelineConversationHandler:
         first_audio_at: float | None = None
         try:
             async for chunk, tts_audio, marker_seen in self._llm_to_tts(
-                messages_for_llm, cancel_event, session_id, directives, tool_calls_made
+                messages_for_llm, cancel_event, session_id, directives,
+                tool_calls_made, store=history,
             ):
                 now = time.monotonic()
                 if first_token_at is None:
@@ -929,7 +1019,7 @@ class PipelineConversationHandler:
         # (no tool call needed that turn — nothing about the booking
         # changed), got flagged as a fresh fabrication anyway, since this
         # check only ever looks at THIS turn's tool_calls_made. Comparing
-        # against the real confirmed slot (see _confirmed_booking_slot,
+        # against the real confirmed slot (see confirmed_booking_slot,
         # set in _token_stream's DeterministicSpokenEvent handling) lets a
         # truthful recap of THAT exact slot through without disabling the
         # check for the rest of the call — confirmed live, separately
@@ -980,14 +1070,53 @@ class PipelineConversationHandler:
 
         if self._transcripts is not None:
             self._transcripts.record_turn(
-                session_id, stt_result.text, stt_result.confidence,
+                session_id, user_text, confidence,
                 assistant_text, cancel_event.is_set(),
                 latency=TurnLatency(
                     stt_ms=stt_ms, llm_ms=llm_ms, tts_ms=tts_ms, voice_to_voice_ms=voice_to_voice_ms,
-                    stt_engine=type(self._stt).__name__, llm_engine=type(self._llm).__name__,
-                    tts_engine=type(self._tts).__name__,
+                    # Naming an engine that never ran is worse than naming
+                    # none: a typed turn transcribed nothing and spoke
+                    # nothing, and call analytics shouldn't read as if it did.
+                    stt_engine=None if self._text_only else type(self._stt).__name__,
+                    llm_engine=type(self._llm).__name__,
+                    tts_engine=None if self._text_only else type(self._tts).__name__,
                 ),
+                # The node as of the END of the turn: if the model
+                # transitioned mid-turn, it generated this reply under the
+                # new node's prompt, so that is the stage that said it.
+                node_id=self._workflow.node.id,
+                node_name=self._workflow.node.name,
             )
+
+        # In a chat session nothing above produced audio, so the reply the
+        # model actually generated is delivered here instead. One message
+        # per turn, after the tool calls and any mid-turn transition have
+        # settled, so the text matches what a caller would have heard.
+        if self._text_only and assistant_text and not cancel_event.is_set():
+            any_audio = True
+            yield HandlerResponse(agent_text=assistant_text)
+
+        # Report the transition (if any) before the turn's terminal events —
+        # the editor's canvas should light up the node that just spoke, even
+        # on a turn that also ends the call.
+        node_changed = self._take_node_changed()
+        if node_changed is not None:
+            yield HandlerResponse(node_changed=node_changed)
+
+        # Reaching an `end` node ends the call the same way the [[END_CALL]]
+        # token does — one teardown path, not two.
+        ended_on_end_node = self._workflow.pending_end
+        if ended_on_end_node:
+            end_call = True
+        elif end_call:
+            # The model emitted [[END_CALL]] from a node that is not an end
+            # node. That instruction is appended to every node's prompt on
+            # purpose — it is the safety net for a caller who says goodbye
+            # where no edge covers it, and without it the call would hang on
+            # until max_call_duration_s. But it skips the end node that would
+            # have carried the disposition, so the runner records that the
+            # call left the graph instead of reporting no outcome at all.
+            self._workflow.ended_off_graph = True
 
         # Phase 6: an LLM-emitted directive takes precedence over a pending
         # escalation-threshold trigger from an earlier turn — either way,
@@ -1026,6 +1155,13 @@ class PipelineConversationHandler:
                 if decision.accepted:
                     transfer_request = decision.request
                     self._session(session_id).transfer_requested = True
+            # Reaching a `transfer` node hands the call to the same transfer
+            # engine an LLM directive would — modelling handoff as a tool
+            # instead would route around transfer_engine, the caller-ID
+            # policy, and the gateway's own Transferring state.
+            if transfer_request is None:
+                transfer_request = await self._workflow_transfer(session_id)
+
             # Fall through to a pending escalation-accepted request whenever
             # the directive path produced nothing — including when a
             # directive WAS emitted but the engine rejected it as
@@ -1043,22 +1179,17 @@ class PipelineConversationHandler:
         # Also not if a transfer is about to happen instead (see comment
         # above) — ending the call would make the transfer unreachable.
         if end_call and not cancel_event.is_set() and transfer_request is None:
-            got_farewell_audio = False
-            if self._farewell_message:
-                # Scripted farewell — spoken verbatim as the turn's closing
-                # audio. The injected instruction told the LLM to reply with
-                # only the token, so this is normally the only speech; if the
-                # model spoke anyway, the script still plays after it
-                # (deterministic wording beats deduplication here).
-                async for chunk in self._synthesize_sentence_stream(self._farewell_message, session_id):
-                    got_farewell_audio = True
-                    yield HandlerResponse(tts_payloads=[chunk])
-            if not any_audio and not got_farewell_audio:
-                # Marker-only reply with no scripted line (or its synthesis
-                # failed): synthesize a fallback so the servicer actually
-                # has audio to key EndCall off of.
-                async for chunk in self._synthesize_sentence_stream(_FALLBACK_GOODBYE, session_id):
-                    yield HandlerResponse(tts_payloads=[chunk])
+            # The closing words are the end step's own — its prompt drove
+            # this turn's generation (the transition swaps history[0]
+            # mid-turn), so by here the goodbye is already streaming. There
+            # is no second, agent-level farewell to speak on top of it; that
+            # column existed to override the graph and is gone.
+            if not any_audio:
+                # Marker-only reply with nothing spoken (the model emitted
+                # [[END_CALL]] and no words): synthesize a fallback so the
+                # servicer actually has audio to key EndCall off of.
+                async for response in self._speak(_FALLBACK_GOODBYE, session_id):
+                    yield response
             yield HandlerResponse(
                 end_call=True,
                 end_call_grace_period_ms=self._goodbye_grace_period_ms,
@@ -1066,23 +1197,17 @@ class PipelineConversationHandler:
 
         if transfer_request is not None:
             # A fabrication-triggered transfer always gets its own specific
-            # line (overrides whatever generic transfer_announcement this
-            # agent has configured, if any) — see that constant's comment
-            # for why a silent/generic handoff right after a false "booked"
-            # claim reads as the system being broken.
-            announcement = (
-                _BOOKING_FABRICATION_TRANSFER_ANNOUNCEMENT
-                if self._session(session_id).fabrication_triggered_transfer
-                else self._transfer_announcement
-            )
-            self._session(session_id).fabrication_triggered_transfer = False
-            if announcement:
-                # Scripted announcement — yielded as this turn's TTS so
-                # the servicer holds the TransferRequest until it has
-                # actually played (see servicer.py's pending_transfer),
-                # exactly like an LLM-spoken acknowledgment would be.
-                async for chunk in self._synthesize_sentence_stream(announcement, session_id):
-                    yield HandlerResponse(tts_payloads=[chunk])
+            # line — see that constant's comment for why a silent/generic
+            # handoff right after a false "booked" claim reads as the
+            # system being broken. Workflow transfer nodes / LLM-directive
+            # transfers already spoke their acknowledgment via the node's
+            # own prompt or the model's reply.
+            if self._session(session_id).fabrication_triggered_transfer:
+                self._session(session_id).fabrication_triggered_transfer = False
+                async for response in self._speak(
+                    _BOOKING_FABRICATION_TRANSFER_ANNOUNCEMENT, session_id,
+                ):
+                    yield response
             yield HandlerResponse(transfer_request=transfer_request)
 
     async def on_cancel(self, session_id: str) -> None:
@@ -1090,6 +1215,26 @@ class PipelineConversationHandler:
 
     async def on_session_end(self, session_id: str, reason: str,
                              final_state: str | None = None) -> None:
+        # Before the transcript writes below — record_workflow_outcome has
+        # to land on the calls row while TranscriptBuilder's per-session
+        # write chain is still alive (end_call() drops it).
+        #
+        # Bounded: ConversationSession.close() and the servicer both await
+        # this with no timeout of their own, so an unbounded extraction
+        # round-trip here would hold the gRPC stream (and the calls row's
+        # finalization) open for its full timeout after the caller has
+        # already hung up. A missed final extraction is analytics; a call
+        # that takes 8 seconds to disappear from the live list is not.
+        try:
+            await asyncio.wait_for(
+                self._finish_workflow(session_id), timeout=_FINISH_WORKFLOW_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "Workflow finalization timed out after %.1fs session=%s — "
+                "the call's path and disposition may be incomplete",
+                _FINISH_WORKFLOW_TIMEOUT_S, session_id,
+            )
         # Requirement: transfer-failure recovery turns are recorded in
         # short-term memory (history) immediately, in on_transfer_failed(),
         # but their transcript *persistence* is deferred until now — normal
@@ -1109,11 +1254,16 @@ class PipelineConversationHandler:
         except Exception:
             log.exception("STT cancel_stream failed session=%s", session_id)
 
-    def _decision_context(self, session_id: str) -> DecisionContext:
+    def _decision_context(
+        self, session_id: str, destination_override: str | None = None,
+    ) -> DecisionContext:
+        """destination_override is a workflow transfer node's own
+        destination (see docs/workflow.md §2.3) — it replaces the agent-wide
+        default for that one decision and nothing else."""
         return DecisionContext(
             session_id=session_id, tenant_id=self._tenant_id, call_id=self._call_id,
             transfer_type=self._transfer_type_default,
-            transfer_destination=self._transfer_destination_default,
+            transfer_destination=destination_override or self._transfer_destination_default,
             escalation_threshold=self._escalation_threshold,
             already_requested=self._session(session_id).transfer_requested,
             caller_id_policy=self._caller_id_policy,
@@ -1122,6 +1272,80 @@ class PipelineConversationHandler:
             caller_number=self._caller_number,
             waiting_experience=self._waiting_experience,
         )
+
+    # ── Workflow helpers ─────────────────────────────────────────────────
+
+    def _take_node_changed(self) -> NodeChanged | None:
+        """Whether the active node moved since the last time this was
+        asked. Diffed rather than pushed from the runner, so the runner
+        keeps knowing nothing about gRPC messages or who is watching."""
+        node = self._workflow.node
+        if node.id == self._last_reported_node_id:
+            return None
+        self._last_reported_node_id = node.id
+        return NodeChanged(
+            node_id=node.id, node_name=node.name, node_type=node.type,
+            via=self._workflow.last_transition,
+        )
+
+    def _refresh_node_prompt(self, history: list[ChatMessage]) -> None:
+        """history[0] is the active node's prompt, refreshed every turn —
+        the node may have changed last turn, and its prompt is re-rendered
+        with whatever variables have been extracted since. _trim_history
+        already preserves history[0], so this is a one-slot mutation, not a
+        context rework."""
+        prompt = ChatMessage(role="system", content=self._workflow.system_prompt())
+        if history and history[0].role == "system":
+            history[0] = prompt
+        else:
+            history.insert(0, prompt)
+
+    async def _workflow_transfer(self, session_id: str) -> TransferRequest | None:
+        node = self._workflow.pending_transfer
+        if node is None:
+            return None
+        self._workflow.pending_transfer = None
+        # A destination that reads {{ some_variable }} cannot be resolved
+        # against a value still in flight — flush first (see
+        # VariableExtractor.flush).
+        await self._extractor.flush()
+        destination = self._workflow.render(node.transfer_destination or "") or None
+        decision = self._transfer_engine.evaluate(
+            self._decision_context(session_id, destination_override=destination),
+            TransferTrigger(
+                type=TriggerType.WORKFLOW, workflow_reason=f"workflow_node:{node.name}",
+            ),
+        )
+        if not decision.accepted:
+            log.warning(
+                "Workflow transfer node %r rejected: %s session=%s",
+                node.name, decision.rejection_reason, session_id,
+            )
+            return None
+        self._session(session_id).transfer_requested = True
+        return decision.request
+
+    async def _finish_workflow(self, session_id: str) -> None:
+        """One final extraction pass on whatever node the call ended in,
+        then the call's path and outcome. Idempotent by way of
+        VariableExtractor's own guard — several teardown paths converge
+        here (caller hangs up, agent ends, max duration, transfer
+        completes) and without that they race to write the same row."""
+        self._summarizer.cancel()
+        try:
+            await self._extractor.extract_final(
+                self._workflow.node, self._get_history(session_id),
+            )
+            await self._extractor.flush()
+        except Exception:
+            log.exception("Workflow final extraction failed session=%s", session_id)
+        if self._transcripts is not None:
+            self._transcripts.record_workflow_outcome(
+                session_id,
+                nodes_visited=self._workflow.visited,
+                disposition=self._workflow.disposition,
+                extracted_variables=self._workflow.variables,
+            )
 
     def record_guardrail_violation(self, session_id: str) -> TransferRequest | None:
         """
@@ -1197,8 +1421,10 @@ class PipelineConversationHandler:
         self._session_finalizer.discard_pending_summary(session_id)
 
         history = self._get_history(session_id)
-        if self._system_prompt and not history:
-            history.append(ChatMessage(role="system", content=self._system_prompt))
+        # Same one-slot refresh as a normal turn: a recovery turn must run
+        # under the node the call is actually in, not whatever history[0]
+        # happened to hold.
+        self._refresh_node_prompt(history)
 
         # AgentRuntime (the LLM call below) receives the structured system
         # event — see _build_transfer_failed_system_event's doc comment for
@@ -1214,7 +1440,7 @@ class PipelineConversationHandler:
         any_audio = False
         try:
             async for chunk, tts_audio, _end_call in self._llm_to_tts(
-                messages_for_llm, cancel_event, session_id, directives
+                messages_for_llm, cancel_event, session_id, directives, store=history
             ):
                 full_response.append(chunk)
                 if tts_audio:
@@ -1231,8 +1457,8 @@ class PipelineConversationHandler:
             # LLM produced nothing usable — never leave dead air, same
             # reasoning as _FALLBACK_GOODBYE above.
             assistant_text = _TRANSFER_FAILED_FALLBACK
-            async for chunk in self._synthesize_sentence_stream(assistant_text, session_id):
-                yield HandlerResponse(tts_payloads=[chunk])
+            async for response in self._speak(assistant_text, session_id):
+                yield response
 
         # Recorded as a normal assistant turn (memory) — no matching
         # "user" turn is stored, same asymmetry RAG-augmented turns already
@@ -1243,7 +1469,7 @@ class PipelineConversationHandler:
 
         # Requirement: do not persist memory immediately — buffer this turn
         # and only write it during normal SessionEnd (see on_session_end()).
-        # Short-term memory (history, above) already happened; this is
+        # Short-term memory (session history above) already happened; this is
         # about deferring the transcript *persistence* specifically.
         self._session(session_id).pending_recovery_turns.append((
             f"[transfer_failed: {reason}]", assistant_text, cancel_event.is_set(),
@@ -1293,9 +1519,13 @@ class PipelineConversationHandler:
     # ── Internal ───────────────────────────────────────────────────────────────
 
     async def _token_stream(
-        self, history: list[ChatMessage], session_id: str, cancel_event: asyncio.Event,
+        self,
+        history: list[ChatMessage],
+        session_id: str,
+        cancel_event: asyncio.Event,
         tool_calls_made: list[str],
-    ) -> AsyncGenerator[str | ToolCallStartedEvent, None]:
+        store: list[ChatMessage] | None = None,
+    ) -> AsyncGenerator[str | ToolCallStartedEvent | LocalToolCompletedEvent, None]:
         """Token stream, identical shape to self._llm.generate() except for
         one addition — the seam that makes the rest of _llm_to_tts (sentence
         splitting, directive parsing) mostly unaware tool-calling exists.
@@ -1325,14 +1555,28 @@ class PipelineConversationHandler:
         if just_confirmed:
             self._session(session_id).phone_number_confirmed = True
 
+        # A workflow turn additionally offers one in-process tool per
+        # outgoing edge of the active node (the transitions), and narrows
+        # the agent's DB-backed tools to the ones this node allows.
+        # Passed as callables, not values: a transition changes the active
+        # node mid-turn, and the orchestrator re-reads these after every
+        # local tool call so the rest of the turn gets the new node's tools
+        # rather than the ones it just left.
+        local_tools = lambda: self._workflow.local_tools(history, store)  # noqa: E731
+        only_tools = lambda: self._workflow.allowed_tool_names()       # noqa: E731
+
         async for event in self._tool_orchestrator.run_turn(
             self._agent_id or "", self._tenant_id, self._call_id, session_id, history,
             caller_number=self._caller_number, cancel_event=cancel_event,
             force_tool_name=force_tool_name,
             phone_number_confirmed=self._session(session_id).phone_number_confirmed,
+            local_tools=local_tools, only_tools=only_tools,
         ):
             if isinstance(event, ToolCallStartedEvent):
                 tool_calls_made.append(event.tool_name)
+                yield event
+                continue
+            if isinstance(event, LocalToolCompletedEvent):
                 yield event
                 continue
             if isinstance(event, DeterministicSpokenEvent):
@@ -1343,7 +1587,7 @@ class PipelineConversationHandler:
                 # check downstream is already correctly inert for THIS
                 # turn's text; no special-casing needed beyond getting it
                 # spoken. But record the real confirmed slot persistently
-                # too — see _confirmed_booking_slot's own comment for why
+                # too — see confirmed_booking_slot's own comment for why
                 # a later turn's truthful recap needs this to avoid a false
                 # fabrication flag, and why it must be the actual datetime,
                 # not just a boolean "a booking happened at some point."
@@ -1361,6 +1605,7 @@ class PipelineConversationHandler:
         session_id:   str,
         directives:   list[Directive],
         tool_calls_made: list[str] | None = None,
+        store:        list[ChatMessage] | None = None,
     ) -> AsyncGenerator[tuple[str, bytes, bool], None]:
         """
         Stream LLM tokens, buffer into sentences, synthesise each sentence.
@@ -1384,10 +1629,40 @@ class PipelineConversationHandler:
         text_buffer = ""  # directive-free text awaiting a sentence boundary
         if tool_calls_made is None:
             tool_calls_made = []
+        # Initialized before the loop, and carried by every yield below. The
+        # caller does `end_call = marker_seen` on EVERY item it receives (see
+        # on_speech_ended), so a branch yielding a literal False after the
+        # marker was already seen silently un-hangs-up the call — and the
+        # branches that did so (filler, transition speech) are exactly the
+        # ones that can fire in the same turn as an [[END_CALL]].
+        end_call = False
         try:
-            async for item in self._token_stream(history, session_id, cancel_event, tool_calls_made):
+            async for item in self._token_stream(
+                history, session_id, cancel_event, tool_calls_made, store,
+            ):
                 if cancel_event.is_set():
                     break
+                if isinstance(item, LocalToolCompletedEvent):
+                    # A workflow transition just happened. Speak its
+                    # bridging line now, during the model's round-trip to
+                    # the new node's prompt, instead of leaving dead air —
+                    # and barge-in-able like any other speech, since the
+                    # loop above checks cancel_event on every item.
+                    speech = self._workflow.pending_speech
+                    if speech:
+                        self._workflow.pending_speech = None
+                        if self._text_only:
+                            # _synthesize_sentence_stream is a no-op in a chat
+                            # session, so the words have to be yielded as text
+                            # or the bridging line vanishes entirely. Every
+                            # other scripted line goes through _speak() for
+                            # exactly this reason, and a workflow tested in the
+                            # chat panel has to show what a call would say.
+                            yield speech, b"", end_call
+                        else:
+                            async for chunk in self._synthesize_sentence_stream(speech, session_id):
+                                yield "", chunk, end_call
+                    continue
                 if isinstance(item, ToolCallStartedEvent):
                     # Rotates through _TOOL_CALL_FILLERS, gap-suppressed by
                     # _TOOL_CALL_FILLER_MIN_GAP_S — see both constants' own
@@ -1408,7 +1683,11 @@ class PipelineConversationHandler:
                                     "Tool-call filler spoken tool=%s phrase=%r session=%s",
                                     item.tool_name, phrase, session_id,
                                 )
-                            yield "", chunk, False
+                            yield "", chunk, end_call
+                        if self._text_only and not any_filler_chunk:
+                            # text_only: synthesis is a no-op — still surface
+                            # the filler as agent_text so chat sessions see it.
+                            yield phrase, b"", end_call
                     continue
                 token = item
                 result = DirectiveParser.parse(stream_buf.feed(token))
@@ -1433,10 +1712,14 @@ class PipelineConversationHandler:
         except Exception:
             log.exception("LLM streaming failed session=%s", session_id)
             if not cancel_event.is_set():
-                fallback_text = _FALLBACK_LLM_ERROR
+                # The text first and unconditionally: synthesis yields
+                # nothing in a text_only session (and can fail outright in a
+                # voice one), and the caller keys the whole turn off
+                # full_response — so gating the words on the audio would
+                # lose the apology entirely.
+                yield _FALLBACK_LLM_ERROR, b"", False
                 async for chunk in self._synthesize_sentence_stream(_FALLBACK_LLM_ERROR, session_id):
-                    yield fallback_text, chunk, False
-                    fallback_text = ""  # yielded once — see full_response.append(chunk) at the call site
+                    yield "", chunk, False
 
         # Whatever StreamBuffer still has pending never closed into a
         # complete tag — a false-positive lookalike (the model literally
@@ -1475,9 +1758,15 @@ class PipelineConversationHandler:
     async def _synthesize_sentence_stream(self, text: str, session_id: str) -> AsyncGenerator[bytes, None]:
         # The one shared boundary every text source reaches TTS through —
         # the LLM-token path already ran DirectiveParser.parse() upstream,
-        # but greeting/farewell_message/transfer_announcement/fallback
-        # strings never do (see strip_markdown_chars' docstring), so this
+        # but the greeting and the fixed fallback/filler strings never do
+        # (see strip_markdown_chars' docstring), so this
         # is where all of them get covered instead of at every call site.
+        if self._text_only:
+            # A chat session must not touch the TTS provider at all —
+            # loading a voice model takes seconds and produces audio nobody
+            # will play. Callers pair every synthesis site with _speak(),
+            # which emits the words themselves in this mode.
+            return
         text = strip_markdown_chars(text)
         # Forwards each chunk the TTS provider yields immediately — real
         # latency win only for a provider with genuine incremental
@@ -1489,6 +1778,24 @@ class PipelineConversationHandler:
                 yield chunk
         except Exception:
             log.exception("TTS streaming failed text=%r session=%s", text, session_id)
+
+    async def _speak(self, text: str, session_id: str) -> AsyncGenerator[HandlerResponse, None]:
+        """Deliver one fixed line to the caller — as synthesized audio on a
+        call, as text in a chat session. Every scripted line (greeting,
+        farewell, max-duration wrap-up, transfer announcement) goes through
+        here so none of them can be silently dropped in text mode."""
+        if self._text_only:
+            if text.strip():
+                yield HandlerResponse(agent_text=text)
+            return
+        async for chunk in self._synthesize_sentence_stream(text, session_id):
+            yield HandlerResponse(tts_payloads=[chunk])
+
+    def greeting_message(self) -> str:
+        """The opening line as text, for a text_only session. Pure — the
+        side effects (begin_call, the start node's delayed start) belong to
+        greeting(), which runs first either way."""
+        return self._workflow.greeting() or ""
 
     def _session(self, session_id: str) -> _SessionState:
         state = self._sessions.get(session_id)
@@ -1504,8 +1811,7 @@ class PipelineConversationHandler:
         return self._session(session_id).history
 
     def _trim_history(self, session_id: str) -> None:
-        state = self._session(session_id)
-        history = state.history
+        history = self._session(session_id).history
         # Preserve a leading system message so it is not silently sliced away
         # when the conversation grows past max_history turns.  Without this,
         # history[-N:] drops history[0] and the `if not history` guard on the
@@ -1513,4 +1819,10 @@ class PipelineConversationHandler:
         base = 1 if (history and history[0].role == "system") else 0
         max_msgs = self._max_history * 2 + base
         if len(history) > max_msgs:
-            state.history = history[:base] + history[-self._max_history * 2:]
+            # Spliced in place rather than rebound to a new list: a workflow
+            # call's background summarization holds a reference to this exact
+            # list and applies its result to it later (see
+            # ContextSummarizer._summarize). Rebinding would leave that
+            # summary mutating an orphan nobody reads — the work silently
+            # thrown away. Same content either way.
+            history[base:] = history[-self._max_history * 2:]

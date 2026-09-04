@@ -10,25 +10,48 @@ exists for the Admin UI's edit-by-id flow, where the id is already known.
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
+from libs.config_sdk.workflow import starter_graph
+
 from . import audit, cache, db
 
+# Operational settings only. Nothing the agent SAYS is here — that is the
+# graph's, and `workflow` is deliberately absent so no PATCH can slip an
+# unvalidated one onto a live agent (see workflows.py's module docstring).
 _UPDATABLE_FIELDS = {
-    "name", "greeting", "system_prompt", "goodbye_grace_ms", "language",
+    "name", "goodbye_grace_ms", "language",
     "stt_config_id", "llm_config_id", "tts_config_id",
     "transfer_type", "transfer_destination", "queue_id", "escalation_threshold",
     "caller_id_policy", "platform_did", "custom_caller_id",
     "transfer_waiting_experience",
-    "end_call_prompt", "transfer_prompt",
-    "farewell_message", "transfer_announcement",
     "status", "max_call_duration_s",
 }
 
 
 def _cache_key(tenant_slug: str, agent_slug: str) -> str:
     return f"agent:{tenant_slug}:{agent_slug}"
+
+_JSON_COLUMNS = ("workflow", "workflow_draft")
+
+
+def _row(row: Any) -> dict[str, Any]:
+    """One agents row as a dict, with its JSONB columns decoded.
+
+    Every read path goes through here. `SELECT *`/`RETURNING *` hands
+    `workflow` back as a string (see db.json_col), and admin-ui types it as
+    an object — untouched, `stepCount`'s `g?.nodes?.length` is undefined on
+    the /workflows list and the settings page's `agent?.workflow?.nodes`
+    banner never renders.
+    """
+    out = dict(row)
+    for column in _JSON_COLUMNS:
+        if column in out:
+            out[column] = db.json_col(out[column])
+    return out
+
 
 
 async def get_agent(tenant_slug: str, agent_slug: str) -> dict[str, Any] | None:
@@ -45,7 +68,7 @@ async def get_agent(tenant_slug: str, agent_slug: str) -> dict[str, Any] | None:
     if row is None:
         return None
 
-    result = dict(row)
+    result = _row(row)
     await cache.set_json(_cache_key(tenant_slug, agent_slug), result)
     return result
 
@@ -55,7 +78,7 @@ async def get_agent_by_id(agent_id: Any) -> dict[str, Any] | None:
     row = await pool.fetchrow(
         "SELECT * FROM agents WHERE id = $1 AND deleted_at IS NULL", agent_id,
     )
-    return dict(row) if row is not None else None
+    return _row(row) if row is not None else None
 
 
 async def list_agents(tenant_id: Any) -> list[dict[str, Any]]:
@@ -64,7 +87,7 @@ async def list_agents(tenant_id: Any) -> list[dict[str, Any]]:
         "SELECT * FROM agents WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY name",
         tenant_id,
     )
-    return [dict(row) for row in rows]
+    return [_row(row) for row in rows]
 
 
 _PROVIDER_ROLE_BY_FIELD = {
@@ -127,10 +150,33 @@ async def create_agent(
     stt_config_id: Any | None = None,
     llm_config_id: Any | None = None,
     tts_config_id: Any | None = None,
+    workflow: dict[str, Any] | None = None,
     tenant_slug: str | None = None,
     user_id: Any | None = None,
     user_email: str | None = None,
 ) -> dict[str, Any]:
+    """An agent is born with a conversation graph — published, not just
+    drafted — in the same transaction as the row itself. There is no moment
+    where an agent exists without a flow to run, which is the whole point of
+    "the workflow IS the agent" (docs/workflow.md §9.1); it also removes the
+    two-call create the admin UI otherwise needs, where a failure between the
+    calls leaves a half-made agent behind.
+
+    `greeting` and `system_prompt` are not columns any more — they are the
+    text the starter graph is seeded with, landing on its start node and its
+    global node respectively. A caller-supplied `workflow` ignores them and
+    is validated first, exactly as a publish would be, so nothing
+    unvalidated ever reaches the `workflow` column.
+    """
+    # Deferred: workflows.py imports this module for its cache key, so a
+    # top-level import here would be a cycle. Creation is an agents concern;
+    # validation is a workflows one.
+    from .workflows import validate
+
+    graph = workflow if workflow is not None else starter_graph(greeting, system_prompt)
+    validate(graph)
+    graph_json = json.dumps(graph)
+
     pool = await db.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -140,13 +186,20 @@ async def create_agent(
             )
             row = await conn.fetchrow(
                 "INSERT INTO agents "
-                "(tenant_id, slug, name, greeting, system_prompt, "
-                "stt_config_id, llm_config_id, tts_config_id) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *",
-                tenant_id, slug, name, greeting, system_prompt,
-                stt_config_id, llm_config_id, tts_config_id,
+                "(tenant_id, slug, name, "
+                "stt_config_id, llm_config_id, tts_config_id, workflow, workflow_draft) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $7::jsonb) RETURNING *",
+                tenant_id, slug, name,
+                stt_config_id, llm_config_id, tts_config_id, graph_json,
             )
-            result = dict(row)
+            result = _row(row)
+            # Version 1, so the publish history starts where the agent does
+            # rather than at whatever the operator happens to publish first.
+            await conn.execute(
+                "INSERT INTO agent_workflow_versions (agent_id, version, graph, published_by, note) "
+                "VALUES ($1, 1, $2::jsonb, $3, $4)",
+                result["id"], graph_json, user_id, "created with the agent",
+            )
             await audit.write_audit(
                 conn,
                 entity_type="agent",

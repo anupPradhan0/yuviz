@@ -120,7 +120,9 @@ async def main() -> None:
             tenant_id=tenant["id"], slug=AGENT_SLUG, name="Default Assistant",
             greeting=GREETING, system_prompt=SYSTEM_PROMPT,
         )
-        print(f"created agent {AGENT_SLUG!r} ({agent['id']})")
+        # create_agent seeds and publishes the starter graph itself (no
+        # workflow= argument needed) — the agent is call-ready immediately.
+        print(f"created agent {AGENT_SLUG!r} ({agent['id']}) with a starter flow")
     else:
         print(f"agent {AGENT_SLUG!r} already exists ({agent['id']})")
 

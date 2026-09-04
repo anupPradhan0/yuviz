@@ -50,6 +50,7 @@ from .tools.policy_resolver import ToolPolicyResolver
 from .tools.provider_manager import ToolProviderManager
 from .tools.registry import ToolRegistry
 from .transcript_builder import TranscriptBuilder
+from .workflow import graph_for
 from .generated.voiceai.v1 import conversation_pb2_grpc as pb_grpc
 
 SERVICE_NAME = "voiceai.v1.ConversationService"
@@ -90,6 +91,7 @@ async def _prewarm_agents(
     http_config_repo: HttpConfigRepository,
     provider_registry: ProviderRegistry,
     config: IConfigProvider,
+    cfg: PipelineConfig,
 ) -> None:
     """Load every active agent's STT/LLM/TTS providers once, at startup, via
     the exact same resolve_handler_deps() path a real call uses — so the
@@ -139,6 +141,20 @@ async def _prewarm_agents(
             agent_slug = agent.get("slug")
             if not agent_slug:
                 continue
+            if not _enabled("STT") or not _enabled("TTS"):
+                # Either flag is enough to skip the whole prewarm, because
+                # resolve_handler_deps() below builds all three providers
+                # together and that is where the cost lives:
+                # _make_faster_whisper() awaits inst.load(), and KokoroTTS's
+                # constructor builds a KPipeline. There is no way to resolve
+                # one leg without paying for the other, so an "and" here
+                # made --no-stt on its own do nothing except move whisper's
+                # download from dev.sh into container startup. Whatever is
+                # still enabled loads lazily on its first real use, exactly
+                # as it did before prewarm existed.
+                log.info("prewarm: tenant=%s agent=%s skipped (stt=%s tts=%s)",
+                         tenant_slug, agent_slug, _enabled("STT"), _enabled("TTS"))
+                continue
             try:
                 resolved = await resolve_handler_deps(tenant_slug, agent_slug, provider_registry, config)
             except Exception:
@@ -147,6 +163,11 @@ async def _prewarm_agents(
                 log.warning("prewarm: tenant=%s agent=%s did not resolve — skipping", tenant_slug, agent_slug)
                 continue
             _, bundle = resolved
+            # Parse and cache the conversation graph too (see workflow.runner's
+            # graph_for): parsing per call is wasted work on the latency path,
+            # and a parse failure found at call time is a dropped call — here
+            # it is a log line and a fallback to the starter graph.
+            graph = graph_for(resolved[0])
             # Object construction != model loaded — Ollama needs a real
             # request first (see OllamaLLM.warm()). No-op for cloud LLMs.
             warm = getattr(bundle.llm, "warm", None)
@@ -155,7 +176,26 @@ async def _prewarm_agents(
                     await warm()
                 except Exception:
                     log.exception("prewarm: LLM warm() failed tenant=%s agent=%s", tenant_slug, agent_slug)
-            log.info("prewarm: tenant=%s agent=%s providers ready", tenant_slug, agent_slug)
+            # Synthesize one throwaway word per agent. Loading the TTS model
+            # is not enough: Kokoro fetches the *voice* file (af_sarah.pt and
+            # friends) from HuggingFace on its first actual synthesis, so
+            # without this the first real call pays a ~9s download before the
+            # greeting is heard — long enough that the webcall bridge's
+            # response watchdog gives up and the caller hears nothing at all
+            # (confirmed live 2026-08-28). Same reasoning as warming the STT
+            # model above; this just warms the half that only a real
+            # synthesis touches.
+            try:
+                async for _chunk in bundle.tts.synthesize_stream("Hello.", cfg.sample_rate):
+                    break
+            except Exception:
+                log.warning("prewarm: TTS warm-up failed tenant=%s agent=%s — the first call "
+                            "will pay the voice-load cost", tenant_slug, agent_slug, exc_info=True)
+            log.info(
+                "prewarm: tenant=%s agent=%s providers ready%s",
+                tenant_slug, agent_slug,
+                f", workflow graph parsed ({len(graph.nodes)} nodes)" if graph else "",
+            )
 
 
 async def serve(port: int, args: argparse.Namespace) -> None:
@@ -306,7 +346,6 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 runtime_config, bundle,
                 sample_rate=cfg.sample_rate,
                 max_history=cfg.max_history,
-                default_system_prompt=cfg.llm.system,
                 transcripts=transcripts,
                 tenant_id=ctx.tenant_id,
                 call_id=ctx.call_id,
@@ -316,6 +355,12 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 called_number=ctx.called_did,
                 knowledge=knowledge,
                 has_booking_tool=has_booking_tool,
+                # Admin-UI test calls only (see SessionOpenRequest) — a real
+                # call always runs the published graph.
+                use_workflow_draft=ctx.use_workflow_draft,
+                # Admin-UI chat test: skip STT/TTS entirely and answer in
+                # text. Never set by a real call.
+                text_only=ctx.text_only,
             )
 
     # grpc.aio.server() defaults to SO_REUSEPORT, which lets a second process
@@ -344,10 +389,10 @@ async def serve(port: int, args: argparse.Namespace) -> None:
              listen_addr, args.mode)
 
     async def _load_and_promote() -> None:
-        if stt is not None:
+        if stt is not None and _enabled("STT"):
             await stt.load()
         if args.mode != "echo":
-            await _prewarm_agents(http_config_repo, provider_registry, config)
+            await _prewarm_agents(http_config_repo, provider_registry, config, cfg)
         health_servicer.set(SERVICE_NAME, health_pb2.HealthCheckResponse.SERVING)
         log.info("ConversationService SERVING")
 

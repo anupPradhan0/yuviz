@@ -31,7 +31,6 @@ from ..models import (
     ConversationInfo,
     MediaInfo,
     Policies,
-    Prompt,
     ProviderConfig,
     ProviderConfigs,
     RuntimeConfig,
@@ -51,6 +50,16 @@ def _parse_dt(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value
     return datetime.fromisoformat(value)
+
+
+def _parse_json(value: Any) -> dict[str, Any] | None:
+    """Like _parse_extra but preserves None — for agents.workflow, where
+    "no workflow" (single-prompt agent) and "an empty graph" are different
+    things and only the first is legal."""
+    import json
+    if value is None or value == "":
+        return None
+    return json.loads(value) if isinstance(value, str) else value
 
 
 def _parse_extra(value: Any) -> dict[str, Any]:
@@ -94,8 +103,6 @@ def _agent_from_dict(row: dict[str, Any]) -> Agent:
         slug=row["slug"],
         tenant_id=str(row["tenant_id"]),
         name=row["name"],
-        greeting=row.get("greeting", ""),
-        system_prompt=row.get("system_prompt", ""),
         goodbye_grace_ms=row.get("goodbye_grace_ms", 3000),
         stt_config_id=row.get("stt_config_id"),
         llm_config_id=row.get("llm_config_id"),
@@ -112,11 +119,10 @@ def _agent_from_dict(row: dict[str, Any]) -> Agent:
         platform_did=row.get("platform_did"),
         custom_caller_id=row.get("custom_caller_id"),
         transfer_waiting_experience=row.get("transfer_waiting_experience", "announcement_moh"),
-        end_call_prompt=row.get("end_call_prompt"),
-        transfer_prompt=row.get("transfer_prompt"),
-        farewell_message=row.get("farewell_message"),
-        transfer_announcement=row.get("transfer_announcement"),
         max_call_duration_s=row.get("max_call_duration_s"),
+        # JSONB — same asyncpg-returns-a-string caveat as `extra` above.
+        workflow=_parse_json(row.get("workflow")),
+        workflow_draft=_parse_json(row.get("workflow_draft")),
     )
 
 
@@ -197,11 +203,8 @@ class CacheAsideConfigProvider:
                 stt=providers["stt"], llm=providers["llm"], tts=providers["tts"],
             ),
             conversation=ConversationInfo(
-                greeting=agent.greeting, system_prompt=agent.system_prompt,
-                end_call_prompt=agent.end_call_prompt,
-                transfer_prompt=agent.transfer_prompt,
-                farewell_message=agent.farewell_message,
-                transfer_announcement=agent.transfer_announcement,
+                workflow=agent.workflow,
+                workflow_draft=agent.workflow_draft,
             ),
             media=MediaInfo(
                 voice=providers["tts"].voice,
@@ -241,11 +244,6 @@ class CacheAsideConfigProvider:
             resolved_at=datetime.now(timezone.utc),
         )
 
-    async def get_prompt(self, tenant_slug: str, agent_slug: str) -> Prompt | None:
-        agent = await self.get_agent(tenant_slug, agent_slug)
-        if agent is None:
-            return None
-        return Prompt(greeting=agent.greeting, system_prompt=agent.system_prompt)
 
     async def get_voice(self, tenant_slug: str, agent_slug: str) -> str | None:
         runtime_config = await self.get_runtime_config(tenant_slug, agent_slug)

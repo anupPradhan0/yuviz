@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import uuid
 
+import json
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -123,7 +125,44 @@ class TestAgentEndpoints:
 
         resp = await client.get(f"/tenants/{test_tenant['slug']}/agents/support-agent")
         assert resp.status_code == 200
-        assert resp.json()["greeting"] == "Hi!"
+        # Created with a flow already running — one call, no follow-up
+        # publish — and the greeting is on its start step, not a column.
+        # asyncpg hands JSONB back as a string on this path; the API layer
+        # doesn't re-encode it, so the test decodes it the way a client would.
+        graph = resp.json()["workflow"]
+        if isinstance(graph, str):
+            graph = json.loads(graph)
+        assert graph is not None
+        start = next(n for n in graph["nodes"] if n["type"] == "start")
+        assert start["data"]["greeting"] == "Hi!"
+
+    async def test_creating_the_same_slug_twice_is_409_not_500(self, client, test_tenant):
+        """The admin UI derives the slug from the name, so two agents named
+        the same thing collide here — that is the caller's mistake to fix,
+        not a server fault."""
+        body = {"slug": "dupe-agent", "name": "Dupe"}
+        assert (await client.post(f"/tenants/{test_tenant['slug']}/agents", json=body)).status_code == 201
+        resp = await client.post(f"/tenants/{test_tenant['slug']}/agents", json=body)
+        assert resp.status_code == 409
+        assert "already taken" in resp.json()["detail"]
+
+    async def test_create_agent_rejects_an_invalid_graph(self, client, test_tenant):
+        """Same validation gate as publish, in the same response shape — a
+        graph that cannot run must not get in through create."""
+        resp = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={
+                "slug": "bad-graph", "name": "Bad",
+                "workflow": {
+                    "version": 1,
+                    "nodes": [{"id": "n1", "type": "start", "position": {"x": 0, "y": 0},
+                               "data": {"name": "greeting", "prompt": "Hi."}}],
+                    "edges": [],
+                },
+            },
+        )
+        assert resp.status_code == 400
+        assert any(e["id"] == "n1" for e in resp.json()["errors"])
 
     async def test_create_agent_under_unknown_tenant_is_404(self, client):
         resp = await client.post(

@@ -104,8 +104,6 @@ class Agent:
     slug: str
     tenant_id: str
     name: str
-    greeting: str
-    system_prompt: str
     goodbye_grace_ms: int
     stt_config_id: str | None
     llm_config_id: str | None
@@ -118,18 +116,6 @@ class Agent:
     # cache_aside.py's get_runtime_config()). Defaults to None so every
     # existing construction site (that predates this field) still works.
     language: str | None = None
-    # Condition-clause overrides for the [[END_CALL]]/[[TRANSFER]] trigger
-    # instructions (agents.end_call_prompt/transfer_prompt); None/empty =
-    # pipeline.py's built-in defaults. Only the condition is configurable —
-    # token mechanics are fixed so custom prompts can't break parsing.
-    end_call_prompt: str | None = None
-    transfer_prompt: str | None = None
-    # Exact scripted lines the agent speaks when ending/transferring
-    # (agents.farewell_message/transfer_announcement) — synthesized
-    # deterministically by pipeline.py, never LLM-worded. None/empty =
-    # LLM chooses the wording, the pre-existing behavior.
-    farewell_message: str | None = None
-    transfer_announcement: str | None = None
     # Human escalation / transfer — mirrors agents.transfer_type/
     # transfer_destination/queue_id/escalation_threshold (database/schema.sql).
     # Defaults match the column defaults (transfer_type='none', the rest
@@ -151,6 +137,19 @@ class Agent:
     # Mirrors agents.max_call_duration_s — see Policies.max_call_duration_s's
     # own comment for what this controls. None = unlimited.
     max_call_duration_s: int | None = None
+    # The published conversation graph (agents.workflow), raw React Flow
+    # JSON — parsed into a WorkflowGraph by libs/config_sdk/workflow.py's
+    # parse_graph(). None means single-prompt agent, today's exact
+    # behavior: the whole workflow path is skipped. Deliberately carried as
+    # a dict, not a parsed graph: this SDK's models are plain row-shaped
+    # DTOs, and parsing belongs at the one place that can cache it by
+    # (agent_id, config_version) instead of per call (see
+    # services/conversation/__main__.py's prewarm).
+    workflow: dict[str, Any] | None = None
+    # agents.workflow_draft — the editor's autosave, NEVER read by a real
+    # call. Carried only so the admin UI's own test-call path can run an
+    # unpublished graph (see SessionOpenRequest.use_workflow_draft).
+    workflow_draft: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -176,16 +175,6 @@ class ToolSpec:
 
 
 @dataclass(frozen=True)
-class Prompt:
-    """Standalone return type for get_prompt() — the real call path
-    (agent_resolver.py) reads greeting/system_prompt off RuntimeConfig.
-    conversation instead; this exists for a future consumer that wants just
-    the prompt without paying for the full runtime-config assembly."""
-    greeting: str
-    system_prompt: str
-
-
-@dataclass(frozen=True)
 class ProviderConfigs:
     """The three resolved-but-not-yet-instantiated provider configs for a
     call — input to services.conversation's ProviderRegistry.resolve(),
@@ -201,16 +190,16 @@ class ProviderConfigs:
 
 @dataclass(frozen=True)
 class ConversationInfo:
-    greeting: str
-    system_prompt: str
+    """Everything the agent says now lives in the graph — the greeting on its
+    start node, the always-on instruction on its global node, the closing
+    words on its end nodes (docs/workflow.md §9.1). What used to sit beside
+    the graph here (greeting, system_prompt, end_call_prompt,
+    farewell_message, transfer_prompt, transfer_announcement) was a second
+    place to look and is gone."""
     goodbye_prompt: str | None = None    # no schema column yet — see module docstring
     fallback_prompt: str | None = None   # no schema column yet — see module docstring
-    # Condition-clause overrides (see Agent.end_call_prompt/transfer_prompt).
-    end_call_prompt: str | None = None
-    transfer_prompt: str | None = None
-    # Scripted spoken lines (see Agent.farewell_message/transfer_announcement).
-    farewell_message: str | None = None
-    transfer_announcement: str | None = None
+    workflow: dict[str, Any] | None = None
+    workflow_draft: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

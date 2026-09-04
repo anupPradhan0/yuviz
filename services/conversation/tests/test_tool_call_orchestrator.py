@@ -20,7 +20,7 @@ from services.conversation.tools.llm_adapter import (
 from services.conversation.tools.orchestrator import ToolCallOrchestrator
 from services.conversation.tools.policy_resolver import ResolvedToolPolicy
 from services.conversation.tools.registry import ToolRegistry
-from services.conversation.tools.types import ToolResult, ToolStatus
+from services.conversation.tools.types import ToolDefinition, ToolResult, ToolStatus
 
 
 def _policy(tool_name: str = "book_appointment") -> ResolvedToolPolicy:
@@ -36,7 +36,13 @@ class _FakePolicyResolver:
     def __init__(self, policies: list[ResolvedToolPolicy]) -> None:
         self._policies = policies
 
-    async def enabled_tools(self, agent_id: str) -> list[ResolvedToolPolicy]:
+    async def enabled_tools(
+        self, agent_id: str, only: list[str] | None = None,
+    ) -> list[ResolvedToolPolicy]:
+        # `only` (a workflow node's tool list) is narrowing done by the real
+        # resolver — see test_policy_resolver.py; this double just records
+        # that the orchestrator passes it through.
+        self.last_only = only
         return self._policies
 
 
@@ -486,3 +492,178 @@ async def test_no_cancel_event_behaves_exactly_as_before():
         ToolCallStartedEvent(tool_name="book_appointment"),
         TokenEvent(text="You're booked!"),
     ]
+
+
+# ── local_tools — in-process tools (workflow transitions are the first
+# user; nothing here knows that) ────────────────────────────────────────
+
+
+def _local(name: str = "caller_verified"):
+    """Returns (local_tools mapping, calls list) for one no-op local tool."""
+    calls: list[dict] = []
+
+    async def handler(args: dict) -> ToolResult:
+        calls.append(args)
+        return ToolResult(status=ToolStatus.SUCCESS, payload={"status": "done"})
+
+    definition = ToolDefinition(
+        name=name, description="The caller confirmed who they are.",
+        parameters_schema={"type": "object", "properties": {}},
+    )
+    return {name: (definition, handler)}, calls
+
+
+async def test_a_local_tool_executes_without_touching_policy_or_provider():
+    llm = _ScriptedLLM([
+        [ToolCallEvent(tool_call_id="c1", tool_name="caller_verified", arguments={})],
+        [TokenEvent(text="Thanks!")],
+    ])
+    local_tools, calls = _local()
+    provider_manager = _FakeProviderManager()
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([]),   # no DB-backed tools at all
+        provider_manager=provider_manager,
+        executor_registry=ExecutorRegistry(),      # nothing registered
+        metrics=None,
+    )
+
+    history = [ChatMessage(role="user", content="my dob is...")]
+    events = [
+        e async for e in orchestrator.run_turn(
+            "agent1", "t1", "c1", "s1", history, local_tools=local_tools,
+        )
+    ]
+
+    assert calls == [{}]                        # the handler ran
+    assert TokenEvent(text="Thanks!") in events
+    # No spoken filler: an in-process pointer move has no round-trip to
+    # cover, unlike a real API call.
+    assert not any(isinstance(e, ToolCallStartedEvent) for e in events)
+    # The result was folded into history exactly like any other tool's.
+    assert json.loads(history[-1].content)["status"] == "done"
+
+
+async def test_a_local_tool_does_not_consume_a_tool_iteration():
+    # max_tool_iterations=1: if the local call counted, the second
+    # generation would have its tools yanked and the real tool could never
+    # run. A turn that transitions AND books has to be able to do both.
+    llm = _ScriptedLLM([
+        [ToolCallEvent(tool_call_id="c1", tool_name="caller_verified", arguments={})],
+        [ToolCallEvent(tool_call_id="c2", tool_name="book_appointment",
+                       arguments={"requested_datetime": "2026-01-01T10:00:00Z"})],
+        [TokenEvent(text="Booked.")],
+    ])
+    local_tools, _ = _local()
+    executor = _FixedExecutor(ToolResult(status=ToolStatus.SUCCESS, payload={"booked": True}))
+    registry = ExecutorRegistry()
+    registry.register("book_appointment", lambda provider: executor)
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([_policy()]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=registry,
+        max_tool_iterations=1,
+    )
+
+    events = [
+        e async for e in orchestrator.run_turn(
+            "agent1", "t1", "c1", "s1",
+            [ChatMessage(role="user", content="book me in")], local_tools=local_tools,
+        )
+    ]
+
+    assert len(executor.calls) == 1
+    assert TokenEvent(text="Booked.") in events
+
+
+async def test_local_tool_schemas_are_offered_alongside_policy_tools():
+    llm = _ScriptedLLM([[TokenEvent(text="hi")]])
+    local_tools, _ = _local()
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([_policy()]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=ExecutorRegistry(),
+    )
+    seen: list[list[dict]] = []
+    original = llm.generate_with_tools
+
+    async def _record(messages, schemas):
+        seen.append(schemas)
+        async for e in original(messages, schemas):
+            yield e
+
+    llm.generate_with_tools = _record
+
+    [e async for e in orchestrator.run_turn(
+        "agent1", "t1", "c1", "s1", [ChatMessage(role="user", content="hi")],
+        local_tools=local_tools,
+    )]
+
+    assert [s["name"] for s in seen[0]] == ["book_appointment", "caller_verified"]
+
+
+async def test_local_tools_are_capped_so_a_cyclic_workflow_cannot_spin_forever():
+    # A workflow may legally contain a cycle, so a model that keeps calling
+    # transitions would walk it forever inside ONE turn — and
+    # max_call_duration_s can't catch that, because it's checked between
+    # turns and the turn never ends.
+    local_tools, calls = _local()
+    llm = _ScriptedLLM(
+        [[ToolCallEvent(tool_call_id=f"c{i}", tool_name="caller_verified", arguments={})]
+         for i in range(3)]
+        + [[TokenEvent(text="Anyway.")]]
+    )
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=ExecutorRegistry(),
+        max_local_tool_calls=3,
+    )
+
+    events = [
+        e async for e in orchestrator.run_turn(
+            "agent1", "t1", "c1", "s1",
+            [ChatMessage(role="user", content="hi")], local_tools=local_tools,
+        )
+    ]
+
+    # Capped, then the turn still finishes in words rather than stalling.
+    assert len(calls) == 3
+    assert TokenEvent(text="Anyway.") in events
+
+
+async def test_a_callable_tool_source_is_re_read_after_every_local_call():
+    # The workflow case: executing a transition changes which tools exist.
+    first, _ = _local("step_one")
+    second, _ = _local("step_two")
+    sets = [first, second, second]
+    llm = _ScriptedLLM([
+        [ToolCallEvent(tool_call_id="c1", tool_name="step_one", arguments={})],
+        [TokenEvent(text="done")],
+    ])
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=ExecutorRegistry(),
+    )
+    seen: list[list[str]] = []
+    original = llm.generate_with_tools
+
+    async def _record(messages, schemas):
+        seen.append([s["name"] for s in (schemas or [])])
+        async for e in original(messages, schemas):
+            yield e
+
+    llm.generate_with_tools = _record
+
+    [e async for e in orchestrator.run_turn(
+        "agent1", "t1", "c1", "s1", [ChatMessage(role="user", content="hi")],
+        local_tools=lambda: sets.pop(0),
+    )]
+
+    assert seen[0] == ["step_one"]
+    assert seen[1] == ["step_two"]

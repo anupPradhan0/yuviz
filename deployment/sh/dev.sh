@@ -119,6 +119,7 @@ while [ $# -gt 0 ]; do
         --timeout) TIMEOUT="${2:?--timeout needs a value in seconds}"; shift ;;
         --version) ACTION="version" ;;
         -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) fail "unknown flag: $1 (try --help)"; exit 2 ;;
     esac
     shift
@@ -484,6 +485,7 @@ case "$OLLAMA_MODEL" in *:*) WANT_TAG="$OLLAMA_MODEL" ;; *) WANT_TAG="${OLLAMA_M
 
 if [ "$OLLAMA_MODE" = "off" ]; then
     ok "LLM disabled — skipping ${OLLAMA_MODEL} (and the CPU it would burn)"
+    ok "LLM disabled — skipping llama3.2 (~2 GB, and the CPU it would burn)"
 elif [ "$OLLAMA_MODE" = "container" ]; then
     deadline=$(( $(date +%s) + TIMEOUT ))
     until compose "${COMPOSE_PROFILE[@]}" exec -T ollama ollama list >/dev/null 2>&1; do
@@ -631,6 +633,7 @@ async def main():
             r = await c.post(f"{url}/api/generate", json={
                 "model": os.environ.get("OLLAMA_MODEL", "llama3.2"),
                 "prompt": "Say hello in three words.", "stream": False})
+                "model": "llama3.2", "prompt": "Say hello in three words.", "stream": False})
             r.raise_for_status()
             out = (r.json().get("response") or "").strip()
         if not out:
@@ -658,6 +661,13 @@ done
 # whether the row is there.
 if [ "$OLLAMA_MODE" = "off" ]; then
     ok "database seeded"
+    SEEDED_URL=""
+else
+SEEDED_URL=$(compose "${COMPOSE_PROFILE[@]}" exec -T postgres \
+    psql -U "${POSTGRES_USER:-voiceai}" -d "${POSTGRES_DB:-voiceai}" -tAc \
+    "select extra->>'base_url' from provider_configs where engine='ollama' limit 1" 2>/dev/null | tr -d '[:space:]' || echo "")
+if [ -n "$SEEDED_URL" ] && [ "$SEEDED_URL" != "$OLLAMA_URL" ]; then
+    warn "seeded LLM url is '$SEEDED_URL' but this run uses '$OLLAMA_URL' — reseed with --clean"
 else
     SEEDED_URL=$(compose "${COMPOSE_PROFILE[@]}" exec -T postgres \
         psql -U "${POSTGRES_USER:-voiceai}" -d "${POSTGRES_DB:-voiceai}" -tAc \
@@ -668,6 +678,8 @@ else
         ok "database seeded (llm url: ${SEEDED_URL:-$OLLAMA_URL})"
     fi
 fi
+fi
+[ "$OLLAMA_MODE" = "off" ] && ok "database seeded"
 
 # ── [7/7] ─────────────────────────────────────────────────────────────────────
 leg_line() {
@@ -683,6 +695,8 @@ off_hint() {
     [ "$WANT_LLM" = "0" ] && printf '  No local LLM is running: add a cloud provider key in the Admin UI\n  under AI & Voice, then point the agent at it.\n'
     { [ "$WANT_STT" = "0" ] || [ "$WANT_TTS" = "0" ]; } && printf '  The default agent still uses Whisper/Kokoro, so a test call downloads\n  that model mid-call unless you repoint it first.\n'
     printf '%s' "$RESET"
+    [ "$WANT_LLM" = "1" ] && return 0
+    printf '\n  %sNo local LLM is running. Add a cloud provider key in the Admin UI\n  under AI & Voice, then point the agent at it.%s' "$DIM" "$RESET"
 }
 
 phase 7 "Ready!"

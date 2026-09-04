@@ -8,12 +8,22 @@ import { clearToken, getToken } from "./auth";
 const BASE_URL = process.env.NEXT_PUBLIC_CONFIG_SERVICE_URL || "http://localhost:8000";
 
 export class ApiError extends Error {
-  constructor(public status: number, public detail: string) {
+  /** `body` is the whole parsed error response, for endpoints that return
+   *  structured detail alongside the message (workflow publish returns an
+   *  `errors` array the editor paints onto the canvas). Undefined when the
+   *  response wasn't JSON. */
+  constructor(
+    public status: number,
+    public detail: string,
+    public body?: Record<string, unknown>,
+  ) {
     super(detail);
   }
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+// Exported so lib/workflowApi.ts reuses the same auth header, error
+// shaping and 401-redirect rather than repeating them.
+export async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const token = getToken();
   const res = await fetch(`${BASE_URL}${path}`, {
     ...options,
@@ -25,9 +35,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     let detail = res.statusText;
+    let body: Record<string, unknown> | undefined;
     try {
-      const body = await res.json();
-      detail = body.detail || detail;
+      body = await res.json();
+      detail = (body?.detail as string) || detail;
     } catch {
       // response body wasn't JSON — fall back to statusText
     }
@@ -37,7 +48,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       clearToken();
       if (window.location.pathname !== "/login") window.location.href = "/login";
     }
-    throw new ApiError(res.status, detail);
+    throw new ApiError(res.status, detail, body);
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -191,8 +202,6 @@ export interface Agent {
   tenant_id: string;
   slug: string;
   name: string;
-  greeting: string;
-  system_prompt: string;
   goodbye_grace_ms: number;
   // null = derive from the STT/TTS provider's own language setting (see
   // libs/config_sdk's MediaInfo resolution order) — the behavior before
@@ -222,17 +231,20 @@ export interface Agent {
   // What the caller experiences while a warm transfer's agent leg rings
   // (no equivalent for cold transfer).
   transfer_waiting_experience: "announcement_moh" | "announcement_silence";
+  // The conversation flow, if this agent runs one (docs/workflow.md).
+  // `workflow` is what live calls execute; `workflow_draft` is the editor's
+  // autosave and is never read by a call. Both null = single-prompt agent,
+  // which is most of them. list_agents does SELECT *, so these ride along
+  // with every agent list — the /workflows index needs no extra request.
+  workflow: { nodes?: unknown[]; edges?: unknown[] } | null;
+  workflow_draft: { nodes?: unknown[]; edges?: unknown[] } | null;
   // Condition-clause overrides for the built-in end-call / transfer trigger
   // instructions (null/empty = defaults). Only the condition is
   // configurable — the [[END_CALL]]/[[TRANSFER]] token mechanics are fixed
   // server-side so a custom prompt can't break directive parsing.
-  end_call_prompt: string | null;
-  transfer_prompt: string | null;
   // Exact scripted lines the agent speaks when ending/transferring —
   // synthesized verbatim (never LLM-paraphrased). null/empty = the LLM
   // chooses its own wording.
-  farewell_message: string | null;
-  transfer_announcement: string | null;
   // Admin-configured hard ceiling on how long a caller may stay on this
   // agent, in seconds (30-7200). null = unlimited — the pre-existing
   // behavior. Enforced by the Conversation Service: once exceeded, the
@@ -247,6 +259,9 @@ export interface Agent {
 export interface AgentCreate {
   slug: string;
   name: string;
+  // Seeds the starter graph the server creates with the agent — the
+  // greeting lands on its start step, the prompt on its always-applies
+  // step. Not columns; edit them on the canvas afterwards.
   greeting?: string;
   system_prompt?: string;
   stt_config_id?: string | null;
@@ -256,8 +271,6 @@ export interface AgentCreate {
 
 export interface AgentUpdate {
   name?: string;
-  greeting?: string;
-  system_prompt?: string;
   goodbye_grace_ms?: number;
   language?: string | null;
   stt_config_id?: string | null;
@@ -271,10 +284,6 @@ export interface AgentUpdate {
   platform_did?: string | null;
   custom_caller_id?: string | null;
   transfer_waiting_experience?: "announcement_moh" | "announcement_silence";
-  end_call_prompt?: string | null;
-  transfer_prompt?: string | null;
-  farewell_message?: string | null;
-  transfer_announcement?: string | null;
   max_call_duration_s?: number | null;
   status?: AgentStatus;
 }
@@ -418,6 +427,11 @@ export interface Call {
   agent_name: string | null;
   status: CallStatus;
   mode: CallMode;
+  // Workflow calls only (docs/workflow.md §7.1) — null for a single-prompt
+  // agent, which is most calls.
+  disposition: string | null;
+  nodes_visited: string[] | null;
+  extracted_variables: Record<string, unknown> | null;
 }
 
 export interface CallListResult {
@@ -435,6 +449,10 @@ export interface TranscriptEntry {
   ai_response: string | null;
   interrupted: boolean;
   created_at: string;
+  // Which workflow stage was active when this turn was spoken — null for a
+  // single-prompt agent.
+  node_id: string | null;
+  node_name: string | null;
 }
 
 export const listCalls = (

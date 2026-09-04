@@ -178,6 +178,7 @@ services:
     <<: *python-service
     command: ["python", "-m", "services.webcall", "--port", "8300"]
     environment:
+      WEBCALL_RESPONSE_TIMEOUT_S: ${WEBCALL_RESPONSE_TIMEOUT_S:-8}
       # Direct to conversation — this stack runs no Envoy, which webcall's :10000 default expects.
       CONVERSATION_SVC_TARGET: conversation:50051
       LOG_LEVEL: INFO

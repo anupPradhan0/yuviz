@@ -43,11 +43,26 @@ export function TestAgentPanel({
   onClose,
   tenantSlug,
   agentSlug,
+  useDraft = false,
+  inline = false,
+  onNodeChanged,
 }: {
   open: boolean;
   onClose: () => void;
   tenantSlug: string;
   agentSlug: string;
+  // Run the agent's unpublished workflow draft instead of its live graph —
+  // set by the workflow editor so an operator can hear a change before
+  // publishing it to real traffic (docs/workflow.md §6.4).
+  useDraft?: boolean;
+  // Render in place instead of as a modal. The workflow editor puts the
+  // test call in its side column so the canvas stays visible — watching the
+  // active step light up while you talk is the whole point of testing
+  // there, and a modal covers exactly the thing you're trying to watch.
+  inline?: boolean;
+  // Fires as the call moves between workflow stages, so the editor's canvas
+  // can light up the node the call is actually in.
+  onNodeChanged?: (node: { id: string; name: string; type: string }) => void;
 }) {
   const [state, setState] = useState<CallState>("idle");
   const [transcript, setTranscript] = useState<{ text: string; ts: number }[]>([]);
@@ -222,7 +237,8 @@ export function TestAgentPanel({
       // caller's own mic echoed back to them.
 
       const ws = new WebSocket(
-        `${WEBCALL_URL}/webcall?tenant=${encodeURIComponent(tenantSlug)}&agent=${encodeURIComponent(agentSlug)}`,
+        `${WEBCALL_URL}/webcall?tenant=${encodeURIComponent(tenantSlug)}&agent=${encodeURIComponent(agentSlug)}` +
+          (useDraft ? "&draft=1" : ""),
       );
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
@@ -259,6 +275,15 @@ export function TestAgentPanel({
           case "tts_chunk_final":
             setState((s) => (s === "talking" ? s : "ready"));
             break;
+          case "transfer":
+            // A browser call can't execute a handoff, so this is the only
+            // sign a `transfer` node did anything at all. Without it the
+            // stage looks like it silently did nothing.
+            setTranscript((t) => [...t, {
+              text: `[the agent handed the call to ${msg.destination || "a human"}]`,
+              ts: Date.now(),
+            }]);
+            break;
           case "end_call": {
             // Found live 2026-08-02: this only updated the status label —
             // the mic and WebSocket stayed open indefinitely after the
@@ -278,6 +303,9 @@ export function TestAgentPanel({
             }, Math.min(remainingMs, MAX_END_CALL_WAIT_MS));
             break;
           }
+          case "workflow_node":
+            onNodeChanged?.({ id: msg.node_id, name: msg.node_name, type: msg.node_type });
+            break;
           case "no_response":
             // The agent heard nothing recognizable (silence/noise/unclear
             // audio) and never replied at all — without this, the UI would
@@ -390,8 +418,7 @@ export function TestAgentPanel({
   const active = state === "talking" || state === "thinking" || state === "speaking";
   const listening = state === "ready" || state === "talking" || state === "thinking" || state === "speaking";
 
-  return (
-    <Modal open={open} title="Test Agent" onClose={onClose} footer={null}>
+  const body = (
       <div style={{ textAlign: "center", padding: "12px 4px" }}>
         <div
           className={`test-agent-orb${active ? " active" : ""}${state === "speaking" ? " speaking" : ""}`}
@@ -474,6 +501,29 @@ export function TestAgentPanel({
           </button>
         )}
       </div>
+  );
+
+  if (inline) {
+    // Modal does its own !open check; inline has to do it here, or the
+    // panel would sit in the column after it was closed. The teardown
+    // effect above still runs either way — the mic must stop.
+    if (!open) return null;
+    return (
+      <div className="wf-testpanel">
+        <div className="wf-inspector-hdr">
+          <span className="wf-inspector-title">Test call</span>
+          <button className="btn btn-ghost btn-sm" style={{ marginLeft: "auto" }} onClick={onClose}>
+            Close
+          </button>
+        </div>
+        {body}
+      </div>
+    );
+  }
+
+  return (
+    <Modal open={open} title="Test Agent" onClose={onClose} footer={null}>
+      {body}
     </Modal>
   );
 }

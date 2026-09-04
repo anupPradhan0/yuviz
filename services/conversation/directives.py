@@ -60,8 +60,8 @@ _MARKDOWN_CHARS_RE = re.compile(r"[*_`#]")
 def strip_markdown_chars(text: str) -> str:
     """Public wrapper around _MARKDOWN_CHARS_RE — DirectiveParser.parse()
     only runs on the LLM-token path (see pipeline.py's _llm_to_tts); text
-    that reaches TTS a different way (agent.greeting, farewell_message,
-    transfer_announcement, the fixed fallback/filler strings) never passes
+    that reaches TTS a different way (the start step's greeting, a step's
+    transition speech, the fixed fallback/filler strings) never passes
     through it, and any markdown an admin typed into those fields would
     reach TTS unstripped. pipeline.py's _synthesize_sentence_stream calls
     this directly since it's the one shared boundary all of those paths

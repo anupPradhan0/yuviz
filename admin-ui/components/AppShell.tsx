@@ -29,6 +29,14 @@ const ICONS: Record<string, React.ReactNode> = {
       <path d="M5 6V4a3 3 0 016 0v2" />
     </svg>
   ),
+  workflows: (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <rect x="5.5" y="1" width="5" height="3.5" rx="1" />
+      <rect x="1" y="11.5" width="5" height="3.5" rx="1" />
+      <rect x="10" y="11.5" width="5" height="3.5" rx="1" />
+      <path d="M8 4.5v2.5M8 7h-4.5v4.5M8 7h4.5v4.5" />
+    </svg>
+  ),
   agents: (
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
       <circle cx="8" cy="5" r="3" />
@@ -71,7 +79,7 @@ const OVERVIEW_ITEMS = [{ href: "/dashboard", label: "Dashboard", icon: "dashboa
 
 const MANAGEMENT_ITEMS = [
   { href: "/tenants", label: "Accounts", icon: "accounts" },
-  { href: "/agents", label: "Agents", icon: "agents" },
+  { href: "/workflows", label: "Agents", icon: "workflows" },
   { href: "/ai-voice", label: "AI & Voice", icon: "ai-voice" },
   { href: "/phone-numbers", label: "Phone Numbers", icon: "phone-numbers" },
 ];
@@ -84,6 +92,11 @@ const CALLING_ITEMS = [
 const PLATFORM_ITEMS = [{ href: "/settings", label: "Settings", icon: "settings" }];
 
 const ALL_ITEMS = [...OVERVIEW_ITEMS, ...MANAGEMENT_ITEMS, ...CALLING_ITEMS, ...PLATFORM_ITEMS];
+
+// An agent's settings are a sub-route of its own flow (2026-08-30), so they
+// need a second crumb — the nav item alone would read as if Settings were
+// the whole page.
+const SETTINGS_CRUMBS = ["Agents", "Settings"];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -133,11 +146,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const visibleCalling = CALLING_ITEMS.filter((item) => matches(item.label));
   const visiblePlatform = PLATFORM_ITEMS.filter((item) => matches(item.label));
 
-  // Longest-prefix match, not first-match: /agents/acme/reception must
-  // resolve to "Agents" (href "/agents"), not accidentally match a shorter
-  // unrelated prefix first.
-  const activeItem = [...ALL_ITEMS].sort((a, b) => b.href.length - a.href.length).find((item) => pathname.startsWith(item.href));
-  const pageTitle = activeItem?.label ?? "Yuviz.ai";
+  // Longest-prefix match, not first-match: /workflows/acme/reception must
+  // resolve to "Agents", not accidentally match a shorter unrelated prefix
+  // first.
+  const activeItem = [...ALL_ITEMS]
+    .sort((a, b) => b.href.length - a.href.length)
+    .find((item) => pathname.startsWith(item.href));
+  const inAgentSettings = /^\/workflows\/[^/]+\/[^/]+\/settings/.test(pathname);
+  const crumbs = inAgentSettings ? SETTINGS_CRUMBS : [activeItem?.label ?? "Yuviz.ai"];
 
   return (
     <div className="app-shell">
@@ -183,7 +199,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <Link
                   key={item.href}
                   href={item.href}
-                  className={`nav-item${pathname.startsWith(item.href) ? " active" : ""}`}
+                  className={`nav-item${item.href === activeItem?.href ? " active" : ""}`}
                 >
                   {ICONS[item.icon]}
                   <span className="nav-label">{item.label}</span>
@@ -198,7 +214,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <Link
                   key={item.href}
                   href={item.href}
-                  className={`nav-item${pathname.startsWith(item.href) ? " active" : ""}`}
+                  className={`nav-item${item.href === activeItem?.href ? " active" : ""}`}
                 >
                   {ICONS[item.icon]}
                   <span className="nav-label">{item.label}</span>
@@ -213,7 +229,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <Link
                   key={item.href}
                   href={item.href}
-                  className={`nav-item${pathname.startsWith(item.href) ? " active" : ""}`}
+                  className={`nav-item${item.href === activeItem?.href ? " active" : ""}`}
                 >
                   {ICONS[item.icon]}
                   <span className="nav-label">{item.label}</span>
@@ -228,7 +244,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <Link
                   key={item.href}
                   href={item.href}
-                  className={`nav-item${pathname.startsWith(item.href) ? " active" : ""}`}
+                  className={`nav-item${item.href === activeItem?.href ? " active" : ""}`}
                 >
                   {ICONS[item.icon]}
                   <span className="nav-label">{item.label}</span>
@@ -266,8 +282,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="topbar">
           <span className="topbar-title">
             <span style={{ color: "var(--text-3)" }}>Yuviz</span>
-            <span style={{ color: "var(--text-3)", margin: "0 6px" }}>›</span>
-            {pageTitle}
+            {crumbs.map((c, i) => (
+              <span key={c}>
+                <span style={{ color: "var(--text-3)", margin: "0 6px" }}>›</span>
+                <span style={{ color: i === crumbs.length - 1 ? "var(--text)" : "var(--text-3)" }}>{c}</span>
+              </span>
+            ))}
           </span>
           <div className="topbar-actions">
             <button

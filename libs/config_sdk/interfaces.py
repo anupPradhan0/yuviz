@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from .models import Agent, Prompt, ProviderConfig, RuntimeConfig, Tenant, ToolSpec
+from .models import Agent, ProviderConfig, RuntimeConfig, Tenant, ToolSpec
 
 
 class IConfigProvider(Protocol):
@@ -37,7 +37,6 @@ class IConfigProvider(Protocol):
 
     async def get_provider_config(self, provider_id: str) -> ProviderConfig | None: ...
 
-    async def get_prompt(self, tenant_slug: str, agent_slug: str) -> Prompt | None: ...
 
     async def get_voice(self, tenant_slug: str, agent_slug: str) -> str | None: ...
 

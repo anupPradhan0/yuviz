@@ -58,7 +58,7 @@ def _tenant_row(slug, **overrides):
 def _agent_row(slug, **overrides):
     return {
         "id": "a1", "slug": slug, "tenant_id": "t1", "name": "Agent",
-        "greeting": "Hi", "system_prompt": "Be helpful.", "goodbye_grace_ms": 3000,
+        "goodbye_grace_ms": 3000,
         "status": "active", "config_version": 1, "updated_at": _now(),
         "stt_config_id": None, "llm_config_id": None, "tts_config_id": None,
         **overrides,
@@ -118,7 +118,7 @@ async def test_runtime_config_uses_tenant_defaults():
         tenants={"acme": _tenant_row(
             "acme", default_stt_config_id="stt1", default_llm_config_id="llm1", default_tts_config_id="tts1",
         )},
-        agents={("acme", "sup"): _agent_row("sup", greeting="Hi there", system_prompt="Be helpful.")},
+        agents={("acme", "sup"): _agent_row("sup")},
         providers={
             "stt1": _provider_row("stt1", "stt", "deepgram"),
             "llm1": _provider_row("llm1", "llm", "openai"),
@@ -132,8 +132,6 @@ async def test_runtime_config_uses_tenant_defaults():
     assert rc.providers.stt.engine == "deepgram"
     assert rc.providers.llm.engine == "openai"
     assert rc.providers.tts.engine == "elevenlabs"
-    assert rc.conversation.greeting == "Hi there"
-    assert rc.conversation.system_prompt == "Be helpful."
     assert rc.version == 1
 
 
@@ -167,14 +165,6 @@ async def test_runtime_config_missing_one_provider_role_returns_none():
     provider = CacheAsideConfigProvider(redis_repo, FakeRepo())
     assert await provider.get_runtime_config("acme", "sup") is None
 
-
-async def test_get_prompt_returns_agent_greeting_and_prompt():
-    redis_repo = FakeRepo(agents={("acme", "sup"): _agent_row("sup", greeting="Hi", system_prompt="Help.")})
-    provider = CacheAsideConfigProvider(redis_repo, FakeRepo())
-
-    prompt = await provider.get_prompt("acme", "sup")
-    assert prompt.greeting == "Hi"
-    assert prompt.system_prompt == "Help."
 
 
 async def test_get_voice_derives_from_runtime_config():

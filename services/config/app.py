@@ -98,6 +98,20 @@ async def bad_request_handler(request: Request, exc: ValueError) -> JSONResponse
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
+@app.exception_handler(asyncpg.UniqueViolationError)
+async def unique_violation_handler(
+    request: Request, exc: asyncpg.UniqueViolationError,
+) -> JSONResponse:
+    """A duplicate slug is the caller asking for something already taken, not
+    a server fault. Reachable from the admin UI's create dialog, which derives
+    the slug from the name and so hits it whenever two agents are given the
+    same one."""
+    return JSONResponse(
+        status_code=409,
+        content={"detail": "That name or slug is already taken in this account."},
+    )
+
+
 @app.exception_handler(asyncpg.ForeignKeyViolationError)
 async def fk_violation_handler(
     request: Request, exc: asyncpg.ForeignKeyViolationError,

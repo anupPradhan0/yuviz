@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from ..workflow import starter_graph
 from ..models import (
     Agent,
     ConversationInfo,
     MediaInfo,
     Policies,
-    Prompt,
     ProviderConfig,
     ProviderConfigs,
     RuntimeConfig,
@@ -47,10 +47,13 @@ class MockConfigProvider:
         return tenant
 
     def add_agent(self, tenant_slug: str, **kwargs) -> Agent:
+        # A mock agent gets a real graph by default, because a real one
+        # always has one — an agent IS its workflow (docs/workflow.md §9.1).
         defaults = dict(
-            id="agent-id", tenant_id="tenant-id", greeting="", system_prompt="",
+            id="agent-id", tenant_id="tenant-id",
             goodbye_grace_ms=3000, stt_config_id=None, llm_config_id=None, tts_config_id=None,
             status="active", config_version=1, updated_at=datetime.now(timezone.utc),
+            workflow=starter_graph(), workflow_draft=starter_graph(),
         )
         agent = Agent(**{**defaults, **kwargs})
         self.agents[(tenant_slug, agent.slug)] = agent
@@ -100,11 +103,7 @@ class MockConfigProvider:
             agent=agent,
             providers=ProviderConfigs(stt=providers["stt"], llm=providers["llm"], tts=providers["tts"]),
             conversation=ConversationInfo(
-                greeting=agent.greeting, system_prompt=agent.system_prompt,
-                end_call_prompt=agent.end_call_prompt,
-                transfer_prompt=agent.transfer_prompt,
-                farewell_message=agent.farewell_message,
-                transfer_announcement=agent.transfer_announcement,
+                workflow=agent.workflow, workflow_draft=agent.workflow_draft,
             ),
             media=MediaInfo(
                 voice=providers["tts"].voice,
@@ -125,11 +124,6 @@ class MockConfigProvider:
             resolved_at=datetime.now(timezone.utc),
         )
 
-    async def get_prompt(self, tenant_slug: str, agent_slug: str) -> Prompt | None:
-        agent = await self.get_agent(tenant_slug, agent_slug)
-        if agent is None:
-            return None
-        return Prompt(greeting=agent.greeting, system_prompt=agent.system_prompt)
 
     async def get_voice(self, tenant_slug: str, agent_slug: str) -> str | None:
         runtime_config = await self.get_runtime_config(tenant_slug, agent_slug)

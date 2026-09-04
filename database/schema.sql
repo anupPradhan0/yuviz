@@ -71,8 +71,6 @@ CREATE TABLE IF NOT EXISTS agents (
     tenant_id               UUID NOT NULL REFERENCES tenants(id),
     slug                    TEXT NOT NULL,
     name                    TEXT NOT NULL,
-    greeting                TEXT NOT NULL DEFAULT '',
-    system_prompt           TEXT NOT NULL DEFAULT '',
     goodbye_grace_ms        INT NOT NULL DEFAULT 3000,
     stt_config_id           UUID REFERENCES provider_configs(id),  -- nullable: override tenant default
     llm_config_id           UUID REFERENCES provider_configs(id),
@@ -109,17 +107,6 @@ CREATE TABLE IF NOT EXISTS agents (
     -- WarmTransferCoordinator itself switches on it.
     transfer_waiting_experience TEXT NOT NULL DEFAULT 'announcement_moh'
                                 CHECK (transfer_waiting_experience IN ('announcement_moh', 'announcement_silence')),
-    -- Optional condition-clause overrides for the LLM's [[END_CALL]]/[[TRANSFER]]
-    -- trigger instructions (NULL/empty = built-in defaults). Only the *condition*
-    -- is configurable — the token mechanics are fixed and appended by
-    -- pipeline.py, so a custom prompt can't break directive parsing.
-    end_call_prompt         TEXT,
-    transfer_prompt         TEXT,
-    -- Optional exact scripted lines the agent SPEAKS at those moments
-    -- (synthesized deterministically by pipeline.py, not LLM-generated).
-    -- NULL/empty = the LLM chooses its own wording, as before.
-    farewell_message        TEXT,
-    transfer_announcement   TEXT,
     -- Admin-configured hard ceiling on how long a caller may stay on this
     -- agent, in seconds. NULL = unlimited (the pre-existing behavior — a
     -- call could run forever, bounded only by the caller/agent choosing to
@@ -127,7 +114,7 @@ CREATE TABLE IF NOT EXISTS agents (
     -- per-turn (after STT, before the LLM call) against wall-clock time
     -- since the call started; when exceeded, the pipeline skips the LLM,
     -- speaks a fixed wrap-up line, and ends the call the same way
-    -- [[END_CALL]]/farewell_message do — see libs/config_sdk's
+    -- [[END_CALL]] does — see libs/config_sdk's
     -- Policies.max_call_duration_s (already modeled there before this
     -- column existed).
     max_call_duration_s     INT CHECK (max_call_duration_s IS NULL OR max_call_duration_s BETWEEN 30 AND 7200),
@@ -169,6 +156,40 @@ DO $$ BEGIN
     ALTER TABLE agents ADD CONSTRAINT agents_max_call_duration_s_check
         CHECK (max_call_duration_s IS NULL OR max_call_duration_s BETWEEN 30 AND 7200);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Conversation workflow (docs/workflow.md) ────────────────────────────────
+-- The graph IS the agent: created with the row (services/config/agents.py's
+-- create_agent), never NULL in practice, and the only place the agent's
+-- words live. Its global node carries the always-on instruction, its start
+-- node the greeting, its end nodes the closing words.
+--
+-- The draft/live split is the point: workflow_draft is what the editor
+-- autosaves and may be invalid or half-drawn; `workflow` is only ever
+-- written by publish, and publish validates first. A broken graph cannot
+-- reach a phone call. Publishing bumps config_version through the existing
+-- trigger, so the graph propagates over the Redis invalidation path that
+-- already exists for every other agent field.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS workflow       JSONB;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS workflow_draft JSONB;
+
+-- The agent IS its workflow (docs/workflow.md §9.1). Every word it speaks
+-- lives in the graph: the greeting on the start step, the always-on
+-- instruction on a global node, the closing words on each end step. These
+-- six columns were the second place to look, and the reason "why is the
+-- greeting in two places?" was a fair question.
+--
+-- scripts/migrate_workflow_text.py moves greeting/system_prompt into the
+-- graph and runs BEFORE this file (see deployment/sh/init.sh). The other
+-- four only ever configured the wording of the [[END_CALL]]/[[TRANSFER]]
+-- safety nets, which is now fixed in pipeline.py so no configuration can
+-- break directive parsing — there is nothing to move.
+ALTER TABLE agents DROP COLUMN IF EXISTS greeting;
+ALTER TABLE agents DROP COLUMN IF EXISTS system_prompt;
+ALTER TABLE agents DROP COLUMN IF EXISTS end_call_prompt;
+ALTER TABLE agents DROP COLUMN IF EXISTS transfer_prompt;
+ALTER TABLE agents DROP COLUMN IF EXISTS farewell_message;
+ALTER TABLE agents DROP COLUMN IF EXISTS transfer_announcement;
+-- (agent_workflow_versions lives below the users table — it FKs published_by.)
 
 -- ── tool_provider_configs — Tool Execution Framework, mirrors provider_configs ──
 -- Same shape/discipline as provider_configs above: tenant-scoped, api_key_ref
@@ -241,6 +262,22 @@ ALTER TABLE users ALTER COLUMN password_hash SET NOT NULL;
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_service_account BOOLEAN NOT NULL DEFAULT false;
 UPDATE users SET is_service_account = true WHERE lower(email) LIKE '%@internal.%' AND is_service_account = false;
+
+-- Append-only publish history. Rollback republishes an old version as a new
+-- one rather than rewriting the log, so "what was live at 3pm yesterday"
+-- stays answerable. Nine lines against a support incident: an operator
+-- editing a live agent's conversation flow with no way back.
+CREATE TABLE IF NOT EXISTS agent_workflow_versions (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id     UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    version      INT  NOT NULL,
+    graph        JSONB NOT NULL,
+    published_by UUID REFERENCES users(id),
+    published_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    note         TEXT,
+    UNIQUE (agent_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_awv_agent ON agent_workflow_versions(agent_id, version DESC);
 
 -- ── audit_log — append-only, written in the same transaction as the mutation ─
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -373,6 +410,18 @@ CREATE TABLE IF NOT EXISTS calls (
 -- silent (crashed, never coming back under the same node_id) WITHOUT
 -- waiting for that exact node_id to restart — the gap the earlier
 -- startup-only reconcile_stale_calls() couldn't cover on its own.
+-- ── Workflow observability (docs/workflow.md §7.1) ──────────────────────────
+-- NULL on every one of these means "this call ran a single-prompt agent",
+-- which is most of them — a workflow call is the only thing that ever
+-- writes them. disposition is free text (an end node may carry any code;
+-- libs/config_sdk/workflow.py's SYSTEM_DISPOSITIONS are only the ones the
+-- platform itself reasons about), and the calls-list filter reads distinct
+-- values out of this column rather than a hardcoded frontend list, so a
+-- tenant-invented code shows up without a code change.
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS disposition         TEXT;
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS nodes_visited       JSONB;  -- ["start","triage","booking","end"]
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS extracted_variables JSONB;
+
 CREATE TABLE IF NOT EXISTS conversation_node_heartbeats (
     node_id      TEXT PRIMARY KEY,
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -421,6 +470,12 @@ CREATE TABLE IF NOT EXISTS transcript_entries (
     tool_calls          JSONB,  -- Phase 6b
     metadata            JSONB
 );
+
+-- Which workflow node was active when this turn was spoken — NULL for a
+-- single-prompt agent. Turns "where do calls die" into a GROUP BY, and
+-- segments the transcript by stage on the call detail page.
+ALTER TABLE transcript_entries ADD COLUMN IF NOT EXISTS node_id   TEXT;
+ALTER TABLE transcript_entries ADD COLUMN IF NOT EXISTS node_name TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_transcript_entries_session ON transcript_entries(session_id);
 CREATE INDEX IF NOT EXISTS te_intent_idx ON transcript_entries(intent) WHERE intent IS NOT NULL;
@@ -527,9 +582,36 @@ DROP TRIGGER IF EXISTS tenants_version ON tenants;
 CREATE TRIGGER tenants_version BEFORE UPDATE ON tenants
     FOR EACH ROW EXECUTE FUNCTION bump_config_version();
 
+-- agents needs its own variant: the workflow editor autosaves
+-- workflow_draft on a debounce while an operator types, and every one of
+-- those going through bump_config_version() would inflate config_version by
+-- thousands and make updated_at meaningless — for a column no call ever
+-- reads. A draft save is keystrokes, not a config change. Publishing (which
+-- writes agents.workflow) still bumps normally, which is exactly what makes
+-- a published graph propagate over the existing Redis invalidation path.
+CREATE OR REPLACE FUNCTION bump_agent_config_version() RETURNS TRIGGER AS $$
+BEGIN
+    -- Everything except the draft is unchanged, so nothing a call can see
+    -- moved: leave config_version and updated_at alone. Deliberately not
+    -- gated on the draft having actually changed — an autosave that rewrites
+    -- byte-identical JSON is still not a config change, and gating on it
+    -- made every such save bump (confirmed against a real Postgres).
+    IF to_jsonb(NEW) - 'workflow_draft' - 'updated_at' - 'config_version'
+     = to_jsonb(OLD) - 'workflow_draft' - 'updated_at' - 'config_version'
+    THEN
+        NEW.config_version := OLD.config_version;
+        NEW.updated_at := OLD.updated_at;
+        RETURN NEW;
+    END IF;
+    NEW.config_version := OLD.config_version + 1;
+    NEW.updated_at := now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 DROP TRIGGER IF EXISTS agents_version ON agents;
 CREATE TRIGGER agents_version BEFORE UPDATE ON agents
-    FOR EACH ROW EXECUTE FUNCTION bump_config_version();
+    FOR EACH ROW EXECUTE FUNCTION bump_agent_config_version();
 
 -- ── Remaining indexes ────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_agents_tenant ON agents(tenant_id);

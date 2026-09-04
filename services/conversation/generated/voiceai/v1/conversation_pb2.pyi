@@ -31,7 +31,7 @@ AGENT_DISCONNECTED: FinalizationReason
 SYSTEM_SHUTDOWN: FinalizationReason
 
 class GatewayMessage(_message.Message):
-    __slots__ = ("session_open", "audio_chunk", "cancel_generation", "playback_finished", "speech_ended", "transfer_initiated", "transfer_completed", "transfer_failed")
+    __slots__ = ("session_open", "audio_chunk", "cancel_generation", "playback_finished", "speech_ended", "transfer_initiated", "transfer_completed", "transfer_failed", "text_input")
     SESSION_OPEN_FIELD_NUMBER: _ClassVar[int]
     AUDIO_CHUNK_FIELD_NUMBER: _ClassVar[int]
     CANCEL_GENERATION_FIELD_NUMBER: _ClassVar[int]
@@ -40,6 +40,7 @@ class GatewayMessage(_message.Message):
     TRANSFER_INITIATED_FIELD_NUMBER: _ClassVar[int]
     TRANSFER_COMPLETED_FIELD_NUMBER: _ClassVar[int]
     TRANSFER_FAILED_FIELD_NUMBER: _ClassVar[int]
+    TEXT_INPUT_FIELD_NUMBER: _ClassVar[int]
     session_open: SessionOpenRequest
     audio_chunk: AudioChunk
     cancel_generation: CancelGeneration
@@ -48,10 +49,11 @@ class GatewayMessage(_message.Message):
     transfer_initiated: TransferInitiated
     transfer_completed: TransferCompleted
     transfer_failed: TransferFailed
-    def __init__(self, session_open: _Optional[_Union[SessionOpenRequest, _Mapping]] = ..., audio_chunk: _Optional[_Union[AudioChunk, _Mapping]] = ..., cancel_generation: _Optional[_Union[CancelGeneration, _Mapping]] = ..., playback_finished: _Optional[_Union[PlaybackFinished, _Mapping]] = ..., speech_ended: _Optional[_Union[SpeechEndedNotification, _Mapping]] = ..., transfer_initiated: _Optional[_Union[TransferInitiated, _Mapping]] = ..., transfer_completed: _Optional[_Union[TransferCompleted, _Mapping]] = ..., transfer_failed: _Optional[_Union[TransferFailed, _Mapping]] = ...) -> None: ...
+    text_input: TextInput
+    def __init__(self, session_open: _Optional[_Union[SessionOpenRequest, _Mapping]] = ..., audio_chunk: _Optional[_Union[AudioChunk, _Mapping]] = ..., cancel_generation: _Optional[_Union[CancelGeneration, _Mapping]] = ..., playback_finished: _Optional[_Union[PlaybackFinished, _Mapping]] = ..., speech_ended: _Optional[_Union[SpeechEndedNotification, _Mapping]] = ..., transfer_initiated: _Optional[_Union[TransferInitiated, _Mapping]] = ..., transfer_completed: _Optional[_Union[TransferCompleted, _Mapping]] = ..., transfer_failed: _Optional[_Union[TransferFailed, _Mapping]] = ..., text_input: _Optional[_Union[TextInput, _Mapping]] = ...) -> None: ...
 
 class SessionOpenRequest(_message.Message):
-    __slots__ = ("protocol_version", "session_id", "tenant_id", "trace_id", "call_id", "caller_did", "called_did", "script_id", "codec", "sample_rate", "channels", "direction")
+    __slots__ = ("protocol_version", "session_id", "tenant_id", "trace_id", "call_id", "caller_did", "called_did", "script_id", "codec", "sample_rate", "channels", "direction", "use_workflow_draft", "text_only")
     PROTOCOL_VERSION_FIELD_NUMBER: _ClassVar[int]
     SESSION_ID_FIELD_NUMBER: _ClassVar[int]
     TENANT_ID_FIELD_NUMBER: _ClassVar[int]
@@ -64,6 +66,8 @@ class SessionOpenRequest(_message.Message):
     SAMPLE_RATE_FIELD_NUMBER: _ClassVar[int]
     CHANNELS_FIELD_NUMBER: _ClassVar[int]
     DIRECTION_FIELD_NUMBER: _ClassVar[int]
+    USE_WORKFLOW_DRAFT_FIELD_NUMBER: _ClassVar[int]
+    TEXT_ONLY_FIELD_NUMBER: _ClassVar[int]
     protocol_version: str
     session_id: str
     tenant_id: str
@@ -76,7 +80,9 @@ class SessionOpenRequest(_message.Message):
     sample_rate: int
     channels: int
     direction: str
-    def __init__(self, protocol_version: _Optional[str] = ..., session_id: _Optional[str] = ..., tenant_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., call_id: _Optional[str] = ..., caller_did: _Optional[str] = ..., called_did: _Optional[str] = ..., script_id: _Optional[str] = ..., codec: _Optional[_Union[AudioCodec, str]] = ..., sample_rate: _Optional[int] = ..., channels: _Optional[int] = ..., direction: _Optional[str] = ...) -> None: ...
+    use_workflow_draft: bool
+    text_only: bool
+    def __init__(self, protocol_version: _Optional[str] = ..., session_id: _Optional[str] = ..., tenant_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., call_id: _Optional[str] = ..., caller_did: _Optional[str] = ..., called_did: _Optional[str] = ..., script_id: _Optional[str] = ..., codec: _Optional[_Union[AudioCodec, str]] = ..., sample_rate: _Optional[int] = ..., channels: _Optional[int] = ..., direction: _Optional[str] = ..., use_workflow_draft: _Optional[bool] = ..., text_only: _Optional[bool] = ...) -> None: ...
 
 class AudioChunk(_message.Message):
     __slots__ = ("session_id", "trace_id", "sequence_num", "timestamp_us", "payload")
@@ -109,6 +115,16 @@ class PlaybackFinished(_message.Message):
     trace_id: str
     interrupted: bool
     def __init__(self, session_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., interrupted: _Optional[bool] = ...) -> None: ...
+
+class TextInput(_message.Message):
+    __slots__ = ("session_id", "trace_id", "text")
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    TRACE_ID_FIELD_NUMBER: _ClassVar[int]
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    trace_id: str
+    text: str
+    def __init__(self, session_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., text: _Optional[str] = ...) -> None: ...
 
 class SpeechEndedNotification(_message.Message):
     __slots__ = ("session_id", "trace_id", "duration_ms", "energy_db")
@@ -159,7 +175,7 @@ class TransferFailed(_message.Message):
     def __init__(self, session_id: _Optional[str] = ..., destination: _Optional[str] = ..., reason: _Optional[str] = ..., transfer_id: _Optional[str] = ...) -> None: ...
 
 class ServiceMessage(_message.Message):
-    __slots__ = ("service_ready", "tts_chunk", "cancel_ack", "error", "stt_result", "tts_started", "end_call", "transfer_request", "conversation_finalized")
+    __slots__ = ("service_ready", "tts_chunk", "cancel_ack", "error", "stt_result", "tts_started", "end_call", "transfer_request", "conversation_finalized", "workflow_node_changed", "agent_text")
     SERVICE_READY_FIELD_NUMBER: _ClassVar[int]
     TTS_CHUNK_FIELD_NUMBER: _ClassVar[int]
     CANCEL_ACK_FIELD_NUMBER: _ClassVar[int]
@@ -169,6 +185,8 @@ class ServiceMessage(_message.Message):
     END_CALL_FIELD_NUMBER: _ClassVar[int]
     TRANSFER_REQUEST_FIELD_NUMBER: _ClassVar[int]
     CONVERSATION_FINALIZED_FIELD_NUMBER: _ClassVar[int]
+    WORKFLOW_NODE_CHANGED_FIELD_NUMBER: _ClassVar[int]
+    AGENT_TEXT_FIELD_NUMBER: _ClassVar[int]
     service_ready: ServiceReady
     tts_chunk: TtsChunk
     cancel_ack: CancelAck
@@ -178,7 +196,23 @@ class ServiceMessage(_message.Message):
     end_call: EndCall
     transfer_request: TransferRequest
     conversation_finalized: ConversationFinalized
-    def __init__(self, service_ready: _Optional[_Union[ServiceReady, _Mapping]] = ..., tts_chunk: _Optional[_Union[TtsChunk, _Mapping]] = ..., cancel_ack: _Optional[_Union[CancelAck, _Mapping]] = ..., error: _Optional[_Union[ServiceError, _Mapping]] = ..., stt_result: _Optional[_Union[SttResult, _Mapping]] = ..., tts_started: _Optional[_Union[TtsStarted, _Mapping]] = ..., end_call: _Optional[_Union[EndCall, _Mapping]] = ..., transfer_request: _Optional[_Union[TransferRequest, _Mapping]] = ..., conversation_finalized: _Optional[_Union[ConversationFinalized, _Mapping]] = ...) -> None: ...
+    workflow_node_changed: WorkflowNodeChanged
+    agent_text: AgentText
+    def __init__(self, service_ready: _Optional[_Union[ServiceReady, _Mapping]] = ..., tts_chunk: _Optional[_Union[TtsChunk, _Mapping]] = ..., cancel_ack: _Optional[_Union[CancelAck, _Mapping]] = ..., error: _Optional[_Union[ServiceError, _Mapping]] = ..., stt_result: _Optional[_Union[SttResult, _Mapping]] = ..., tts_started: _Optional[_Union[TtsStarted, _Mapping]] = ..., end_call: _Optional[_Union[EndCall, _Mapping]] = ..., transfer_request: _Optional[_Union[TransferRequest, _Mapping]] = ..., conversation_finalized: _Optional[_Union[ConversationFinalized, _Mapping]] = ..., workflow_node_changed: _Optional[_Union[WorkflowNodeChanged, _Mapping]] = ..., agent_text: _Optional[_Union[AgentText, _Mapping]] = ...) -> None: ...
+
+class WorkflowNodeChanged(_message.Message):
+    __slots__ = ("session_id", "node_id", "node_name", "node_type", "via")
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    NODE_ID_FIELD_NUMBER: _ClassVar[int]
+    NODE_NAME_FIELD_NUMBER: _ClassVar[int]
+    NODE_TYPE_FIELD_NUMBER: _ClassVar[int]
+    VIA_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    node_id: str
+    node_name: str
+    node_type: str
+    via: str
+    def __init__(self, session_id: _Optional[str] = ..., node_id: _Optional[str] = ..., node_name: _Optional[str] = ..., node_type: _Optional[str] = ..., via: _Optional[str] = ...) -> None: ...
 
 class ServiceReady(_message.Message):
     __slots__ = ("session_id", "protocol_version")
@@ -227,6 +261,16 @@ class TtsChunk(_message.Message):
     payload: bytes
     is_final: bool
     def __init__(self, session_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., sequence_num: _Optional[int] = ..., codec: _Optional[_Union[AudioCodec, str]] = ..., sample_rate: _Optional[int] = ..., payload: _Optional[bytes] = ..., is_final: _Optional[bool] = ...) -> None: ...
+
+class AgentText(_message.Message):
+    __slots__ = ("session_id", "trace_id", "text")
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    TRACE_ID_FIELD_NUMBER: _ClassVar[int]
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    trace_id: str
+    text: str
+    def __init__(self, session_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., text: _Optional[str] = ...) -> None: ...
 
 class CancelAck(_message.Message):
     __slots__ = ("session_id", "trace_id")

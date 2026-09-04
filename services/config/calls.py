@@ -36,9 +36,20 @@ def _mode_of(row: dict[str, Any]) -> str:
     return "AI" if row.get("direction") == "inbound" else "WebRTC"
 
 
+# Written as JSONB by TranscriptBuilder.end_call(). Both reach the Call
+# Details modal, which does `.length`/`.map()` on nodes_visited and
+# `Object.entries()` on extracted_variables — undecoded they arrive as
+# strings and the modal throws for every workflow call, which since the
+# agent IS its graph means every call.
+_JSON_COLUMNS = ("nodes_visited", "extracted_variables")
+
+
 def _decorate(row: dict[str, Any]) -> dict[str, Any]:
     row["status"] = _status_of(row)
     row["mode"] = _mode_of(row)
+    for column in _JSON_COLUMNS:
+        if column in row:
+            row[column] = db.json_col(row[column])
     return row
 
 
