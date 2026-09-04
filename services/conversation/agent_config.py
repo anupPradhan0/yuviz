@@ -62,8 +62,8 @@ class AgentConfig:
     # The conversation graph this fallback agent runs. None means "build one
     # from greeting/system_prompt above" — this path exists for when the
     # config plane is unreachable mid-call (see agent_resolver.py), and a
-    # degraded call still has to be a graph-driven one. A YAML file may
-    # supply its own under `workflow:`.
+    # degraded call still has to be a graph-driven one now that there is no
+    # single-prompt mode. A YAML file may supply its own under `workflow:`.
     workflow:      dict | None = None
     # Matches CallFsmTimerConfig::goodbye_timeout's gateway-side default
     # (config/gateway.yaml has no per-tenant override yet) — keep them in
@@ -176,11 +176,9 @@ def to_runtime_config(
     graph = agent.workflow or starter_graph(agent.greeting, agent.system_prompt)
     agent_row = Agent(
         id="", slug=script_id, tenant_id="", name=agent.name,
-        greeting=agent.greeting, system_prompt=agent.system_prompt,
         goodbye_grace_ms=agent.goodbye_grace_period_ms,
         stt_config_id=None, llm_config_id=None, tts_config_id=None,
         status="active", config_version=0, updated_at=now,
-        workflow=graph,
     )
     # Descriptive only — never resolved via ProviderRegistry for this path,
     # see docstring above. engine=type name is the closest honest label
@@ -194,11 +192,7 @@ def to_runtime_config(
         tenant=tenant,
         agent=agent_row,
         providers=placeholder_providers,
-        conversation=ConversationInfo(
-            greeting=agent.greeting, system_prompt=agent.system_prompt,
-            workflow=graph, workflow_draft=graph,
-        ),
-        # legacy YAML path has no prompt-override columns — defaults apply
+        conversation=ConversationInfo(workflow=graph, workflow_draft=graph),
         media=MediaInfo(voice=None, language=None),
         policies=Policies(
             vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,

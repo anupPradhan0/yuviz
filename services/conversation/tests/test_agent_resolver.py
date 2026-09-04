@@ -55,7 +55,7 @@ def _fully_configured_mock() -> MockConfigProvider:
         default_stt_config_id="stt1", default_llm_config_id="llm1", default_tts_config_id="tts1",
     )
     mock.add_agent(
-        "acme", slug="sup", name="Sup", greeting="Hi there", system_prompt="Be helpful.",
+        "acme", slug="sup", name="Sup",
     )
     mock.add_provider_config(id="stt1", role="stt", engine="fake_stt")
     mock.add_provider_config(id="llm1", role="llm", engine="fake_llm")
@@ -89,8 +89,7 @@ async def test_full_resolution_returns_runtime_config_and_provider_bundle():
     # unwrap to reach the real instance this test is actually checking.
     assert isinstance(bundle.llm._llm, FakeProviderInstance) and bundle.llm._llm.cfg.engine == "fake_llm"
     assert isinstance(bundle.tts, FakeProviderInstance) and bundle.tts.cfg.engine == "fake_tts"
-    assert runtime_config.conversation.greeting == "Hi there"
-    assert runtime_config.conversation.system_prompt == "Be helpful."
+    assert runtime_config.conversation.workflow is not None
     assert runtime_config.policies.goodbye_grace_ms == 3000  # schema default
     assert runtime_config.version == 1
 

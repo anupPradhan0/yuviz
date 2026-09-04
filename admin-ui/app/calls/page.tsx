@@ -274,8 +274,15 @@ export default function CallsPage() {
               <div style={{ color: "var(--text-3)", fontSize: ".75rem", marginTop: 4 }}>No transcript available.</div>
             ) : (
               <div style={{ background: "var(--surf-2)", border: "1px solid var(--border)", borderRadius: "var(--rs)", padding: "10px 12px", fontSize: ".75rem", lineHeight: 1.7, marginTop: 4 }}>
-                {transcript.map((t) => (
+                {transcript.map((t, i) => (
                   <div key={t.id} style={{ marginBottom: 8 }}>
+                    {/* Segment the transcript by stage — only shown at the
+                        turn where the stage actually changed. */}
+                    {t.node_name && t.node_name !== transcript[i - 1]?.node_name && (
+                      <div style={{ margin: "6px 0 4px", fontSize: ".62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--text-3)" }}>
+                        {t.node_name}
+                      </div>
+                    )}
                     <div>Caller: {t.caller_text || "—"}</div>
                     <div>Agent: {t.ai_response || "—"}</div>
                   </div>

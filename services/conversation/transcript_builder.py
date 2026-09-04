@@ -236,6 +236,8 @@ class TranscriptBuilder:
         ai_response:       str,
         interrupted:       bool,
         latency:           "TurnLatency | None" = None,
+        node_id:           str | None = None,
+        node_name:         str | None = None,
     ) -> None:
         if self._pool is None:
             return
@@ -245,7 +247,26 @@ class TranscriptBuilder:
             self._barge_in_counts[session_id] = self._barge_in_counts.get(session_id, 0) + 1
         self._spawn(session_id, self._record_turn(
             session_id, turn_number, caller_text, caller_confidence, ai_response, interrupted,
-            latency or TurnLatency(),
+            latency or TurnLatency(), node_id, node_name,
+        ))
+
+    def record_workflow_outcome(
+        self,
+        session_id: str,
+        *,
+        nodes_visited: list[str] | None = None,
+        disposition: str | None = None,
+        extracted_variables: dict | None = None,
+    ) -> None:
+        """The path this call took, how it ended, and what it learned (see
+        docs/workflow.md §7.1). Only a workflow call ever calls this; every
+        other call leaves all three columns NULL. Must be spawned BEFORE
+        end_call() — that method drops this session's write chain once its
+        own write lands."""
+        if self._pool is None:
+            return
+        self._spawn(session_id, self._record_workflow_outcome(
+            session_id, nodes_visited, disposition, extracted_variables,
         ))
 
     def record_workflow_outcome(
@@ -344,6 +365,8 @@ class TranscriptBuilder:
         ai_response:        str,
         interrupted:        bool,
         latency:            TurnLatency,
+        node_id:            str | None = None,
+        node_name:          str | None = None,
     ) -> None:
         # latency_ms JSONB mirrors the individual *_latency_ms columns —
         # kept alongside them (not instead of) so a future latency field
@@ -359,13 +382,13 @@ class TranscriptBuilder:
                     "INSERT INTO transcript_entries "
                     "(session_id, turn_number, caller_text, caller_confidence, ai_response, interrupted, "
                     "stt_engine, stt_latency_ms, llm_engine, llm_latency_ms, tts_engine, tts_latency_ms, "
-                    "latency_ms) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)",
+                    "latency_ms, node_id, node_name) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15)",
                     session_id, turn_number, caller_text, caller_confidence, ai_response, interrupted,
                     latency.stt_engine, _round_or_none(latency.stt_ms),
                     latency.llm_engine, _round_or_none(latency.llm_ms),
                     latency.tts_engine, _round_or_none(latency.tts_ms),
-                    latency_json,
+                    latency_json, node_id, node_name,
                 )
         except Exception:
             log.exception(
