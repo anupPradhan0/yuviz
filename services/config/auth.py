@@ -1,12 +1,3 @@
-"""
-Password hashing + JWT issuance/verification for real request-scoped
-identity — replaces the previous "trust an X-User-Email header" stand-in
-(see deps.py). Stateless (JWT, not a server-side sessions table): a login
-verifies the password once and issues a signed token carrying the user's
-id/email/role/tenant_id; every subsequent request verifies the signature
-and expiry only, no DB round-trip required to authenticate a request.
-"""
-
 from __future__ import annotations
 
 import os
