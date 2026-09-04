@@ -126,7 +126,7 @@ credential becomes permanently undecryptable, not just hard to find.
 `scripts/start_local.sh`'s `start_config_service()`/`_conv_env()` both
 fail loudly if it's unset, same posture as `CONFIG_SERVICE_PASSWORD`.
 
-`JWT_SECRET` signs the login tokens — Config/Knowledge/Campaigns must
+`JWT_SECRET` signs the login tokens — Config/Knowledge/Campaigns/DID must
 share the same value:
 
 ```bash

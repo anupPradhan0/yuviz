@@ -14,8 +14,8 @@ if not JWT_SECRET:
     raise RuntimeError(
         "JWT_SECRET is not set — tokens cannot be signed or verified. "
         "deployment/sh/dev.sh generates one into deployment/.env; for the native "
-        "path export it in scripts/start_local.sh (Knowledge and DID services must "
-        "share the same value)."
+        "path export it in scripts/start_local.sh (Knowledge, Campaigns, and DID "
+        "services must share the same value)."
     )
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_TTL = timedelta(hours=12)
