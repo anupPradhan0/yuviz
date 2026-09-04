@@ -60,7 +60,7 @@ class _ScriptedToolLLM:
             assert isinstance(event, TokenEvent)
             yield event.text
 
-    async def generate_with_tools(self, messages, schemas):
+    async def generate_with_tools(self, messages, schemas, tool_choice=None):
         self.seen_prompts.append(messages[0].content if messages else "")
         self.seen_tool_names.append([s["name"] for s in schemas])
         for event in self._generations.pop(0):
