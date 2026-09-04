@@ -6,9 +6,10 @@ verifies the password once and issues a signed token carrying the user's
 id/email/role/tenant_id; every subsequent request verifies the signature
 and expiry only, no DB round-trip required to authenticate a request.
 
-JWT_SECRET must be set via env in any real deployment — the fallback here
-is dev-only and intentionally distinctive so it can never be mistaken for a
-real secret if it ends up in a deployed environment by accident.
+JWT_SECRET must be set via env — deliberately NO fallback. A hardcoded
+default in a public repo would be the signing key, letting anyone forge a
+superadmin token; fail loud instead, same posture as SECRET_ENCRYPTION_KEY.
+Knowledge/DID/Campaigns verify tokens minted here, so they share the value.
 """
 
 from __future__ import annotations
@@ -21,7 +22,15 @@ from typing import Any, Literal
 import bcrypt
 import jwt
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "dev-only-insecure-secret-do-not-deploy-" * 2)
+# Blank counts as missing — a set-but-empty var must not become the key.
+JWT_SECRET = os.environ.get("JWT_SECRET", "").strip()
+if not JWT_SECRET:
+    raise RuntimeError(
+        "JWT_SECRET is not set — tokens cannot be signed or verified. "
+        "deployment/sh/dev.sh generates one into deployment/.env; for the native "
+        "path export it in scripts/start_local.sh (Knowledge and DID services must "
+        "share the same value)."
+    )
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_TTL = timedelta(hours=12)
 
