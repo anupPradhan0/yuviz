@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -18,6 +20,15 @@ async def _resolve_tenant(tenant_slug: str) -> dict:
     return await get_or_404(
         tenants_service.get_tenant(tenant_slug), f"tenant {tenant_slug!r} not found",
     )
+
+
+def _parse_agent_id(agent_id: str) -> str:
+    """Reject non-UUID path params before asyncpg raises an unhandled DataError."""
+    try:
+        uuid.UUID(agent_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{agent_id!r} is not a valid agent id")
+    return agent_id
 
 
 def _validation_error(exc: workflows_service.WorkflowValidationError) -> JSONResponse:
@@ -106,6 +117,7 @@ async def delete_agent(
 async def get_workflow(
     tenant_slug: str, agent_id: str, current_user: CurrentUser = Depends(get_current_user),
 ):
+    agent_id = _parse_agent_id(agent_id)
     return await workflows_service.get_workflow(agent_id, tenant_slug)
 
 
@@ -116,6 +128,7 @@ async def save_workflow_draft(
     body: WorkflowDraft,
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
+    agent_id = _parse_agent_id(agent_id)
     return await workflows_service.save_draft(agent_id, tenant_slug=tenant_slug, graph=body.graph)
 
 
@@ -126,6 +139,7 @@ async def validate_workflow(
     body: WorkflowDraft,
     current_user: CurrentUser = Depends(get_current_user),
 ):
+    _parse_agent_id(agent_id)
     try:
         return {"valid": True, "warnings": workflows_service.validate(body.graph)}
     except workflows_service.WorkflowValidationError as exc:
@@ -139,6 +153,7 @@ async def publish_workflow(
     body: WorkflowPublish,
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
+    agent_id = _parse_agent_id(agent_id)
     try:
         return await workflows_service.publish(
             agent_id, tenant_slug=tenant_slug, graph=body.graph, note=body.note,
@@ -153,6 +168,7 @@ async def list_workflow_versions(
     tenant_slug: str, agent_id: str, limit: int = 50,
     current_user: CurrentUser = Depends(get_current_user),
 ):
+    agent_id = _parse_agent_id(agent_id)
     return await workflows_service.list_versions(agent_id, tenant_slug, limit=limit)
 
 
@@ -161,6 +177,7 @@ async def get_workflow_version(
     tenant_slug: str, agent_id: str, version: int,
     current_user: CurrentUser = Depends(get_current_user),
 ):
+    agent_id = _parse_agent_id(agent_id)
     return await get_or_404(
         workflows_service.get_version(agent_id, tenant_slug, version),
         f"workflow version {version} not found",
@@ -174,6 +191,7 @@ async def rollback_workflow(
     version: int,
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
+    agent_id = _parse_agent_id(agent_id)
     try:
         return await workflows_service.rollback(
             agent_id, tenant_slug=tenant_slug, version=version,

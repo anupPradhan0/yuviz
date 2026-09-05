@@ -156,6 +156,18 @@ class TestAgentEndpoints:
         assert resp.status_code == 400
         assert any(e["id"] == "n1" for e in resp.json()["errors"])
 
+    async def test_workflow_routes_reject_a_malformed_agent_id_with_400_not_500(
+        self, client, test_tenant,
+    ):
+        base = f"/tenants/{test_tenant['slug']}/agents/not-a-uuid/workflow"
+        assert (await client.get(base)).status_code == 400
+        assert (await client.put(f"{base}/draft", json={"graph": {"version": 1, "nodes": [], "edges": []}})).status_code == 400
+        assert (await client.post(f"{base}/validate", json={"graph": {"version": 1, "nodes": [], "edges": []}})).status_code == 400
+        assert (await client.post(f"{base}/publish", json={})).status_code == 400
+        assert (await client.get(f"{base}/versions")).status_code == 400
+        assert (await client.get(f"{base}/versions/1")).status_code == 400
+        assert (await client.post(f"{base}/versions/1/rollback")).status_code == 400
+
     async def test_create_agent_under_unknown_tenant_is_404(self, client):
         resp = await client.post(
             "/tenants/no-such-tenant/agents", json={"slug": "x", "name": "X"},

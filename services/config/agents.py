@@ -149,13 +149,13 @@ async def create_agent(
 ) -> dict[str, Any]:
     """Create agent + published starter workflow in one transaction.
 
-    Caller-supplied `workflow` is validated like publish; otherwise
-    greeting/system_prompt seed starter_graph().
+    Caller-supplied `workflow` is validated like publish; None/{} seed
+    starter_graph() from greeting/system_prompt.
     """
     # Deferred import: workflows.py imports this module for its cache key.
-    from .workflows import validate
+    from .workflows import append_version, validate
 
-    graph = workflow if workflow is not None else starter_graph(greeting, system_prompt)
+    graph = workflow if workflow else starter_graph(greeting, system_prompt)
     validate(graph)
     graph_json = json.dumps(graph)
 
@@ -175,10 +175,9 @@ async def create_agent(
                 stt_config_id, llm_config_id, tts_config_id, graph_json,
             )
             result = _row(row)
-            await conn.execute(
-                "INSERT INTO agent_workflow_versions (agent_id, version, graph, published_by, note) "
-                "VALUES ($1, 1, $2::jsonb, $3, $4)",
-                result["id"], graph_json, user_id, "created with the agent",
+            await append_version(
+                conn, result["id"], graph_json,
+                user_id=user_id, note="created with the agent",
             )
             await audit.write_audit(
                 conn,

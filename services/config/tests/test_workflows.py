@@ -184,3 +184,56 @@ async def test_another_tenants_agent_id_is_indistinguishable_from_missing(test_t
         await workflows.save_draft(agent["id"], tenant_slug="not-this-tenant", graph=GRAPH)
     with pytest.raises(LookupError):
         await workflows.publish(agent["id"], tenant_slug="not-this-tenant", graph=GRAPH)
+
+
+async def test_draft_autosave_rejects_a_soft_deleted_agent(test_tenant):
+    agent = await _agent(test_tenant, slug="wf-deleted")
+    await agents.soft_delete_agent(agent["id"], tenant_slug=test_tenant["slug"])
+    with pytest.raises(LookupError):
+        await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=GRAPH)
+
+
+async def test_republishing_the_same_graph_is_a_noop(test_tenant, pool):
+    agent = await _agent(test_tenant, slug="wf-noop")
+    first = await workflows.publish(
+        agent["id"], tenant_slug=test_tenant["slug"], graph=GRAPH,
+    )
+    before = await pool.fetchrow(
+        "SELECT config_version FROM agents WHERE id = $1", agent["id"],
+    )
+    versions_before = await workflows.list_versions(agent["id"], test_tenant["slug"])
+
+    again = await workflows.publish(
+        agent["id"], tenant_slug=test_tenant["slug"], graph=GRAPH,
+    )
+
+    assert again["version"] == first["version"]
+    assert again["config_version"] == before["config_version"]
+    versions_after = await workflows.list_versions(agent["id"], test_tenant["slug"])
+    assert [v["version"] for v in versions_after] == [v["version"] for v in versions_before]
+
+
+async def test_rollback_to_the_already_live_version_is_a_noop(test_tenant):
+    agent = await _agent(test_tenant, slug="wf-rb-noop")
+    published = await workflows.publish(
+        agent["id"], tenant_slug=test_tenant["slug"], graph=GRAPH,
+    )
+    result = await workflows.rollback(
+        agent["id"], tenant_slug=test_tenant["slug"], version=published["version"],
+    )
+    assert result["version"] == published["version"]
+    assert result["config_version"] == published["config_version"]
+    versions = await workflows.list_versions(agent["id"], test_tenant["slug"])
+    assert [v["version"] for v in versions] == [published["version"], 1]
+
+
+async def test_empty_workflow_object_at_create_uses_the_starter_graph(test_tenant):
+    agent = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="wf-empty", name="Empty",
+        system_prompt=AGENT_PROMPT, workflow={},
+    )
+    state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
+    assert state["workflow"] == CREATED_GRAPH
+    versions = await workflows.list_versions(agent["id"], test_tenant["slug"])
+    assert [v["version"] for v in versions] == [1]
+
