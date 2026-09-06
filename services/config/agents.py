@@ -7,11 +7,11 @@ because that's what the hot path actually has: the WebSocket path is
 context — nobody holds a UUID before the call starts. get_agent_by_id()
 exists for the Admin UI's edit-by-id flow, where the id is already known.
 
-Prompt authority: once an agent has a published `workflow`, the graph's
-start.data.greeting and global.data.prompt are authoritative for calls.
-The greeting/system_prompt columns stay as Behaviour-UI mirrors — PATCH
-keeps them in sync with those two nodes (no version row). Draft/editor
-edits still go through workflows.publish.
+Prompt sync (phase until Conversation reads agents.workflow):
+- Runtime still speaks agents.greeting / system_prompt.
+- PATCH of those fields mirrors into start/global on both graphs (and the
+  audit row keeps the graphs when that happens).
+- publish() mirrors the other way (graph → columns).
 """
 
 from __future__ import annotations
@@ -67,6 +67,10 @@ def _public_agent(row: dict[str, Any], *, list_view: bool = False) -> dict[str, 
     return out
 
 
+def _coerce_prompt(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
 def _mirror_prompts_into_graph(
     graph: dict[str, Any] | None, fields: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -78,9 +82,9 @@ def _mirror_prompts_into_graph(
         node = dict(raw)
         data = dict(node.get("data") or {})
         if node.get("type") == "global" and "system_prompt" in fields:
-            data["prompt"] = fields["system_prompt"]
+            data["prompt"] = _coerce_prompt(fields["system_prompt"])
         if node.get("type") == "start" and "greeting" in fields:
-            data["greeting"] = fields["greeting"]
+            data["greeting"] = _coerce_prompt(fields["greeting"])
         node["data"] = data
         nodes.append(node)
     return {**graph, "nodes": nodes}
@@ -196,7 +200,7 @@ async def create_agent(
     from .workflows import append_version, validate
 
     graph = workflow if workflow else starter_graph(greeting, system_prompt)
-    validate(graph)
+    await validate(graph)
     graph_json = json.dumps(graph)
 
     pool = await db.get_pool()
@@ -281,20 +285,28 @@ async def update_agent(
             await _validate_provider_assignments(conn, old["tenant_id"], fields)
 
             set_fields = dict(fields)
+            if "greeting" in set_fields:
+                set_fields["greeting"] = _coerce_prompt(set_fields["greeting"])
+            if "system_prompt" in set_fields:
+                set_fields["system_prompt"] = _coerce_prompt(set_fields["system_prompt"])
+
+            mirrored_graph = False
             if old.get("workflow") is not None and (
                 "greeting" in fields or "system_prompt" in fields
             ):
-                synced_wf = _mirror_prompts_into_graph(old["workflow"], fields)
+                synced_wf = _mirror_prompts_into_graph(old["workflow"], set_fields)
                 if synced_wf != old["workflow"]:
                     set_fields["workflow"] = json.dumps(synced_wf)
+                    mirrored_graph = True
                 draft_src = (
                     old["workflow_draft"]
                     if old.get("workflow_draft") is not None
                     else old["workflow"]
                 )
-                synced_draft = _mirror_prompts_into_graph(draft_src, fields)
+                synced_draft = _mirror_prompts_into_graph(draft_src, set_fields)
                 if synced_draft != draft_src:
                     set_fields["workflow_draft"] = json.dumps(synced_draft)
+                    mirrored_graph = True
 
             columns = list(set_fields.keys())
             set_clause = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(columns))
@@ -304,6 +316,10 @@ async def update_agent(
             )
             new = _row(new_row)
 
+            # Mirror mutates the live graph without a version row — keep the
+            # graphs in this audit so "who changed the live script" is answerable.
+            old_audit = old if mirrored_graph else _audit_view(old)
+            new_audit = new if mirrored_graph else _audit_view(new)
             await audit.write_audit(
                 conn,
                 entity_type="agent",
@@ -311,8 +327,8 @@ async def update_agent(
                 action="updated",
                 user_id=user_id,
                 user_email=user_email,
-                old_value=_audit_view(old),
-                new_value=_audit_view(new),
+                old_value=old_audit,
+                new_value=new_audit,
             )
 
     await cache.invalidate(cache_key(tenant_slug, old["slug"]))

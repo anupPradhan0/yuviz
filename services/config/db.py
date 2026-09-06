@@ -10,29 +10,33 @@ logic, which lives in tenants.py / agents.py / provider_configs.py etc.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
 import asyncpg
 
 _pool: asyncpg.Pool | None = None
+log = logging.getLogger(__name__)
 
 
 def json_col(value: Any) -> Any:
     """Decode a JSONB column. asyncpg returns strings (no pool codec — writers
-    already pass json.dumps into $n::jsonb, so a codec would double-encode)."""
+    already pass json.dumps into $n::jsonb, so a codec would double-encode).
+
+    Corrupt storage is a server defect — raise RuntimeError (→ 500), not ValueError
+    (→ 400 with column bytes in the body).
+    """
     if value is None or not isinstance(value, str):
         return value
     try:
         parsed = json.loads(value)
     except (ValueError, TypeError) as exc:
-        raise ValueError(
-            f"JSONB column is not decodable JSON: {value[:200]!r}"
-        ) from exc
+        log.exception("agents JSONB column is not decodable JSON")
+        raise RuntimeError("agents JSONB column is not decodable JSON") from exc
     if isinstance(parsed, str):
-        raise ValueError(
-            f"JSONB column is double-encoded JSON string: {value[:200]!r}"
-        )
+        log.error("agents JSONB column is double-encoded JSON string")
+        raise RuntimeError("agents JSONB column is double-encoded JSON string")
     return parsed
 
 

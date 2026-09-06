@@ -580,19 +580,24 @@ def graph_warnings(graph: WorkflowGraph, known_variables: Iterable[str] = ()) ->
 
 
 def graphs_equivalent(a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool:
-    """True when graphs match ignoring React Flow `position` cosmetics."""
+    """True when graphs match ignoring React Flow `position` and node/edge order."""
     if a is None or b is None:
         return a is b
     return _without_positions(a) == _without_positions(b)
 
 
 def _without_positions(graph: dict[str, Any]) -> dict[str, Any]:
+    nodes = [
+        {k: v for k, v in n.items() if k != "position"}
+        for n in (graph.get("nodes") or [])
+    ]
+    edges = list(graph.get("edges") or [])
+    nodes.sort(key=lambda n: str(n.get("id", "")))
+    edges.sort(key=lambda e: str(e.get("id", "")))
     return {
-        **{k: v for k, v in graph.items() if k != "nodes"},
-        "nodes": [
-            {k: v for k, v in n.items() if k != "position"}
-            for n in (graph.get("nodes") or [])
-        ],
+        **{k: v for k, v in graph.items() if k not in ("nodes", "edges")},
+        "nodes": nodes,
+        "edges": edges,
     }
 
 

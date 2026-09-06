@@ -351,3 +351,15 @@ def test_graphs_equivalent_ignores_node_positions():
     assert graphs_equivalent(a, b)
     b["nodes"][1]["data"] = {**b["nodes"][1]["data"], "greeting": "bye"}
     assert not graphs_equivalent(a, b)
+
+
+def test_graphs_equivalent_ignores_node_and_edge_order():
+    from libs.config_sdk.workflow import graphs_equivalent
+
+    a = starter_graph("hi", "be nice")
+    b = {
+        **a,
+        "nodes": list(reversed(a["nodes"])),
+        "edges": list(reversed(a["edges"])),
+    }
+    assert graphs_equivalent(a, b)

@@ -573,12 +573,64 @@ BEGIN
 END
 $agents_version$;
 
+-- Single source for the starter-graph JSON shape (backfill + parity tests).
+-- Keep in lockstep with libs/config_sdk.workflow.starter_graph().
+CREATE OR REPLACE FUNCTION starter_graph_sql(
+    greeting text,
+    system_prompt text,
+    tools jsonb DEFAULT '[]'::jsonb
+) RETURNS jsonb
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT jsonb_build_object(
+        'version', 1,
+        'nodes', jsonb_build_array(
+            jsonb_build_object(
+                'id', 'global', 'type', 'global',
+                'position', '{"x": 330, "y": 0}'::jsonb,
+                'data', jsonb_build_object(
+                    'name', 'always applies',
+                    'prompt', COALESCE(system_prompt, '')
+                )
+            ),
+            jsonb_build_object(
+                'id', 'start', 'type', 'start',
+                'position', '{"x": 0, "y": 0}'::jsonb,
+                'data', jsonb_build_object(
+                    'name', 'greeting',
+                    'prompt', 'Greet the caller and find out what they need.',
+                    'greeting', COALESCE(greeting, ''),
+                    'tools', COALESCE(tools, '[]'::jsonb)
+                )
+            ),
+            jsonb_build_object(
+                'id', 'end', 'type', 'end',
+                'position', '{"x": 0, "y": 230}'::jsonb,
+                'data', jsonb_build_object(
+                    'name', 'goodbye',
+                    'prompt', 'Confirm anything outstanding and close warmly.',
+                    'disposition', 'completed'
+                )
+            )
+        ),
+        'edges', jsonb_build_array(
+            jsonb_build_object(
+                'id', 'e-start-end', 'source', 'start', 'target', 'end',
+                'data', jsonb_build_object(
+                    'label', 'conversation finished',
+                    'condition', 'The caller has no further questions.'
+                )
+            )
+        )
+    );
+$$;
+
 -- Pre-workflow agents: seed a starter graph from greeting/system_prompt (and
--- any enabled tool policies) so live `workflow` is never left NULL. Shape
--- mirrors libs/config_sdk.workflow.starter_graph(); tools come from policies
--- because Node.tools is default-deny. Re-runs are no-ops. Wrapped in one DO
--- so a partial failure cannot exit 0 with workflow still NULL, and each
--- backfill writes an audit_log row alongside the config_version bump.
+-- any enabled tool policies) so live `workflow` is never left NULL. Tools come
+-- from policies because Node.tools is default-deny. Re-runs are no-ops.
+-- Wrapped in one DO so a partial failure cannot exit 0 with workflow still
+-- NULL, and each backfill writes an audit_log row alongside the bump.
 DO $workflow_backfill$
 DECLARE
     null_left INT;
@@ -586,50 +638,14 @@ BEGIN
     WITH starter AS (
         SELECT
             a.id,
-            jsonb_build_object(
-                'version', 1,
-                'nodes', jsonb_build_array(
-                    jsonb_build_object(
-                        'id', 'global', 'type', 'global',
-                        'position', '{"x": 330, "y": 0}'::jsonb,
-                        'data', jsonb_build_object(
-                            'name', 'always applies',
-                            'prompt', COALESCE(a.system_prompt, '')
-                        )
-                    ),
-                    jsonb_build_object(
-                        'id', 'start', 'type', 'start',
-                        'position', '{"x": 0, "y": 0}'::jsonb,
-                        'data', jsonb_build_object(
-                            'name', 'greeting',
-                            'prompt', 'Greet the caller and find out what they need.',
-                            'greeting', COALESCE(a.greeting, ''),
-                            'tools', COALESCE((
-                                SELECT jsonb_agg(p.tool_name ORDER BY p.tool_name)
-                                FROM agent_tool_policies p
-                                WHERE p.agent_id = a.id AND p.enabled
-                            ), '[]'::jsonb)
-                        )
-                    ),
-                    jsonb_build_object(
-                        'id', 'end', 'type', 'end',
-                        'position', '{"x": 0, "y": 230}'::jsonb,
-                        'data', jsonb_build_object(
-                            'name', 'goodbye',
-                            'prompt', 'Confirm anything outstanding and close warmly.',
-                            'disposition', 'completed'
-                        )
-                    )
-                ),
-                'edges', jsonb_build_array(
-                    jsonb_build_object(
-                        'id', 'e-start-end', 'source', 'start', 'target', 'end',
-                        'data', jsonb_build_object(
-                            'label', 'conversation finished',
-                            'condition', 'The caller has no further questions.'
-                        )
-                    )
-                )
+            starter_graph_sql(
+                COALESCE(a.greeting, ''),
+                COALESCE(a.system_prompt, ''),
+                COALESCE((
+                    SELECT jsonb_agg(p.tool_name ORDER BY p.tool_name)
+                    FROM agent_tool_policies p
+                    WHERE p.agent_id = a.id AND p.enabled
+                ), '[]'::jsonb)
             ) AS graph
         FROM agents a
         WHERE a.workflow IS NULL

@@ -151,8 +151,9 @@ class Agent:
     # Mirrors agents.max_call_duration_s — see Policies.max_call_duration_s's
     # own comment for what this controls. None = unlimited.
     max_call_duration_s: int | None = None
-    # Published graph only — drafts never reach the call path (GET .../workflow).
-    workflow: dict[str, Any] | None = None
+    # Published graph lives on the agents row for the editor (GET .../workflow /
+    # get_agent). Not carried on this SDK Agent — Conversation does not read
+    # it yet, and cold call-setup must not pay to ship/parse it.
 
 
 @dataclass(frozen=True)
@@ -213,8 +214,9 @@ class ConversationInfo:
     # Scripted spoken lines (see Agent.farewell_message/transfer_announcement).
     farewell_message: str | None = None
     transfer_announcement: str | None = None
-    # Published graph only — drafts never reach the call path.
-    workflow: dict[str, Any] | None = None
+    # Graph stays on agents.workflow for the editor; Conversation still reads
+    # greeting/system_prompt columns. Do not put the graph on call-setup
+    # RuntimeConfig until the FSM consumes it.
 
 
 @dataclass(frozen=True)

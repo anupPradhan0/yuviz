@@ -127,7 +127,6 @@ class TestAgentEndpoints:
         assert body["greeting"] == "Hi!"
         graph = body["workflow"]
         assert isinstance(graph, dict)
-        assert graph is not None
         start = next(n for n in graph["nodes"] if n["type"] == "start")
         assert start["data"]["greeting"] == "Hi!"
 
@@ -213,7 +212,7 @@ class TestAgentEndpoints:
         nodes = [
             {"id": f"n{i}", "type": "agent", "position": {"x": 0, "y": i},
              "data": {"name": f"n{i}", "prompt": "x"}}
-            for i in range(201)
+            for i in range(51)
         ]
         nodes[0]["type"] = "start"
         nodes[-1]["type"] = "end"

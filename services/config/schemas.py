@@ -8,12 +8,15 @@ place field lists are maintained, not two that can drift apart.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-MAX_WORKFLOW_NODES = 200
-MAX_WORKFLOW_EDGES = 500
+MAX_WORKFLOW_NODES = 50
+MAX_WORKFLOW_EDGES = 120
+# Caps prompt bloat: a 2-node graph can still carry multi-MB strings.
+MAX_WORKFLOW_BYTES = 256_000
 
 
 def _check_graph_bounds(graph: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -25,6 +28,12 @@ def _check_graph_bounds(graph: dict[str, Any] | None) -> dict[str, Any] | None:
         raise ValueError(f"workflow has too many nodes (max {MAX_WORKFLOW_NODES})")
     if isinstance(edges, list) and len(edges) > MAX_WORKFLOW_EDGES:
         raise ValueError(f"workflow has too many edges (max {MAX_WORKFLOW_EDGES})")
+    # Cheap size check before CPU-bound parse_graph / graph_warnings.
+    size = len(json.dumps(graph, default=str))
+    if size > MAX_WORKFLOW_BYTES:
+        raise ValueError(
+            f"workflow is too large ({size} bytes; max {MAX_WORKFLOW_BYTES})"
+        )
     return graph
 
 

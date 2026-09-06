@@ -158,7 +158,7 @@ async def validate_workflow(
     await _resolve_tenant(tenant_slug, current_user)
     _parse_agent_id(agent_id)
     try:
-        return {"valid": True, "warnings": workflows_service.validate(body.graph)}
+        return {"valid": True, "warnings": await workflows_service.validate(body.graph)}
     except workflows_service.WorkflowValidationError as exc:
         return {"valid": False, "errors": [e.to_dict() for e in exc.errors], "warnings": []}
 

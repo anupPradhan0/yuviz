@@ -274,7 +274,7 @@ async def test_get_agent_does_not_expose_or_cache_the_draft(test_tenant):
     assert "workflow" not in row and "workflow_draft" not in row
 
 
-async def test_patching_greeting_mirrors_into_the_published_graph(test_tenant):
+async def test_patching_greeting_mirrors_into_the_published_graph(test_tenant, pool):
     agent = await agents.create_agent(
         tenant_id=test_tenant["id"], slug="wf-mirror", name="Mirror",
         greeting="Old hello", system_prompt=AGENT_PROMPT,
@@ -288,26 +288,57 @@ async def test_patching_greeting_mirrors_into_the_published_graph(test_tenant):
     assert start["data"]["greeting"] == "New hello"
     versions = await workflows.list_versions(agent["id"], test_tenant["slug"])
     assert [v["version"] for v in versions] == [1]  # mirror is not a publish
+    # Mirror keeps graphs in the agent audit row (not stripped).
+    audit = await pool.fetchrow(
+        "SELECT new_value FROM audit_log WHERE entity_id = $1 AND action = 'updated' "
+        "ORDER BY changed_at DESC LIMIT 1",
+        agent["id"],
+    )
+    new_value = audit["new_value"]
+    if isinstance(new_value, str):
+        import json
+        new_value = json.loads(new_value)
+    assert "workflow" in new_value
 
 
-async def test_backfill_sql_shape_matches_starter_graph_with_tools():
-    """SQL backfill in schema.sql must stay aligned with starter_graph().
+async def test_publish_mirrors_greeting_back_into_the_agent_columns(test_tenant):
+    agent = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="wf-pub-mirror", name="Pub Mirror",
+        greeting="Column greeting", system_prompt="Column prompt",
+    )
+    published = {
+        "version": 1,
+        "nodes": [
+            {"id": "global", "type": "global", "position": {"x": 330, "y": 0},
+             "data": {"name": "always applies", "prompt": "Graph prompt"}},
+            {"id": "n1", "type": "start", "position": {"x": 0, "y": 0},
+             "data": {"name": "greeting", "prompt": "Ask.", "greeting": "Graph greeting"}},
+            {"id": "n2", "type": "end", "position": {"x": 0, "y": 190},
+             "data": {"name": "goodbye", "prompt": "Close.", "disposition": "completed"}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "n2",
+             "data": {"label": "done", "condition": "Finished."}},
+        ],
+    }
+    await workflows.publish(agent["id"], tenant_slug=test_tenant["slug"], graph=published)
+    fetched = await agents.get_agent(test_tenant["slug"], "wf-pub-mirror")
+    assert fetched["greeting"] == "Graph greeting"
+    assert fetched["system_prompt"] == "Graph prompt"
 
-    The SQL copy includes enabled agent_tool_policies (create_agent has none
-    yet); both must produce the same node/edge shape for the same inputs.
-    """
+
+async def test_starter_graph_sql_matches_python_starter_graph(pool):
+    """database/schema.sql starter_graph_sql() must equal starter_graph()."""
+    import json
+
     from libs.config_sdk.workflow import graphs_equivalent, starter_graph
 
+    row = await pool.fetchval(
+        "SELECT starter_graph_sql($1, $2, $3::jsonb)",
+        "Thanks for calling.", "Be helpful.", '["book_appointment"]',
+    )
+    sql_graph = json.loads(row) if isinstance(row, str) else dict(row)
     expected = starter_graph("Thanks for calling.", "Be helpful.", ["book_appointment"])
-    # Recreate the SQL defaults explicitly — if starter_graph drifts, fail here.
-    assert expected["nodes"][0]["data"]["prompt"] == "Be helpful."
-    assert expected["nodes"][1]["data"]["greeting"] == "Thanks for calling."
-    assert expected["nodes"][1]["data"]["tools"] == ["book_appointment"]
-    assert expected["nodes"][2]["data"]["disposition"] == "completed"
-    moved = {
-        **expected,
-        "nodes": [{**n, "position": {"x": 99, "y": 99}} for n in expected["nodes"]],
-    }
-    assert graphs_equivalent(expected, moved)
-    assert not graphs_equivalent(expected, starter_graph("other", "Be helpful.", ["book_appointment"]))
+    assert graphs_equivalent(sql_graph, expected)
+    assert sql_graph == expected
 

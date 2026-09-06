@@ -7,10 +7,15 @@ Workflow draft/publish/versions for agents.workflow (docs/workflow.md §4.2).
 
 `workflow` is intentionally absent from agents._UPDATABLE_FIELDS so PATCH
 cannot put an unvalidated graph on a live agent.
+
+Until the Conversation FSM reads ConversationInfo.workflow, live calls still
+use agents.greeting / agents.system_prompt. publish() mirrors those columns
+from the start/global nodes so a Publish 200 means callers hear the new text.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -34,13 +39,34 @@ class WorkflowValidationError(Exception):
         super().__init__("workflow is not valid")
 
 
-def validate(graph: dict[str, Any]) -> list[dict[str, Any]]:
-    """Raise WorkflowValidationError on errors; return warnings (never blocking)."""
+def _validate_sync(graph: dict[str, Any]) -> list[dict[str, Any]]:
     try:
         parsed = parse_graph(graph)
     except WorkflowInvalid as exc:
         raise WorkflowValidationError(exc.errors) from None
     return [w.to_dict() for w in graph_warnings(parsed)]
+
+
+async def validate(graph: dict[str, Any]) -> list[dict[str, Any]]:
+    """CPU-bound parse + warnings off the event loop (Config also serves call setup)."""
+    return await asyncio.to_thread(_validate_sync, graph)
+
+
+def prompts_from_graph(graph: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Extract start.greeting / global.prompt; None if that node type is absent."""
+    greeting: str | None = None
+    system_prompt: str | None = None
+    saw_start = False
+    saw_global = False
+    for node in graph.get("nodes") or []:
+        data = node.get("data") or {}
+        if node.get("type") == "start":
+            saw_start = True
+            greeting = "" if data.get("greeting") is None else str(data.get("greeting"))
+        elif node.get("type") == "global":
+            saw_global = True
+            system_prompt = "" if data.get("prompt") is None else str(data.get("prompt"))
+    return (greeting if saw_start else None, system_prompt if saw_global else None)
 
 
 async def _locked_agent(conn: Any, agent_id: Any, tenant_slug: str) -> dict[str, Any]:
@@ -136,8 +162,11 @@ async def publish(
     """Validate, write live graph + draft, append a version, bump config_version.
 
     graph=None publishes workflow_draft (editor Publish button).
-    Identical logic to the already-live graph (ignoring node positions) is a
-    no-op (no version row, no bump).
+    Identical logic to the already-live graph (ignoring node positions / order)
+    is a no-op (no version row, no bump).
+
+    Also mirrors start.greeting / global.prompt into agents.greeting /
+    system_prompt — those columns are what the runtime reads today.
     """
     pool = await db.get_pool()
     async with pool.acquire() as conn:
@@ -146,7 +175,7 @@ async def publish(
             candidate = graph if graph is not None else _as_graph(old["workflow_draft"])
             if candidate is None:
                 raise ValueError("nothing to publish — this agent has no workflow draft")
-            warnings = validate(candidate)
+            warnings = await validate(candidate)
 
             current = _as_graph(old["workflow"])
             if graphs_equivalent(candidate, current):
@@ -161,10 +190,18 @@ async def publish(
                 }
 
             payload = json.dumps(candidate)
+            greeting, system_prompt = prompts_from_graph(candidate)
             new_row = await conn.fetchrow(
-                "UPDATE agents SET workflow = $2::jsonb, workflow_draft = $2::jsonb "
-                "WHERE id = $1 RETURNING *",
-                agent_id, payload,
+                """
+                UPDATE agents SET
+                    workflow = $2::jsonb,
+                    workflow_draft = $2::jsonb,
+                    greeting = COALESCE($3, greeting),
+                    system_prompt = COALESCE($4, system_prompt)
+                WHERE id = $1
+                RETURNING *
+                """,
+                agent_id, payload, greeting, system_prompt,
             )
             version = await append_version(
                 conn, agent_id, payload, user_id=user_id, note=note,
