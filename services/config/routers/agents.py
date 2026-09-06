@@ -25,7 +25,7 @@ async def _resolve_tenant(tenant_slug: str, current_user: CurrentUser) -> dict:
     tenant = await get_or_404(
         tenants_service.get_tenant(tenant_slug), f"tenant {tenant_slug!r} not found",
     )
-    is_unscoped = current_user.role == "superadmin" or current_user.tenant_id is None
+    is_unscoped = current_user.role == "superadmin" or current_user.is_service_account
     if not is_unscoped and str(tenant["id"]) != str(current_user.tenant_id):
         raise HTTPException(status_code=404, detail=f"tenant {tenant_slug!r} not found")
     return tenant

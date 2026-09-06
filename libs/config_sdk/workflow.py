@@ -579,23 +579,31 @@ def graph_warnings(graph: WorkflowGraph, known_variables: Iterable[str] = ()) ->
     return warnings
 
 
+# React Flow editor chrome — not conversation logic.
+_RF_NODE_LOGIC = ("id", "type", "data")
+_RF_EDGE_LOGIC = ("id", "source", "target", "sourceHandle", "targetHandle", "data")
+
+
 def graphs_equivalent(a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool:
-    """True when graphs match ignoring React Flow `position` and node/edge order."""
+    """True when graphs match on conversation logic, ignoring RF chrome/order."""
     if a is None or b is None:
         return a is b
-    return _without_positions(a) == _without_positions(b)
+    return _logic_view(a) == _logic_view(b)
 
 
-def _without_positions(graph: dict[str, Any]) -> dict[str, Any]:
+def _logic_view(graph: dict[str, Any]) -> dict[str, Any]:
     nodes = [
-        {k: v for k, v in n.items() if k != "position"}
+        {k: n[k] for k in _RF_NODE_LOGIC if k in n}
         for n in (graph.get("nodes") or [])
     ]
-    edges = list(graph.get("edges") or [])
+    edges = [
+        {k: e[k] for k in _RF_EDGE_LOGIC if k in e}
+        for e in (graph.get("edges") or [])
+    ]
     nodes.sort(key=lambda n: str(n.get("id", "")))
     edges.sort(key=lambda e: str(e.get("id", "")))
     return {
-        **{k: v for k, v in graph.items() if k not in ("nodes", "edges")},
+        "version": graph.get("version"),
         "nodes": nodes,
         "edges": edges,
     }

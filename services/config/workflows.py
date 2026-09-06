@@ -69,6 +69,12 @@ def prompts_from_graph(graph: dict[str, Any]) -> tuple[str | None, str | None]:
     return (greeting if saw_start else None, system_prompt if saw_global else None)
 
 
+def column_prompts(graph: dict[str, Any]) -> tuple[str, str]:
+    """Columns the runtime reads today. Missing start/global → empty, not leftover."""
+    greeting, system_prompt = prompts_from_graph(graph)
+    return ("" if greeting is None else greeting, "" if system_prompt is None else system_prompt)
+
+
 async def _locked_agent(conn: Any, agent_id: Any, tenant_slug: str) -> dict[str, Any]:
     """Tenant-scoped SELECT ... FOR UPDATE (same shape as agents.update_agent)."""
     row = await conn.fetchrow(
@@ -150,6 +156,19 @@ async def save_draft(
     return {"saved": True}
 
 
+async def _peek_draft(agent_id: Any, tenant_slug: str) -> dict[str, Any] | None:
+    """Unlocked draft read so validate() can run before FOR UPDATE."""
+    pool = await db.get_pool()
+    row = await pool.fetchrow(
+        "SELECT a.workflow_draft FROM agents a JOIN tenants t ON t.id = a.tenant_id "
+        "WHERE a.id = $1 AND t.slug = $2 AND a.deleted_at IS NULL",
+        agent_id, tenant_slug,
+    )
+    if row is None:
+        raise LookupError(f"agent {agent_id} not found under tenant {tenant_slug!r}")
+    return _as_graph(row["workflow_draft"])
+
+
 async def publish(
     agent_id: Any,
     *,
@@ -162,12 +181,18 @@ async def publish(
     """Validate, write live graph + draft, append a version, bump config_version.
 
     graph=None publishes workflow_draft (editor Publish button).
-    Identical logic to the already-live graph (ignoring node positions / order)
+    Identical logic to the already-live graph (ignoring RF chrome / order)
     is a no-op (no version row, no bump).
 
     Also mirrors start.greeting / global.prompt into agents.greeting /
     system_prompt — those columns are what the runtime reads today.
+    A missing start/global node clears that column (no leftover stale text).
     """
+    peeked = graph if graph is not None else await _peek_draft(agent_id, tenant_slug)
+    if peeked is None:
+        raise ValueError("nothing to publish — this agent has no workflow draft")
+    warnings = await validate(peeked)
+
     pool = await db.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -175,7 +200,8 @@ async def publish(
             candidate = graph if graph is not None else _as_graph(old["workflow_draft"])
             if candidate is None:
                 raise ValueError("nothing to publish — this agent has no workflow draft")
-            warnings = await validate(candidate)
+            if not graphs_equivalent(candidate, peeked):
+                warnings = await validate(candidate)
 
             current = _as_graph(old["workflow"])
             if graphs_equivalent(candidate, current):
@@ -190,14 +216,14 @@ async def publish(
                 }
 
             payload = json.dumps(candidate)
-            greeting, system_prompt = prompts_from_graph(candidate)
+            greeting, system_prompt = column_prompts(candidate)
             new_row = await conn.fetchrow(
                 """
                 UPDATE agents SET
                     workflow = $2::jsonb,
                     workflow_draft = $2::jsonb,
-                    greeting = COALESCE($3, greeting),
-                    system_prompt = COALESCE($4, system_prompt)
+                    greeting = $3,
+                    system_prompt = $4
                 WHERE id = $1
                 RETURNING *
                 """,

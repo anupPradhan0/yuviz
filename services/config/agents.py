@@ -9,9 +9,9 @@ exists for the Admin UI's edit-by-id flow, where the id is already known.
 
 Prompt sync (phase until Conversation reads agents.workflow):
 - Runtime still speaks agents.greeting / system_prompt.
-- PATCH of those fields mirrors into start/global on both graphs (and the
-  audit row keeps the graphs when that happens).
-- publish() mirrors the other way (graph → columns).
+- PATCH of those fields mirrors into start/global and appends a version.
+- Missing start/global on PATCH is a 400, not a silent no-op.
+- publish()/create derive the columns from the graph.
 """
 
 from __future__ import annotations
@@ -58,17 +58,26 @@ def _audit_view(row: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in row.items() if k not in _JSON_COLUMNS}
 
 
-def _public_agent(row: dict[str, Any], *, list_view: bool = False) -> dict[str, Any]:
-    """Draft is editor-only (GET .../workflow). List omits published graph too."""
+def _public_agent(row: dict[str, Any]) -> dict[str, Any]:
+    """Graphs are editor-only (GET .../workflow) — not on the call-setup GET."""
     out = dict(row)
+    out.pop("workflow", None)
     out.pop("workflow_draft", None)
-    if list_view:
-        out.pop("workflow", None)
     return out
 
 
 def _coerce_prompt(value: Any) -> str:
     return "" if value is None else str(value)
+
+
+def _require_prompt_nodes(graph: dict[str, Any], fields: dict[str, Any]) -> None:
+    types = {n.get("type") for n in (graph.get("nodes") or [])}
+    if "greeting" in fields and "start" not in types:
+        raise ValueError("cannot update greeting: this agent's workflow has no start node")
+    if "system_prompt" in fields and "global" not in types:
+        raise ValueError(
+            "cannot update system_prompt: this agent's workflow has no always-on (global) node"
+        )
 
 
 def _mirror_prompts_into_graph(
@@ -77,6 +86,7 @@ def _mirror_prompts_into_graph(
     """Copy greeting/system_prompt into start/global nodes when those fields change."""
     if graph is None or ("greeting" not in fields and "system_prompt" not in fields):
         return graph
+    _require_prompt_nodes(graph, fields)
     nodes: list[dict[str, Any]] = []
     for raw in graph.get("nodes") or []:
         node = dict(raw)
@@ -123,7 +133,7 @@ async def list_agents(tenant_id: Any) -> list[dict[str, Any]]:
         "SELECT * FROM agents WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY name",
         tenant_id,
     )
-    return [_public_agent(_row(row), list_view=True) for row in rows]
+    return [_public_agent(_row(row)) for row in rows]
 
 
 _PROVIDER_ROLE_BY_FIELD = {
@@ -197,10 +207,11 @@ async def create_agent(
     starter_graph() from greeting/system_prompt.
     """
     # Deferred import: workflows.py imports this module for its cache key.
-    from .workflows import append_version, validate
+    from .workflows import append_version, column_prompts, validate
 
     graph = workflow if workflow else starter_graph(greeting, system_prompt)
     await validate(graph)
+    greeting, system_prompt = column_prompts(graph)
     graph_json = json.dumps(graph)
 
     pool = await db.get_pool()
@@ -316,8 +327,14 @@ async def update_agent(
             )
             new = _row(new_row)
 
-            # Mirror mutates the live graph without a version row — keep the
-            # graphs in this audit so "who changed the live script" is answerable.
+            if mirrored_graph and isinstance(set_fields.get("workflow"), str):
+                from .workflows import append_version
+                await append_version(
+                    conn, agent_id, set_fields["workflow"],
+                    user_id=user_id, note="mirrored greeting/system_prompt",
+                )
+
+            # Mirror mutates the live graph — keep graphs in this audit row.
             old_audit = old if mirrored_graph else _audit_view(old)
             new_audit = new if mirrored_graph else _audit_view(new)
             await audit.write_audit(

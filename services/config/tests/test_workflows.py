@@ -267,11 +267,13 @@ async def test_get_agent_does_not_expose_or_cache_the_draft(test_tenant):
     await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=DEAD_END)
     fetched = await agents.get_agent(test_tenant["slug"], "wf-no-draft")
     assert fetched is not None
-    assert "workflow_draft" not in fetched
-    assert fetched["workflow"] == CREATED_GRAPH
+    assert "workflow" not in fetched and "workflow_draft" not in fetched
     listed = await agents.list_agents(test_tenant["id"])
     row = next(a for a in listed if a["id"] == agent["id"])
     assert "workflow" not in row and "workflow_draft" not in row
+    state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
+    assert state["workflow"] == CREATED_GRAPH
+    assert state["workflow_draft"] == DEAD_END
 
 
 async def test_patching_greeting_mirrors_into_the_published_graph(test_tenant, pool):
@@ -287,7 +289,8 @@ async def test_patching_greeting_mirrors_into_the_published_graph(test_tenant, p
     start = next(n for n in state["workflow"]["nodes"] if n["type"] == "start")
     assert start["data"]["greeting"] == "New hello"
     versions = await workflows.list_versions(agent["id"], test_tenant["slug"])
-    assert [v["version"] for v in versions] == [1]  # mirror is not a publish
+    assert [v["version"] for v in versions] == [2, 1]
+    assert versions[0]["note"] == "mirrored greeting/system_prompt"
     # Mirror keeps graphs in the agent audit row (not stripped).
     audit = await pool.fetchrow(
         "SELECT new_value FROM audit_log WHERE entity_id = $1 AND action = 'updated' "
@@ -341,4 +344,50 @@ async def test_starter_graph_sql_matches_python_starter_graph(pool):
     expected = starter_graph("Thanks for calling.", "Be helpful.", ["book_appointment"])
     assert graphs_equivalent(sql_graph, expected)
     assert sql_graph == expected
+
+
+async def test_create_with_a_graph_stores_prompts_from_the_graph_not_the_body(test_tenant):
+    graph = {
+        "version": 1,
+        "nodes": [
+            {"id": "global", "type": "global", "position": {"x": 330, "y": 0},
+             "data": {"name": "always applies", "prompt": "Graph prompt"}},
+            {"id": "n1", "type": "start", "position": {"x": 0, "y": 0},
+             "data": {"name": "greeting", "prompt": "Ask.", "greeting": "Graph hello"}},
+            {"id": "n2", "type": "end", "position": {"x": 0, "y": 190},
+             "data": {"name": "goodbye", "prompt": "Close.", "disposition": "completed"}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "n2",
+             "data": {"label": "done", "condition": "Finished."}},
+        ],
+    }
+    agent = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="wf-create-prompts", name="Prompts",
+        greeting="Body hello", system_prompt="Body prompt", workflow=graph,
+        tenant_slug=test_tenant["slug"],
+    )
+    assert agent["greeting"] == "Graph hello"
+    assert agent["system_prompt"] == "Graph prompt"
+
+
+async def test_publish_without_a_global_node_clears_system_prompt(test_tenant):
+    agent = await _agent(test_tenant, slug="wf-no-global")
+    assert agent["system_prompt"] == AGENT_PROMPT
+    await workflows.publish(agent["id"], tenant_slug=test_tenant["slug"], graph=GRAPH)
+    fetched = await agents.get_agent(test_tenant["slug"], "wf-no-global")
+    assert fetched["system_prompt"] == ""
+    start = next(n for n in GRAPH["nodes"] if n["type"] == "start")
+    assert fetched["greeting"] == (start["data"].get("greeting") or "")
+
+
+async def test_patch_system_prompt_rejects_a_graph_with_no_global_node(test_tenant):
+    agent = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="wf-no-global-patch", name="No Global",
+        workflow=GRAPH,
+    )
+    with pytest.raises(ValueError, match="no always-on"):
+        await agents.update_agent(
+            agent["id"], tenant_slug=test_tenant["slug"], system_prompt="Nope",
+        )
 

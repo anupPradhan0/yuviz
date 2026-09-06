@@ -119,13 +119,18 @@ class TestAgentEndpoints:
             json={"slug": "support-agent", "name": "Support", "greeting": "Hi!"},
         )
         assert resp.status_code == 201
-        assert resp.json()["slug"] == "support-agent"
+        created = resp.json()
+        assert created["slug"] == "support-agent"
+        assert "workflow" not in created and "workflow_draft" not in created
 
         resp = await client.get(f"/tenants/{test_tenant['slug']}/agents/support-agent")
         assert resp.status_code == 200
         body = resp.json()
         assert body["greeting"] == "Hi!"
-        graph = body["workflow"]
+        assert "workflow" not in body and "workflow_draft" not in body
+        wf = await client.get(f"/tenants/{test_tenant['slug']}/agents/{created['id']}/workflow")
+        assert wf.status_code == 200
+        graph = wf.json()["workflow"]
         assert isinstance(graph, dict)
         start = next(n for n in graph["nodes"] if n["type"] == "start")
         assert start["data"]["greeting"] == "Hi!"
@@ -207,6 +212,55 @@ class TestAgentEndpoints:
         finally:
             await pool.execute("DELETE FROM agents WHERE tenant_id = $1", other["id"])
             await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_null_tenant_admin_is_not_unscoped_on_agent_routes(
+        self, client, test_tenant, pool,
+    ):
+        """role=admin + tenant_id=NULL is not a service account — 404, not a write."""
+        from services.config import auth as auth_mod
+        from services.config import users as users_service
+        email = f"test-null-admin-{uuid.uuid4().hex[:8]}@example.com"
+        user = await users_service.create_user(
+            email=email, password="test-password-not-real", role="admin", tenant_id=None,
+        )
+        token = auth_mod.create_access_token(user)
+        try:
+            from httpx import ASGITransport, AsyncClient
+            from services.config.app import app
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test",
+                headers={"Authorization": f"Bearer {token}"},
+            ) as stray:
+                resp = await stray.get(f"/tenants/{test_tenant['slug']}/agents")
+                assert resp.status_code == 404
+        finally:
+            await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])
+
+    async def test_service_account_can_read_any_tenant_agents(
+        self, test_tenant, pool,
+    ):
+        from httpx import ASGITransport, AsyncClient
+        from services.config import auth as auth_mod
+        from services.config.app import app
+        email = f"test-svc-{uuid.uuid4().hex[:8]}@internal.yuviz.ai"
+        row = await pool.fetchrow(
+            "INSERT INTO users (email, password_hash, role, tenant_id, is_service_account) "
+            "VALUES ($1, $2, 'viewer', NULL, true) RETURNING *",
+            email, auth_mod.hash_password("svc-not-real"),
+        )
+        user = dict(row)
+        token = auth_mod.create_access_token(user)
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test",
+                headers={"Authorization": f"Bearer {token}"},
+            ) as svc:
+                resp = await svc.get(f"/tenants/{test_tenant['slug']}/agents")
+                assert resp.status_code == 200
+        finally:
+            await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])
 
     async def test_oversized_workflow_graph_is_422(self, client, test_tenant):
         nodes = [

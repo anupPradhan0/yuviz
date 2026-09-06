@@ -363,3 +363,19 @@ def test_graphs_equivalent_ignores_node_and_edge_order():
         "edges": list(reversed(a["edges"])),
     }
     assert graphs_equivalent(a, b)
+
+
+def test_graphs_equivalent_ignores_react_flow_chrome():
+    from libs.config_sdk.workflow import graphs_equivalent
+
+    a = starter_graph("hi", "be nice")
+    b = {
+        **a,
+        "nodes": [
+            {**n, "selected": True, "dragging": False, "width": 200, "height": 80,
+             "measured": {"width": 200, "height": 80}}
+            for n in a["nodes"]
+        ],
+        "edges": [{**e, "selected": True} for e in a["edges"]],
+    }
+    assert graphs_equivalent(a, b)
