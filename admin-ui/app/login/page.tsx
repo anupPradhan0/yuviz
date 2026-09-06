@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ApiError, bootstrap, getSetupStatus, login } from "@/lib/api";
+import { ApiError, bootstrap, getSetupStatus, isConsoleRole, login } from "@/lib/api";
 import { setToken } from "@/lib/auth";
 
 function EyeIcon({ off }: { off: boolean }) {
@@ -65,7 +65,15 @@ export default function LoginPage() {
     try {
       const result = creating ? await bootstrap(email, password) : await login(email, password);
       setToken(result.access_token);
-      router.push("/tenants");
+      // `supervisor`/`agent` have zero Config API surface (deps.py's
+      // CONSOLE_ROLES) — every admin page 403s for them, so they land on
+      // the standalone "not for your role" screen instead. A `viewer` is a
+      // console role but can't create/edit tenants, so /tenants (built
+      // around superadmin/admin actions) isn't a page they can use either —
+      // Dashboard is read-only and works for them.
+      if (!isConsoleRole(result.user.role)) router.push("/no-access");
+      else if (result.user.role === "viewer") router.push("/dashboard");
+      else router.push("/tenants");
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : String(e));
     } finally {

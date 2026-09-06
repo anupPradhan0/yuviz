@@ -12,6 +12,16 @@ enforced, identity.
 require_role() builds on top of it for endpoints that need more than "any
 authenticated user" (e.g. only superadmin/admin may write, viewer is
 read-only).
+
+CONSOLE_ROLES / get_current_user() also fence off `supervisor`/`agent` — two
+roles added to `users_role_check` for the invite feature that have no Config
+API surface at all in this build (see design doc's "the console-role gate").
+`get_authenticated_user` is the raw decode-or-401 step, unchanged from
+before; it exists as its own name only for `/auth/me` and
+`/auth/change-password`, which a supervisor/agent must still be able to
+reach. Every other route keeps depending on `get_current_user`, so the gate
+sits inside identity resolution itself rather than being an exemption list
+some future router can forget to add itself to.
 """
 
 from __future__ import annotations
@@ -23,8 +33,12 @@ from fastapi import Depends, HTTPException, Header
 
 from .auth import CurrentUser, InvalidTokenError, decode_access_token
 
+CONSOLE_ROLES = frozenset({"superadmin", "admin", "viewer"})
 
-async def get_current_user(authorization: str | None = Header(default=None)) -> CurrentUser:
+
+async def get_authenticated_user(authorization: str | None = Header(default=None)) -> CurrentUser:
+    """Decode-or-401. No role gate — see module docstring for why this name
+    exists separately from get_current_user()."""
     if authorization is None or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="missing or malformed Authorization header")
     token = authorization.removeprefix("Bearer ").strip()
@@ -32,6 +46,12 @@ async def get_current_user(authorization: str | None = Header(default=None)) -> 
         return decode_access_token(token)
     except InvalidTokenError:
         raise HTTPException(status_code=401, detail="invalid or expired token")
+
+
+async def get_current_user(user: CurrentUser = Depends(get_authenticated_user)) -> CurrentUser:
+    if user.role not in CONSOLE_ROLES:
+        raise HTTPException(status_code=403, detail=f"role {user.role!r} cannot access this service")
+    return user
 
 
 def require_role(*allowed_roles: str):

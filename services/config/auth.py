@@ -20,7 +20,7 @@ if not JWT_SECRET:
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_TTL = timedelta(hours=12)
 
-Role = Literal["superadmin", "admin", "viewer"]
+Role = Literal["superadmin", "admin", "supervisor", "agent", "viewer"]
 
 
 @dataclass(frozen=True)

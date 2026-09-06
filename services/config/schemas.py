@@ -232,7 +232,7 @@ class UserCreate(BaseModel):
 
 
 class UserUpdate(BaseModel):
-    role:      Literal["superadmin", "admin", "viewer"] | None = None
+    role:      Literal["superadmin", "admin", "supervisor", "agent", "viewer"] | None = None
     tenant_id: str | None = None
     password:  str | None = Field(default=None, min_length=8)
 
@@ -240,3 +240,14 @@ class UserUpdate(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password:      str = Field(min_length=8)
+
+
+class InviteCreate(BaseModel):
+    email:     str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    role:      Literal["superadmin", "admin", "supervisor", "agent", "viewer"]
+    tenant_id: str | None = None  # None == superadmin scope
+    team:      str | None = None
+
+
+class InviteAccept(BaseModel):
+    password: str = Field(min_length=8)

@@ -30,7 +30,7 @@ def to_public_dict(user: dict[str, Any]) -> dict[str, Any]:
 async def get_user_by_email(email: str) -> dict[str, Any] | None:
     pool = await db.get_pool()
     row = await pool.fetchrow(
-        "SELECT * FROM users WHERE email = $1 AND deleted_at IS NULL", email,
+        "SELECT * FROM users WHERE lower(email) = lower($1) AND deleted_at IS NULL", email,
     )
     return dict(row) if row is not None else None
 
@@ -49,10 +49,24 @@ async def list_users(*, tenant_id: Any | None, is_superadmin: bool) -> list[dict
     # an admin soft-deleted one through this exact listing once already,
     # breaking every live call until it was noticed. They're managed
     # directly in Postgres, not through the Users UI.
+    #
+    # `is_superadmin` reflects the *actor's* real privilege, not whether
+    # tenant_id was supplied — a superadmin filtering to one tenant via
+    # ?tenant_id= still gets every role in that tenant; only a non-
+    # superadmin actor gets the `role != 'superadmin'` exclusion, since
+    # they must never see a superadmin row regardless of tenant. Review
+    # finding 3: these used to be conflated, which silently dropped
+    # superadmin-role rows from a superadmin's own filtered listing.
     pool = await db.get_pool()
-    if is_superadmin:
+    if is_superadmin and tenant_id is None:
         rows = await pool.fetch(
             "SELECT * FROM users WHERE deleted_at IS NULL AND NOT is_service_account ORDER BY email",
+        )
+    elif is_superadmin:
+        rows = await pool.fetch(
+            "SELECT * FROM users WHERE tenant_id IS NOT DISTINCT FROM $1 "
+            "AND deleted_at IS NULL AND NOT is_service_account ORDER BY email",
+            tenant_id,
         )
     else:
         rows = await pool.fetch(
@@ -72,14 +86,15 @@ async def _insert_user(
     tenant_id: Any | None,
     creator_user_id: Any | None,
     creator_user_email: str | None,
+    team: str | None = None,
 ) -> dict[str, Any]:
     """Insert + audit on a caller-supplied connection, already inside a
     transaction — so bootstrap_first_superadmin() can share its lock-holding
     transaction, which create_user()'s own connection could not."""
     row = await conn.fetchrow(
-        "INSERT INTO users (email, password_hash, role, tenant_id) "
-        "VALUES ($1, $2, $3, $4) RETURNING *",
-        email, auth.hash_password(password), role, tenant_id,
+        "INSERT INTO users (email, password_hash, role, tenant_id, team) "
+        "VALUES ($1, $2, $3, $4, $5) RETURNING *",
+        email.lower(), auth.hash_password(password), role, tenant_id, team,
     )
     result = dict(row)
     await audit.write_audit(
@@ -130,7 +145,7 @@ async def bootstrap_first_superadmin(*, email: str, password: str) -> dict[str, 
     Check and insert share one advisory-locked transaction, so two concurrent
     requests can't both see "no superadmin" and both insert. A partial unique
     index would do it too, but would also forbid the legal second superadmin
-    created later via POST /users."""
+    created later via the invite flow (POST /invites, then POST /invites/accept)."""
     pool = await db.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():

@@ -71,7 +71,7 @@ cp venv/lib/python3.11/site-packages/faster_whisper/assets/silero_vad_v6.onnx mo
 brew services start postgresql@14
 brew services start redis
 createdb voiceai
-psql voiceai -f database/schema.sql
+psql voiceai -v ON_ERROR_STOP=1 -f database/schema.sql
 psql voiceai -f database/knowledge_schema.sql
 psql voiceai -f database/telephony_schema.sql
 ```
@@ -132,6 +132,45 @@ share the same value:
 ```bash
 export JWT_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
 ```
+
+Invite emails (user onboarding) are sent via stdlib `smtplib` — no new
+dependency, no queue. `SMTP_PASSWORD_REF` follows the same `env:`/`k8s:`
+secret-ref convention as `api_key_ref`/`auth_token_ref` above; the rest are
+plain config, not secrets:
+
+```bash
+export SMTP_HOST="smtp.example.com"
+export SMTP_PORT="587"
+export SMTP_USER="invites@example.com"
+export SMTP_FROM="invites@example.com"
+export SMTP_PASSWORD_REF="env:SMTP_PASSWORD"
+export SMTP_PASSWORD="<the-mailbox-password-or-app-password>"
+export SMTP_STARTTLS="true"
+export INVITE_BASE_URL="http://localhost:3000"
+```
+
+`INVITE_BASE_URL` is the Admin UI origin the accept link points at —
+`${INVITE_BASE_URL}/invite#<token>`, token in the fragment so it never
+reaches a server log. An SMTP send failure doesn't fail the invite
+request: the invite is still created `pending` and the response reports
+`email_sent: false`; resend tries again.
+
+`SMTP_USER` is optional — leave it unset for a relay that needs no
+authentication (a local dev sink, or an internal relay that authorises by
+source IP); `SMTP_PASSWORD_REF` is only required when `SMTP_USER` is set.
+
+`SMTP_STARTTLS` defaults to `true` and upgrades the connection with
+STARTTLS before authenticating — both `SMTP_PASSWORD` and the invite token
+itself are bearer-equivalent, so sending either over a cleartext
+connection on port 587 is a real credential leak, not just a lint issue.
+It must stay `true` everywhere except local development. Set it to
+`false` only against a local dev relay with no TLS support at all (e.g.
+MailHog, `aiosmtpd` on port 1025) — a relay that refuses STARTTLS is
+treated as a send failure (same `email_sent: false` path above), never a
+silent fallback to cleartext. The upgrade verifies the relay's certificate
+and hostname (no way to disable that while `SMTP_STARTTLS=true`), so the
+relay needs a valid, trusted certificate — a self-signed or expired one
+will fail the send the same way a refused STARTTLS does.
 
 ## 6. Seed a default agent
 

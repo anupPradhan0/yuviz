@@ -242,6 +242,89 @@ ALTER TABLE users ALTER COLUMN password_hash SET NOT NULL;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_service_account BOOLEAN NOT NULL DEFAULT false;
 UPDATE users SET is_service_account = true WHERE lower(email) LIKE '%@internal.%' AND is_service_account = false;
 
+-- Invite-based onboarding: widen roles, add team, and re-guard email
+-- uniqueness case-insensitively (findings 4, 5, 8).
+--
+-- DROP and re-ADD folded into one DO block for the same reason as the email
+-- guard below (lesson 13): `psql -f` is autocommit-per-statement with no
+-- ON_ERROR_STOP, so two bare top-level statements would let the DROP commit
+-- and then silently leave the table with no role CHECK at all if the ADD
+-- ever failed. One statement means one failure rolls both back together.
+DO $$ BEGIN
+  EXECUTE 'ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check';
+  EXECUTE $sql$ALTER TABLE users ADD CONSTRAINT users_role_check
+    CHECK (role IN ('superadmin','admin','supervisor','agent','viewer'))$sql$;
+END $$;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS team TEXT;
+
+-- Email identity (findings 4, 5, 8). `psql -f` runs with no ON_ERROR_STOP,
+-- so a failing statement is logged and the script keeps going rather than
+-- aborting — meaning ordering two separate statements cannot protect the
+-- second from running after the first raises. So the guard, the DROP and
+-- the lower-casing UPDATE are folded into one DO block: it is a single
+-- statement, atomic under autocommit, so a RAISE here rolls back the DROP
+-- and the UPDATE together and nothing is left half-applied (lesson 5).
+DO $$
+DECLARE collisions int;
+BEGIN
+  SELECT count(*) INTO collisions FROM (
+    SELECT lower(email) FROM users WHERE deleted_at IS NULL
+    GROUP BY 1 HAVING count(*) > 1
+  ) d;
+  IF collisions > 0 THEN
+    RAISE EXCEPTION
+      'users.email has % case-insensitive duplicate(s) among live rows; '
+      'soft-delete or merge the losers before applying schema.sql', collisions;
+  END IF;
+  -- Drop the case-sensitive column UNIQUE only once the guard above has
+  -- passed. If it survived, it would keep a soft-deleted address permanently
+  -- un-reinvitable — the exact mismatch with get_user_by_email()'s
+  -- `deleted_at IS NULL` filter (users.py:33) that would 500 the accept path
+  -- when someone re-invites a departed employee. DDL needs EXECUTE inside
+  -- plpgsql.
+  EXECUTE 'ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key';
+  UPDATE users SET email = lower(email) WHERE email <> lower(email);
+END $$;
+
+-- Partial, so it agrees with get_user_by_email()'s predicate on
+-- `deleted_at IS NULL`: a soft-deleted address is re-invitable and its ghost
+-- row cannot collide with the new one. `get_user_by_email` itself now
+-- matches on `lower(email)` (services/config/users.py), so the two agree on
+-- case as well. Left as its own statement — if the DO block above raised,
+-- this fails too (duplicates still present), but that failure damages
+-- nothing: the DROP was the only statement that could leave the table worse
+-- than it found it, and that one is now inside the guarded block.
+CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_idx
+  ON users (lower(email)) WHERE deleted_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS user_invites (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id    UUID REFERENCES tenants(id),   -- NULL = superadmin invite
+    email        TEXT NOT NULL,                 -- stored already lower-cased
+    role         TEXT NOT NULL CHECK (role IN ('superadmin','admin','supervisor','agent','viewer')),
+    team         TEXT,
+    token_hash   TEXT NOT NULL UNIQUE,          -- sha256 hex of the token
+    status       TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','revoked')),
+    expires_at   TIMESTAMPTZ NOT NULL,
+    invited_by   UUID REFERENCES users(id),
+    accepted_at  TIMESTAMPTZ,
+    accepted_user_id UUID REFERENCES users(id),
+    last_sent_at TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Per-TENANT, not global (finding 2, round 1). A global index would let
+-- Tenant B park a pending invite on an email and permanently block Tenant A
+-- from onboarding that person, and would raise a UniqueViolation with no user
+-- row whose tenant could be named. Cross-tenant collision is instead caught by
+-- the users lookup at send time, which is the only check with a real account
+-- behind it. COALESCE gives the NULL (superadmin) scope its own slot.
+CREATE UNIQUE INDEX IF NOT EXISTS user_invites_pending_email_idx
+  ON user_invites (COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid), lower(email))
+  WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS user_invites_tenant_idx ON user_invites (tenant_id, status, created_at DESC);
+
 -- ── audit_log — append-only, written in the same transaction as the mutation ─
 CREATE TABLE IF NOT EXISTS audit_log (
     id          BIGSERIAL PRIMARY KEY,

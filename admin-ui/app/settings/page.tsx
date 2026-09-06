@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import {
   ApiError,
   AuditLogEntry,
   changePassword,
-  createUser,
   deleteUser,
   getCurrentUser,
   listAuditLog,
@@ -77,7 +77,13 @@ function ProfilePanel() {
   );
 }
 
-const ROLE_BADGE: Record<UserRole, string> = { superadmin: "red", admin: "indigo", viewer: "gray" };
+const ROLE_BADGE: Record<UserRole, string> = {
+  superadmin: "red",
+  admin: "indigo",
+  supervisor: "amber",
+  agent: "amber",
+  viewer: "gray",
+};
 
 function UsersPanel() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -85,16 +91,8 @@ function UsersPanel() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [modalOpen, setModalOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<User | null>(null);
   const [deactivatingId, setDeactivatingId] = useState<string | null>(null);
-
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [role, setRole] = useState<UserRole>("admin");
-  const [tenantId, setTenantId] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [formError, setFormError] = useState<string | null>(null);
 
   const [editForm, setEditForm] = useState<UserUpdate>({});
   const [resetPassword, setResetPassword] = useState("");
@@ -121,34 +119,6 @@ function UsersPanel() {
   useEffect(refresh, []);
 
   const tenantName = (id: string | null) => (id ? tenants.find((t) => t.id === id)?.name ?? id : "— platform —");
-
-  const openCreate = () => {
-    setEmail("");
-    setPassword("");
-    setRole("admin");
-    setTenantId(isSuperadmin ? "" : currentUser?.tenant_id ?? "");
-    setFormError(null);
-    setModalOpen(true);
-  };
-
-  const handleCreate = async () => {
-    setSubmitting(true);
-    setFormError(null);
-    try {
-      await createUser({
-        email,
-        password,
-        role,
-        tenant_id: isSuperadmin ? tenantId || null : currentUser?.tenant_id ?? null,
-      });
-      setModalOpen(false);
-      refresh();
-    } catch (e) {
-      setFormError(e instanceof ApiError ? e.detail : String(e));
-    } finally {
-      setSubmitting(false);
-    }
-  };
 
   const openEdit = (u: User) => {
     setEditTarget(u);
@@ -200,15 +170,13 @@ function UsersPanel() {
     }
   };
 
-  const createRoleOptions: UserRole[] = isSuperadmin ? ["superadmin", "admin", "viewer"] : ["admin", "viewer"];
-
   return (
     <>
       {canCreate && (
         <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
-          <button className="btn btn-primary btn-sm" onClick={openCreate}>
-            + New User
-          </button>
+          <Link href="/users" className="btn btn-primary btn-sm">
+            Invite User
+          </Link>
         </div>
       )}
 
@@ -280,80 +248,6 @@ function UsersPanel() {
       </div>
 
       <Modal
-        open={modalOpen}
-        title="New User"
-        onClose={() => setModalOpen(false)}
-        footer={
-          <>
-            <button className="btn btn-ghost btn-sm" onClick={() => setModalOpen(false)}>
-              Cancel
-            </button>
-            <button
-              className="btn btn-primary btn-sm"
-              onClick={handleCreate}
-              disabled={submitting || !email || password.length < 8}
-            >
-              {submitting ? "Creating…" : "Create User"}
-            </button>
-          </>
-        }
-      >
-        {formError && <div className="error-banner">{formError}</div>}
-        <div className="form-group">
-          <label className="form-label" htmlFor="new-user-email">
-            Email <span className="required">*</span>
-          </label>
-          <input
-            id="new-user-email"
-            className="form-input"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="teammate@company.com"
-          />
-        </div>
-        <div className="form-group">
-          <label className="form-label" htmlFor="new-user-password">
-            Password <span className="required">*</span>
-            <span className="hint">at least 8 characters</span>
-          </label>
-          <input
-            id="new-user-password"
-            className="form-input"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="new-password"
-          />
-        </div>
-        <div className="form-group">
-          <label className="form-label" htmlFor="new-user-role">Role</label>
-          <select id="new-user-role" className="form-input" value={role} onChange={(e) => setRole(e.target.value as UserRole)}>
-            {createRoleOptions.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-          </select>
-        </div>
-        {isSuperadmin && (
-          <div className="form-group">
-            <label className="form-label" htmlFor="new-user-tenant">
-              Tenant <span className="hint">blank = platform-wide (superadmin scope)</span>
-            </label>
-            <select id="new-user-tenant" className="form-input" value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
-              <option value="">— Platform (no tenant) —</option>
-              {tenants.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-      </Modal>
-
-      <Modal
         open={editTarget !== null}
         title={`Edit User — ${editTarget?.email ?? ""}`}
         onClose={() => setEditTarget(null)}
@@ -377,7 +271,7 @@ function UsersPanel() {
             value={editForm.role ?? ""}
             onChange={(e) => setEditForm({ ...editForm, role: e.target.value as UserRole })}
           >
-            {(["superadmin", "admin", "viewer"] as UserRole[]).map((r) => (
+            {(["superadmin", "admin", "supervisor", "agent", "viewer"] as UserRole[]).map((r) => (
               <option key={r} value={r}>
                 {r}
               </option>

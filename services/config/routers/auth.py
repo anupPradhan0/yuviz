@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from .. import users as users_service
 from ..auth import CurrentUser, create_access_token
-from ..deps import get_current_user
+from ..deps import get_authenticated_user
 from ..schemas import BootstrapRequest, ChangePasswordRequest, LoginRequest
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -48,7 +48,7 @@ async def login(body: LoginRequest):
 
 
 @router.get("/me")
-async def me(current_user: CurrentUser = Depends(get_current_user)):
+async def me(current_user: CurrentUser = Depends(get_authenticated_user)):
     user = await users_service.get_user_by_id(current_user.id)
     if user is None:
         # Token is validly signed but the user row is gone (deleted since
@@ -60,7 +60,7 @@ async def me(current_user: CurrentUser = Depends(get_current_user)):
 
 @router.post("/change-password", status_code=204)
 async def change_password(
-    body: ChangePasswordRequest, current_user: CurrentUser = Depends(get_current_user),
+    body: ChangePasswordRequest, current_user: CurrentUser = Depends(get_authenticated_user),
 ):
     # Always the caller's own password — there is no "change someone else's
     # password" endpoint. An admin resetting another user's credentials is a

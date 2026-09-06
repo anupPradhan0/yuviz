@@ -28,8 +28,32 @@ start_kamailio() {
 start_data() {
   brew services start postgresql@14 2>/dev/null || true
   brew services start redis         2>/dev/null || true
-  psql voiceai -f "$REPO/database/schema.sql" 2>/dev/null || \
-    echo "schema already applied or voiceai db missing — run: psql postgres -c 'CREATE DATABASE voiceai;'"
+
+  # ON_ERROR_STOP=1 (lesson 13) turns a tripped guard — e.g. schema.sql's
+  # case-insensitive email-collision check — into psql exit status 3, which
+  # must reach the operator and stop this launcher: swallowing it (the old
+  # `2>/dev/null || echo "...applied..."`) would have printed a false
+  # success and started every service against a half-applied schema, with
+  # no user_invites table and no invite-onboarding at all. The one case
+  # that old fallback genuinely needed to catch is exit status 2 — psql's
+  # own "could not connect", which is what happens on a fresh checkout
+  # before `createdb voiceai` has ever been run — checked here explicitly,
+  # verified empirically (`psql <missing db>` -> 2, a tripped `RAISE
+  # EXCEPTION` guard under ON_ERROR_STOP=1 -> 3, not 2).
+  local schema_rc=0
+  psql voiceai -v ON_ERROR_STOP=1 -f "$REPO/database/schema.sql" || schema_rc=$?
+  if [ "$schema_rc" -eq 2 ]; then
+    echo "voiceai db missing — run: psql postgres -c 'CREATE DATABASE voiceai;'" >&2
+    # return 0, not 1: this file is source-d into the operator's shell (docs/setup.md:158)
+    # under `set -euo pipefail`, where a nonzero return from a sourced function
+    # terminates the interactive shell. The hint above is the whole point of
+    # this branch, so it must survive to be read.
+    return 0
+  elif [ "$schema_rc" -ne 0 ]; then
+    echo "schema.sql failed to apply — see the error above; PostgreSQL/Redis were NOT started for use" >&2
+    return "$schema_rc"
+  fi
+
   psql voiceai -f "$REPO/database/knowledge_schema.sql" 2>/dev/null || true
   echo "✓ PostgreSQL + Redis running"
 }
