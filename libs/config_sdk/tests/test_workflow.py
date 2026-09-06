@@ -338,3 +338,16 @@ def test_the_starter_graph_carries_the_tools_it_is_given():
     graph = parse_graph(starter_graph("hi", "be nice", ["book_appointment"]))
     assert graph.start.tools == ["book_appointment"]
     assert parse_graph(starter_graph("hi", "be nice")).start.tools == []
+
+
+def test_graphs_equivalent_ignores_node_positions():
+    from libs.config_sdk.workflow import graphs_equivalent
+
+    a = starter_graph("hi", "be nice")
+    b = {
+        **a,
+        "nodes": [{**n, "position": {"x": 1, "y": 2}} for n in a["nodes"]],
+    }
+    assert graphs_equivalent(a, b)
+    b["nodes"][1]["data"] = {**b["nodes"][1]["data"], "greeting": "bye"}
+    assert not graphs_equivalent(a, b)

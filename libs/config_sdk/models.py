@@ -151,9 +151,8 @@ class Agent:
     # Mirrors agents.max_call_duration_s — see Policies.max_call_duration_s's
     # own comment for what this controls. None = unlimited.
     max_call_duration_s: int | None = None
-    # Published / draft graphs (agents.workflow*). Draft is editor-only.
+    # Published graph only — drafts never reach the call path (GET .../workflow).
     workflow: dict[str, Any] | None = None
-    workflow_draft: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

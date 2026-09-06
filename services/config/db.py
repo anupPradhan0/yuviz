@@ -24,9 +24,16 @@ def json_col(value: Any) -> Any:
     if value is None or not isinstance(value, str):
         return value
     try:
-        return json.loads(value)
-    except (ValueError, TypeError):
-        return value
+        parsed = json.loads(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"JSONB column is not decodable JSON: {value[:200]!r}"
+        ) from exc
+    if isinstance(parsed, str):
+        raise ValueError(
+            f"JSONB column is double-encoded JSON string: {value[:200]!r}"
+        )
+    return parsed
 
 
 async def get_pool(dsn: str | None = None) -> asyncpg.Pool:

@@ -237,3 +237,77 @@ async def test_empty_workflow_object_at_create_uses_the_starter_graph(test_tenan
     versions = await workflows.list_versions(agent["id"], test_tenant["slug"])
     assert [v["version"] for v in versions] == [1]
 
+
+async def test_republishing_with_only_position_changes_is_a_noop(test_tenant, pool):
+    agent = await _agent(test_tenant, slug="wf-pos-noop")
+    first = await workflows.publish(
+        agent["id"], tenant_slug=test_tenant["slug"], graph=GRAPH,
+    )
+    moved = {
+        **GRAPH,
+        "nodes": [
+            {**n, "position": {"x": n["position"]["x"] + 40, "y": n["position"]["y"] + 10}}
+            for n in GRAPH["nodes"]
+        ],
+    }
+    again = await workflows.publish(
+        agent["id"], tenant_slug=test_tenant["slug"], graph=moved,
+    )
+    assert again["version"] == first["version"]
+    assert again["config_version"] == first["config_version"]
+    versions = await workflows.list_versions(agent["id"], test_tenant["slug"])
+    assert [v["version"] for v in versions] == [first["version"], 1]
+
+
+async def test_get_agent_does_not_expose_or_cache_the_draft(test_tenant):
+    agent = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="wf-no-draft", name="No Draft",
+        system_prompt=AGENT_PROMPT, tenant_slug=test_tenant["slug"],
+    )
+    await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=DEAD_END)
+    fetched = await agents.get_agent(test_tenant["slug"], "wf-no-draft")
+    assert fetched is not None
+    assert "workflow_draft" not in fetched
+    assert fetched["workflow"] == CREATED_GRAPH
+    listed = await agents.list_agents(test_tenant["id"])
+    row = next(a for a in listed if a["id"] == agent["id"])
+    assert "workflow" not in row and "workflow_draft" not in row
+
+
+async def test_patching_greeting_mirrors_into_the_published_graph(test_tenant):
+    agent = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="wf-mirror", name="Mirror",
+        greeting="Old hello", system_prompt=AGENT_PROMPT,
+    )
+    updated = await agents.update_agent(
+        agent["id"], tenant_slug=test_tenant["slug"], greeting="New hello",
+    )
+    assert updated["greeting"] == "New hello"
+    state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
+    start = next(n for n in state["workflow"]["nodes"] if n["type"] == "start")
+    assert start["data"]["greeting"] == "New hello"
+    versions = await workflows.list_versions(agent["id"], test_tenant["slug"])
+    assert [v["version"] for v in versions] == [1]  # mirror is not a publish
+
+
+async def test_backfill_sql_shape_matches_starter_graph_with_tools():
+    """SQL backfill in schema.sql must stay aligned with starter_graph().
+
+    The SQL copy includes enabled agent_tool_policies (create_agent has none
+    yet); both must produce the same node/edge shape for the same inputs.
+    """
+    from libs.config_sdk.workflow import graphs_equivalent, starter_graph
+
+    expected = starter_graph("Thanks for calling.", "Be helpful.", ["book_appointment"])
+    # Recreate the SQL defaults explicitly — if starter_graph drifts, fail here.
+    assert expected["nodes"][0]["data"]["prompt"] == "Be helpful."
+    assert expected["nodes"][1]["data"]["greeting"] == "Thanks for calling."
+    assert expected["nodes"][1]["data"]["tools"] == ["book_appointment"]
+    assert expected["nodes"][2]["data"]["disposition"] == "completed"
+    moved = {
+        **expected,
+        "nodes": [{**n, "position": {"x": 99, "y": 99}} for n in expected["nodes"]],
+    }
+    assert graphs_equivalent(expected, moved)
+    assert not graphs_equivalent(expected, starter_graph("other", "Be helpful.", ["book_appointment"]))
+

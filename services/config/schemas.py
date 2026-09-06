@@ -10,7 +10,22 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+MAX_WORKFLOW_NODES = 200
+MAX_WORKFLOW_EDGES = 500
+
+
+def _check_graph_bounds(graph: dict[str, Any] | None) -> dict[str, Any] | None:
+    if graph is None:
+        return None
+    nodes = graph.get("nodes")
+    edges = graph.get("edges")
+    if isinstance(nodes, list) and len(nodes) > MAX_WORKFLOW_NODES:
+        raise ValueError(f"workflow has too many nodes (max {MAX_WORKFLOW_NODES})")
+    if isinstance(edges, list) and len(edges) > MAX_WORKFLOW_EDGES:
+        raise ValueError(f"workflow has too many edges (max {MAX_WORKFLOW_EDGES})")
+    return graph
 
 
 class TenantCreate(BaseModel):
@@ -47,6 +62,11 @@ class AgentCreate(BaseModel):
     llm_config_id:  str | None = None
     tts_config_id:  str | None = None
     workflow: dict | None = None  # None/{} → starter_graph; validated like publish
+
+    @field_validator("workflow")
+    @classmethod
+    def _workflow_bounds(cls, value: dict | None) -> dict | None:
+        return _check_graph_bounds(value)
 
 
 class AgentUpdate(BaseModel):
@@ -89,10 +109,22 @@ class AgentUpdate(BaseModel):
 class WorkflowDraft(BaseModel):
     graph: dict[str, Any]
 
+    @field_validator("graph")
+    @classmethod
+    def _graph_bounds(cls, value: dict[str, Any]) -> dict[str, Any]:
+        checked = _check_graph_bounds(value)
+        assert checked is not None
+        return checked
+
 
 class WorkflowPublish(BaseModel):
     graph: dict[str, Any] | None = None  # None → publish workflow_draft
     note:  str | None = None
+
+    @field_validator("graph")
+    @classmethod
+    def _graph_bounds(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return _check_graph_bounds(value)
 
 
 class ProviderConfigCreate(BaseModel):

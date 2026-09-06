@@ -547,96 +547,131 @@ CREATE TRIGGER tenants_version BEFORE UPDATE ON tenants
     FOR EACH ROW EXECUTE FUNCTION bump_config_version();
 
 -- Skip config_version bump when only workflow_draft changed (editor autosave).
-CREATE OR REPLACE FUNCTION bump_agent_config_version() RETURNS TRIGGER AS $$
+-- Function + trigger replacement is one statement so a mid-apply failure cannot
+-- leave agents with no version trigger (psql without ON_ERROR_STOP).
+DO $agents_version$
 BEGIN
-    IF to_jsonb(NEW) - 'workflow_draft' - 'updated_at' - 'config_version'
-     = to_jsonb(OLD) - 'workflow_draft' - 'updated_at' - 'config_version'
-    THEN
-        NEW.config_version := OLD.config_version;
-        NEW.updated_at := OLD.updated_at;
-        RETURN NEW;
-    END IF;
-    NEW.config_version := OLD.config_version + 1;
-    NEW.updated_at := now();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS agents_version ON agents;
-CREATE TRIGGER agents_version BEFORE UPDATE ON agents
-    FOR EACH ROW EXECUTE FUNCTION bump_agent_config_version();
+    EXECUTE $fn$
+        CREATE OR REPLACE FUNCTION bump_agent_config_version() RETURNS TRIGGER AS $body$
+        BEGIN
+            IF to_jsonb(NEW) - 'workflow_draft' - 'updated_at' - 'config_version'
+             = to_jsonb(OLD) - 'workflow_draft' - 'updated_at' - 'config_version'
+            THEN
+                NEW.config_version := OLD.config_version;
+                NEW.updated_at := OLD.updated_at;
+                RETURN NEW;
+            END IF;
+            NEW.config_version := OLD.config_version + 1;
+            NEW.updated_at := now();
+            RETURN NEW;
+        END;
+        $body$ LANGUAGE plpgsql;
+    $fn$;
+    EXECUTE 'DROP TRIGGER IF EXISTS agents_version ON agents';
+    EXECUTE 'CREATE TRIGGER agents_version BEFORE UPDATE ON agents
+             FOR EACH ROW EXECUTE FUNCTION bump_agent_config_version()';
+END
+$agents_version$;
 
 -- Pre-workflow agents: seed a starter graph from greeting/system_prompt (and
--- any enabled tool policies) so live `workflow` is never left NULL. Mirrors
--- libs/config_sdk.workflow.starter_graph(); re-runs are no-ops.
-WITH starter AS (
+-- any enabled tool policies) so live `workflow` is never left NULL. Shape
+-- mirrors libs/config_sdk.workflow.starter_graph(); tools come from policies
+-- because Node.tools is default-deny. Re-runs are no-ops. Wrapped in one DO
+-- so a partial failure cannot exit 0 with workflow still NULL, and each
+-- backfill writes an audit_log row alongside the config_version bump.
+DO $workflow_backfill$
+DECLARE
+    null_left INT;
+BEGIN
+    WITH starter AS (
+        SELECT
+            a.id,
+            jsonb_build_object(
+                'version', 1,
+                'nodes', jsonb_build_array(
+                    jsonb_build_object(
+                        'id', 'global', 'type', 'global',
+                        'position', '{"x": 330, "y": 0}'::jsonb,
+                        'data', jsonb_build_object(
+                            'name', 'always applies',
+                            'prompt', COALESCE(a.system_prompt, '')
+                        )
+                    ),
+                    jsonb_build_object(
+                        'id', 'start', 'type', 'start',
+                        'position', '{"x": 0, "y": 0}'::jsonb,
+                        'data', jsonb_build_object(
+                            'name', 'greeting',
+                            'prompt', 'Greet the caller and find out what they need.',
+                            'greeting', COALESCE(a.greeting, ''),
+                            'tools', COALESCE((
+                                SELECT jsonb_agg(p.tool_name ORDER BY p.tool_name)
+                                FROM agent_tool_policies p
+                                WHERE p.agent_id = a.id AND p.enabled
+                            ), '[]'::jsonb)
+                        )
+                    ),
+                    jsonb_build_object(
+                        'id', 'end', 'type', 'end',
+                        'position', '{"x": 0, "y": 230}'::jsonb,
+                        'data', jsonb_build_object(
+                            'name', 'goodbye',
+                            'prompt', 'Confirm anything outstanding and close warmly.',
+                            'disposition', 'completed'
+                        )
+                    )
+                ),
+                'edges', jsonb_build_array(
+                    jsonb_build_object(
+                        'id', 'e-start-end', 'source', 'start', 'target', 'end',
+                        'data', jsonb_build_object(
+                            'label', 'conversation finished',
+                            'condition', 'The caller has no further questions.'
+                        )
+                    )
+                )
+            ) AS graph
+        FROM agents a
+        WHERE a.workflow IS NULL
+    ),
+    updated AS (
+        UPDATE agents a
+        SET workflow = s.graph, workflow_draft = s.graph
+        FROM starter s
+        WHERE a.id = s.id
+        RETURNING a.id, a.workflow, a.config_version
+    )
+    INSERT INTO audit_log (entity_type, entity_id, action, new_value)
     SELECT
-        a.id,
+        'agent_workflow',
+        u.id,
+        'updated',
         jsonb_build_object(
-            'version', 1,
-            'nodes', jsonb_build_array(
-                jsonb_build_object(
-                    'id', 'global', 'type', 'global',
-                    'position', '{"x": 330, "y": 0}'::jsonb,
-                    'data', jsonb_build_object(
-                        'name', 'always applies',
-                        'prompt', COALESCE(a.system_prompt, '')
-                    )
-                ),
-                jsonb_build_object(
-                    'id', 'start', 'type', 'start',
-                    'position', '{"x": 0, "y": 0}'::jsonb,
-                    'data', jsonb_build_object(
-                        'name', 'greeting',
-                        'prompt', 'Greet the caller and find out what they need.',
-                        'greeting', COALESCE(a.greeting, ''),
-                        'tools', COALESCE((
-                            SELECT jsonb_agg(p.tool_name ORDER BY p.tool_name)
-                            FROM agent_tool_policies p
-                            WHERE p.agent_id = a.id AND p.enabled
-                        ), '[]'::jsonb)
-                    )
-                ),
-                jsonb_build_object(
-                    'id', 'end', 'type', 'end',
-                    'position', '{"x": 0, "y": 230}'::jsonb,
-                    'data', jsonb_build_object(
-                        'name', 'goodbye',
-                        'prompt', 'Confirm anything outstanding and close warmly.',
-                        'disposition', 'completed'
-                    )
-                )
-            ),
-            'edges', jsonb_build_array(
-                jsonb_build_object(
-                    'id', 'e-start-end', 'source', 'start', 'target', 'end',
-                    'data', jsonb_build_object(
-                        'label', 'conversation finished',
-                        'condition', 'The caller has no further questions.'
-                    )
-                )
-            )
-        ) AS graph
+            'note', 'backfilled starter graph',
+            'workflow', u.workflow,
+            'config_version', u.config_version
+        )
+    FROM updated u;
+
+    UPDATE agents
+    SET workflow_draft = workflow
+    WHERE workflow IS NOT NULL AND workflow_draft IS NULL;
+
+    INSERT INTO agent_workflow_versions (agent_id, version, graph, note)
+    SELECT a.id, 1, a.workflow, 'backfilled starter graph'
     FROM agents a
-    WHERE a.workflow IS NULL
-)
-UPDATE agents a
-SET workflow = s.graph, workflow_draft = s.graph
-FROM starter s
-WHERE a.id = s.id;
+    WHERE a.workflow IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM agent_workflow_versions v WHERE v.agent_id = a.id
+      );
 
--- Draft may still be NULL if only `workflow` was filled by an older path.
-UPDATE agents
-SET workflow_draft = workflow
-WHERE workflow IS NOT NULL AND workflow_draft IS NULL;
-
-INSERT INTO agent_workflow_versions (agent_id, version, graph, note)
-SELECT a.id, 1, a.workflow, 'backfilled starter graph'
-FROM agents a
-WHERE a.workflow IS NOT NULL
-  AND NOT EXISTS (
-      SELECT 1 FROM agent_workflow_versions v WHERE v.agent_id = a.id
-  );
+    SELECT COUNT(*) INTO null_left FROM agents WHERE workflow IS NULL;
+    IF null_left > 0 THEN
+        RAISE EXCEPTION
+            'workflow backfill left % agent(s) with workflow IS NULL', null_left;
+    END IF;
+END
+$workflow_backfill$;
 
 -- ── Remaining indexes ────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_agents_tenant ON agents(tenant_id);

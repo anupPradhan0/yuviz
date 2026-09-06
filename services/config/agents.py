@@ -6,6 +6,12 @@ because that's what the hot path actually has: the WebSocket path is
 `/<agent>/<uuid>`, and the tenant is resolved from the same connection
 context — nobody holds a UUID before the call starts. get_agent_by_id()
 exists for the Admin UI's edit-by-id flow, where the id is already known.
+
+Prompt authority: once an agent has a published `workflow`, the graph's
+start.data.greeting and global.data.prompt are authoritative for calls.
+The greeting/system_prompt columns stay as Behaviour-UI mirrors — PATCH
+keeps them in sync with those two nodes (no version row). Draft/editor
+edits still go through workflows.publish.
 """
 
 from __future__ import annotations
@@ -18,7 +24,8 @@ from libs.config_sdk.workflow import starter_graph
 
 from . import audit, cache, db
 
-# `workflow` is absent — only publish/create may write a validated graph.
+# `workflow` is absent — only publish/create may write a validated graph
+# (except the greeting/system_prompt mirror sync in update_agent).
 _UPDATABLE_FIELDS = {
     "name", "greeting", "system_prompt", "goodbye_grace_ms", "language",
     "stt_config_id", "llm_config_id", "tts_config_id",
@@ -33,7 +40,7 @@ _UPDATABLE_FIELDS = {
 _JSON_COLUMNS = ("workflow", "workflow_draft")
 
 
-def _cache_key(tenant_slug: str, agent_slug: str) -> str:
+def cache_key(tenant_slug: str, agent_slug: str) -> str:
     return f"agent:{tenant_slug}:{agent_slug}"
 
 
@@ -46,8 +53,41 @@ def _row(row: Any) -> dict[str, Any]:
     return out
 
 
+def _audit_view(row: dict[str, Any]) -> dict[str, Any]:
+    """Strip graph columns from ordinary agent audits (publish records them)."""
+    return {k: v for k, v in row.items() if k not in _JSON_COLUMNS}
+
+
+def _public_agent(row: dict[str, Any], *, list_view: bool = False) -> dict[str, Any]:
+    """Draft is editor-only (GET .../workflow). List omits published graph too."""
+    out = dict(row)
+    out.pop("workflow_draft", None)
+    if list_view:
+        out.pop("workflow", None)
+    return out
+
+
+def _mirror_prompts_into_graph(
+    graph: dict[str, Any] | None, fields: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Copy greeting/system_prompt into start/global nodes when those fields change."""
+    if graph is None or ("greeting" not in fields and "system_prompt" not in fields):
+        return graph
+    nodes: list[dict[str, Any]] = []
+    for raw in graph.get("nodes") or []:
+        node = dict(raw)
+        data = dict(node.get("data") or {})
+        if node.get("type") == "global" and "system_prompt" in fields:
+            data["prompt"] = fields["system_prompt"]
+        if node.get("type") == "start" and "greeting" in fields:
+            data["greeting"] = fields["greeting"]
+        node["data"] = data
+        nodes.append(node)
+    return {**graph, "nodes": nodes}
+
+
 async def get_agent(tenant_slug: str, agent_slug: str) -> dict[str, Any] | None:
-    cached = await cache.get_json(_cache_key(tenant_slug, agent_slug))
+    cached = await cache.get_json(cache_key(tenant_slug, agent_slug))
     if cached is not None:
         return cached
 
@@ -60,8 +100,8 @@ async def get_agent(tenant_slug: str, agent_slug: str) -> dict[str, Any] | None:
     if row is None:
         return None
 
-    result = _row(row)
-    await cache.set_json(_cache_key(tenant_slug, agent_slug), result)
+    result = _public_agent(_row(row))
+    await cache.set_json(cache_key(tenant_slug, agent_slug), result)
     return result
 
 
@@ -70,7 +110,7 @@ async def get_agent_by_id(agent_id: Any) -> dict[str, Any] | None:
     row = await pool.fetchrow(
         "SELECT * FROM agents WHERE id = $1 AND deleted_at IS NULL", agent_id,
     )
-    return _row(row) if row is not None else None
+    return _public_agent(_row(row)) if row is not None else None
 
 
 async def list_agents(tenant_id: Any) -> list[dict[str, Any]]:
@@ -79,7 +119,7 @@ async def list_agents(tenant_id: Any) -> list[dict[str, Any]]:
         "SELECT * FROM agents WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY name",
         tenant_id,
     )
-    return [_row(row) for row in rows]
+    return [_public_agent(_row(row), list_view=True) for row in rows]
 
 
 _PROVIDER_ROLE_BY_FIELD = {
@@ -186,8 +226,9 @@ async def create_agent(
                 action="created",
                 user_id=user_id,
                 user_email=user_email,
-                new_value=result,
+                new_value=_audit_view(result),
             )
+    public = _public_agent(result)
     if tenant_slug is not None:
         # Warm the cache immediately rather than leaving it for the agent's
         # first real call to populate lazily — same reasoning, and the same
@@ -197,7 +238,7 @@ async def create_agent(
         # callers only have tenant_id on hand; the REST router (the actual
         # live-usage path) does have tenant_slug and passes it.
         await get_agent(tenant_slug, slug)
-    return result
+    return public
 
 
 async def update_agent(
@@ -239,11 +280,27 @@ async def update_agent(
             old = _row(old_row)
             await _validate_provider_assignments(conn, old["tenant_id"], fields)
 
-            columns = list(fields.keys())
+            set_fields = dict(fields)
+            if old.get("workflow") is not None and (
+                "greeting" in fields or "system_prompt" in fields
+            ):
+                synced_wf = _mirror_prompts_into_graph(old["workflow"], fields)
+                if synced_wf != old["workflow"]:
+                    set_fields["workflow"] = json.dumps(synced_wf)
+                draft_src = (
+                    old["workflow_draft"]
+                    if old.get("workflow_draft") is not None
+                    else old["workflow"]
+                )
+                synced_draft = _mirror_prompts_into_graph(draft_src, fields)
+                if synced_draft != draft_src:
+                    set_fields["workflow_draft"] = json.dumps(synced_draft)
+
+            columns = list(set_fields.keys())
             set_clause = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(columns))
             new_row = await conn.fetchrow(
                 f"UPDATE agents SET {set_clause} WHERE id = $1 RETURNING *",
-                agent_id, *(fields[col] for col in columns),
+                agent_id, *(set_fields[col] for col in columns),
             )
             new = _row(new_row)
 
@@ -254,12 +311,12 @@ async def update_agent(
                 action="updated",
                 user_id=user_id,
                 user_email=user_email,
-                old_value=old,
-                new_value=new,
+                old_value=_audit_view(old),
+                new_value=_audit_view(new),
             )
 
-    await cache.invalidate(_cache_key(tenant_slug, old["slug"]))
-    return new
+    await cache.invalidate(cache_key(tenant_slug, old["slug"]))
+    return _public_agent(new)
 
 
 async def soft_delete_agent(
@@ -290,7 +347,7 @@ async def soft_delete_agent(
                 action="deleted",
                 user_id=user_id,
                 user_email=user_email,
-                old_value=old,
+                old_value=_audit_view(old),
             )
 
-    await cache.invalidate(_cache_key(tenant_slug, old["slug"]))
+    await cache.invalidate(cache_key(tenant_slug, old["slug"]))

@@ -126,7 +126,6 @@ def _agent_from_dict(row: dict[str, Any]) -> Agent:
         transfer_announcement=row.get("transfer_announcement"),
         max_call_duration_s=row.get("max_call_duration_s"),
         workflow=_parse_json(row.get("workflow")),
-        workflow_draft=_parse_json(row.get("workflow_draft")),
     )
 
 

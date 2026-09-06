@@ -126,9 +126,7 @@ class TestAgentEndpoints:
         body = resp.json()
         assert body["greeting"] == "Hi!"
         graph = body["workflow"]
-        if isinstance(graph, str):
-            import json
-            graph = json.loads(graph)
+        assert isinstance(graph, dict)
         assert graph is not None
         start = next(n for n in graph["nodes"] if n["type"] == "start")
         assert start["data"]["greeting"] == "Hi!"
@@ -167,6 +165,64 @@ class TestAgentEndpoints:
         assert (await client.get(f"{base}/versions")).status_code == 400
         assert (await client.get(f"{base}/versions/1")).status_code == 400
         assert (await client.post(f"{base}/versions/1/rollback")).status_code == 400
+
+    async def test_admin_cannot_read_another_tenants_workflow(
+        self, admin_client, test_tenant, pool,
+    ):
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other WF Tenant", f"other-wf-{uuid.uuid4().hex[:8]}",
+        )
+        try:
+            from services.config import agents as agents_service
+            victim = await agents_service.create_agent(
+                tenant_id=other["id"], slug="victim", name="Victim",
+                system_prompt="secret prompt IP",
+            )
+            # Wrong-tenant slug is 404 (not 403) — same as a missing tenant.
+            list_resp = await admin_client.get(f"/tenants/{other['slug']}/agents")
+            assert list_resp.status_code == 404
+            wf = await admin_client.get(
+                f"/tenants/{other['slug']}/agents/{victim['id']}/workflow",
+            )
+            assert wf.status_code == 404
+            publish = await admin_client.post(
+                f"/tenants/{other['slug']}/agents/{victim['id']}/workflow/publish",
+                json={"graph": {
+                    "version": 1,
+                    "nodes": [
+                        {"id": "n1", "type": "start", "position": {"x": 0, "y": 0},
+                         "data": {"name": "greeting", "prompt": "hijacked"}},
+                        {"id": "n2", "type": "end", "position": {"x": 0, "y": 100},
+                         "data": {"name": "bye", "prompt": "x", "disposition": "completed"}},
+                    ],
+                    "edges": [
+                        {"id": "e1", "source": "n1", "target": "n2",
+                         "data": {"label": "done", "condition": "Done."}},
+                    ],
+                }},
+            )
+            assert publish.status_code == 404
+            own = await admin_client.get(f"/tenants/{test_tenant['slug']}/agents")
+            assert own.status_code == 200
+        finally:
+            await pool.execute("DELETE FROM agents WHERE tenant_id = $1", other["id"])
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_oversized_workflow_graph_is_422(self, client, test_tenant):
+        nodes = [
+            {"id": f"n{i}", "type": "agent", "position": {"x": 0, "y": i},
+             "data": {"name": f"n{i}", "prompt": "x"}}
+            for i in range(201)
+        ]
+        nodes[0]["type"] = "start"
+        nodes[-1]["type"] = "end"
+        nodes[-1]["data"]["disposition"] = "completed"
+        resp = await client.put(
+            f"/tenants/{test_tenant['slug']}/agents/{uuid.uuid4()}/workflow/draft",
+            json={"graph": {"version": 1, "nodes": nodes, "edges": []}},
+        )
+        assert resp.status_code == 422
 
     async def test_create_agent_under_unknown_tenant_is_404(self, client):
         resp = await client.post(

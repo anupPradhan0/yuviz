@@ -15,11 +15,20 @@ from ..schemas import AgentCreate, AgentUpdate, WorkflowDraft, WorkflowPublish
 
 router = APIRouter(prefix="/tenants/{tenant_slug}/agents", tags=["agents"])
 
+# Postgres name for UNIQUE (tenant_id, slug) on agents — don't map other
+# unique violations (e.g. agent_workflow_versions) to the slug message.
+_AGENTS_SLUG_UNIQUE = "agents_tenant_id_slug_key"
 
-async def _resolve_tenant(tenant_slug: str) -> dict:
-    return await get_or_404(
+
+async def _resolve_tenant(tenant_slug: str, current_user: CurrentUser) -> dict:
+    """Load tenant by slug; 404 for missing *or* wrong-tenant JWT (lesson 2)."""
+    tenant = await get_or_404(
         tenants_service.get_tenant(tenant_slug), f"tenant {tenant_slug!r} not found",
     )
+    is_unscoped = current_user.role == "superadmin" or current_user.tenant_id is None
+    if not is_unscoped and str(tenant["id"]) != str(current_user.tenant_id):
+        raise HTTPException(status_code=404, detail=f"tenant {tenant_slug!r} not found")
+    return tenant
 
 
 def _parse_agent_id(agent_id: str) -> str:
@@ -43,7 +52,7 @@ def _validation_error(exc: workflows_service.WorkflowValidationError) -> JSONRes
 
 @router.get("")
 async def list_agents(tenant_slug: str, current_user: CurrentUser = Depends(get_current_user)):
-    tenant = await _resolve_tenant(tenant_slug)
+    tenant = await _resolve_tenant(tenant_slug, current_user)
     return await agents_service.list_agents(tenant["id"])
 
 
@@ -53,7 +62,7 @@ async def create_agent(
     body: AgentCreate,
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
-    tenant = await _resolve_tenant(tenant_slug)
+    tenant = await _resolve_tenant(tenant_slug, current_user)
     try:
         return await agents_service.create_agent(
             tenant_id=tenant["id"],
@@ -71,7 +80,9 @@ async def create_agent(
         )
     except workflows_service.WorkflowValidationError as exc:
         return _validation_error(exc)
-    except asyncpg.UniqueViolationError:
+    except asyncpg.UniqueViolationError as exc:
+        if exc.constraint_name != _AGENTS_SLUG_UNIQUE:
+            raise
         raise HTTPException(
             status_code=409,
             detail="That name or slug is already taken in this account.",
@@ -80,6 +91,7 @@ async def create_agent(
 
 @router.get("/{agent_slug}")
 async def get_agent(tenant_slug: str, agent_slug: str, current_user: CurrentUser = Depends(get_current_user)):
+    await _resolve_tenant(tenant_slug, current_user)
     return await get_or_404(
         agents_service.get_agent(tenant_slug, agent_slug),
         f"agent {agent_slug!r} not found under tenant {tenant_slug!r}",
@@ -93,6 +105,7 @@ async def update_agent(
     body: AgentUpdate,
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
+    await _resolve_tenant(tenant_slug, current_user)
     fields = body.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(status_code=400, detail="request body has no fields to update")
@@ -108,6 +121,7 @@ async def delete_agent(
     agent_id: str,
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
+    await _resolve_tenant(tenant_slug, current_user)
     await agents_service.soft_delete_agent(
         agent_id, tenant_slug=tenant_slug, user_id=current_user.id, user_email=current_user.email,
     )
@@ -117,6 +131,7 @@ async def delete_agent(
 async def get_workflow(
     tenant_slug: str, agent_id: str, current_user: CurrentUser = Depends(get_current_user),
 ):
+    await _resolve_tenant(tenant_slug, current_user)
     agent_id = _parse_agent_id(agent_id)
     return await workflows_service.get_workflow(agent_id, tenant_slug)
 
@@ -128,6 +143,7 @@ async def save_workflow_draft(
     body: WorkflowDraft,
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
+    await _resolve_tenant(tenant_slug, current_user)
     agent_id = _parse_agent_id(agent_id)
     return await workflows_service.save_draft(agent_id, tenant_slug=tenant_slug, graph=body.graph)
 
@@ -139,6 +155,7 @@ async def validate_workflow(
     body: WorkflowDraft,
     current_user: CurrentUser = Depends(get_current_user),
 ):
+    await _resolve_tenant(tenant_slug, current_user)
     _parse_agent_id(agent_id)
     try:
         return {"valid": True, "warnings": workflows_service.validate(body.graph)}
@@ -153,6 +170,7 @@ async def publish_workflow(
     body: WorkflowPublish,
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
+    await _resolve_tenant(tenant_slug, current_user)
     agent_id = _parse_agent_id(agent_id)
     try:
         return await workflows_service.publish(
@@ -168,6 +186,7 @@ async def list_workflow_versions(
     tenant_slug: str, agent_id: str, limit: int = 50,
     current_user: CurrentUser = Depends(get_current_user),
 ):
+    await _resolve_tenant(tenant_slug, current_user)
     agent_id = _parse_agent_id(agent_id)
     return await workflows_service.list_versions(agent_id, tenant_slug, limit=limit)
 
@@ -177,6 +196,7 @@ async def get_workflow_version(
     tenant_slug: str, agent_id: str, version: int,
     current_user: CurrentUser = Depends(get_current_user),
 ):
+    await _resolve_tenant(tenant_slug, current_user)
     agent_id = _parse_agent_id(agent_id)
     return await get_or_404(
         workflows_service.get_version(agent_id, tenant_slug, version),
@@ -191,6 +211,7 @@ async def rollback_workflow(
     version: int,
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
+    await _resolve_tenant(tenant_slug, current_user)
     agent_id = _parse_agent_id(agent_id)
     try:
         return await workflows_service.rollback(

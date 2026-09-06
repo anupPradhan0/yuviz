@@ -18,6 +18,7 @@ from libs.config_sdk.workflow import (
     WorkflowError,
     WorkflowInvalid,
     graph_warnings,
+    graphs_equivalent,
     parse_graph,
 )
 
@@ -100,7 +101,11 @@ async def get_workflow(agent_id: Any, tenant_slug: str) -> dict[str, Any]:
 async def save_draft(
     agent_id: Any, *, tenant_slug: str, graph: dict[str, Any],
 ) -> dict[str, Any]:
-    """Autosave. Last-write-wins; tenant + soft-delete enforced on the UPDATE itself."""
+    """Autosave. Last-write-wins; tenant + soft-delete enforced on the UPDATE itself.
+
+    Draft is not cached on the agent row (GET /agents strips it), so no cache
+    invalidation — GET .../workflow always reads Postgres.
+    """
     pool = await db.get_pool()
     status = await pool.execute(
         """
@@ -131,7 +136,8 @@ async def publish(
     """Validate, write live graph + draft, append a version, bump config_version.
 
     graph=None publishes workflow_draft (editor Publish button).
-    Identical to the already-live graph is a no-op (no version row, no bump).
+    Identical logic to the already-live graph (ignoring node positions) is a
+    no-op (no version row, no bump).
     """
     pool = await db.get_pool()
     async with pool.acquire() as conn:
@@ -143,7 +149,7 @@ async def publish(
             warnings = validate(candidate)
 
             current = _as_graph(old["workflow"])
-            if candidate == current:
+            if graphs_equivalent(candidate, current):
                 version = await conn.fetchval(
                     "SELECT COALESCE(MAX(version), 0) FROM agent_workflow_versions WHERE agent_id = $1",
                     agent_id,
@@ -175,7 +181,7 @@ async def publish(
             )
             new = dict(new_row)
 
-    await cache.invalidate(agents_service._cache_key(tenant_slug, new["slug"]))
+    await cache.invalidate(agents_service.cache_key(tenant_slug, new["slug"]))
     return {
         "version": version,
         "config_version": new["config_version"],
