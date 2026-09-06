@@ -119,11 +119,163 @@ class TestAgentEndpoints:
             json={"slug": "support-agent", "name": "Support", "greeting": "Hi!"},
         )
         assert resp.status_code == 201
-        assert resp.json()["slug"] == "support-agent"
+        created = resp.json()
+        assert created["slug"] == "support-agent"
+        assert "workflow" not in created and "workflow_draft" not in created
 
         resp = await client.get(f"/tenants/{test_tenant['slug']}/agents/support-agent")
         assert resp.status_code == 200
-        assert resp.json()["greeting"] == "Hi!"
+        body = resp.json()
+        assert body["greeting"] == "Hi!"
+        assert "workflow" not in body and "workflow_draft" not in body
+        wf = await client.get(f"/tenants/{test_tenant['slug']}/agents/{created['id']}/workflow")
+        assert wf.status_code == 200
+        graph = wf.json()["workflow"]
+        assert isinstance(graph, dict)
+        start = next(n for n in graph["nodes"] if n["type"] == "start")
+        assert start["data"]["greeting"] == "Hi!"
+
+    async def test_creating_the_same_slug_twice_is_409_not_500(self, client, test_tenant):
+        body = {"slug": "dupe-agent", "name": "Dupe"}
+        assert (await client.post(f"/tenants/{test_tenant['slug']}/agents", json=body)).status_code == 201
+        resp = await client.post(f"/tenants/{test_tenant['slug']}/agents", json=body)
+        assert resp.status_code == 409
+        assert "already taken" in resp.json()["detail"]
+
+    async def test_create_agent_rejects_an_invalid_graph(self, client, test_tenant):
+        resp = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={
+                "slug": "bad-graph", "name": "Bad",
+                "workflow": {
+                    "version": 1,
+                    "nodes": [{"id": "n1", "type": "start", "position": {"x": 0, "y": 0},
+                               "data": {"name": "greeting", "prompt": "Hi."}}],
+                    "edges": [],
+                },
+            },
+        )
+        assert resp.status_code == 400
+        assert any(e["id"] == "n1" for e in resp.json()["errors"])
+
+    async def test_workflow_routes_reject_a_malformed_agent_id_with_400_not_500(
+        self, client, test_tenant,
+    ):
+        base = f"/tenants/{test_tenant['slug']}/agents/not-a-uuid/workflow"
+        assert (await client.get(base)).status_code == 400
+        assert (await client.put(f"{base}/draft", json={"graph": {"version": 1, "nodes": [], "edges": []}})).status_code == 400
+        assert (await client.post(f"{base}/validate", json={"graph": {"version": 1, "nodes": [], "edges": []}})).status_code == 400
+        assert (await client.post(f"{base}/publish", json={})).status_code == 400
+        assert (await client.get(f"{base}/versions")).status_code == 400
+        assert (await client.get(f"{base}/versions/1")).status_code == 400
+        assert (await client.post(f"{base}/versions/1/rollback")).status_code == 400
+
+    async def test_admin_cannot_read_another_tenants_workflow(
+        self, admin_client, test_tenant, pool,
+    ):
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other WF Tenant", f"other-wf-{uuid.uuid4().hex[:8]}",
+        )
+        try:
+            from services.config import agents as agents_service
+            victim = await agents_service.create_agent(
+                tenant_id=other["id"], slug="victim", name="Victim",
+                system_prompt="secret prompt IP",
+            )
+            # Wrong-tenant slug is 404 (not 403) — same as a missing tenant.
+            list_resp = await admin_client.get(f"/tenants/{other['slug']}/agents")
+            assert list_resp.status_code == 404
+            wf = await admin_client.get(
+                f"/tenants/{other['slug']}/agents/{victim['id']}/workflow",
+            )
+            assert wf.status_code == 404
+            publish = await admin_client.post(
+                f"/tenants/{other['slug']}/agents/{victim['id']}/workflow/publish",
+                json={"graph": {
+                    "version": 1,
+                    "nodes": [
+                        {"id": "n1", "type": "start", "position": {"x": 0, "y": 0},
+                         "data": {"name": "greeting", "prompt": "hijacked"}},
+                        {"id": "n2", "type": "end", "position": {"x": 0, "y": 100},
+                         "data": {"name": "bye", "prompt": "x", "disposition": "completed"}},
+                    ],
+                    "edges": [
+                        {"id": "e1", "source": "n1", "target": "n2",
+                         "data": {"label": "done", "condition": "Done."}},
+                    ],
+                }},
+            )
+            assert publish.status_code == 404
+            own = await admin_client.get(f"/tenants/{test_tenant['slug']}/agents")
+            assert own.status_code == 200
+        finally:
+            await pool.execute("DELETE FROM agents WHERE tenant_id = $1", other["id"])
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_null_tenant_admin_is_not_unscoped_on_agent_routes(
+        self, client, test_tenant, pool,
+    ):
+        """role=admin + tenant_id=NULL is not a service account — 404, not a write."""
+        from services.config import auth as auth_mod
+        from services.config import users as users_service
+        email = f"test-null-admin-{uuid.uuid4().hex[:8]}@example.com"
+        user = await users_service.create_user(
+            email=email, password="test-password-not-real", role="admin", tenant_id=None,
+        )
+        token = auth_mod.create_access_token(user)
+        try:
+            from httpx import ASGITransport, AsyncClient
+            from services.config.app import app
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test",
+                headers={"Authorization": f"Bearer {token}"},
+            ) as stray:
+                resp = await stray.get(f"/tenants/{test_tenant['slug']}/agents")
+                assert resp.status_code == 404
+        finally:
+            await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])
+
+    async def test_service_account_can_read_any_tenant_agents(
+        self, test_tenant, pool,
+    ):
+        from httpx import ASGITransport, AsyncClient
+        from services.config import auth as auth_mod
+        from services.config.app import app
+        email = f"test-svc-{uuid.uuid4().hex[:8]}@internal.yuviz.ai"
+        row = await pool.fetchrow(
+            "INSERT INTO users (email, password_hash, role, tenant_id, is_service_account) "
+            "VALUES ($1, $2, 'viewer', NULL, true) RETURNING *",
+            email, auth_mod.hash_password("svc-not-real"),
+        )
+        user = dict(row)
+        token = auth_mod.create_access_token(user)
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(
+                transport=transport, base_url="http://test",
+                headers={"Authorization": f"Bearer {token}"},
+            ) as svc:
+                resp = await svc.get(f"/tenants/{test_tenant['slug']}/agents")
+                assert resp.status_code == 200
+        finally:
+            await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])
+
+    async def test_oversized_workflow_graph_is_422(self, client, test_tenant):
+        nodes = [
+            {"id": f"n{i}", "type": "agent", "position": {"x": 0, "y": i},
+             "data": {"name": f"n{i}", "prompt": "x"}}
+            for i in range(51)
+        ]
+        nodes[0]["type"] = "start"
+        nodes[-1]["type"] = "end"
+        nodes[-1]["data"]["disposition"] = "completed"
+        resp = await client.put(
+            f"/tenants/{test_tenant['slug']}/agents/{uuid.uuid4()}/workflow/draft",
+            json={"graph": {"version": 1, "nodes": nodes, "edges": []}},
+        )
+        assert resp.status_code == 422
 
     async def test_create_agent_under_unknown_tenant_is_404(self, client):
         resp = await client.post(
