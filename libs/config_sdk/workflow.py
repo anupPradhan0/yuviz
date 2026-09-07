@@ -128,6 +128,14 @@ class WorkflowGraph:
         return self.nodes[self.start_node_id]
 
     @property
+    def is_single_stage(self) -> bool:
+        """Starter/backfill shape (start+end only). Multi-node authored graphs are False."""
+        return all(
+            n.type in ("start", "end") or n.is_unwired
+            for n in self.nodes.values()
+        )
+
+    @property
     def global_prompt(self) -> str:
         """Always-on instruction prepended to every step. Empty if none."""
         for node in self.nodes.values():
@@ -302,7 +310,7 @@ def _str_list(raw: Any) -> list[str]:
 
 
 # Mistyped delays (30000 vs 300) must not hold the line silent for half a minute.
-_MAX_DELAYED_START_MS = 10_000
+_MAX_DELAYED_START_MS = 2_000
 
 
 def _delayed_start_ms(raw: Any) -> int:
@@ -310,7 +318,11 @@ def _delayed_start_ms(raw: Any) -> int:
         value = int(raw or 0)
     except (TypeError, ValueError):
         return 0
-    return min(max(0, value), _MAX_DELAYED_START_MS)
+    if value < 0:
+        return 0
+    if value > _MAX_DELAYED_START_MS:
+        return _MAX_DELAYED_START_MS
+    return value
 
 
 def _node_from_raw(raw: dict[str, Any]) -> Node:

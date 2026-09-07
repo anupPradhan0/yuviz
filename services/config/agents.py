@@ -133,7 +133,13 @@ async def list_agents(tenant_id: Any) -> list[dict[str, Any]]:
         "SELECT * FROM agents WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY name",
         tenant_id,
     )
-    return [_public_agent(_row(row)) for row in rows]
+    # Call-setup needs workflow on GET/cache; the agent list does not.
+    out = []
+    for row in rows:
+        agent = _public_agent(_row(row))
+        agent.pop("workflow", None)
+        out.append(agent)
+    return out
 
 
 _PROVIDER_ROLE_BY_FIELD = {
@@ -204,7 +210,10 @@ async def create_agent(
     """Create agent + published starter workflow in one transaction.
 
     Caller-supplied `workflow` is validated like publish; None/{} seed
-    starter_graph() from greeting/system_prompt.
+    starter_graph() from greeting/system_prompt. Starter shape leaves
+    tools/KB empty on purpose — Conversation treats single-stage graphs as
+    policy-driven (agent_tool_policies / agent_knowledge_bases) until the
+    editor authors a multi-node graph.
     """
     # Deferred import: workflows.py imports this module for its cache key.
     from .workflows import append_version, column_prompts, validate

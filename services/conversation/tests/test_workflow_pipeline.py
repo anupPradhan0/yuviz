@@ -103,9 +103,9 @@ def _handler(llm, resolver, *, workflow=GRAPH, **kw):
 
 async def test_a_call_walks_the_graph_and_ends_on_the_end_node():
     llm = _ScriptedToolLLM([
-        [ToolCallEvent(tool_call_id="t1", tool_name="wants_to_book", arguments={})],
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_to_book", arguments={})],
         [TokenEvent(text="Sure."), TokenEvent(text=" What time suits you?")],
-        [ToolCallEvent(tool_call_id="t2", tool_name="booked", arguments={})],
+        [ToolCallEvent(tool_call_id="t2", tool_name="goto_booked", arguments={})],
         [TokenEvent(text="You're all set. Goodbye!")],
     ])
     resolver = _RecordingPolicyResolver()
@@ -127,7 +127,7 @@ async def test_a_call_walks_the_graph_and_ends_on_the_end_node():
 
 async def test_transitions_are_offered_as_tools_and_the_prompt_swaps_mid_turn():
     llm = _ScriptedToolLLM([
-        [ToolCallEvent(tool_call_id="t1", tool_name="wants_to_book", arguments={})],
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_to_book", arguments={})],
         [TokenEvent(text="Sure.")],
     ])
     resolver = _RecordingPolicyResolver()
@@ -135,17 +135,17 @@ async def test_transitions_are_offered_as_tools_and_the_prompt_swaps_mid_turn():
 
     [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
 
-    assert llm.seen_tool_names[0] == ["wants_to_book"]
+    assert llm.seen_tool_names[0] == ["goto_wants_to_book"]
     assert "Ask what they need." in llm.seen_prompts[0]
     assert "Take their preferred time." in llm.seen_prompts[1]
     assert llm.seen_prompts[1].startswith("You are Ada.")
     assert resolver.seen_only == [[], ["book_appointment"]]
-    assert llm.seen_tool_names[1] == ["booked"]
+    assert llm.seen_tool_names[1] == ["goto_booked"]
 
 
 async def test_transition_speech_is_spoken_during_the_round_trip():
     llm = _ScriptedToolLLM([
-        [ToolCallEvent(tool_call_id="t1", tool_name="wants_to_book", arguments={})],
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_to_book", arguments={})],
         [TokenEvent(text="Sure.")],
     ])
     handler = _handler(llm, _RecordingPolicyResolver())
@@ -157,6 +157,12 @@ async def test_transition_speech_is_spoken_during_the_round_trip():
     assert "Let me pull up the calendar." in spoken
     assert spoken.index("Let me pull up the calendar.") < spoken.index("Sure.")
     assert handler._workflow.pending_speech is None
+    # Authored transition speech must land in history for the LLM / transcript.
+    history = handler._get_history("s1")
+    assert any(
+        m.role == "assistant" and "Let me pull up the calendar." in (m.content or "")
+        for m in history
+    )
 
 
 async def test_an_end_call_marker_survives_a_transition_in_the_same_turn():
@@ -164,7 +170,7 @@ async def test_an_end_call_marker_survives_a_transition_in_the_same_turn():
     llm = _ScriptedToolLLM([
         [
             TokenEvent(text="All set. [[END_CALL]]"),
-            ToolCallEvent(tool_call_id="t1", tool_name="wants_to_book", arguments={}),
+            ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_to_book", arguments={}),
         ],
         [],
     ])
@@ -179,7 +185,7 @@ async def test_an_end_call_marker_survives_a_transition_in_the_same_turn():
 
 async def test_workflow_transfer_node_surfaces_a_transfer_request():
     llm = _ScriptedToolLLM([
-        [ToolCallEvent(tool_call_id="t1", tool_name="wants_a_human", arguments={})],
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_a_human", arguments={})],
         [TokenEvent(text="Connecting you now.")],
     ])
     handler = _handler(
@@ -199,7 +205,7 @@ async def test_workflow_transfer_node_surfaces_a_transfer_request():
 
 async def test_workflow_transfer_rejected_when_agent_transfer_disabled():
     llm = _ScriptedToolLLM([
-        [ToolCallEvent(tool_call_id="t1", tool_name="wants_a_human", arguments={})],
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_a_human", arguments={})],
         [TokenEvent(text="One moment.")],
     ])
     handler = _handler(
@@ -209,5 +215,7 @@ async def test_workflow_transfer_rejected_when_agent_transfer_disabled():
 
     responses = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
 
-    assert handler._workflow.node.name == "to_human"
+    # Must not park on the terminal transfer node with no edges out.
+    assert handler._workflow.node.name == "greeting"
+    assert handler._workflow.pending_transfer is None
     assert not any(r.transfer_request for r in responses)

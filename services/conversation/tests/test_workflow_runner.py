@@ -79,14 +79,14 @@ def test_qualified_path():
     assert runner.node.name == "greeting"
 
     tools = runner.local_tools()
-    assert set(tools) == {"caller_wants_to_book", "just_a_question", "wants_a_human"}
-    asyncio.run(tools["caller_wants_to_book"][1]({}))
+    assert set(tools) == {"goto_caller_wants_to_book", "goto_just_a_question", "goto_wants_a_human"}
+    asyncio.run(tools["goto_caller_wants_to_book"][1]({}))
 
     assert runner.node.name == "booking"
     assert runner.allowed_tool_names() == ["book_appointment"]
     assert runner.pending_speech == "Of course, let me pull up the calendar."
 
-    asyncio.run(runner.local_tools()["booked"][1]({}))
+    asyncio.run(runner.local_tools()["goto_booked"][1]({}))
     assert runner.node.name == "goodbye"
     assert runner.pending_end is True
     assert runner.disposition == "qualified"
@@ -102,7 +102,7 @@ def test_the_booking_tool_does_not_exist_until_the_booking_node_is_active():
 
 def test_prompt_is_global_then_node_then_suffix_and_renders_variables():
     runner = _runner()
-    asyncio.run(runner.local_tools()["caller_wants_to_book"][1]({}))
+    asyncio.run(runner.local_tools()["goto_caller_wants_to_book"][1]({}))
     assert runner.system_prompt() == (
         "You are Ada, a receptionist.\n\n"
         "Book an appointment for +15551234.\n\n"
@@ -119,7 +119,7 @@ def test_greeting_comes_from_the_start_node_with_a_fallback():
 def test_extracted_variables_reach_later_nodes_prompts():
     runner = _runner()
     runner.update_variables({"caller_number": "+15550000"})
-    asyncio.run(runner.local_tools()["caller_wants_to_book"][1]({}))
+    asyncio.run(runner.local_tools()["goto_caller_wants_to_book"][1]({}))
     assert "+15550000" in runner.system_prompt()
 
 
@@ -132,14 +132,14 @@ def test_transition_swaps_the_system_prompt_inside_the_same_turn():
         ChatMessage(role="system", content=runner.system_prompt()),
         ChatMessage(role="user", content="I'd like to book something"),
     ]
-    asyncio.run(runner.local_tools(history)["caller_wants_to_book"][1]({}))
+    asyncio.run(runner.local_tools(history)["goto_caller_wants_to_book"][1]({}))
     assert "Book an appointment" in history[0].content
     assert history[1].role == "user"
 
 
 def test_reaching_a_transfer_node_flags_a_transfer_not_an_end():
     runner = _runner()
-    asyncio.run(runner.local_tools()["wants_a_human"][1]({}))
+    asyncio.run(runner.local_tools()["goto_wants_a_human"][1]({}))
     assert runner.pending_end is False
     assert runner.pending_transfer is not None
     assert runner.pending_transfer.transfer_destination == "+15559999"
@@ -148,7 +148,7 @@ def test_reaching_a_transfer_node_flags_a_transfer_not_an_end():
 def test_knowledge_is_per_stage():
     runner = _runner()
     assert runner.knowledge_enabled() is False       # start node has no KB
-    asyncio.run(runner.local_tools()["just_a_question"][1]({}))
+    asyncio.run(runner.local_tools()["goto_just_a_question"][1]({}))
     assert runner.knowledge_enabled() is True        # q&a node does
 
 
@@ -170,7 +170,41 @@ def test_all_empty_knowledge_keeps_agent_level_rag():
              "data": {"label": "done", "condition": "Finished."}},
         ],
     }
-    assert WorkflowRunner(parse_graph(bare)).knowledge_enabled() is True
+    runner = WorkflowRunner(parse_graph(bare))
+    assert runner.knowledge_enabled() is True
+    assert runner.allowed_tool_names() is None  # policies win on starter shape
+
+
+def test_empty_global_falls_back_to_default_system_prompt():
+    bare = {
+        "version": 1,
+        "nodes": [
+            {"id": "n1", "type": "start", "data": {
+                "name": "greeting", "prompt": "Ask what they need.", "greeting": "Hi",
+            }},
+            {"id": "n2", "type": "end", "data": {
+                "name": "goodbye", "prompt": "Bye", "disposition": "completed",
+            }},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "n2",
+             "data": {"label": "done", "condition": "Finished."}},
+        ],
+    }
+    runner = WorkflowRunner(parse_graph(bare), default_global="You are the clinic receptionist.")
+    assert runner.system_prompt().startswith("You are the clinic receptionist.")
+    assert "Ask what they need." in runner.system_prompt()
+
+
+def test_abandon_transfer_reverts_to_source_node():
+    runner = _runner()
+    asyncio.run(runner.local_tools()["goto_wants_a_human"][1]({}))
+    assert runner.node.name == "to_human"
+    assert runner.pending_transfer is not None
+    runner.abandon_transfer()
+    assert runner.node.name == "greeting"
+    assert runner.pending_transfer is None
+    assert runner.visited == ["greeting"]
 
 
 def test_extraction_fires_before_leaving_the_node_not_after():
@@ -181,9 +215,9 @@ def test_extraction_fires_before_leaving_the_node_not_after():
             seen.append((node.name, len(history)))
 
     runner = _runner(extractor=_Extractor())
-    asyncio.run(runner.local_tools()["caller_wants_to_book"][1]({}))
+    asyncio.run(runner.local_tools()["goto_caller_wants_to_book"][1]({}))
     assert seen == []                       # the start node declares none
-    asyncio.run(runner.local_tools()["booked"][1]({}))
+    asyncio.run(runner.local_tools()["goto_booked"][1]({}))
     # Extracted from the booking node, while booking was still the active
     # one — after the swap this segment is just historical context.
     assert seen == [("booking", 0)]

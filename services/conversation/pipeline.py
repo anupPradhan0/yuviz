@@ -514,7 +514,7 @@ class PipelineConversationHandler:
         tool_orchestrator: ToolCallOrchestrator | None = None,
         has_booking_tool: bool = False,
     ) -> None:
-        del default_system_prompt  # call-site compat; live prompt is the active node
+        self._default_system_prompt = (default_system_prompt or "").strip()
         self._stt          = provider_bundle.stt
         self._llm          = provider_bundle.llm
         self._tts          = provider_bundle.tts
@@ -679,6 +679,7 @@ class PipelineConversationHandler:
         self._workflow = WorkflowRunner(
             graph,
             base_suffix=self._prompt_suffix,
+            default_global=self._default_system_prompt,
             variables={
                 "caller_number": caller_number,
                 "called_number": called_number,
@@ -1129,6 +1130,8 @@ class PipelineConversationHandler:
 
     async def on_cancel(self, session_id: str) -> None:
         self._cancel_event(session_id).set()
+        # Barge-in before pending_speech is consumed must not replay it next turn.
+        self._workflow.pending_speech = None
 
     async def on_session_end(self, session_id: str, reason: str,
                              final_state: str | None = None) -> None:
@@ -1366,6 +1369,7 @@ class PipelineConversationHandler:
                 "Workflow transfer node %r rejected: %s session=%s",
                 node.name, decision.rejection_reason, session_id,
             )
+            self._workflow.abandon_transfer()
             return None
         self._session(session_id).transfer_requested = True
         return decision.request
@@ -1459,13 +1463,17 @@ class PipelineConversationHandler:
                 history, session_id, cancel_event, tool_calls_made, store,
             ):
                 if cancel_event.is_set():
+                    self._workflow.pending_speech = None
                     break
                 if isinstance(item, LocalToolCompletedEvent):
                     speech = self._workflow.pending_speech
                     if speech:
                         self._workflow.pending_speech = None
+                        # Yield text once so full_response/history/transcript record it.
+                        first = True
                         async for chunk in self._synthesize_sentence_stream(speech, session_id):
-                            yield "", chunk, end_call
+                            yield speech if first else "", chunk, end_call
+                            first = False
                     continue
                 if isinstance(item, ToolCallStartedEvent):
                     # Rotates through _TOOL_CALL_FILLERS, gap-suppressed by
