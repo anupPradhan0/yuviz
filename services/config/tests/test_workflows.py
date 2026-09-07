@@ -267,10 +267,13 @@ async def test_get_agent_does_not_expose_or_cache_the_draft(test_tenant):
     await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=DEAD_END)
     fetched = await agents.get_agent(test_tenant["slug"], "wf-no-draft")
     assert fetched is not None
-    assert "workflow" not in fetched and "workflow_draft" not in fetched
+    # Published graph stays on the agent GET/cache payload for call-setup;
+    # draft is editor-only until draft testing.
+    assert "workflow" in fetched and "workflow_draft" not in fetched
+    assert fetched["workflow"] == CREATED_GRAPH
     listed = await agents.list_agents(test_tenant["id"])
     row = next(a for a in listed if a["id"] == agent["id"])
-    assert "workflow" not in row and "workflow_draft" not in row
+    assert "workflow" in row and "workflow_draft" not in row
     state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
     assert state["workflow"] == CREATED_GRAPH
     assert state["workflow_draft"] == DEAD_END

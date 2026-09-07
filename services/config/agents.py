@@ -59,9 +59,9 @@ def _audit_view(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _public_agent(row: dict[str, Any]) -> dict[str, Any]:
-    """Graphs are editor-only (GET .../workflow) — not on the call-setup GET."""
+    """Published workflow stays on the agent GET/cache payload so call-setup
+    can carry it into RuntimeConfig. Draft is editor-only until draft testing."""
     out = dict(row)
-    out.pop("workflow", None)
     out.pop("workflow_draft", None)
     return out
 
