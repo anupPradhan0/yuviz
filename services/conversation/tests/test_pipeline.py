@@ -2006,6 +2006,30 @@ async def test_pipeline_without_tool_orchestrator_uses_llm_directly():
 
 
 @pytest.mark.asyncio
+async def test_local_tool_completed_event_does_not_crash_the_pipeline():
+    """LocalToolCompletedEvent must be absorbed by _token_stream — an
+    unhandled TurnEvent used to AssertionError before the next TokenEvent
+    could reach TTS."""
+    from ..tools.llm_adapter import LocalToolCompletedEvent
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+
+    stt = _make_stt("verified")
+    llm = _make_llm(["unused"])
+    tts = _make_tts(b"\x00" * 640)
+    orchestrator = _FakeToolOrchestrator([
+        LocalToolCompletedEvent(tool_name="caller_verified"),
+        ToolTokenEvent(text="Thanks, moving on."),
+    ])
+    handler = _make_handler(stt, llm, tts, system_prompt="You are a scheduler.", tool_orchestrator=orchestrator)
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert any(r.tts_payloads for r in responses)
+    spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
+    assert not any(t in _TOOL_CALL_FILLERS for t in spoken_texts)
+
+
+@pytest.mark.asyncio
 async def test_tool_call_filler_burst_within_one_turn_speaks_only_once():
     """Two tool calls back to back in the same turn (no real user speech
     between them) must not each speak a filler — that's the same

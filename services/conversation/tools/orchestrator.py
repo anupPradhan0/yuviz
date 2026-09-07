@@ -16,7 +16,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Any, AsyncGenerator, Awaitable, Callable
+from typing import Any, AsyncGenerator, Awaitable, Callable, TypeAlias
 
 from ..metrics import IMetrics
 from ..providers.interfaces import ChatMessage
@@ -54,10 +54,12 @@ DEFAULT_MAX_LOCAL_TOOL_CALLS = 8
 # Workflow transitions (see services/conversation/workflow/runner.py) are
 # the first user; nothing here knows that — same provider-agnostic posture
 # as the rest of this module.
-LocalTools = dict[str, tuple[ToolDefinition, Callable[[dict[str, Any]], Awaitable[ToolResult]]]]
+LocalTools: TypeAlias = dict[
+    str, tuple[ToolDefinition, Callable[[dict[str, Any]], Awaitable[ToolResult]]]
+]
 # A caller whose tool set can change DURING a turn passes a callable instead
 # of a dict — see run_turn's `local_tools`.
-LocalToolsSource = "LocalTools | Callable[[], LocalTools] | None"
+LocalToolsSource: TypeAlias = LocalTools | Callable[[], LocalTools] | None
 
 
 class ToolCallOrchestrator:
@@ -83,8 +85,8 @@ class ToolCallOrchestrator:
         self, agent_id: str, tenant_id: str, call_id: str, session_id: str, history: list[ChatMessage],
         caller_number: str = "", cancel_event: "asyncio.Event | None" = None,
         force_tool_name: str | None = None, phone_number_confirmed: bool = False,
-        local_tools: Any = None,
-        only_tools: "list[str] | Callable[[], list[str] | None] | None" = None,
+        local_tools: LocalToolsSource = None,
+        only_tools: list[str] | Callable[[], list[str] | None] | None = None,
     ) -> AsyncGenerator[TurnEvent, None]:
         """only_tools narrows the agent's DB-backed tool set for this turn
         (a workflow node's `tools` list); None leaves it as resolved. It can
@@ -158,19 +160,24 @@ class ToolCallOrchestrator:
                     )
                 else:
                     local_calls += 1
-                    result = await local_entry[1](event.arguments)
-                    # Before the next generate() — that round-trip is the
-                    # gap the caller would otherwise hear as dead air.
-                    yield LocalToolCompletedEvent(tool_name=event.tool_name)
-                    # A local tool can have moved a workflow to another node,
-                    # whose prompt the rest of this turn already runs under
-                    # (see WorkflowRunner._transition). Re-resolve so it runs
-                    # under that node's TOOLS too — otherwise the model is
-                    # told to book an appointment while still holding the
-                    # previous stage's tool list, and the edges it just left
-                    # stay callable, which would let it take a transition the
-                    # validated graph doesn't have.
-                    local, policies_by_name, schemas, local_schemas = await resolve()
+                    result = await _execute_local_tool(
+                        event.tool_name, local_entry[1], event.arguments, cancel_event,
+                    )
+                    if not (result.status == ToolStatus.FAILED and result.error == "cancelled"):
+                        # Before the next generate() — that round-trip is the
+                        # gap the caller would otherwise hear as dead air.
+                        # Skipped on cancel: the tool did not complete, and the
+                        # turn is about to end (same posture as remote cancel).
+                        yield LocalToolCompletedEvent(tool_name=event.tool_name)
+                        # A local tool can have moved a workflow to another node,
+                        # whose prompt the rest of this turn already runs under
+                        # (see WorkflowRunner._transition). Re-resolve so it runs
+                        # under that node's TOOLS too — otherwise the model is
+                        # told to book an appointment while still holding the
+                        # previous stage's tool list, and the edges it just left
+                        # stay callable, which would let it take a transition the
+                        # validated graph doesn't have.
+                        local, policies_by_name, schemas, local_schemas = await resolve()
                 _fold_tool_result_into_history(history, event, result)
                 if result.deterministic_response is not None:
                     # This exact outcome must reach the caller verbatim —
@@ -302,6 +309,47 @@ def _log_background_tool_result(task: "asyncio.Task[ToolResult]") -> None:
     exc = task.exception()
     if exc is not None:
         log.warning("ToolCallOrchestrator: backgrounded tool call (post-cancel) failed: %r", exc)
+
+
+async def _invoke_local_handler(
+    tool_name: str, handler: Callable[[dict[str, Any]], Awaitable[ToolResult]], arguments: dict[str, Any],
+) -> ToolResult:
+    """Soft-fail like the remote unknown_tool / provider_unavailable path —
+    a raised local handler must not take down the turn."""
+    try:
+        return await handler(arguments)
+    except Exception:
+        log.exception("ToolCallOrchestrator: local tool raised tool_name=%r", tool_name)
+        return ToolResult(status=ToolStatus.FAILED, error="local_tool_failed")
+
+
+async def _execute_local_tool(
+    tool_name: str,
+    handler: Callable[[dict[str, Any]], Awaitable[ToolResult]],
+    arguments: dict[str, Any],
+    cancel_event: asyncio.Event | None,
+) -> ToolResult:
+    """Same cancel-on-barge-in race as _execute_tool_call: stop *waiting* on
+    a slow local Awaitable when the caller interrupts, without cancelling the
+    in-flight handler (it may still have side effects worth finishing)."""
+    if cancel_event is None:
+        return await _invoke_local_handler(tool_name, handler, arguments)
+
+    execute_task = asyncio.ensure_future(_invoke_local_handler(tool_name, handler, arguments))
+    cancel_task = asyncio.ensure_future(cancel_event.wait())
+    try:
+        done, _ = await asyncio.wait({execute_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
+        if execute_task in done:
+            return execute_task.result()
+        log.info(
+            "ToolCallOrchestrator: caller interrupted mid local tool_call=%r — no longer waiting on its result",
+            tool_name,
+        )
+        return ToolResult(status=ToolStatus.FAILED, error="cancelled")
+    finally:
+        cancel_task.cancel()
+        if not execute_task.done():
+            execute_task.add_done_callback(_log_background_tool_result)
 
 
 def _fold_tool_result_into_history(history: list[ChatMessage], event: ToolCallEvent, result: ToolResult) -> None:

@@ -15,7 +15,7 @@ import json
 from services.conversation.providers.interfaces import ChatMessage
 from services.conversation.tools.executor_registry import ExecutorRegistry
 from services.conversation.tools.llm_adapter import (
-    DeterministicSpokenEvent, LLMAdapter, TokenEvent, ToolCallEvent, ToolCallStartedEvent,
+    DeterministicSpokenEvent, LLMAdapter, LocalToolCompletedEvent, TokenEvent, ToolCallEvent, ToolCallStartedEvent,
 )
 from services.conversation.tools.orchestrator import ToolCallOrchestrator
 from services.conversation.tools.policy_resolver import ResolvedToolPolicy
@@ -537,6 +537,7 @@ async def test_a_local_tool_executes_without_touching_policy_or_provider():
 
     assert calls == [{}]                        # the handler ran
     assert TokenEvent(text="Thanks!") in events
+    assert LocalToolCompletedEvent(tool_name="caller_verified") in events
     # No spoken filler: an in-process pointer move has no round-trip to
     # cover, unlike a real API call.
     assert not any(isinstance(e, ToolCallStartedEvent) for e in events)
@@ -667,3 +668,102 @@ async def test_a_callable_tool_source_is_re_read_after_every_local_call():
 
     assert seen[0] == ["step_one"]
     assert seen[1] == ["step_two"]
+
+
+async def test_a_local_tool_that_raises_soft_fails_instead_of_crashing_the_turn():
+    async def boom(_args: dict) -> ToolResult:
+        raise RuntimeError("transition exploded")
+
+    definition = ToolDefinition(
+        name="caller_verified", description="x",
+        parameters_schema={"type": "object", "properties": {}},
+    )
+    llm = _ScriptedLLM([
+        [ToolCallEvent(tool_call_id="c1", tool_name="caller_verified", arguments={})],
+        [TokenEvent(text="Still here.")],
+    ])
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=ExecutorRegistry(),
+    )
+    history = [ChatMessage(role="user", content="hi")]
+    events = [
+        e async for e in orchestrator.run_turn(
+            "agent1", "t1", "c1", "s1", history,
+            local_tools={"caller_verified": (definition, boom)},
+        )
+    ]
+
+    assert LocalToolCompletedEvent(tool_name="caller_verified") in events
+    assert TokenEvent(text="Still here.") in events
+    assert json.loads(history[-1].content)["status"] == "failed"
+    assert json.loads(history[-1].content)["error"] == "local_tool_failed"
+
+
+async def test_cancel_event_stops_waiting_on_an_in_flight_local_tool():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow(_args: dict) -> ToolResult:
+        started.set()
+        await release.wait()
+        return ToolResult(status=ToolStatus.SUCCESS, payload={"done": True})
+
+    definition = ToolDefinition(
+        name="caller_verified", description="x",
+        parameters_schema={"type": "object", "properties": {}},
+    )
+    llm = _ScriptedLLM([
+        [ToolCallEvent(tool_call_id="c1", tool_name="caller_verified", arguments={})],
+    ])
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=ExecutorRegistry(),
+    )
+    cancel_event = asyncio.Event()
+    history = [ChatMessage(role="user", content="hi")]
+
+    async def _collect():
+        return [
+            e async for e in orchestrator.run_turn(
+                "agent1", "t1", "c1", "s1", history,
+                cancel_event=cancel_event,
+                local_tools={"caller_verified": (definition, slow)},
+            )
+        ]
+
+    task = asyncio.ensure_future(_collect())
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    assert not task.done()
+
+    cancel_event.set()
+    events = await asyncio.wait_for(task, timeout=1.0)
+
+    assert events == []  # no LocalToolCompletedEvent — the tool did not finish
+    assert json.loads(history[-1].content)["error"] == "cancelled"
+    assert llm.call_count == 1
+
+    release.set()
+    await asyncio.sleep(0)
+
+
+async def test_only_tools_is_passed_through_to_the_policy_resolver():
+    llm = _ScriptedLLM([[TokenEvent(text="hi")]])
+    resolver = _FakePolicyResolver([_policy()])
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=resolver,
+        provider_manager=_FakeProviderManager(),
+        executor_registry=ExecutorRegistry(),
+    )
+
+    [e async for e in orchestrator.run_turn(
+        "agent1", "t1", "c1", "s1", [ChatMessage(role="user", content="hi")],
+        only_tools=["book_appointment"],
+    )]
+
+    assert resolver.last_only == ["book_appointment"]

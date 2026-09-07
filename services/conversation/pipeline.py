@@ -42,6 +42,7 @@ from .providers.interfaces import ChatMessage, SttResult
 from .session import HandlerResponse
 from .session_finalizer import FinalizationResult, SessionFinalizer
 from .tools.llm_adapter import DeterministicSpokenEvent
+from .tools.llm_adapter import LocalToolCompletedEvent
 from .tools.llm_adapter import TokenEvent as ToolTokenEvent
 from .tools.llm_adapter import ToolCallStartedEvent
 from .tools.orchestrator import ToolCallOrchestrator
@@ -1301,12 +1302,13 @@ class PipelineConversationHandler:
         splitting, directive parsing) mostly unaware tool-calling exists.
         ToolCallOrchestrator.run_turn() yields TokenEvent (unwrapped to
         .text, keeping exactly the per-sentence TTS latency it has today)
-        and, once per tool call, a single ToolCallStartedEvent passed
+        and, once per remote tool call, a single ToolCallStartedEvent passed
         through as-is so _llm_to_tts can speak a filler before the (a
         ToolCallEvent itself is consumed internally, folded into `history`,
         and never surfaces here) potentially slow round-trip (see design
         §12's state-transition note: the pause is real, but previously had
-        no caller-facing signal at all)."""
+        no caller-facing signal at all). LocalToolCompletedEvent is absorbed
+        here — no filler; bridging speech lands later with workflow."""
         if self._tool_orchestrator is None:
             async for token in self._llm.generate(history):
                 yield token
@@ -1334,6 +1336,11 @@ class PipelineConversationHandler:
             if isinstance(event, ToolCallStartedEvent):
                 tool_calls_made.append(event.tool_name)
                 yield event
+                continue
+            if isinstance(event, LocalToolCompletedEvent):
+                # In-process tools have no round-trip to cover with a filler.
+                # Absorb so the assert below never sees an unknown TurnEvent;
+                # workflow bridging speech will hook here later.
                 continue
             if isinstance(event, DeterministicSpokenEvent):
                 # Unwrapped to plain text like a TokenEvent (same sentence-
