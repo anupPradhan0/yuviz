@@ -72,11 +72,13 @@ class ToolCallOrchestrator:
         """only_tools subsets DB tools for this turn (never grants). Both tool
         args may be callables so a mid-turn node change re-resolves schemas."""
         local_calls = 0
+        seen_local_names: set[str] = set()
 
         async def resolve() -> tuple[LocalTools, dict, list[dict] | None, list[dict]]:
             raw = local_tools() if callable(local_tools) else (local_tools or {})
             # Key by definition.name so lookup matches LLM schema names.
             local = {defn.name: (defn, handler) for defn, handler in raw.values()}
+            seen_local_names.update(local)
             if local_calls >= self._max_local_tool_calls:
                 local = {}
             if iteration >= self._max_tool_iterations:
@@ -114,14 +116,7 @@ class ToolCallOrchestrator:
                 tool_call_happened = True
 
                 local_entry = local.get(event.tool_name)
-                if local_entry is None:
-                    iteration += 1  # remote only — locals must not burn this budget
-                    yield ToolCallStartedEvent(tool_name=event.tool_name)
-                    result = await self._execute_tool_call(
-                        event, policies_by_name, tenant_id, agent_id, call_id, session_id, turn_id,
-                        iteration, caller_number, cancel_event, phone_number_confirmed,
-                    )
-                else:
+                if local_entry is not None:
                     local_calls += 1
                     result = await _execute_local_tool(
                         event.tool_name, local_entry[1], event.arguments, cancel_event,
@@ -130,6 +125,21 @@ class ToolCallOrchestrator:
                         yield LocalToolCompletedEvent(tool_name=event.tool_name)
                         # Re-resolve: a local tool may have moved the workflow node.
                         local, policies_by_name, schemas, local_schemas = await resolve()
+                elif (
+                    local_calls >= self._max_local_tool_calls
+                    and event.tool_name in seen_local_names
+                ):
+                    # Cap yank emptied `local`; do not burn a remote iteration on the miss.
+                    result = ToolResult(
+                        status=ToolStatus.FAILED, error="local_tool_call_cap_exceeded",
+                    )
+                else:
+                    iteration += 1  # remote only — locals must not burn this budget
+                    yield ToolCallStartedEvent(tool_name=event.tool_name)
+                    result = await self._execute_tool_call(
+                        event, policies_by_name, tenant_id, agent_id, call_id, session_id, turn_id,
+                        iteration, caller_number, cancel_event, phone_number_confirmed,
+                    )
                 _fold_tool_result_into_history(history, event, result)
                 if result.deterministic_response is not None:
                     yield DeterministicSpokenEvent(

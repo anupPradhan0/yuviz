@@ -620,6 +620,49 @@ async def test_local_tools_are_capped_so_a_cyclic_workflow_cannot_spin_forever()
     assert TokenEvent(text="Anyway.") in events
 
 
+async def test_past_local_cap_does_not_burn_a_remote_iteration():
+    # After the local cap, a repeat local name must fail cheaply — not as
+    # unknown_tool consuming max_tool_iterations before a real remote call.
+    local_tools, calls = _local()
+    llm = _ScriptedLLM(
+        [[ToolCallEvent(tool_call_id=f"c{i}", tool_name="caller_verified", arguments={})]
+         for i in range(4)]
+        + [[ToolCallEvent(tool_call_id="book", tool_name="book_appointment",
+                          arguments={"requested_datetime": "2026-01-01T10:00:00Z"})],
+           [TokenEvent(text="Booked.")]]
+    )
+    executor = _FixedExecutor(ToolResult(status=ToolStatus.SUCCESS, payload={"booked": True}))
+    registry = ExecutorRegistry()
+    registry.register("book_appointment", lambda provider, companion=None: executor)
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([_policy()]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=registry,
+        max_local_tool_calls=3,
+        max_tool_iterations=1,
+    )
+    history = [ChatMessage(role="user", content="hi")]
+
+    events = [
+        e async for e in orchestrator.run_turn(
+            "agent1", "t1", "c1", "s1", history, local_tools=local_tools,
+        )
+    ]
+
+    assert len(calls) == 3
+    assert len(executor.calls) == 1
+    assert TokenEvent(text="Booked.") in events
+    assert not any(isinstance(e, ToolCallStartedEvent) and e.tool_name == "caller_verified"
+                   for e in events)
+    cap_payloads = [
+        json.loads(m.content) for m in history
+        if m.role == "tool" and "local_tool_call_cap_exceeded" in (m.content or "")
+    ]
+    assert len(cap_payloads) == 1
+    assert cap_payloads[0]["error"] == "local_tool_call_cap_exceeded"
+
+
 async def test_a_callable_tool_source_is_re_read_after_every_local_call():
     first, _ = _local("step_one")
     second, _ = _local("step_two")
