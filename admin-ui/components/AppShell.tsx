@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { getCurrentUser, User } from "@/lib/api";
+import { getCurrentUser, isConsoleRole, User } from "@/lib/api";
 import { clearToken, getToken } from "@/lib/auth";
 
 // Icons match the original "Yuviz.ai — Admin Console" artifact's nav icon
@@ -121,6 +121,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // a present-but-invalid/expired one is caught by getCurrentUser() itself
   // (api.ts's request() already redirects to /login on any 401, so this only
   // needs to handle "no token at all").
+  //
+  // A token alone isn't enough: login/page.tsx sends non-console roles
+  // (supervisor/agent — see isConsoleRole) to /no-access, but that's only
+  // enforced at login time. Without re-checking here, a bookmark or a
+  // refresh on any admin URL renders the full sidebar for a role with zero
+  // Config API surface, so the page's own fetches 403 into an error banner
+  // instead (lesson 22). authChecked stays false while a redirect is in
+  // flight so the page underneath never gets to render its own fetches.
   useEffect(() => {
     if (pathname === "/login" || pathname === "/invite") return;
     if (!getToken()) {
@@ -128,12 +136,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       return;
     }
     getCurrentUser()
-      .then(setUser)
+      .then((u) => {
+        if (!isConsoleRole(u.role) && pathname !== "/no-access") {
+          router.push("/no-access");
+          return;
+        }
+        setUser(u);
+        setAuthChecked(true);
+      })
       .catch(() => {
         // api.ts's request() already redirects to /login on 401; nothing
         // extra to do here.
-      })
-      .finally(() => setAuthChecked(true));
+        setAuthChecked(true);
+      });
   }, [pathname, router]);
 
   const handleLogout = () => {

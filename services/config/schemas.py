@@ -275,13 +275,6 @@ class BootstrapRequest(BaseModel):
     password: str = Field(min_length=8)
 
 
-class UserCreate(BaseModel):
-    email:     str
-    password:  str
-    role:      Literal["superadmin", "admin", "viewer"] = "admin"
-    tenant_id: str | None = None  # None == superadmin scope
-
-
 class UserUpdate(BaseModel):
     role:      Literal["superadmin", "admin", "supervisor", "agent", "viewer"] | None = None
     tenant_id: str | None = None

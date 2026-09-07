@@ -54,6 +54,20 @@ async def get_current_user(user: CurrentUser = Depends(get_authenticated_user)) 
     return user
 
 
+def is_platform_scoped(user: CurrentUser) -> bool:
+    """"Is this actor privileged?" and "which tenant is this actor scoped
+    to?" are different questions (lesson 24) — the scoping one is answered
+    by `tenant_id is None`, not by `role == "superadmin"`. A NULL tenant_id
+    also covers the viewer-role service accounts (Conversation's startup
+    prewarm, vobiz's per-call telephony lookup), which legitimately need
+    platform-wide reads and are not superadmins. Routes that gate a
+    `?tenant_id=` filter or an unscoped listing on "is this actor
+    platform-scoped" should call this, not compare role directly — see
+    routers/tenants.py's list_tenants for the original correct version of
+    this predicate."""
+    return user.tenant_id is None
+
+
 def require_role(*allowed_roles: str):
     """Returns a dependency that additionally rejects (403) an authenticated
     user whose role isn't in allowed_roles. Usage:

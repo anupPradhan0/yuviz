@@ -89,21 +89,19 @@ class TestMayInvite:
             target_role="superadmin", target_tenant_id=None,
         ) is True
 
-    def test_tenant_less_admin_may_invite_into_null_tenant(self):
-        # Security review (05-security.md, carried-forward #3): _same_tenant
-        # treats two NULLs as a match, so a platform-scoped ("tenant-less")
-        # admin can mint further tenant-less admins indefinitely with no
-        # superadmin in the loop. This combination was never parametrised
-        # here before, so the escalation path sat unexercised. Recorded as
-        # the currently accepted (not yet fixed) behaviour: if
-        # `_same_tenant`/`may_invite` is later changed to require a real,
-        # matching tenant for an `admin` actor (the design's own suggested
-        # fix), this assertion flips to False and must be updated alongside
-        # that change — that update is exactly the point of pinning it here.
+    @pytest.mark.parametrize("target_role", ["admin", "viewer"])
+    @pytest.mark.parametrize("target_tenant_id", [None, TENANT_A])
+    def test_tenant_less_admin_cannot_invite(self, target_role, target_tenant_id):
+        # PR #19 finding 4: _same_tenant(None, None) was True, so a
+        # platform-scoped ("tenant-less") admin could mint further
+        # platform-scope admin/viewer accounts indefinitely with no
+        # superadmin in the loop — the only account-creation path now that
+        # POST /users is gone. The admin branch now requires a real,
+        # non-NULL actor tenant.
         assert invites.may_invite(
             actor_role="admin", actor_tenant_id=None,
-            target_role="admin", target_tenant_id=None,
-        ) is True
+            target_role=target_role, target_tenant_id=target_tenant_id,
+        ) is False
 
     @pytest.mark.parametrize("actor_role", ["supervisor", "agent", "viewer"])
     @pytest.mark.parametrize("target_role", ["superadmin", "admin", "supervisor", "agent", "viewer"])
@@ -282,20 +280,105 @@ class TestCreateInvite:
             await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
 
     async def test_duplicate_pending_invite_same_tenant_is_conflict(self, pool, test_admin, test_tenant):
+        # PR #19 finding 1: a still-*live* pending invite raises the
+        # distinct PendingInviteConflict, not EmailConflict — no account
+        # exists here, the remedy is "revoke the existing invite first".
         email = f"dup-{uuid.uuid4().hex[:8]}@example.com"
         row, _ = await invites.create_invite(
             email=email, role="viewer", tenant_id=test_tenant["id"], team=None,
             actor=_actor(test_admin["user"]),
         )
         try:
-            with pytest.raises(invites.EmailConflict) as exc_info:
+            with pytest.raises(invites.PendingInviteConflict):
                 await invites.create_invite(
                     email=email, role="viewer", tenant_id=test_tenant["id"], team=None,
                     actor=_actor(test_admin["user"]),
                 )
-            assert exc_info.value.tenant_name is None
         finally:
             await _cleanup_invite(pool, row["id"])
+
+    async def test_expired_pending_invite_is_self_healed_and_does_not_block_reinvite(
+        self, pool, test_admin, test_tenant,
+    ):
+        # PR #19 finding 1 (BLOCKING): expiry is derived, not stored, so an
+        # expired invite is still status='pending' and would otherwise
+        # squat this (tenant, lower(email)) slot in
+        # user_invites_pending_email_idx forever. create_invite must revoke
+        # the stale row itself and let the re-invite through. Mutation-
+        # verified: removing the pre-INSERT revoke UPDATE in create_invite
+        # makes this fail with PendingInviteConflict instead of a second
+        # successful insert.
+        email = f"stale-{uuid.uuid4().hex[:8]}@example.com"
+        old_row, _ = await invites.create_invite(
+            email=email, role="viewer", tenant_id=test_tenant["id"], team=None,
+            actor=_actor(test_admin["user"]),
+        )
+        await pool.execute(
+            "UPDATE user_invites SET expires_at = now() - interval '1 day' WHERE id = $1",
+            old_row["id"],
+        )
+        try:
+            new_row, _ = await invites.create_invite(
+                email=email, role="viewer", tenant_id=test_tenant["id"], team=None,
+                actor=_actor(test_admin["user"]),
+            )
+            assert new_row["id"] != old_row["id"]
+            stale = await pool.fetchrow("SELECT status FROM user_invites WHERE id = $1", old_row["id"])
+            assert stale["status"] == "revoked"
+
+            # PR #19 round-2 finding: the reclaim must audit, and must be
+            # distinguishable from an operator-initiated revoke.
+            audit_row = await pool.fetchrow(
+                "SELECT * FROM audit_log WHERE entity_type = 'invite' AND entity_id = $1 "
+                "AND action = 'updated' ORDER BY changed_at DESC LIMIT 1",
+                old_row["id"],
+            )
+            assert audit_row is not None
+            assert audit_row["user_email"] == test_admin["user"]["email"]
+            assert "expired_reclaimed_on_reinvite" in audit_row["new_value"]
+
+            await _cleanup_invite(pool, new_row["id"])
+        finally:
+            await _cleanup_invite(pool, old_row["id"])
+
+    async def test_self_heal_does_not_reclaim_a_role_the_actor_could_not_revoke(
+        self, pool, test_admin, test_tenant,
+    ):
+        # PR #19 round-2 finding [low, security]: revoke_invite refuses
+        # target_role='superadmin' for an admin actor (may_invite). The
+        # self-heal must reuse that same check against the *stored* row's
+        # role, not just match on (tenant, email) — otherwise a
+        # tenant_admin could clear an expired superadmin-role invite it
+        # could never have revoked through POST /invites/{id}/revoke, with
+        # no way to tell afterward that it happened. Mutation-verified:
+        # dropping the `may_invite(...)` guard from the self-heal condition
+        # makes this fail — the stale row is silently revoked instead of
+        # staying pending, and create_invite raises no conflict.
+        email = f"escalate-{uuid.uuid4().hex[:8]}@example.com"
+        stale = await pool.fetchrow(
+            "INSERT INTO user_invites "
+            "(tenant_id, email, role, token_hash, expires_at, invited_by, last_sent_at) "
+            "VALUES ($1, $2, 'superadmin', $3, now() - interval '1 day', $4, now()) RETURNING *",
+            test_tenant["id"], email, hashlib.sha256(uuid.uuid4().hex.encode()).hexdigest(),
+            test_admin["user"]["id"],
+        )
+        try:
+            with pytest.raises(invites.PendingInviteConflict):
+                await invites.create_invite(
+                    email=email, role="viewer", tenant_id=test_tenant["id"], team=None,
+                    actor=_actor(test_admin["user"]),
+                )
+            # Untouched, not silently reclaimed.
+            refreshed = await pool.fetchrow("SELECT status FROM user_invites WHERE id = $1", stale["id"])
+            assert refreshed["status"] == "pending"
+            audit_count = await pool.fetchval(
+                "SELECT count(*) FROM audit_log WHERE entity_type = 'invite' AND entity_id = $1 "
+                "AND action = 'updated'",
+                stale["id"],
+            )
+            assert audit_count == 0
+        finally:
+            await _cleanup_invite(pool, stale["id"])
 
     async def test_same_email_different_tenants_both_insert(self, pool, test_admin, test_tenant):
         # A second, independent tenant so the pending-email index's per-
@@ -717,6 +800,65 @@ class TestAcceptInvite:
             await pool.execute("UPDATE tenants SET deleted_at = now() WHERE id = $1", test_tenant["id"])
             with pytest.raises(invites.InviteContextGone):
                 await invites.accept_invite(raw_token=raw_token, password="a-real-password")
+        finally:
+            await _cleanup_invite(pool, row["id"])
+
+
+class TestGetInviteForAccept:
+    """PR #19 finding 3: get_invite_for_accept used to classify only
+    revoked/accepted/expired and skip the granting-context re-validation
+    accept_invite performs, so GET kept returning a live-looking invite for
+    the full 7-day TTL after the inviter (or their tenant) was soft-deleted
+    — while POST already correctly 410s. GET and POST must agree. Mutation-
+    verified: removing the `await _check_context_live(pool, invite)` call
+    added to get_invite_for_accept makes each of these fail (the call
+    returns a dict instead of raising)."""
+
+    async def test_inviter_soft_deleted_makes_get_raise_context_gone(
+        self, pool, test_admin, test_tenant,
+    ):
+        email = f"gone-inviter-get-{uuid.uuid4().hex[:8]}@example.com"
+        row, raw_token = await invites.create_invite(
+            email=email, role="viewer", tenant_id=test_tenant["id"], team=None,
+            actor=_actor(test_admin["user"]),
+        )
+        try:
+            await pool.execute(
+                "UPDATE users SET deleted_at = now() WHERE id = $1", test_admin["user"]["id"],
+            )
+            with pytest.raises(invites.InviteContextGone):
+                await invites.get_invite_for_accept(raw_token=raw_token)
+        finally:
+            await _cleanup_invite(pool, row["id"])
+
+    async def test_target_tenant_soft_deleted_makes_get_raise_context_gone(
+        self, pool, test_admin, test_tenant,
+    ):
+        email = f"gone-tenant-get-{uuid.uuid4().hex[:8]}@example.com"
+        row, raw_token = await invites.create_invite(
+            email=email, role="viewer", tenant_id=test_tenant["id"], team=None,
+            actor=_actor(test_admin["user"]),
+        )
+        try:
+            await pool.execute("UPDATE tenants SET deleted_at = now() WHERE id = $1", test_tenant["id"])
+            with pytest.raises(invites.InviteContextGone):
+                await invites.get_invite_for_accept(raw_token=raw_token)
+        finally:
+            await _cleanup_invite(pool, row["id"])
+
+    async def test_still_live_invite_is_returned_by_get(self, pool, test_admin, test_tenant):
+        # Control: a live invite's granting context is unaffected, so GET
+        # must still return normally — proves the check above isn't
+        # unconditionally raising.
+        email = f"live-get-{uuid.uuid4().hex[:8]}@example.com"
+        row, raw_token = await invites.create_invite(
+            email=email, role="viewer", tenant_id=test_tenant["id"], team=None,
+            actor=_actor(test_admin["user"]),
+        )
+        try:
+            result = await invites.get_invite_for_accept(raw_token=raw_token)
+            assert result["email"] == email
+            assert result["status"] == "pending"
         finally:
             await _cleanup_invite(pool, row["id"])
 

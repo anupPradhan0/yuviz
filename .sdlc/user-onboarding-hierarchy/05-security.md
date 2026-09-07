@@ -12,7 +12,12 @@ T18 landed and the probe cap is genuinely outcome-blind (verified below, includi
 
 ## Findings
 
-1. [low] STARTTLS is negotiated with an unauthenticated TLS context, so an *active* on-path
+1. [CLOSED — fixed after this report was written] STARTTLS is negotiated with an
+   unauthenticated TLS context. **This finding no longer applies:** `email.py:88` now passes
+   `context=ssl.create_default_context()` explicitly, giving certificate and hostname
+   verification, and `test_starttls_uses_a_verifying_tls_context` asserts `CERT_REQUIRED`
+   and `check_hostname`. Kept here for the record; do not re-raise it. Original text:
+   STARTTLS is negotiated with an unauthenticated TLS context, so an *active* on-path
    attacker can still capture the SMTP credential and the invite token — `services/config/email.py:69`
    `smtp.starttls()` is called with no `context=`. In this Python (3.14), `smtplib.SMTP.starttls`
    falls back to `ssl._create_stdlib_context()`, which is `verify_mode=CERT_NONE,

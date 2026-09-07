@@ -13,11 +13,12 @@ import os
 import smtplib
 import ssl
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from services.config import email
+from services.config.app import app, lifespan
 
 
 @pytest.fixture(autouse=True)
@@ -76,6 +77,25 @@ async def test_smtp_failure_raises_and_does_not_hang(monkeypatch):
     with patch("smtplib.SMTP", side_effect=OSError("connection refused")):
         with pytest.raises(OSError):
             await email.send_invite_email(to_email="new-user@example.com", raw_token="tok")
+
+
+async def test_send_is_bounded_even_if_every_socket_op_stalls(monkeypatch):
+    # _send_sync's own timeout= only bounds a single socket operation.
+    # connect/starttls/login/send_message are each a separate round-trip,
+    # so a relay that black-holes on all four in turn could take up to 4x
+    # _SMTP_TIMEOUT_SECONDS without an outer bound. Would fail (i.e. run
+    # past the shortened ceiling below) if send_invite_email dropped its
+    # asyncio.wait_for() wrapper around the to_thread call.
+    monkeypatch.setattr(email, "_SMTP_TIMEOUT_SECONDS", 0.2)
+
+    def _hangs_forever(*args, **kwargs):
+        time.sleep(5)
+
+    with patch("smtplib.SMTP", side_effect=_hangs_forever):
+        start = time.monotonic()
+        with pytest.raises(asyncio.TimeoutError):
+            await email.send_invite_email(to_email="new-user@example.com", raw_token="tok")
+        assert time.monotonic() - start < 1.0
 
 
 async def test_starttls_is_called_by_default():
@@ -167,6 +187,33 @@ async def test_unresolvable_password_ref_fails_loudly_when_smtp_user_is_set(monk
 
     smtp_instance.login.assert_not_called()
     smtp_instance.send_message.assert_not_called()
+
+
+async def test_lifespan_teardown_shuts_down_the_smtp_executor():
+    # Review finding 2: concurrent.futures registers its own atexit hook
+    # that joins every non-daemon executor thread it has ever created —
+    # without an explicit shutdown() somewhere in this app, that hook (not
+    # this app) is what eventually reaps _SMTP_EXECUTOR's threads, and
+    # only at interpreter exit: a SIGTERM during a black-holed send would
+    # otherwise block process exit for up to ~40s (past docker-compose's
+    # grace period, forcing a SIGKILL), and `uvicorn --reload` leaks a
+    # fresh 4-thread pool every reload since nothing ever shuts the old one
+    # down. app.py's lifespan teardown must call email.close_smtp_executor()
+    # — the same place db.close_pool()/cache.close() already run. db/cache/
+    # phone_numbers startup calls are mocked here so this test doesn't
+    # touch the shared process-wide pool other tests depend on.
+    with (
+        patch("services.config.app.db.get_pool", new=AsyncMock()),
+        patch("services.config.app.db.close_pool", new=AsyncMock()),
+        patch("services.config.app.cache.get_client"),
+        patch("services.config.app.cache.close", new=AsyncMock()),
+        patch("services.config.app.phone_numbers_service.prewarm", new=AsyncMock(return_value=0)),
+        patch("services.config.app.email.close_smtp_executor") as mock_close,
+    ):
+        async with lifespan(app):
+            pass
+
+    mock_close.assert_called_once()
 
 
 async def test_relay_refusing_starttls_is_a_clean_send_failure_not_a_cleartext_send():

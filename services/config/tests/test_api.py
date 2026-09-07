@@ -1367,6 +1367,39 @@ class TestUserEndpoints:
         finally:
             await pool.execute("DELETE FROM users WHERE id = $1", svc_id)
 
+    async def test_viewer_service_account_with_null_tenant_cannot_read_other_tenants(self, pool, test_tenant):
+        # PR #19 security finding 1: is_platform_scoped (lesson 24 —
+        # tenant_id is None) answers *which tenant*, not *how privileged*.
+        # GET /users has no authority gate beyond CONSOLE_ROLES, so a
+        # viewer-role service account — role="viewer", tenant_id=NULL,
+        # exactly the shape Conversation's/vobiz's real service accounts
+        # authenticate as — is just as platform-scoped as a superadmin.
+        # It must not inherit a superadmin's unscoped, cross-tenant,
+        # role-unfiltered read just because its own tenant_id is also
+        # NULL. Would fail (the tenant user below present in the response)
+        # if the route gated the unscoped branch on scope alone.
+        svc_row = await pool.fetchrow(
+            "INSERT INTO users (email, password_hash, role, tenant_id, is_service_account) "
+            "VALUES ($1, 'x', 'viewer', NULL, true) RETURNING *",
+            f"test-svc-viewer-{uuid.uuid4().hex[:8]}@internal.yuviz.ai",
+        )
+        tenant_user_email = f"test-tenant-user-{uuid.uuid4().hex[:8]}@example.com"
+        tenant_user = await users_service.create_user(
+            email=tenant_user_email, password="a-real-password", role="viewer", tenant_id=test_tenant["id"],
+        )
+        token = auth.create_access_token(dict(svc_row))
+        transport = ASGITransport(app=app)
+        try:
+            async with AsyncClient(
+                transport=transport, base_url="http://test", headers={"Authorization": f"Bearer {token}"},
+            ) as svc_client:
+                resp = await svc_client.get("/users")
+            assert resp.status_code == 200
+            assert tenant_user_email not in {u["email"] for u in resp.json()}
+        finally:
+            await pool.execute("DELETE FROM users WHERE id = $1", svc_row["id"])
+            await pool.execute("DELETE FROM users WHERE id = $1", tenant_user["id"])
+
     async def test_service_account_backfill_is_case_insensitive(self, pool):
         row = await pool.fetchrow(
             "INSERT INTO users (email, password_hash, role, is_service_account) "

@@ -19,20 +19,57 @@ environment. See docs/setup.md for the full list of new env vars.
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import smtplib
 import ssl
+from concurrent.futures import ThreadPoolExecutor
 from email.message import EmailMessage
 
 from .secret_resolver import CompositeSecretResolver, SecretResolver
 
 _resolver: SecretResolver = CompositeSecretResolver()
 
+# A dedicated (small, bounded) pool for the blocking SMTP call below, not
+# asyncio.to_thread's default executor — that default pool (min(32, cpu+4)
+# workers) is shared with every other blocking call this process threads,
+# including auth.hash_password/verify_password (users.py). asyncio.wait_for
+# below bounds how long *this coroutine* waits, but it cannot cancel the
+# worker thread smtplib is actually blocked in — a black-holing relay can
+# leave that thread stuck in a socket call for up to 4x
+# _SMTP_TIMEOUT_SECONDS (one per round-trip) after the coroutine has already
+# given up and returned. On the shared default pool enough stuck sends
+# exhaust every worker and POST /auth/login queues behind them; on this
+# pool a stuck send can only starve other invite sends, never login.
+_SMTP_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="invite-smtp")
+
+
+def close_smtp_executor() -> None:
+    """Called from app.py's lifespan teardown, same place db.close_pool()/
+    cache.close() run. concurrent.futures registers its own atexit hook
+    that joins every non-daemon executor thread it has ever created, so
+    without an explicit shutdown() here that hook — not this module — is
+    what eventually reaps _SMTP_EXECUTOR's threads, and only at interpreter
+    exit: a SIGTERM during a black-holed send would otherwise block
+    process exit for up to ~40s (well past docker-compose's grace period,
+    forcing a SIGKILL), and `uvicorn --reload` leaks a fresh 4-thread pool
+    every reload since nothing ever shuts the old one down. wait=False: a
+    thread already stuck inside a blocking smtplib call can't be
+    interrupted by shutting the pool down around it — that limitation is
+    inherent to any thread-based worker, not something this call fixes —
+    so this stops issuing new work and lets the process proceed with
+    shutdown instead of blocking teardown on threads already stuck."""
+    _SMTP_EXECUTOR.shutdown(wait=False)
+
 # Design-specified ceiling on the blocking SMTP call below — without it,
 # smtplib.SMTP() inherits the global socket default (no timeout at all), so
-# an unreachable/black-holing host would hang forever. 10s is generous for
-# a local/LAN mail relay and short enough that the caller's non-fatal
-# except Exception (routers/invites.py) fires in bounded time either way.
+# an unreachable/black-holing host would hang forever. This is a *per-socket-
+# operation* timeout, though: connect, starttls(), login() and send_message()
+# are each a separate round-trip smtplib.SMTP() applies it to individually,
+# so a relay that black-holes on each step in turn could burn up to 4x this
+# before _send_sync raises. send_invite_email wraps the whole call in
+# asyncio.wait_for() with this same value so the request is bounded by one
+# 10s ceiling regardless of how many socket ops stall.
 _SMTP_TIMEOUT_SECONDS = 10
 
 
@@ -111,7 +148,16 @@ async def send_invite_email(*, to_email: str, raw_token: str) -> None:
     But if SMTP_USER *is* set, the password is mandatory and resolved
     eagerly right here: a set-but-unresolvable SMTP_PASSWORD_REF must fail
     the send loudly, never silently fall through to an unauthenticated
-    one just because the credential lookup broke."""
+    one just because the credential lookup broke.
+
+    The blocking call is wrapped in asyncio.wait_for(..., _SMTP_TIMEOUT_
+    SECONDS) — _send_sync's own timeout= is per socket operation, so
+    without this outer bound a relay that black-holes on connect, then
+    starttls(), then login(), then send_message() in turn could take up to
+    4x _SMTP_TIMEOUT_SECONDS before raising. This is what actually gives
+    the caller's non-fatal except Exception (routers/invites.py) its
+    bounded time. It runs on _SMTP_EXECUTOR, not asyncio.to_thread's
+    default pool — see that constant's comment for why."""
     host = _env("SMTP_HOST")
     port = int(_env("SMTP_PORT"))
     user = os.environ.get("SMTP_USER", "").strip()
@@ -131,6 +177,13 @@ async def send_invite_email(*, to_email: str, raw_token: str) -> None:
         "This link expires in 7 days.",
     )
 
-    await asyncio.to_thread(
-        _send_sync, host=host, port=port, user=user, password=password, message=message, starttls=starttls,
+    loop = asyncio.get_running_loop()
+    await asyncio.wait_for(
+        loop.run_in_executor(
+            _SMTP_EXECUTOR,
+            functools.partial(
+                _send_sync, host=host, port=port, user=user, password=password, message=message, starttls=starttls,
+            ),
+        ),
+        timeout=_SMTP_TIMEOUT_SECONDS,
     )

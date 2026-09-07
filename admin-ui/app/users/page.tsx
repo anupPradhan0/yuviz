@@ -293,14 +293,10 @@ export default function UsersPage() {
                 // offers neither action — not disabled-with-a-tooltip,
                 // simply absent. The server would 409 "invite is not
                 // pending" on either, but that path must be unreachable
-                // through this UI. Revoke stays offered on an expired
-                // invite (the server allows it — it only checks the stored
-                // status, not expires_at). Resend does not: the server
-                // rotates the token in place without extending expires_at,
-                // so "resending" an expired invite would hand the invitee a
-                // fresh link that 410s on their first click.
+                // through this UI. Resend now extends expires_at (PR #19
+                // finding 2), so it's offered on an expired invite too —
+                // same predicate as revoke.
                 const revocable = inv.status === "pending";
-                const resendable = status === "pending";
                 const cooldown = resendCooldownRemaining(inv);
                 return (
                   <tr key={inv.id}>
@@ -319,7 +315,7 @@ export default function UsersPage() {
                       {new Date(inv.expires_at).toLocaleDateString()}
                     </td>
                     <td style={{ display: "flex", gap: 6 }}>
-                      {resendable && (
+                      {revocable && (
                         <button
                           className="btn btn-ghost btn-sm"
                           onClick={() => handleResend(inv)}
@@ -338,7 +334,7 @@ export default function UsersPage() {
                           {revokingId === inv.id ? "Revoking…" : "Revoke"}
                         </button>
                       )}
-                      {!resendable && !revocable && (
+                      {!revocable && (
                         <span style={{ fontSize: ".71rem", color: "var(--text-3)" }}>—</span>
                       )}
                     </td>

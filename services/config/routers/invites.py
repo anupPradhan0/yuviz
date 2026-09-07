@@ -20,7 +20,7 @@ from .. import email
 from .. import invites as invites_service
 from .. import users as users_service
 from ..auth import CurrentUser
-from ..deps import require_role
+from ..deps import is_platform_scoped, require_role
 from ..schemas import InviteAccept, InviteCreate
 
 router = APIRouter(prefix="/invites", tags=["invites"])
@@ -73,11 +73,20 @@ async def list_invites(
     tenant_id: str | None = None,
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
-    # `?tenant_id=` is honored only for super_admin; for anyone else it's
-    # forced to the JWT's own tenant_id, not merely validated (AC11, CURSOR.md).
-    scoped_tenant_id = tenant_id if current_user.role == "superadmin" else current_user.tenant_id
+    # Same conflation routers/users.py had (PR #19 security finding 1):
+    # is_platform_scoped (lesson 24 — tenant_id is None) answers *which
+    # tenant*, not *how privileged*. require_role above keeps a NULL-tenant
+    # viewer service account off this route entirely today, but a NULL-
+    # tenant *admin* (not superadmin) would otherwise still fall into the
+    # unscoped, cross-tenant branch on scope alone. `?tenant_id=` is
+    # honored, and is_superadmin=True is passed to the service, only when
+    # the actor is platform-scoped *and* actually superadmin; anyone else
+    # is forced to their own tenant_id, not merely validated (AC11,
+    # CURSOR.md).
+    platform_scoped = is_platform_scoped(current_user) and current_user.role == "superadmin"
+    scoped_tenant_id = tenant_id if platform_scoped else current_user.tenant_id
     rows = await invites_service.list_invites(
-        tenant_id=scoped_tenant_id, is_superadmin=(current_user.role == "superadmin"),
+        tenant_id=scoped_tenant_id, is_superadmin=platform_scoped,
     )
     return [invites_service.to_public_dict(row) for row in rows]
 
