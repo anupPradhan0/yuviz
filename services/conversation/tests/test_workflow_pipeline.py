@@ -1,20 +1,14 @@
 """
-One end-to-end pass through the real pipeline (docs/workflow.md §7.3): a
-real PipelineConversationHandler and a real ToolCallOrchestrator, driven by
-a scripted tool-aware LLM that emits transition calls. Asserts the things
-the dry-run tests can't see — that the graph actually walks under a live
-turn, that the prompt swaps mid-turn, that per-node tool scoping reaches
-the resolver, and that an `end` node ends the call.
+One end-to-end pass through the real pipeline: handler + orchestrator,
+scripted tool-aware LLM. Covers mid-turn prompt swap, tool scoping, end node,
+transition speech, and workflow transfer.
 """
 
 from __future__ import annotations
 
-import pytest
-
 from services.conversation.tools.executor_registry import ExecutorRegistry
 from services.conversation.tools.llm_adapter import LLMAdapter, TokenEvent, ToolCallEvent
 from services.conversation.tools.orchestrator import ToolCallOrchestrator
-from services.conversation.workflow.runner import _GRAPH_CACHE
 
 from .test_pipeline import _make_handler, _make_stt, _make_tts, _silence
 
@@ -41,11 +35,30 @@ GRAPH = {
     ],
 }
 
+TRANSFER_GRAPH = {
+    "version": 1,
+    "nodes": [
+        {"id": "g1", "type": "global", "data": {
+            "name": "always applies", "prompt": "You are Ada."}},
+        {"id": "n1", "type": "start", "data": {
+            "name": "greeting", "prompt": "Ask what they need.",
+            "greeting": "Thanks for calling."}},
+        {"id": "n2", "type": "transfer", "data": {
+            "name": "to_human", "prompt": "Say you're connecting them.",
+            "transfer_destination": "+15559999"}},
+        {"id": "n3", "type": "end", "data": {
+            "name": "goodbye", "prompt": "Close.", "disposition": "completed"}},
+    ],
+    "edges": [
+        {"id": "e1", "source": "n1", "target": "n2", "data": {
+            "label": "wants a human", "condition": "The caller asked for a person."}},
+        {"id": "e2", "source": "n1", "target": "n3", "data": {
+            "label": "all done", "condition": "The caller is finished."}},
+    ],
+}
+
 
 class _ScriptedToolLLM:
-    """Emits a pre-scripted list of events per generation, and records the
-    system prompt and tool schemas it was handed each time."""
-
     def __init__(self, generations):
         self._generations = list(generations)
         self.seen_prompts: list[str] = []
@@ -71,45 +84,34 @@ class _RecordingPolicyResolver:
 
     async def enabled_tools(self, agent_id, only=None):
         self.seen_only.append(only)
-        return []   # no tool_provider_configs in a unit test
+        return []
 
 
-@pytest.fixture(autouse=True)
-def _clear_graph_cache():
-    # graph_for() caches by (agent id, config_version), and every handler
-    # these tests build reuses both.
-    _GRAPH_CACHE.clear()
-    yield
-    _GRAPH_CACHE.clear()
-
-
-def _handler(llm, resolver, **kw):
+def _handler(llm, resolver, *, workflow=GRAPH, **kw):
     orchestrator = ToolCallOrchestrator(
         llm_adapter=LLMAdapter(llm),
         policy_resolver=resolver,
-        provider_manager=None,          # never reached: no policy tools resolve
+        provider_manager=None,
         executor_registry=ExecutorRegistry(),
     )
     return _make_handler(
         _make_stt("I'd like to book an appointment"), llm, _make_tts(),
-        system_prompt="You are Ada.", workflow=GRAPH, tool_orchestrator=orchestrator,
+        system_prompt="You are Ada.", workflow=workflow, tool_orchestrator=orchestrator,
         **kw,
     )
 
 
 async def test_a_call_walks_the_graph_and_ends_on_the_end_node():
     llm = _ScriptedToolLLM([
-        # Turn 1: the model advances the conversation by calling the edge.
         [ToolCallEvent(tool_call_id="t1", tool_name="wants_to_book", arguments={})],
         [TokenEvent(text="Sure."), TokenEvent(text=" What time suits you?")],
-        # Turn 2: booked -> the end node.
         [ToolCallEvent(tool_call_id="t2", tool_name="booked", arguments={})],
         [TokenEvent(text="You're all set. Goodbye!")],
     ])
     resolver = _RecordingPolicyResolver()
     handler = _handler(llm, resolver)
 
-    assert await handler.greeting("s1") != []      # start node's greeting
+    assert await handler.greeting("s1") != []
 
     turn1 = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
     assert handler._workflow.node.name == "booking"
@@ -133,22 +135,10 @@ async def test_transitions_are_offered_as_tools_and_the_prompt_swaps_mid_turn():
 
     [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
 
-    # The start node's one outgoing edge was the only tool offered.
     assert llm.seen_tool_names[0] == ["wants_to_book"]
-    # First generation ran under the start node's prompt...
     assert "Ask what they need." in llm.seen_prompts[0]
-    # ...and the SECOND generation of the same turn ran under the new
-    # node's, not the old one's. Getting this wrong mostly works, which is
-    # what makes it nasty (see docs/workflow.md §5.3).
     assert "Take their preferred time." in llm.seen_prompts[1]
-    # The graph's global node is the prefix on both.
     assert llm.seen_prompts[1].startswith("You are Ada.")
-
-    # And the tool set moved with the node, not just the prompt: the start
-    # node allows nothing, the booking node allows book_appointment. Offering
-    # the OLD node's tools for the rest of the turn would both withhold the
-    # tool the new prompt just told the model to use and leave the edges it
-    # already left callable.
     assert resolver.seen_only == [[], ["book_appointment"]]
     assert llm.seen_tool_names[1] == ["booked"]
 
@@ -165,26 +155,18 @@ async def test_transition_speech_is_spoken_during_the_round_trip():
 
     spoken = [call.args[0] for call in tts.synthesize.await_args_list]
     assert "Let me pull up the calendar." in spoken
-    # Spoken before the new node's own words, not after them.
     assert spoken.index("Let me pull up the calendar.") < spoken.index("Sure.")
     assert handler._workflow.pending_speech is None
 
 
-
 async def test_an_end_call_marker_survives_a_transition_in_the_same_turn():
-    """[[END_CALL]] emitted alongside a transition must still hang up.
-
-    on_speech_ended does `end_call = marker_seen` on EVERY item _llm_to_tts
-    yields, so the transition-speech branch yielding a literal False after
-    the marker had already been seen silently un-hung-up the call — and the
-    follow-up generation producing no text left nothing to re-raise it.
-    """
+    """[[END_CALL]] must still hang up if transition speech yields in the same turn."""
     llm = _ScriptedToolLLM([
         [
             TokenEvent(text="All set. [[END_CALL]]"),
             ToolCallEvent(tool_call_id="t1", tool_name="wants_to_book", arguments={}),
         ],
-        [],                     # nothing further to say after the transition
+        [],
     ])
     handler = _handler(llm, _RecordingPolicyResolver())
 
@@ -193,3 +175,39 @@ async def test_an_end_call_marker_survives_a_transition_in_the_same_turn():
     assert any(r.end_call for r in responses), (
         "the hang-up was lost — transition speech reset end_call"
     )
+
+
+async def test_workflow_transfer_node_surfaces_a_transfer_request():
+    llm = _ScriptedToolLLM([
+        [ToolCallEvent(tool_call_id="t1", tool_name="wants_a_human", arguments={})],
+        [TokenEvent(text="Connecting you now.")],
+    ])
+    handler = _handler(
+        llm, _RecordingPolicyResolver(), workflow=TRANSFER_GRAPH,
+        transfer_type="warm", transfer_destination="+15550001111",
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+
+    assert handler._workflow.node.name == "to_human"
+    transfers = [r.transfer_request for r in responses if r.transfer_request]
+    assert len(transfers) == 1
+    assert transfers[0].destination == "+15559999"
+    assert transfers[0].trigger == "workflow_policy"
+    assert not any(r.end_call for r in responses)
+
+
+async def test_workflow_transfer_rejected_when_agent_transfer_disabled():
+    llm = _ScriptedToolLLM([
+        [ToolCallEvent(tool_call_id="t1", tool_name="wants_a_human", arguments={})],
+        [TokenEvent(text="One moment.")],
+    ])
+    handler = _handler(
+        llm, _RecordingPolicyResolver(), workflow=TRANSFER_GRAPH,
+        transfer_type="none",
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+
+    assert handler._workflow.node.name == "to_human"
+    assert not any(r.transfer_request for r in responses)

@@ -151,11 +151,8 @@ class Agent:
     # Mirrors agents.max_call_duration_s — see Policies.max_call_duration_s's
     # own comment for what this controls. None = unlimited.
     max_call_duration_s: int | None = None
-    # Published / draft conversation graphs (agents.workflow /
-    # agents.workflow_draft). Call-setup carries the published graph on
-    # RuntimeConfig.conversation so Conversation can walk it at call time;
-    # workflow_draft is editor/test-only and is stripped from the public
-    # agent payload until draft testing lands.
+    # Published / draft graphs on agents.workflow / workflow_draft. Call-setup
+    # carries published on RuntimeConfig; draft stripped from public agent until PR10.
     workflow: dict[str, Any] | None = None
     workflow_draft: dict[str, Any] | None = None
 
@@ -218,10 +215,8 @@ class ConversationInfo:
     # Scripted spoken lines (see Agent.farewell_message/transfer_announcement).
     farewell_message: str | None = None
     transfer_announcement: str | None = None
-    # Published graph Conversation reads at call time (via WorkflowRunner).
-    # greeting/system_prompt remain for the transitional single-prompt path
-    # and for seeding starter graphs; the live turn prompt comes from the
-    # active node once a graph is present.
+    # Published graph for call-time WorkflowRunner. greeting/system_prompt still
+    # seed starter fallbacks (and columns) until PR11 removes the single-prompt path.
     workflow: dict[str, Any] | None = None
     workflow_draft: dict[str, Any] | None = None
 

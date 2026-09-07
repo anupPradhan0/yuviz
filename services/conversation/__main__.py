@@ -148,10 +148,6 @@ async def _prewarm_agents(
                 log.warning("prewarm: tenant=%s agent=%s did not resolve — skipping", tenant_slug, agent_slug)
                 continue
             _, bundle = resolved
-            # Parse and cache the conversation graph too (see workflow.runner's
-            # graph_for): parsing per call is wasted work on the latency path,
-            # and a parse failure found at call time is a dropped call — here
-            # it is a log line and a fallback to the starter graph.
             graph = graph_for(resolved[0])
             # Object construction != model loaded — Ollama needs a real
             # request first (see OllamaLLM.warm()). No-op for cloud LLMs.

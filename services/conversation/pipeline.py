@@ -514,11 +514,7 @@ class PipelineConversationHandler:
         tool_orchestrator: ToolCallOrchestrator | None = None,
         has_booking_tool: bool = False,
     ) -> None:
-        # default_system_prompt is kept for call-site compatibility
-        # (__main__.py still passes PipelineConfig.llm.system). Live turns
-        # read the active node's prompt from WorkflowRunner; the graph's
-        # global node already carries the agent's always-on instruction.
-        del default_system_prompt  # unused — graph owns the prompt
+        del default_system_prompt  # call-site compat; live prompt is the active node
         self._stt          = provider_bundle.stt
         self._llm          = provider_bundle.llm
         self._tts          = provider_bundle.tts
@@ -549,9 +545,7 @@ class PipelineConversationHandler:
             (runtime_config.conversation.transfer_announcement or "").strip() or None
         )
         self._has_booking_tool = has_booking_tool
-        # Mechanics appended after each node's own prompt — date grounding,
-        # optional caller-number booking context, and the directive tokens.
-        # Handed to WorkflowRunner as base_suffix (see system_prompt()).
+        # Date / booking / directive tokens appended after each node's prompt.
         self._prompt_suffix = (
             _build_current_date_context()
             + (_build_caller_number_context(self._caller_number) if has_booking_tool else "")
@@ -679,9 +673,7 @@ class PipelineConversationHandler:
         # _session() below; on_session_end() drops the whole entry in one
         # line instead of one pop/discard per field.
         self._sessions: dict[str, _SessionState] = {}
-        # Conversation workflow (docs/workflow.md). Always present — an agent
-        # IS its workflow; graph_for() falls back to the starter graph rather
-        # than returning None.
+        # Conversation workflow — graph_for() falls back to starter, never None.
         now = datetime.now(timezone.utc)
         graph = graph_for(runtime_config)
         self._workflow = WorkflowRunner(
@@ -696,7 +688,7 @@ class PipelineConversationHandler:
                 "current_date":  now.strftime("%Y-%m-%d"),
                 "current_time":  now.strftime("%H:%M"),
             },
-            extractor=None,
+            extractor=None,  # ponytail: wired in PR9
             summarizer=None,
         )
         if (
@@ -1030,13 +1022,11 @@ class PipelineConversationHandler:
                 ),
             )
 
-        # Reaching an `end` node ends the call the same way [[END_CALL]] does.
+        # End node hangup; [[END_CALL]] off-graph marks ended_off_graph for disposition.
         ended_on_end_node = self._workflow.pending_end
         if ended_on_end_node:
             end_call = True
         elif end_call:
-            # [[END_CALL]] from a non-terminal node — safety net for goodbye
-            # where no edge covers it. Record that the call left the graph.
             self._workflow.ended_off_graph = True
 
         # Phase 6: an LLM-emitted directive takes precedence over a pending
@@ -1076,7 +1066,6 @@ class PipelineConversationHandler:
                 if decision.accepted:
                     transfer_request = decision.request
                     self._session(session_id).transfer_requested = True
-            # A workflow transfer node hands off via the same engine.
             if transfer_request is None:
                 transfer_request = await self._workflow_transfer(session_id)
             # Fall through to a pending escalation-accepted request whenever
@@ -1150,6 +1139,11 @@ class PipelineConversationHandler:
         # turn's record_turn() call.
         state = self._sessions.get(session_id)
         pending_recovery_turns = state.pending_recovery_turns if state is not None else []
+        log.info(
+            "workflow outcome session=%s disposition=%s visited=%s reason=%s",
+            session_id, self._workflow.disposition, self._workflow.visited, reason,
+        )
+        # ponytail: DB outcome (record_workflow_outcome) lands with PR9 extractor teardown.
         if self._transcripts is not None:
             for caller_text, ai_response, interrupted in pending_recovery_turns:
                 self._transcripts.record_turn(session_id, caller_text, 1.0, ai_response, interrupted)
@@ -1165,9 +1159,7 @@ class PipelineConversationHandler:
     def _decision_context(
         self, session_id: str, destination_override: str | None = None,
     ) -> DecisionContext:
-        """destination_override is a workflow transfer node's own
-        destination — it replaces the agent-wide default for that one
-        decision and nothing else."""
+        """destination_override: workflow transfer node destination for this decision."""
         return DecisionContext(
             session_id=session_id, tenant_id=self._tenant_id, call_id=self._call_id,
             transfer_type=self._transfer_type_default,
@@ -1350,10 +1342,7 @@ class PipelineConversationHandler:
     # ── Workflow helpers ─────────────────────────────────────────────────
 
     def _refresh_node_prompt(self, history: list[ChatMessage]) -> None:
-        """history[0] is the active node's prompt, refreshed every turn —
-        the node may have changed last turn, and its prompt is re-rendered
-        with whatever variables have been extracted since. _trim_history
-        already preserves history[0], so this is a one-slot mutation."""
+        """Refresh history[0] with the active node's rendered prompt."""
         prompt = ChatMessage(role="system", content=self._workflow.system_prompt())
         if history and history[0].role == "system":
             history[0] = prompt
@@ -1391,9 +1380,7 @@ class PipelineConversationHandler:
         tool_calls_made: list[str],
         store: list[ChatMessage] | None = None,
     ) -> AsyncGenerator[str | ToolCallStartedEvent | LocalToolCompletedEvent, None]:
-        """Like llm.generate(), plus ToolCallStartedEvent for filler speech.
-        LocalToolCompletedEvent is passed through so _llm_to_tts can speak
-        a workflow transition's bridging line before the next generation."""
+        """LLM tokens + ToolCallStartedEvent filler + LocalToolCompletedEvent for bridging speech."""
         if self._tool_orchestrator is None:
             async for token in self._llm.generate(history):
                 yield token
@@ -1407,9 +1394,7 @@ class PipelineConversationHandler:
         if just_confirmed:
             self._session(session_id).phone_number_confirmed = True
 
-        # One in-process tool per outgoing edge, and narrow DB tools to the
-        # active node's allow-list. Callables so a mid-turn transition
-        # re-reads the new node's tools for the rest of the turn.
+        # Callables so a mid-turn transition re-reads the new node's tools.
         local_tools = lambda: self._workflow.local_tools(history, store)  # noqa: E731
         only_tools = lambda: self._workflow.allowed_tool_names()       # noqa: E731
 
@@ -1467,8 +1452,7 @@ class PipelineConversationHandler:
         text_buffer = ""  # directive-free text awaiting a sentence boundary
         if tool_calls_made is None:
             tool_calls_made = []
-        # Carried on every yield — transition speech / filler must not reset
-        # an [[END_CALL]] already seen earlier in the same turn.
+        # end_call latched so transition speech / filler cannot clear [[END_CALL]].
         end_call = False
         try:
             async for item in self._token_stream(

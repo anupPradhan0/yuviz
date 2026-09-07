@@ -731,11 +731,17 @@ async def test_a_local_tool_that_raises_soft_fails_instead_of_crashing_the_turn(
 async def test_cancel_event_stops_waiting_on_an_in_flight_local_tool():
     started = asyncio.Event()
     release = asyncio.Event()
+    finished: list[str] = []
 
     async def slow(_args: dict) -> ToolResult:
         started.set()
-        await release.wait()
-        return ToolResult(status=ToolStatus.SUCCESS, payload={"done": True})
+        try:
+            await release.wait()
+            finished.append("ok")
+            return ToolResult(status=ToolStatus.SUCCESS, payload={"done": True})
+        except asyncio.CancelledError:
+            finished.append("cancelled")
+            raise
 
     definition = ToolDefinition(
         name="caller_verified", description="x",
@@ -775,6 +781,7 @@ async def test_cancel_event_stops_waiting_on_an_in_flight_local_tool():
 
     release.set()
     await asyncio.sleep(0)
+    assert finished == ["cancelled"]
 
 
 async def test_only_tools_is_passed_through_to_the_policy_resolver():

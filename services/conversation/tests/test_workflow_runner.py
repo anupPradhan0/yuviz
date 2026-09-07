@@ -181,10 +181,54 @@ def test_no_dead_ends_and_the_happy_path_reaches_an_end_node():
 
 
 def test_a_graph_with_no_global_node_just_has_no_global_prefix():
-    """Every instruction being per-step is a legitimate graph, not an error —
-    the composition simply starts at the node's own prompt."""
     bare = {**GRAPH, "nodes": [n for n in GRAPH["nodes"] if n["type"] != "global"]}
     runner = WorkflowRunner(parse_graph(bare), base_suffix="Today is 2026-08-28.")
     assert runner.system_prompt() == (
         "Greet the caller and find out what they want.\n\nToday is 2026-08-28."
     )
+
+
+def test_graph_for_fallback_seeds_greeting_and_system_prompt():
+    from datetime import datetime, timezone
+
+    from libs.config_sdk import (
+        Agent, ConversationInfo, MediaInfo, Policies, ProviderConfig, ProviderConfigs,
+        RuntimeConfig, Tenant,
+    )
+    from services.conversation.workflow.runner import _GRAPH_CACHE, graph_for
+
+    _GRAPH_CACHE.clear()
+    now = datetime.now(timezone.utc)
+    placeholder = ProviderConfig(
+        id="p1", role="stt", engine="fake", model=None, voice=None, language=None, api_key_ref=None,
+    )
+    rc = RuntimeConfig(
+        tenant=Tenant(
+            id="t1", slug="t", name="T", region="us",
+            vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
+            no_speech_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None,
+            transfer_timeout_ms=None,
+            default_stt_config_id=None, default_llm_config_id=None, default_tts_config_id=None,
+            config_version=1, updated_at=now,
+        ),
+        agent=Agent(
+            id="a1", slug="agent", tenant_id="t1", name="Agent",
+            greeting="Hi from column.", system_prompt="Be the column prompt.",
+            goodbye_grace_ms=0, stt_config_id=None, llm_config_id=None, tts_config_id=None,
+            status="active", config_version=1, updated_at=now,
+        ),
+        providers=ProviderConfigs(stt=placeholder, llm=placeholder, tts=placeholder),
+        conversation=ConversationInfo(
+            greeting="Hi from column.", system_prompt="Be the column prompt.", workflow=None,
+        ),
+        media=MediaInfo(voice=None, language=None),
+        policies=Policies(
+            vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
+            silence_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None, goodbye_grace_ms=0,
+        ),
+        tools=[], version=1, resolved_at=now,
+    )
+    graph = graph_for(rc)
+    assert "Hi from column." in (graph.start.greeting or "")
+    assert "Be the column prompt." in (graph.global_prompt or "")
+
