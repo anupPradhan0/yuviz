@@ -81,14 +81,7 @@ class DeterministicSpokenEvent(TurnEvent):
 
 @dataclass(frozen=True)
 class LocalToolCompletedEvent(TurnEvent):
-    """Yielded the instant an in-process tool has run, before the next
-    generation starts (see ToolCallOrchestrator's local_tools). The
-    execution itself is usually instant, so unlike ToolCallStartedEvent this
-    is not a "please cover the silence" signal — it is the one moment a
-    caller can be told what just happened while the model is still thinking
-    about what to say next. PipelineConversationHandler._token_stream
-    absorbs it today (no spoken bridging line yet); a workflow transition
-    will use it later to speak its bridging line from _llm_to_tts."""
+    """Local tool finished; pipeline absorbs it (bridging speech comes later)."""
     tool_name: str
 
 

@@ -87,7 +87,7 @@ def test_disabling_book_appointment_removes_both_derived_companions():
     assert resolved == []
 
 
-# ── _narrow — per-node tool scoping (docs/workflow.md §5.5) ─────────────
+# ── _narrow ─────────────────────────────────────────────────────────────
 
 
 def test_only_none_leaves_the_agents_tools_alone():
@@ -101,15 +101,11 @@ def test_a_node_can_narrow_the_agents_tools():
 
 
 def test_a_node_cannot_grant_a_tool_the_agent_does_not_have():
-    # Privilege escalation through the graph editor: `only` can only ever
-    # remove. The DB stays the source of truth for what the agent MAY use.
+    # `only` subsets only — never grants a tool the agent lacks.
     assert _narrow([], ["book_appointment"]) == []
 
 
 def test_a_narrowed_book_appointment_keeps_its_companions():
-    # cancel/reschedule were never independently selectable, so a node
-    # listing them separately isn't something an operator can express —
-    # they ride along with their source, same as agent-wide resolution.
     resolver = _resolver()
     resolved = [_policy("book_appointment")]
     resolver._add_auto_derived_companions(resolved, agent_id="a1")

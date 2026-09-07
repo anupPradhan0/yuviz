@@ -39,9 +39,6 @@ class _FakePolicyResolver:
     async def enabled_tools(
         self, agent_id: str, only: list[str] | None = None,
     ) -> list[ResolvedToolPolicy]:
-        # `only` (a workflow node's tool list) is narrowing done by the real
-        # resolver — see test_policy_resolver.py; this double just records
-        # that the orchestrator passes it through.
         self.last_only = only
         return self._policies
 
@@ -494,12 +491,10 @@ async def test_no_cancel_event_behaves_exactly_as_before():
     ]
 
 
-# ── local_tools — in-process tools (workflow transitions are the first
-# user; nothing here knows that) ────────────────────────────────────────
+# ── local_tools ─────────────────────────────────────────────────────────
 
 
 def _local(name: str = "caller_verified"):
-    """Returns (local_tools mapping, calls list) for one no-op local tool."""
     calls: list[dict] = []
 
     async def handler(args: dict) -> ToolResult:
@@ -522,9 +517,9 @@ async def test_a_local_tool_executes_without_touching_policy_or_provider():
     provider_manager = _FakeProviderManager()
     orchestrator = ToolCallOrchestrator(
         llm_adapter=LLMAdapter(llm),
-        policy_resolver=_FakePolicyResolver([]),   # no DB-backed tools at all
+        policy_resolver=_FakePolicyResolver([]),
         provider_manager=provider_manager,
-        executor_registry=ExecutorRegistry(),      # nothing registered
+        executor_registry=ExecutorRegistry(),
         metrics=None,
     )
 
@@ -535,20 +530,14 @@ async def test_a_local_tool_executes_without_touching_policy_or_provider():
         )
     ]
 
-    assert calls == [{}]                        # the handler ran
+    assert calls == [{}]
     assert TokenEvent(text="Thanks!") in events
     assert LocalToolCompletedEvent(tool_name="caller_verified") in events
-    # No spoken filler: an in-process pointer move has no round-trip to
-    # cover, unlike a real API call.
     assert not any(isinstance(e, ToolCallStartedEvent) for e in events)
-    # The result was folded into history exactly like any other tool's.
     assert json.loads(history[-1].content)["status"] == "done"
 
 
 async def test_a_local_tool_does_not_consume_a_tool_iteration():
-    # max_tool_iterations=1: if the local call counted, the second
-    # generation would have its tools yanked and the real tool could never
-    # run. A turn that transitions AND books has to be able to do both.
     llm = _ScriptedLLM([
         [ToolCallEvent(tool_call_id="c1", tool_name="caller_verified", arguments={})],
         [ToolCallEvent(tool_call_id="c2", tool_name="book_appointment",
@@ -606,10 +595,6 @@ async def test_local_tool_schemas_are_offered_alongside_policy_tools():
 
 
 async def test_local_tools_are_capped_so_a_cyclic_workflow_cannot_spin_forever():
-    # A workflow may legally contain a cycle, so a model that keeps calling
-    # transitions would walk it forever inside ONE turn — and
-    # max_call_duration_s can't catch that, because it's checked between
-    # turns and the turn never ends.
     local_tools, calls = _local()
     llm = _ScriptedLLM(
         [[ToolCallEvent(tool_call_id=f"c{i}", tool_name="caller_verified", arguments={})]
@@ -631,13 +616,11 @@ async def test_local_tools_are_capped_so_a_cyclic_workflow_cannot_spin_forever()
         )
     ]
 
-    # Capped, then the turn still finishes in words rather than stalling.
     assert len(calls) == 3
     assert TokenEvent(text="Anyway.") in events
 
 
 async def test_a_callable_tool_source_is_re_read_after_every_local_call():
-    # The workflow case: executing a transition changes which tools exist.
     first, _ = _local("step_one")
     second, _ = _local("step_two")
     sets = [first, second, second]
@@ -743,7 +726,7 @@ async def test_cancel_event_stops_waiting_on_an_in_flight_local_tool():
     cancel_event.set()
     events = await asyncio.wait_for(task, timeout=1.0)
 
-    assert events == []  # no LocalToolCompletedEvent — the tool did not finish
+    assert events == []
     assert json.loads(history[-1].content)["error"] == "cancelled"
     assert llm.call_count == 1
 

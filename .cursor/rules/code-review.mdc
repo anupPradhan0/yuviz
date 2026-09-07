@@ -18,7 +18,9 @@ Review the actual diff and relevant surrounding code (callers, schema, auth).
 5. Error handling
 6. Concurrency / idempotency
 7. Performance (complexity, redundant work)
-8. Cleanliness (unused/duplicated code) — not personal style
+8. Cleanliness (unused/duplicated code, **comment bloat**) — not personal style
+
+When reviewing: flag (or remove if asked to fix) comments that narrate obvious code, exceed ~2 lines without a non-obvious *why*, or make the diff harder to read. Prefer deletion over rewriting essays.
 
 ## Finding format
 

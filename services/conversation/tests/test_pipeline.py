@@ -2007,9 +2007,6 @@ async def test_pipeline_without_tool_orchestrator_uses_llm_directly():
 
 @pytest.mark.asyncio
 async def test_local_tool_completed_event_does_not_crash_the_pipeline():
-    """LocalToolCompletedEvent must be absorbed by _token_stream — an
-    unhandled TurnEvent used to AssertionError before the next TokenEvent
-    could reach TTS."""
     from ..tools.llm_adapter import LocalToolCompletedEvent
     from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
 
