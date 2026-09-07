@@ -1,0 +1,25 @@
+# Code review (round 2 — final)
+VERDICT: GREEN
+
+All five findings from round 1 are fixed and verified in the code, not just claimed. Two minor
+observations remain; neither blocks merge.
+
+1. [minor] Eviction is a full-map scan on every access, and the bound is per-window not absolute — `services/config/app.py:_evict_stale` — fails when: a burst of distinct source IPs hits `GET /invites/accept` inside one window. `_evict_stale` runs from `_current`, so it fires on both `over_limit` and `increment` — two full list-comprehension scans of `_buckets` per request per counter. With 50k distinct IPs seen inside the hour bucket's window, every subsequent accept request walks ~50k entries before doing any work, on the single-worker event loop; and the map itself is still free to grow to "every IP seen this window" before any sweep can help. So the memory bound holds *across* windows, not *within* one. Accepted as-is for a single-replica internal service with a 50/hour cap per IP, but it is not an absolute bound. fix (if it ever matters): sweep amortized (every N-th call or on size threshold) rather than on every access.
+
+2. [minor] The `unknown-client` sentinel is one shared bucket — `services/config/routers/invites.py:36` — fails when: the service is ever fronted by a transport that leaves `scope["client"]` unset (uvicorn `--uds`, some proxies). Then *every* accept request keys on the same sentinel and the whole platform's invite-accept traffic shares one 10/min + 50/hour bucket — the 11th accepting user in a minute is 429'd because of the other ten. Fail-closed is the right direction (the alternative was a 500 and a skipped throttle) and the path is unreachable on today's TCP deployment, so this is a note, not a defect. There is no bypass: the sentinel is a real bucket, not an exemption.
+
+## Round-1 findings — re-verified
+
+1. **SMTP offload (was blocking) — fixed.** The offload is complete: `_send_sync` holds the entire blocking sequence (`smtplib.SMTP(...)` construction, which does the DNS resolve and TCP connect, plus `login()` and `send_message()`), and `send_invite_email` reaches it only through `await asyncio.to_thread(...)`. `timeout=_SMTP_TIMEOUT_SECONDS` (10) is passed positionally-safe as a kwarg, so connect and every subsequent socket op is bounded. Nothing blocking is left on the event-loop side of the call: `_env` reads `os.environ`, and the `_resolver.resolve(SMTP_PASSWORD_REF)` await is the same shared secret-ref path every provider credential already uses (an `os.environ` read for the documented `env:` scheme) — not something this diff introduced. AC12 holds: `asyncio.to_thread` re-raises in the awaiting coroutine, so an `OSError`/`SMTPException` from inside the thread — and a `RuntimeError` from `_env` before it — both land in `routers/invites.py`'s `except Exception`, leaving the row pending with `email_sent: false`. `test_email.py` is sound: the timeout test fails if the kwarg is dropped, the ordering test (`order == ["fast", "smtp"]`) fails if the call goes back on the loop, and the failure test proves propagation through the thread boundary.
+
+2. **Bucket eviction (was blocking) — fixed.** `_evict_stale` runs on the exact path an attacker drives (`over_limit` → `_current`, `increment` → `_current`), so a stream of one-off IPs no longer leaks an entry each. `test_throttle.py`'s 500-key test would fail with the eviction removed. Residual per-window growth noted above.
+
+3. **`GET /users` scoping (was minor) — fixed, and the security property holds.** Three explicit branches; `is_superadmin` now reflects the actor only. The tenant-scoped branch cannot be widened by a client value: the router computes `scoped_tenant_id = tenant_id if role == "superadmin" else current_user.tenant_id`, so a non-superadmin's supplied `?tenant_id=` is discarded before the service call, and that branch keeps `role != 'superadmin'`. The superadmin-filtered branch correctly drops that exclusion, so a superadmin's filtered listing no longer hides superadmin rows.
+
+4. **Byte-identical 429 (was minor) — fixed.** The test now seeds a real invite, exhausts a fresh bucket with ten `200`s on the *valid* token, and compares that 429 body against the invalid-token 429. It fails if the 429 differed by token validity, which the old invalid-vs-invalid comparison could not.
+
+5. **`request.client is None` (was minor) — fixed.** `_client_host` guards it, and `test_no_client_in_scope_still_throttles_instead_of_500ing` uses `ASGITransport(client=None)`, asserting 404s then a 429 — so it fails both on the old `AttributeError` 500 and on a silent throttle skip.
+
+Finding 6 (str-typed path/query params → 500 on a non-UUID) was accepted as reported and is not re-raised.
+
+Nothing new introduced: the probe cap still increments before `create_invite`'s users lookup on every outcome, `may_invite` is still the only tenant comparison, the accept routes still take no identity dependency and read the token only from `X-Invite-Token`, and no code path reads `X-Forwarded-For`.

@@ -12,7 +12,15 @@ router = APIRouter(prefix="/tenants", tags=["tenants"])
 
 @router.get("")
 async def list_tenants(current_user: CurrentUser = Depends(get_current_user)):
-    return await tenants_service.list_tenants()
+    # Scope to the actor's own tenant for anyone who isn't platform-scoped.
+    # current_user.tenant_id comes from the verified JWT, never a client-
+    # supplied value — same pattern as GET /users and GET /invites. Only
+    # None (superadmin, or a service account — see tenants_service.
+    # list_tenants' docstring) sees every tenant; a tenant-scoped
+    # admin/viewer's tenant_id narrows this to a single-entry list, which
+    # is also all the invite-create tenant picker needs (may_invite already
+    # forbids inviting into any other tenant).
+    return await tenants_service.list_tenants(tenant_id=current_user.tenant_id)
 
 
 # Creating/renaming/deleting a tenant is a platform-level action — superadmin
@@ -28,7 +36,14 @@ async def create_tenant(body: TenantCreate, current_user: CurrentUser = Depends(
 
 @router.get("/{slug}")
 async def get_tenant(slug: str, current_user: CurrentUser = Depends(get_current_user)):
-    return await get_or_404(tenants_service.get_tenant(slug), f"tenant {slug!r} not found")
+    tenant = await get_or_404(tenants_service.get_tenant(slug), f"tenant {slug!r} not found")
+    # Same scoping as list_tenants above, and the identical 404 (never
+    # 403) for a foreign tenant that a tenant-scoped actor can't see — the
+    # slug existing at all must not be a distinguishable outcome from it
+    # not existing (no existence oracle).
+    if current_user.tenant_id is not None and str(tenant["id"]) != str(current_user.tenant_id):
+        raise HTTPException(status_code=404, detail=f"tenant {slug!r} not found")
+    return tenant
 
 
 @router.patch("/{tenant_id}")

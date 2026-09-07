@@ -58,11 +58,23 @@ async def get_tenant_by_id(tenant_id: Any) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
-async def list_tenants() -> list[dict[str, Any]]:
+async def list_tenants(*, tenant_id: Any | None = None) -> list[dict[str, Any]]:
+    """`tenant_id=None` returns every live tenant — the router passes this
+    only for a platform-scoped actor (superadmin, or a service account:
+    both have tenant_id=None on their verified JWT, see deps.py's
+    CONSOLE_ROLES docstring on why viewer service accounts keep full
+    Config API access). Any other actor's own tenant_id narrows this to
+    the single row they're allowed to see — the router never trusts a
+    client-supplied filter, only the JWT's own tenant_id."""
     pool = await db.get_pool()
-    rows = await pool.fetch(
-        "SELECT * FROM tenants WHERE deleted_at IS NULL ORDER BY name",
-    )
+    if tenant_id is None:
+        rows = await pool.fetch(
+            "SELECT * FROM tenants WHERE deleted_at IS NULL ORDER BY name",
+        )
+    else:
+        rows = await pool.fetch(
+            "SELECT * FROM tenants WHERE id = $1 AND deleted_at IS NULL ORDER BY name", tenant_id,
+        )
     return [dict(row) for row in rows]
 
 

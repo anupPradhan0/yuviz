@@ -717,7 +717,18 @@ export const deleteAgentToolPolicy = (agentId: string, toolName: string) =>
 
 // ── Auth ─────────────────────────────────────────────────────────────────
 
-export type UserRole = "superadmin" | "admin" | "viewer";
+// Widened alongside services/config's users_role_check (schema.sql) — a
+// real user row can now hold "supervisor"/"agent" (invite-only account
+// roles with no Config API surface of their own), not just the three
+// console roles. Keep this in sync with that CHECK constraint.
+export type UserRole = "superadmin" | "admin" | "supervisor" | "agent" | "viewer";
+
+// Mirrors services/config/deps.py's CONSOLE_ROLES exactly — supervisor/agent
+// have no Config API surface at all in this build, so a route decision here
+// (e.g. where to land someone right after login) has to agree with the
+// server's own gate, not just with what the sidebar happens to show.
+export const CONSOLE_ROLES: readonly UserRole[] = ["superadmin", "admin", "viewer"];
+export const isConsoleRole = (role: UserRole) => (CONSOLE_ROLES as readonly string[]).includes(role);
 
 export interface User {
   id: string;
@@ -753,26 +764,92 @@ export const changePassword = (currentPassword: string, newPassword: string) =>
 
 // ── Users ────────────────────────────────────────────────────────────────
 
-export interface UserCreate {
-  email: string;
-  password: string;
-  role: UserRole;
-  tenant_id?: string | null;
-}
-
 export interface UserUpdate {
   role?: UserRole;
   tenant_id?: string | null;
   password?: string;
 }
 
-export const listUsers = () => request<User[]>("/users");
-export const createUser = (body: UserCreate) =>
-  request<User>("/users", { method: "POST", body: JSON.stringify(body) });
+// `?tenant_id=` is honored by the server only for a super_admin caller — a
+// tenant-scoped caller passing it has it silently overridden to their own
+// tenant_id (services/config/routers/users.py). Passed through as-is here;
+// the UI must not rely on omitting it for correctness.
+export const listUsers = (tenantId?: string) =>
+  request<User[]>(`/users${tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : ""}`);
 export const updateUser = (userId: string, body: UserUpdate) =>
   request<User>(`/users/${userId}`, { method: "PATCH", body: JSON.stringify(body) });
 export const deleteUser = (userId: string) =>
   request<void>(`/users/${userId}`, { method: "DELETE" });
+
+// ── Invites ──────────────────────────────────────────────────────────────
+// Backs the invite-based onboarding flow (services/config/routers/invites.py).
+// `supervisor`/`agent` are real account roles an invite can grant, but have
+// no Config API surface of their own in this build (see design doc) — they
+// only ever appear here as an invite's/user's `role`, never as a route guard.
+
+// Same five roles as UserRole — kept as its own name because an invite's
+// role and a user's role are conceptually different fields, not because the
+// value sets differ.
+export type InviteRole = UserRole;
+export type InviteStatus = "pending" | "accepted" | "revoked";
+
+export interface Invite {
+  id: string;
+  tenant_id: string | null;
+  email: string;
+  role: InviteRole;
+  team: string | null;
+  status: InviteStatus;
+  expires_at: string;
+  invited_by: string | null;
+  accepted_at: string | null;
+  accepted_user_id: string | null;
+  last_sent_at: string | null;
+  created_at: string;
+  updated_at: string;
+  // Present only on the create/resend responses (AC12) — a failed SMTP send
+  // still leaves the invite row pending and resendable.
+  email_sent?: boolean;
+}
+
+export interface InviteCreate {
+  email: string;
+  role: InviteRole;
+  tenant_id?: string | null;
+  team?: string | null;
+}
+
+// Same `?tenant_id=` server-side scoping rule as listUsers() above (AC11).
+export const listInvites = (tenantId?: string) =>
+  request<Invite[]>(`/invites${tenantId ? `?tenant_id=${encodeURIComponent(tenantId)}` : ""}`);
+export const createInvite = (body: InviteCreate) =>
+  request<Invite>("/invites", { method: "POST", body: JSON.stringify(body) });
+export const resendInvite = (inviteId: string) =>
+  request<Invite>(`/invites/${inviteId}/resend`, { method: "POST" });
+export const revokeInvite = (inviteId: string) =>
+  request<Invite>(`/invites/${inviteId}/revoke`, { method: "POST" });
+
+// ── Invite accept (public — no JWT) ─────────────────────────────────────
+// The raw token lives only in the URL fragment (never sent to a server) and
+// is carried on these two requests as the X-Invite-Token header — see
+// app/invite/page.tsx. Never put it in a path or query segment.
+
+export interface InviteAcceptInfo {
+  email: string;
+  tenant_name: string;
+  role: InviteRole;
+  status: string;
+}
+
+export const getInvite = (token: string) =>
+  request<InviteAcceptInfo>("/invites/accept", { headers: { "X-Invite-Token": token } });
+
+export const acceptInvite = (token: string, password: string) =>
+  request<User>("/invites/accept", {
+    method: "POST",
+    headers: { "X-Invite-Token": token },
+    body: JSON.stringify({ password }),
+  });
 
 // ── Audit Log ────────────────────────────────────────────────────────────
 

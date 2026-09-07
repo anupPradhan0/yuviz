@@ -4,42 +4,35 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from .. import users as users_service
 from ..auth import CurrentUser
-from ..deps import get_current_user, require_role
-from ..schemas import UserCreate, UserUpdate
+from ..deps import get_current_user, is_platform_scoped, require_role
+from ..schemas import UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
 
 
 @router.get("")
-async def list_users(current_user: CurrentUser = Depends(get_current_user)):
-    # Superadmin sees every user; a tenant-scoped admin/viewer sees only
-    # their own tenant's users — same scoping principle as every other
-    # tenant-owned resource in this API.
+async def list_users(
+    tenant_id: str | None = None, current_user: CurrentUser = Depends(get_current_user),
+):
+    # is_platform_scoped(current_user) (lesson 24: tenant_id is None) only
+    # answers *which tenant* an actor is scoped to — it is a different
+    # question from whether that actor is *privileged* to read across
+    # every tenant. This route has no authority gate at all, only
+    # CONSOLE_ROLES (get_current_user), so a NULL-tenant viewer-role
+    # service account (Conversation, vobiz) is just as platform-scoped as
+    # a superadmin. Both signals are required for the unscoped,
+    # cross-tenant, role-unfiltered branch: `?tenant_id=` is honored, and
+    # is_platform_scoped=True is passed to the service, only when the
+    # actor is *also* superadmin. Anyone else — platform-scoped or not —
+    # is forced to their own tenant_id (still NULL for that service
+    # account) with users_service.list_users' `role != 'superadmin'`
+    # exclusion applied, same as before this PR.
+    platform_scoped = is_platform_scoped(current_user) and current_user.role == "superadmin"
+    scoped_tenant_id = tenant_id if platform_scoped else current_user.tenant_id
     users = await users_service.list_users(
-        tenant_id=current_user.tenant_id, is_superadmin=(current_user.role == "superadmin"),
+        tenant_id=scoped_tenant_id, is_platform_scoped=platform_scoped,
     )
     return [users_service.to_public_dict(u) for u in users]
-
-
-@router.post("", status_code=201)
-async def create_user(
-    body: UserCreate, current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
-):
-    if current_user.role != "superadmin":
-        if body.role == "superadmin":
-            raise HTTPException(status_code=403, detail="only a superadmin can create a superadmin")
-        if body.tenant_id is not None and body.tenant_id != current_user.tenant_id:
-            raise HTTPException(status_code=403, detail="cannot create a user in another tenant")
-
-    user = await users_service.create_user(
-        email=body.email,
-        password=body.password,
-        role=body.role,
-        tenant_id=body.tenant_id if current_user.role == "superadmin" else current_user.tenant_id,
-        creator_user_id=current_user.id,
-        creator_user_email=current_user.email,
-    )
-    return users_service.to_public_dict(user)
 
 
 @router.patch("/{user_id}")

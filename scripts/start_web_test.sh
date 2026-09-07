@@ -23,7 +23,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 start_data() {
   brew services start postgresql@14 2>/dev/null || true
   brew services start redis         2>/dev/null || true
-  psql voiceai -f "$REPO/database/schema.sql"
+  psql voiceai -v ON_ERROR_STOP=1 -f "$REPO/database/schema.sql"
   psql voiceai -f "$REPO/database/knowledge_schema.sql"
   psql voiceai -f "$REPO/database/telephony_schema.sql"
   echo "✓ PostgreSQL + Redis running, schema applied"
