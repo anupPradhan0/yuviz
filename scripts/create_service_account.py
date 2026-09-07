@@ -30,7 +30,11 @@ async def main() -> None:
         sys.exit(1)
     email, password = sys.argv[1], sys.argv[2]
 
+    from services.config import db
+
     user = await users.create_user(email=email, password=password, role="viewer", tenant_id=None)
+    pool = await db.get_pool()
+    await pool.execute("UPDATE users SET is_service_account = true WHERE id = $1", user["id"])
     print(f"Created service account {user['email']} (id={user['id']}, role=viewer)")
 
 

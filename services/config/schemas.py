@@ -8,9 +8,33 @@ place field lists are maintained, not two that can drift apart.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+MAX_WORKFLOW_NODES = 50
+MAX_WORKFLOW_EDGES = 120
+# Caps prompt bloat: a 2-node graph can still carry multi-MB strings.
+MAX_WORKFLOW_BYTES = 256_000
+
+
+def _check_graph_bounds(graph: dict[str, Any] | None) -> dict[str, Any] | None:
+    if graph is None:
+        return None
+    nodes = graph.get("nodes")
+    edges = graph.get("edges")
+    if isinstance(nodes, list) and len(nodes) > MAX_WORKFLOW_NODES:
+        raise ValueError(f"workflow has too many nodes (max {MAX_WORKFLOW_NODES})")
+    if isinstance(edges, list) and len(edges) > MAX_WORKFLOW_EDGES:
+        raise ValueError(f"workflow has too many edges (max {MAX_WORKFLOW_EDGES})")
+    # Cheap size check before CPU-bound parse_graph / graph_warnings.
+    size = len(json.dumps(graph, default=str))
+    if size > MAX_WORKFLOW_BYTES:
+        raise ValueError(
+            f"workflow is too large ({size} bytes; max {MAX_WORKFLOW_BYTES})"
+        )
+    return graph
 
 
 class TenantCreate(BaseModel):
@@ -46,6 +70,12 @@ class AgentCreate(BaseModel):
     stt_config_id:  str | None = None
     llm_config_id:  str | None = None
     tts_config_id:  str | None = None
+    workflow: dict | None = None  # None/{} → starter_graph; validated like publish
+
+    @field_validator("workflow")
+    @classmethod
+    def _workflow_bounds(cls, value: dict | None) -> dict | None:
+        return _check_graph_bounds(value)
 
 
 class AgentUpdate(BaseModel):
@@ -83,6 +113,27 @@ class AgentUpdate(BaseModel):
     # duration_s_check) so a bad value is rejected at config time instead
     # of failing the INSERT/UPDATE.
     max_call_duration_s:  int | None = Field(default=None, ge=30, le=7200)
+
+
+class WorkflowDraft(BaseModel):
+    graph: dict[str, Any]
+
+    @field_validator("graph")
+    @classmethod
+    def _graph_bounds(cls, value: dict[str, Any]) -> dict[str, Any]:
+        checked = _check_graph_bounds(value)
+        assert checked is not None
+        return checked
+
+
+class WorkflowPublish(BaseModel):
+    graph: dict[str, Any] | None = None  # None → publish workflow_draft
+    note:  str | None = None
+
+    @field_validator("graph")
+    @classmethod
+    def _graph_bounds(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        return _check_graph_bounds(value)
 
 
 class ProviderConfigCreate(BaseModel):
