@@ -79,6 +79,18 @@ class DeterministicSpokenEvent(TurnEvent):
     confirmed_datetime: str | None = None
 
 
+@dataclass(frozen=True)
+class LocalToolCompletedEvent(TurnEvent):
+    """Yielded the instant an in-process tool has run, before the next
+    generation starts (see ToolCallOrchestrator's local_tools). The
+    execution itself is instant, so unlike ToolCallStartedEvent this is not
+    a "please cover the silence" signal — it is the one moment a caller can
+    be told what just happened while the model is still thinking about what
+    to say next. A workflow transition uses it to speak its bridging line
+    (see pipeline.py's _llm_to_tts)."""
+    tool_name: str
+
+
 @runtime_checkable
 class IToolAwareLLM(Protocol):
     """Optional companion to ILLM. A provider class implements this

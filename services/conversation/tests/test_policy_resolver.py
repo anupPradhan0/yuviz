@@ -1,14 +1,19 @@
 """
-ToolPolicyResolver._add_auto_derived_companions tests — pure in-memory
-logic, no Postgres needed (the method never touches self._pool). Covers
-the 2026-07-23 design decision: cancel_appointment/reschedule_appointment
+ToolPolicyResolver._add_auto_derived_companions / _narrow tests — pure
+in-memory logic, no Postgres needed (neither touches self._pool). Covers
+the 2026-07-23 design decision (cancel_appointment/reschedule_appointment
 are never independently configured, both are derived from
-book_appointment's own tool_provider_config.
+book_appointment's own tool_provider_config) and workflow per-node tool
+scoping.
 """
 
 from __future__ import annotations
 
-from services.conversation.tools.policy_resolver import ResolvedToolPolicy, ToolPolicyResolver
+from services.conversation.tools.policy_resolver import (
+    ResolvedToolPolicy,
+    ToolPolicyResolver,
+    _narrow,
+)
 from services.conversation.tools.registry import ToolRegistry
 
 
@@ -80,3 +85,34 @@ def test_disabling_book_appointment_removes_both_derived_companions():
     resolver._add_auto_derived_companions(resolved, agent_id="a1")
 
     assert resolved == []
+
+
+# ── _narrow — per-node tool scoping (docs/workflow.md §5.5) ─────────────
+
+
+def test_only_none_leaves_the_agents_tools_alone():
+    resolved = [_policy("book_appointment")]
+    assert _narrow(resolved, None) == resolved
+
+
+def test_a_node_can_narrow_the_agents_tools():
+    resolved = [_policy("book_appointment")]
+    assert _narrow(resolved, []) == []
+
+
+def test_a_node_cannot_grant_a_tool_the_agent_does_not_have():
+    # Privilege escalation through the graph editor: `only` can only ever
+    # remove. The DB stays the source of truth for what the agent MAY use.
+    assert _narrow([], ["book_appointment"]) == []
+
+
+def test_a_narrowed_book_appointment_keeps_its_companions():
+    # cancel/reschedule were never independently selectable, so a node
+    # listing them separately isn't something an operator can express —
+    # they ride along with their source, same as agent-wide resolution.
+    resolver = _resolver()
+    resolved = [_policy("book_appointment")]
+    resolver._add_auto_derived_companions(resolved, agent_id="a1")
+
+    names = {p.definition.name for p in _narrow(resolved, ["book_appointment"])}
+    assert names == {"book_appointment", "cancel_appointment", "reschedule_appointment"}

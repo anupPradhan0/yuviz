@@ -95,17 +95,28 @@ class ToolPolicyResolver:
         if self._pool is not None:
             await self._pool.close()
 
-    async def enabled_tools(self, agent_id: str) -> list[ResolvedToolPolicy]:
+    async def enabled_tools(
+        self, agent_id: str, only: list[str] | None = None,
+    ) -> list[ResolvedToolPolicy]:
         """No agent_id, no pool, or no matching rows all mean the same
         thing: this agent has no tools enabled — a normal, cheap default,
         not an error (same posture as agent_retrieval_policies' own 'no
-        row = use the default' contract)."""
+        row = use the default' contract).
+
+        `only` narrows the result to the named tools — a workflow node's
+        own tool list (see docs/workflow.md §5.5). It can only ever remove:
+        the DB stays the source of truth for what the agent MAY use, and a
+        node narrows that to what this stage may use. A node cannot grant a
+        tool the agent doesn't have — that would be privilege escalation
+        through the graph editor. An empty list means "no tools this
+        stage", the restrictive reading, since withholding capability until
+        it's earned is the entire point of stages."""
         if not agent_id or self._pool is None:
             return []
 
         cached = self._cache.get(agent_id)
         if cached is not None and time.monotonic() - cached[0] < self._cache_ttl_s:
-            return cached[1]
+            return _narrow(cached[1], only)
 
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -146,8 +157,11 @@ class ToolPolicyResolver:
 
         self._add_auto_derived_companions(resolved, agent_id)
 
+        # Cached unnarrowed — `only` varies per node within a single call,
+        # and caching per (agent, node) would multiply entries for what is
+        # a list comprehension over at most a handful of tools.
         self._cache[agent_id] = (time.monotonic(), resolved)
-        return resolved
+        return _narrow(resolved, only)
 
     def _add_auto_derived_companions(self, resolved: list[ResolvedToolPolicy], agent_id: str) -> None:
         """See _AUTO_DERIVED_COMPANIONS. An explicit row for a derived tool
@@ -178,3 +192,20 @@ class ToolPolicyResolver:
                     max_calls_per_turn=source.max_calls_per_turn,
                 ))
                 present.add(derived_name)
+
+
+def _narrow(
+    resolved: list[ResolvedToolPolicy], only: list[str] | None,
+) -> list[ResolvedToolPolicy]:
+    """See enabled_tools()'s `only`. A companion tool rides along with its
+    source (see _AUTO_DERIVED_COMPANIONS): a node that offers
+    book_appointment offers cancel/reschedule too, exactly as the agent-wide
+    resolution does — they were never independently selectable, so a node
+    listing them separately isn't something an operator can even express."""
+    if only is None:
+        return resolved
+    allowed = set(only)
+    for source_name, derived_names in _AUTO_DERIVED_COMPANIONS.items():
+        if source_name in allowed:
+            allowed.update(derived_names)
+    return [p for p in resolved if p.definition.name in allowed]
