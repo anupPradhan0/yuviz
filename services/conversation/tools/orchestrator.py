@@ -268,7 +268,13 @@ async def _execute_local_tool(
         try:
             await execute_task
         except asyncio.CancelledError:
-            pass
+            # Bare `pass` swallows call-teardown cancellation of *this*
+            # coroutine. Only absorb the cancel we sent to execute_task.
+            me = asyncio.current_task()
+            if me is not None and me.cancelling():
+                raise
+            if not execute_task.cancelled():
+                raise
         if execute_task.cancelled():
             log.info(
                 "ToolCallOrchestrator: caller interrupted mid local tool_call=%r — handler cancelled",

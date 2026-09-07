@@ -340,13 +340,25 @@ async def test_starter_graph_sql_matches_python_starter_graph(pool):
     from libs.config_sdk.workflow import graphs_equivalent, starter_graph
 
     row = await pool.fetchval(
+        "SELECT starter_graph_sql($1, $2, $3::jsonb, $4::jsonb)",
+        "Thanks for calling.", "Be helpful.",
+        '["book_appointment"]', '["kb-1"]',
+    )
+    sql_graph = json.loads(row) if isinstance(row, str) else dict(row)
+    expected = starter_graph(
+        "Thanks for calling.", "Be helpful.",
+        ["book_appointment"], ["kb-1"],
+    )
+    assert graphs_equivalent(sql_graph, expected)
+    assert sql_graph == expected
+
+    # 3-arg form still works (knowledge defaults to []).
+    row3 = await pool.fetchval(
         "SELECT starter_graph_sql($1, $2, $3::jsonb)",
         "Thanks for calling.", "Be helpful.", '["book_appointment"]',
     )
-    sql_graph = json.loads(row) if isinstance(row, str) else dict(row)
-    expected = starter_graph("Thanks for calling.", "Be helpful.", ["book_appointment"])
-    assert graphs_equivalent(sql_graph, expected)
-    assert sql_graph == expected
+    sql3 = json.loads(row3) if isinstance(row3, str) else dict(row3)
+    assert sql3 == starter_graph("Thanks for calling.", "Be helpful.", ["book_appointment"])
 
 
 async def test_create_with_a_graph_stores_prompts_from_the_graph_not_the_body(test_tenant):

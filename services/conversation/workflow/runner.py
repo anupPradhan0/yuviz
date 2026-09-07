@@ -8,6 +8,7 @@ Constructed per call with the handler — plain attrs, no session map.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Awaitable, Callable
 
 from libs.config_sdk import RuntimeConfig
@@ -23,6 +24,11 @@ log = logging.getLogger(__name__)
 
 _NO_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
 _TRANSITION_RESULT = ToolResult(status=ToolStatus.SUCCESS, payload={"status": "done"})
+
+# config_version bumps on every edit — TTL + cap so old versions don't pile up.
+_GRAPH_CACHE_TTL_S = 300.0
+_GRAPH_CACHE_MAX = 256
+_GRAPH_CACHE: dict[tuple[str, int, bool], tuple[float, WorkflowGraph]] = {}
 
 
 class WorkflowRunner:
@@ -74,8 +80,15 @@ class WorkflowRunner:
         return list(self._node.tools)
 
     def knowledge_enabled(self) -> bool:
-        # ponytail: per-KB filtering needs RetrievalPolicy.knowledge_base_ids + knowledge filter.
-        return bool(self._node.knowledge_base_ids)
+        """RAG on/off for this node.
+
+        Non-empty knowledge_base_ids → on. Empty on a graph where *some* node
+        opted in → off (per-stage). All-empty graphs (starter backfill before
+        KB patch) → on, so agent_knowledge_bases still retrieve.
+        """
+        if self._node.knowledge_base_ids:
+            return True
+        return not any(n.knowledge_base_ids for n in self._graph.nodes.values())
 
     def greeting(self) -> str | None:
         text = self.render(self._graph.start.greeting or "")
@@ -123,6 +136,8 @@ class WorkflowRunner:
         turn: list[ChatMessage] | None,
         store: list[ChatMessage] | None,
     ) -> ToolResult:
+        # Must stay await-free until PR9 shields extractor/summarizer — a cancel
+        # mid-await would leave node/prompt/pending_* half-applied.
         source = self._node
 
         if self._extractor is not None and source.extraction is not None and source.extraction.enabled:
@@ -161,7 +176,44 @@ class WorkflowRunner:
         return _TRANSITION_RESULT
 
 
-_GRAPH_CACHE: dict[tuple[str, int, bool], WorkflowGraph] = {}
+def _cache_get(key: tuple[str, int, bool]) -> WorkflowGraph | None:
+    item = _GRAPH_CACHE.get(key)
+    if item is None:
+        return None
+    ts, graph = item
+    if time.monotonic() - ts >= _GRAPH_CACHE_TTL_S:
+        _GRAPH_CACHE.pop(key, None)
+        return None
+    return graph
+
+
+def _cache_put(key: tuple[str, int, bool], graph: WorkflowGraph) -> None:
+    now = time.monotonic()
+    if key not in _GRAPH_CACHE and len(_GRAPH_CACHE) >= _GRAPH_CACHE_MAX:
+        expired = [k for k, (ts, _) in _GRAPH_CACHE.items() if now - ts >= _GRAPH_CACHE_TTL_S]
+        for k in expired:
+            _GRAPH_CACHE.pop(k, None)
+        while len(_GRAPH_CACHE) >= _GRAPH_CACHE_MAX:
+            oldest = min(_GRAPH_CACHE, key=lambda k: _GRAPH_CACHE[k][0])
+            _GRAPH_CACHE.pop(oldest, None)
+    _GRAPH_CACHE[key] = (now, graph)
+
+
+def _str_names_from_raw(raw: dict[str, Any] | None, field: str) -> list[str]:
+    """Best-effort scrape of node list fields from unparseable published JSON."""
+    if not isinstance(raw, dict):
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for node in raw.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        data = node.get("data") if isinstance(node.get("data"), dict) else {}
+        for item in data.get(field) or []:
+            if isinstance(item, str) and item and item not in seen:
+                seen.add(item)
+                names.append(item)
+    return names
 
 
 def graph_for(runtime_config: RuntimeConfig, *, draft: bool = False) -> WorkflowGraph:
@@ -182,11 +234,13 @@ def graph_for(runtime_config: RuntimeConfig, *, draft: bool = False) -> Workflow
                 "seeded from greeting/system_prompt",
                 runtime_config.agent.slug,
             )
-        return _fallback_graph(runtime_config)
+        return _fallback_graph(runtime_config, raw=None)
     # Drafts uncached: draft save does not bump config_version.
     key = (runtime_config.agent.id or runtime_config.agent.slug, runtime_config.version, draft)
-    if not draft and key in _GRAPH_CACHE:
-        return _GRAPH_CACHE[key]
+    if not draft:
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached
     try:
         graph = parse_graph(raw)
     except WorkflowInvalid as exc:
@@ -200,17 +254,25 @@ def graph_for(runtime_config: RuntimeConfig, *, draft: bool = False) -> Workflow
             "workflow: agent %s published graph does not parse (%s) — starter fallback",
             runtime_config.agent.slug, exc,
         )
-        graph = _fallback_graph(runtime_config)
+        graph = _fallback_graph(runtime_config, raw=raw if isinstance(raw, dict) else None)
     except Exception:
         log.exception("workflow: unexpected parse failure for agent %s", runtime_config.agent.slug)
-        graph = _fallback_graph(runtime_config)
+        graph = _fallback_graph(runtime_config, raw=raw if isinstance(raw, dict) else None)
     if not draft:
-        _GRAPH_CACHE[key] = graph
+        _cache_put(key, graph)
     return graph
 
 
-def _fallback_graph(runtime_config: RuntimeConfig) -> WorkflowGraph:
+def _fallback_graph(
+    runtime_config: RuntimeConfig, *, raw: dict[str, Any] | None,
+) -> WorkflowGraph:
+    # Prefer RuntimeConfig.tools; scrape broken published JSON so a parse
+    # failure does not silently strip booking/SMS (Node.tools is default-deny).
+    tools = [t.name for t in runtime_config.tools] or _str_names_from_raw(raw, "tools")
+    kb_ids = _str_names_from_raw(raw, "knowledge_base_ids")
     return parse_graph(starter_graph(
         runtime_config.conversation.greeting or "",
         runtime_config.conversation.system_prompt or "",
+        tools,
+        kb_ids,
     ))

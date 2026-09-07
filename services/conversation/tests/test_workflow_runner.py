@@ -152,6 +152,27 @@ def test_knowledge_is_per_stage():
     assert runner.knowledge_enabled() is True        # q&a node does
 
 
+def test_all_empty_knowledge_keeps_agent_level_rag():
+    # Starter backfill omitted knowledge_base_ids — must not silently disable RAG.
+    bare = {
+        "version": 1,
+        "nodes": [
+            {"id": "g1", "type": "global", "data": {"name": "g", "prompt": "p"}},
+            {"id": "n1", "type": "start", "data": {
+                "name": "greeting", "prompt": "hi", "greeting": "Hi",
+            }},
+            {"id": "n2", "type": "end", "data": {
+                "name": "goodbye", "prompt": "bye", "disposition": "completed",
+            }},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "n2",
+             "data": {"label": "done", "condition": "Finished."}},
+        ],
+    }
+    assert WorkflowRunner(parse_graph(bare)).knowledge_enabled() is True
+
+
 def test_extraction_fires_before_leaving_the_node_not_after():
     seen: list[tuple[str, int]] = []
 
@@ -231,4 +252,62 @@ def test_graph_for_fallback_seeds_greeting_and_system_prompt():
     graph = graph_for(rc)
     assert "Hi from column." in (graph.start.greeting or "")
     assert "Be the column prompt." in (graph.global_prompt or "")
+
+
+def test_graph_for_fallback_preserves_tools_from_broken_published_json():
+    from datetime import datetime, timezone
+
+    from libs.config_sdk import (
+        Agent, ConversationInfo, MediaInfo, Policies, ProviderConfig, ProviderConfigs,
+        RuntimeConfig, Tenant,
+    )
+    from services.conversation.workflow.runner import _GRAPH_CACHE, graph_for
+
+    _GRAPH_CACHE.clear()
+    now = datetime.now(timezone.utc)
+    placeholder = ProviderConfig(
+        id="p1", role="stt", engine="fake", model=None, voice=None, language=None, api_key_ref=None,
+    )
+    # Missing end node → WorkflowInvalid → starter fallback must keep tools.
+    broken = {
+        "version": 1,
+        "nodes": [
+            {"id": "g1", "type": "global", "data": {"name": "g", "prompt": "Be helpful."}},
+            {"id": "n1", "type": "start", "data": {
+                "name": "greeting", "prompt": "hi", "greeting": "Hi",
+                "tools": ["book_appointment", "send_sms"],
+                "knowledge_base_ids": ["kb-1"],
+            }},
+        ],
+        "edges": [],
+    }
+    rc = RuntimeConfig(
+        tenant=Tenant(
+            id="t1", slug="t", name="T", region="us",
+            vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
+            no_speech_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None,
+            transfer_timeout_ms=None,
+            default_stt_config_id=None, default_llm_config_id=None, default_tts_config_id=None,
+            config_version=1, updated_at=now,
+        ),
+        agent=Agent(
+            id="a1", slug="agent", tenant_id="t1", name="Agent",
+            greeting="Hi", system_prompt="Be helpful.",
+            goodbye_grace_ms=0, stt_config_id=None, llm_config_id=None, tts_config_id=None,
+            status="active", config_version=1, updated_at=now,
+        ),
+        providers=ProviderConfigs(stt=placeholder, llm=placeholder, tts=placeholder),
+        conversation=ConversationInfo(
+            greeting="Hi", system_prompt="Be helpful.", workflow=broken,
+        ),
+        media=MediaInfo(voice=None, language=None),
+        policies=Policies(
+            vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
+            silence_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None, goodbye_grace_ms=0,
+        ),
+        tools=[], version=1, resolved_at=now,
+    )
+    graph = graph_for(rc)
+    assert graph.start.tools == ["book_appointment", "send_sms"]
+    assert graph.start.knowledge_base_ids == ["kb-1"]
 

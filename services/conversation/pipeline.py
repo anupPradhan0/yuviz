@@ -889,8 +889,8 @@ class PipelineConversationHandler:
         # turn is the standard, safe RAG prompting pattern and leaves
         # exactly one system message in the conversation, always.
         messages_for_llm = history
-        # Retrieval is per-stage: a node with no knowledge base attached
-        # does no retrieval at all (same restrictive reading as its tools).
+        # Retrieval: node with explicit knowledge_base_ids, or all-empty graph
+        # (starter backfill) keeping agent-level RAG. See WorkflowRunner.knowledge_enabled.
         if self._knowledge is not None and self._workflow.knowledge_enabled():
             context = await self._retrieve_context(stt_result.text, session_id)
             if context is not None and context.chunks:
