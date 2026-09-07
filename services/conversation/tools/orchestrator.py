@@ -74,11 +74,16 @@ class ToolCallOrchestrator:
         local_calls = 0
 
         async def resolve() -> tuple[LocalTools, dict, list[dict] | None, list[dict]]:
-            local = local_tools() if callable(local_tools) else (local_tools or {})
+            raw = local_tools() if callable(local_tools) else (local_tools or {})
+            # Key by definition.name so lookup matches LLM schema names.
+            local = {defn.name: (defn, handler) for defn, handler in raw.values()}
             if local_calls >= self._max_local_tool_calls:
                 local = {}
-            only = only_tools() if callable(only_tools) else only_tools
-            policies = await self._policy_resolver.enabled_tools(agent_id, only=only)
+            if iteration >= self._max_tool_iterations:
+                policies: list = []  # yank remotes for real, not only from schemas
+            else:
+                only = only_tools() if callable(only_tools) else only_tools
+                policies = await self._policy_resolver.enabled_tools(agent_id, only=only)
             llm_schemas = [
                 p.definition.to_generic_schema() for p in policies if p.definition.llm_visible
             ]
@@ -86,10 +91,11 @@ class ToolCallOrchestrator:
             schemas = llm_schemas + local_schemas
             return local, {p.definition.name: p for p in policies}, (schemas or None), local_schemas
 
-        local, policies_by_name, schemas, local_schemas = await resolve()
-
+        # iteration is read by resolve(); start at 0 before first resolve.
         turn_id = str(uuid.uuid4())
         iteration = 0
+        local, policies_by_name, schemas, local_schemas = await resolve()
+
         # force_tool_name applies to the first generate() only.
         tool_choice = (
             {"type": "function", "function": {"name": force_tool_name}}
@@ -138,8 +144,7 @@ class ToolCallOrchestrator:
                 return
 
             if iteration >= self._max_tool_iterations:
-                # Strip remotes; keep locals so a mid-turn transition is not stranded.
-                schemas = local_schemas or None
+                local, policies_by_name, schemas, local_schemas = await resolve()
 
     async def _execute_tool_call(
         self, event: ToolCallEvent, policies_by_name: dict, tenant_id: str, agent_id: str,

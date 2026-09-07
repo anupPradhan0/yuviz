@@ -750,3 +750,67 @@ async def test_only_tools_is_passed_through_to_the_policy_resolver():
     )]
 
     assert resolver.last_only == ["book_appointment"]
+
+
+async def test_past_remote_cap_hallucinated_remote_does_not_execute():
+    local_tools, _ = _local()
+    llm = _ScriptedLLM([
+        [ToolCallEvent(tool_call_id="c1", tool_name="book_appointment",
+                       arguments={"requested_datetime": "2026-01-01T10:00:00Z"})],
+        [ToolCallEvent(tool_call_id="c2", tool_name="book_appointment",
+                       arguments={"requested_datetime": "2026-01-01T11:00:00Z"})],
+        [TokenEvent(text="ok")],
+    ])
+    executor = _FixedExecutor(ToolResult(status=ToolStatus.SUCCESS, payload={"booked": True}))
+    registry = ExecutorRegistry()
+    registry.register("book_appointment", lambda provider, companion=None: executor)
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([_policy()]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=registry,
+        max_tool_iterations=1,
+    )
+    history = [ChatMessage(role="user", content="book me")]
+
+    [e async for e in orchestrator.run_turn(
+        "agent1", "t1", "c1", "s1", history, local_tools=local_tools,
+    )]
+
+    assert len(executor.calls) == 1
+    assert json.loads(history[-1].content)["error"] == "unknown_tool"
+
+
+async def test_local_tool_lookup_uses_definition_name_not_dict_key():
+    calls: list[dict] = []
+
+    async def handler(args: dict) -> ToolResult:
+        calls.append(args)
+        return ToolResult(status=ToolStatus.SUCCESS, payload={"status": "done"})
+
+    definition = ToolDefinition(
+        name="caller_verified", description="x",
+        parameters_schema={"type": "object", "properties": {}},
+    )
+    local_tools = {"wrong_key": (definition, handler)}
+    llm = _ScriptedLLM([
+        [ToolCallEvent(tool_call_id="c1", tool_name="caller_verified", arguments={})],
+        [TokenEvent(text="Thanks!")],
+    ])
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=ExecutorRegistry(),
+    )
+
+    events = [
+        e async for e in orchestrator.run_turn(
+            "agent1", "t1", "c1", "s1",
+            [ChatMessage(role="user", content="hi")], local_tools=local_tools,
+        )
+    ]
+
+    assert calls == [{}]
+    assert LocalToolCompletedEvent(tool_name="caller_verified") in events
+    assert TokenEvent(text="Thanks!") in events
