@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { getCurrentUser, User } from "@/lib/api";
+import { getCurrentUser, isConsoleRole, User } from "@/lib/api";
 import { clearToken, getToken } from "@/lib/auth";
 
 // Icons match the original "Yuviz.ai — Admin Console" artifact's nav icon
@@ -27,6 +27,14 @@ const ICONS: Record<string, React.ReactNode> = {
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
       <rect x="1" y="6" width="14" height="9" rx="1" />
       <path d="M5 6V4a3 3 0 016 0v2" />
+    </svg>
+  ),
+  users: (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <circle cx="6" cy="5" r="2.3" />
+      <path d="M1.5 14c0-2.76 2.02-4.5 4.5-4.5s4.5 1.74 4.5 4.5" />
+      <circle cx="12" cy="4.5" r="1.8" />
+      <path d="M10.2 9.7c1.86.3 3.3 1.8 3.3 4.3" />
     </svg>
   ),
   agents: (
@@ -76,6 +84,11 @@ const MANAGEMENT_ITEMS = [
   { href: "/phone-numbers", label: "Phone Numbers", icon: "phone-numbers" },
 ];
 
+// Invite-based onboarding is a superadmin/admin surface only (matches
+// require_role("superadmin", "admin") on services/config/routers/invites.py's
+// admin routes) — everyone else never sees the nav item at all.
+const USERS_ITEM = { href: "/users", label: "Users", icon: "users" };
+
 const CALLING_ITEMS = [
   { href: "/calls", label: "Calls", icon: "calls" },
   { href: "/campaigns", label: "Campaigns", icon: "campaigns" },
@@ -83,7 +96,7 @@ const CALLING_ITEMS = [
 
 const PLATFORM_ITEMS = [{ href: "/settings", label: "Settings", icon: "settings" }];
 
-const ALL_ITEMS = [...OVERVIEW_ITEMS, ...MANAGEMENT_ITEMS, ...CALLING_ITEMS, ...PLATFORM_ITEMS];
+const ALL_ITEMS = [...OVERVIEW_ITEMS, ...MANAGEMENT_ITEMS, USERS_ITEM, ...CALLING_ITEMS, ...PLATFORM_ITEMS];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -98,25 +111,44 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
 
-  // Auth guard: /login renders standalone (no sidebar, nothing to guard —
-  // see the early return below; it also hosts first-run account creation).
+  // Auth guard: /login and /invite render standalone (no sidebar, nothing
+  // to guard — see the early return below). /invite hosts invite acceptance
+  // for someone who, by definition, has no account yet — it must not bounce
+  // to /login the way every other route does. /no-access also renders
+  // standalone (below) but still needs a token to know who's asking, so it
+  // does NOT skip the guard here the way login/invite do.
   // Every other route requires a token; a missing one redirects immediately,
   // a present-but-invalid/expired one is caught by getCurrentUser() itself
   // (api.ts's request() already redirects to /login on any 401, so this only
   // needs to handle "no token at all").
+  //
+  // A token alone isn't enough: login/page.tsx sends non-console roles
+  // (supervisor/agent — see isConsoleRole) to /no-access, but that's only
+  // enforced at login time. Without re-checking here, a bookmark or a
+  // refresh on any admin URL renders the full sidebar for a role with zero
+  // Config API surface, so the page's own fetches 403 into an error banner
+  // instead (lesson 22). authChecked stays false while a redirect is in
+  // flight so the page underneath never gets to render its own fetches.
   useEffect(() => {
-    if (pathname === "/login") return;
+    if (pathname === "/login" || pathname === "/invite") return;
     if (!getToken()) {
       router.push("/login");
       return;
     }
     getCurrentUser()
-      .then(setUser)
+      .then((u) => {
+        if (!isConsoleRole(u.role) && pathname !== "/no-access") {
+          router.push("/no-access");
+          return;
+        }
+        setUser(u);
+        setAuthChecked(true);
+      })
       .catch(() => {
         // api.ts's request() already redirects to /login on 401; nothing
         // extra to do here.
-      })
-      .finally(() => setAuthChecked(true));
+        setAuthChecked(true);
+      });
   }, [pathname, router]);
 
   const handleLogout = () => {
@@ -124,12 +156,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     router.push("/login");
   };
 
-  if (pathname === "/login") return <>{children}</>;
+  if (pathname === "/login" || pathname === "/invite" || pathname === "/no-access") return <>{children}</>;
   if (!authChecked) return null;
 
+  const canManageUsers = user?.role === "superadmin" || user?.role === "admin";
   const matches = (label: string) => label.toLowerCase().includes(search.trim().toLowerCase());
   const visibleOverview = OVERVIEW_ITEMS.filter((item) => matches(item.label));
   const visibleManagement = MANAGEMENT_ITEMS.filter((item) => matches(item.label));
+  const visibleUsers = canManageUsers && matches(USERS_ITEM.label);
   const visibleCalling = CALLING_ITEMS.filter((item) => matches(item.label));
   const visiblePlatform = PLATFORM_ITEMS.filter((item) => matches(item.label));
 
@@ -191,7 +225,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               ))}
             </>
           )}
-          {visibleManagement.length > 0 && (
+          {(visibleManagement.length > 0 || visibleUsers) && (
             <>
               <div className="nav-section">Management</div>
               {visibleManagement.map((item) => (
@@ -204,6 +238,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   <span className="nav-label">{item.label}</span>
                 </Link>
               ))}
+              {visibleUsers && (
+                <Link
+                  href={USERS_ITEM.href}
+                  className={`nav-item${pathname.startsWith(USERS_ITEM.href) ? " active" : ""}`}
+                >
+                  {ICONS[USERS_ITEM.icon]}
+                  <span className="nav-label">{USERS_ITEM.label}</span>
+                </Link>
+              )}
             </>
           )}
           {visibleCalling.length > 0 && (
@@ -236,7 +279,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               ))}
             </>
           )}
-          {visibleOverview.length === 0 && visibleManagement.length === 0 && visibleCalling.length === 0 && visiblePlatform.length === 0 && (
+          {visibleOverview.length === 0 && visibleManagement.length === 0 && !visibleUsers && visibleCalling.length === 0 && visiblePlatform.length === 0 && (
             <div style={{ padding: "12px 10px", fontSize: ".76rem", color: "var(--text-3)" }}>No pages match &quot;{search}&quot;</div>
           )}
         </nav>

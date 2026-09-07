@@ -14,6 +14,7 @@ import os
 import subprocess
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
@@ -209,35 +210,50 @@ class TestPostBootstrapBehaviorIsUnchanged:
         assert wrong_password.status_code == unknown_email.status_code == 401
         assert wrong_password.json()["detail"] == unknown_email.json()["detail"]
 
-    async def test_the_bootstrapped_superadmin_can_still_create_users(self, anon_client):
+    async def test_the_bootstrapped_superadmin_can_still_onboard_users(self, anon_client):
+        # POST /users (the temp-password path) is gone as of Phase 3 — the
+        # only account-creation path left is invite -> accept.
         created = await anon_client.post(
             "/auth/bootstrap", json={"email": "admin@example.com", "password": "a-real-password"},
         )
         headers = {"Authorization": f"Bearer {created.json()['access_token']}"}
 
-        resp = await anon_client.post(
-            "/users",
-            json={"email": "colleague@example.com", "password": "another-password", "role": "admin"},
-            headers=headers,
-        )
+        with patch("services.config.email.send_invite_email") as mock_send:
+            resp = await anon_client.post(
+                "/invites", json={"email": "colleague@example.com", "role": "admin"}, headers=headers,
+            )
         assert resp.status_code == 201
-        assert resp.json()["role"] == "admin"
+        raw_token = mock_send.call_args.kwargs["raw_token"]
+
+        accept_resp = await anon_client.post(
+            "/invites/accept", json={"password": "another-password"},
+            headers={"X-Invite-Token": raw_token},
+        )
+        assert accept_resp.status_code == 200
+        assert accept_resp.json()["role"] == "admin"
 
         listed = await anon_client.get("/users", headers=headers)
         assert {u["email"] for u in listed.json()} == {"admin@example.com", "colleague@example.com"}
 
-    async def test_creating_a_second_superadmin_still_works(self, anon_client):
+    async def test_inviting_a_second_superadmin_still_works(self, anon_client):
         """The guard must not have become a one-superadmin constraint."""
         created = await anon_client.post(
             "/auth/bootstrap", json={"email": "admin@example.com", "password": "a-real-password"},
         )
-        resp = await anon_client.post(
-            "/users",
-            json={"email": "second-admin@example.com", "password": "another-password", "role": "superadmin"},
-            headers={"Authorization": f"Bearer {created.json()['access_token']}"},
-        )
+        headers = {"Authorization": f"Bearer {created.json()['access_token']}"}
+        with patch("services.config.email.send_invite_email") as mock_send:
+            resp = await anon_client.post(
+                "/invites", json={"email": "second-admin@example.com", "role": "superadmin"}, headers=headers,
+            )
         assert resp.status_code == 201
-        assert resp.json()["role"] == "superadmin"
+        raw_token = mock_send.call_args.kwargs["raw_token"]
+
+        accept_resp = await anon_client.post(
+            "/invites/accept", json={"password": "another-password"},
+            headers={"X-Invite-Token": raw_token},
+        )
+        assert accept_resp.status_code == 200
+        assert accept_resp.json()["role"] == "superadmin"
 
 
 class TestNoDefaultCredentialsRemain:

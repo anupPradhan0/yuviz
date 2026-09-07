@@ -4,8 +4,10 @@ Creates a superadmin user from the command line. The normal path for the
 *first* account is the Admin UI's "Create your administrator account" screen
 (POST /auth/bootstrap, open only while no superadmin exists); this script is
 the headless equivalent, and the recovery path when every superadmin is
-locked out — POST /users itself requires an existing superadmin/admin (see
-services/config/routers/users.py). Not idempotent in the sense of "safe to re-run for the same
+locked out — every other way to create an account now goes through the
+invite flow (POST /invites, then POST /invites/accept), which itself
+requires an existing superadmin/admin to send the invite (see
+services/config/routers/invites.py). Not idempotent in the sense of "safe to re-run for the same
 email": users.email is UNIQUE, so a second run for the same address fails
 loudly (asyncpg.UniqueViolationError) rather than silently doing nothing —
 correct here, unlike seed_default_config.py's config rows, because a second

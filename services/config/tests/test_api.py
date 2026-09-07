@@ -111,6 +111,96 @@ class TestTenantEndpoints:
 
         await pool.execute("DELETE FROM tenants WHERE id = $1", tenant["id"])
 
+    # Cross-tenant disclosure fix: list_tenants/get_tenant used to be gated
+    # on Depends(get_current_user) alone, no tenant scoping at all — a
+    # tenant-scoped admin/viewer got every tenant's name/slug (the
+    # customer list) and could read any tenant's full row by slug.
+    async def test_tenant_admin_sees_only_own_tenant_in_list(self, admin_client, test_tenant, pool):
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other List Tenant", f"test-other-list-{uuid.uuid4().hex[:8]}",
+        )
+        try:
+            resp = await admin_client.get("/tenants")
+            assert resp.status_code == 200
+            slugs = {t["slug"] for t in resp.json()}
+            assert slugs == {test_tenant["slug"]}
+            assert other["slug"] not in slugs
+        finally:
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_viewer_sees_only_own_tenant_in_list(self, viewer_client, test_tenant, pool):
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other Viewer Tenant", f"test-other-viewer-{uuid.uuid4().hex[:8]}",
+        )
+        try:
+            resp = await viewer_client.get("/tenants")
+            assert resp.status_code == 200
+            slugs = {t["slug"] for t in resp.json()}
+            assert slugs == {test_tenant["slug"]}
+        finally:
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_superadmin_still_sees_every_tenant_in_list(self, client, test_tenant, pool):
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other Superadmin Tenant", f"test-other-super-{uuid.uuid4().hex[:8]}",
+        )
+        try:
+            resp = await client.get("/tenants")
+            assert resp.status_code == 200
+            slugs = {t["slug"] for t in resp.json()}
+            assert {test_tenant["slug"], other["slug"]} <= slugs
+        finally:
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_client_supplied_tenant_filter_cannot_widen_a_tenant_admins_result(
+        self, admin_client, test_tenant, pool,
+    ):
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Widen Attempt Tenant", f"test-widen-{uuid.uuid4().hex[:8]}",
+        )
+        try:
+            # There's no documented ?tenant_id= on this endpoint at all —
+            # this proves one can't be smuggled in to widen the result
+            # regardless, the same "never trust client tenancy" contract
+            # GET /users and GET /invites already enforce.
+            resp = await admin_client.get(f"/tenants?tenant_id={other['id']}")
+            assert resp.status_code == 200
+            slugs = {t["slug"] for t in resp.json()}
+            assert slugs == {test_tenant["slug"]}
+        finally:
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_get_tenant_by_slug_404s_for_a_different_tenants_admin(
+        self, admin_client, pool,
+    ):
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other Get Tenant", f"test-other-get-{uuid.uuid4().hex[:8]}",
+        )
+        try:
+            known_other = await admin_client.get(f"/tenants/{other['slug']}")
+            unknown = await admin_client.get("/tenants/does-not-exist-at-all")
+            # Same status and the identical detail *shape* either way — a
+            # real tenant that isn't theirs must not be distinguishable
+            # from a slug that doesn't exist (no existence oracle); the
+            # message only ever echoes back the slug the caller already
+            # supplied, so comparing the template rather than the exact
+            # string (which necessarily differs by slug) is the right check.
+            assert known_other.status_code == unknown.status_code == 404
+            assert known_other.json() == {"detail": f"tenant {other['slug']!r} not found"}
+            assert unknown.json() == {"detail": "tenant 'does-not-exist-at-all' not found"}
+        finally:
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_get_own_tenant_by_slug_still_works_for_tenant_admin(self, admin_client, test_tenant):
+        resp = await admin_client.get(f"/tenants/{test_tenant['slug']}")
+        assert resp.status_code == 200
+        assert resp.json()["slug"] == test_tenant["slug"]
+
 
 class TestAgentEndpoints:
     async def test_create_and_get_agent(self, client, test_tenant):
@@ -1199,60 +1289,48 @@ class TestAuthEndpoints:
 
 
 class TestUserEndpoints:
-    async def test_create_user_requires_superadmin_or_admin(self, viewer_client):
-        resp = await viewer_client.post(
+    # POST /users (the temp-password create path) was removed once the
+    # invite-based path (routers/invites.py) was reachable end-to-end —
+    # invite creation/lookup coverage lives in test_invites.py instead. The
+    # cases below that only needed *a* live user now create one directly via
+    # users_service.create_user(), the same helper conftest.py's own
+    # test_admin/test_viewer fixtures use.
+    async def test_post_users_route_is_gone(self, client):
+        resp = await client.post(
             "/users", json={"email": "new@example.com", "password": "pw", "role": "viewer"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code in (404, 405)
 
-    async def test_superadmin_can_create_list_and_delete_user(self, client):
+    async def test_list_and_delete_user(self, client, pool):
         email = f"test-created-{uuid.uuid4().hex[:8]}@example.com"
-        create_resp = await client.post(
-            "/users", json={"email": email, "password": "a-real-password", "role": "admin"},
-        )
-        assert create_resp.status_code == 201
-        body = create_resp.json()
-        assert body["email"] == email
-        assert "password_hash" not in body
+        created = await users_service.create_user(email=email, password="a-real-password", role="admin")
 
         list_resp = await client.get("/users")
         assert any(u["email"] == email for u in list_resp.json())
 
-        del_resp = await client.delete(f"/users/{body['id']}")
+        del_resp = await client.delete(f"/users/{created['id']}")
         assert del_resp.status_code == 204
 
-    async def test_admin_cannot_create_superadmin(self, admin_client):
-        resp = await admin_client.post(
-            "/users", json={"email": "escalate@example.com", "password": "a-real-password", "role": "superadmin"},
-        )
-        assert resp.status_code == 403
-
-    async def test_admin_cannot_create_user_in_another_tenant(self, admin_client, test_tenant, pool):
-        other = await pool.fetchrow(
-            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
-            "Other Tenant", f"other-{uuid.uuid4().hex[:8]}",
+    async def test_superadmin_tenant_filter_still_includes_superadmin_role_rows(
+        self, client, test_tenant, pool,
+    ):
+        # Review finding 3: is_superadmin was being conflated with "no
+        # tenant_id filter given", so a superadmin's own ?tenant_id= filter
+        # was silently applying the `role != 'superadmin'` exclusion meant
+        # only for non-superadmin actors — a superadmin-role row in that
+        # tenant would vanish from the actor who's allowed to see it.
+        email = f"tenant-scoped-superadmin-{uuid.uuid4().hex[:8]}@example.com"
+        row = await pool.fetchrow(
+            "INSERT INTO users (email, password_hash, role, tenant_id) "
+            "VALUES ($1, 'x', 'superadmin', $2) RETURNING *",
+            email, test_tenant["id"],
         )
         try:
-            resp = await admin_client.post(
-                "/users",
-                json={
-                    "email": "cross-tenant@example.com", "password": "a-real-password",
-                    "role": "admin", "tenant_id": str(other["id"]),
-                },
-            )
-            assert resp.status_code == 403
+            resp = await client.get(f"/users?tenant_id={test_tenant['id']}")
+            assert resp.status_code == 200
+            assert email in {u["email"] for u in resp.json()}
         finally:
-            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
-
-    async def test_admin_create_user_is_pinned_to_own_tenant(self, admin_client, test_admin, test_tenant, pool):
-        email = f"test-pinned-{uuid.uuid4().hex[:8]}@example.com"
-        resp = await admin_client.post(
-            "/users", json={"email": email, "password": "a-real-password", "role": "viewer"},
-        )
-        assert resp.status_code == 201
-        body = resp.json()
-        assert body["tenant_id"] == str(test_tenant["id"])
-        await pool.execute("DELETE FROM users WHERE id = $1", body["id"])
+            await pool.execute("DELETE FROM users WHERE id = $1", row["id"])
 
     async def test_admin_cannot_update_another_user(self, admin_client, test_viewer):
         resp = await admin_client.patch(f"/users/{test_viewer['user']['id']}", json={"role": "admin"})
@@ -1290,6 +1368,39 @@ class TestUserEndpoints:
             assert resp.status_code == 400
         finally:
             await pool.execute("DELETE FROM users WHERE id = $1", svc_id)
+
+    async def test_viewer_service_account_with_null_tenant_cannot_read_other_tenants(self, pool, test_tenant):
+        # PR #19 security finding 1: is_platform_scoped (lesson 24 —
+        # tenant_id is None) answers *which tenant*, not *how privileged*.
+        # GET /users has no authority gate beyond CONSOLE_ROLES, so a
+        # viewer-role service account — role="viewer", tenant_id=NULL,
+        # exactly the shape Conversation's/vobiz's real service accounts
+        # authenticate as — is just as platform-scoped as a superadmin.
+        # It must not inherit a superadmin's unscoped, cross-tenant,
+        # role-unfiltered read just because its own tenant_id is also
+        # NULL. Would fail (the tenant user below present in the response)
+        # if the route gated the unscoped branch on scope alone.
+        svc_row = await pool.fetchrow(
+            "INSERT INTO users (email, password_hash, role, tenant_id, is_service_account) "
+            "VALUES ($1, 'x', 'viewer', NULL, true) RETURNING *",
+            f"test-svc-viewer-{uuid.uuid4().hex[:8]}@internal.yuviz.ai",
+        )
+        tenant_user_email = f"test-tenant-user-{uuid.uuid4().hex[:8]}@example.com"
+        tenant_user = await users_service.create_user(
+            email=tenant_user_email, password="a-real-password", role="viewer", tenant_id=test_tenant["id"],
+        )
+        token = auth.create_access_token(dict(svc_row))
+        transport = ASGITransport(app=app)
+        try:
+            async with AsyncClient(
+                transport=transport, base_url="http://test", headers={"Authorization": f"Bearer {token}"},
+            ) as svc_client:
+                resp = await svc_client.get("/users")
+            assert resp.status_code == 200
+            assert tenant_user_email not in {u["email"] for u in resp.json()}
+        finally:
+            await pool.execute("DELETE FROM users WHERE id = $1", svc_row["id"])
+            await pool.execute("DELETE FROM users WHERE id = $1", tenant_user["id"])
 
     async def test_service_account_backfill_is_case_insensitive(self, pool):
         row = await pool.fetchrow(

@@ -4,10 +4,19 @@ agents.py — no Redis caching here, unlike those: auth checks are
 comparatively low-frequency (once at login, not per hot-path call) and
 correctness (a role change or deactivation taking effect immediately)
 matters more than shaving a few ms off a login request.
+
+auth.hash_password/verify_password are bcrypt (cost 12, ~250ms of pure CPU)
+called synchronously — every call site here goes through asyncio.to_thread
+so that work runs off the event loop (lesson 18), not just the ones already
+reachable from an authenticated route: POST /invites/accept
+(invites.accept_invite -> _insert_user) is public and unauthenticated, so
+without this a burst of accepts at the AcceptThrottle ceiling would stall
+the whole loop, including /health.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from . import audit, auth, db
@@ -30,7 +39,7 @@ def to_public_dict(user: dict[str, Any]) -> dict[str, Any]:
 async def get_user_by_email(email: str) -> dict[str, Any] | None:
     pool = await db.get_pool()
     row = await pool.fetchrow(
-        "SELECT * FROM users WHERE email = $1 AND deleted_at IS NULL", email,
+        "SELECT * FROM users WHERE lower(email) = lower($1) AND deleted_at IS NULL", email,
     )
     return dict(row) if row is not None else None
 
@@ -43,16 +52,36 @@ async def get_user_by_id(user_id: Any) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
-async def list_users(*, tenant_id: Any | None, is_superadmin: bool) -> list[dict[str, Any]]:
+async def list_users(*, tenant_id: Any | None, is_platform_scoped: bool) -> list[dict[str, Any]]:
     # Service accounts (conversation-service@internal.yuviz.ai etc.) never
     # appear here — see is_service_account's schema.sql comment for why:
     # an admin soft-deleted one through this exact listing once already,
     # breaking every live call until it was noticed. They're managed
     # directly in Postgres, not through the Users UI.
+    #
+    # `is_platform_scoped` reflects the *actor's* tenant scope
+    # (deps.is_platform_scoped: tenant_id is None), not their role — a
+    # platform-scoped actor (superadmin, or a viewer-role service account
+    # like Conversation/vobiz, lesson 24) filtering to one tenant via
+    # ?tenant_id= still gets every role in that tenant; only a tenant-
+    # scoped actor gets the `role != 'superadmin'` exclusion, since they
+    # must never see a superadmin row regardless of tenant. PR #19 finding
+    # 4: this used to be `role == "superadmin"`, which scoped a NULL-tenant
+    # service account to `tenant_id IS NOT DISTINCT FROM NULL` instead of
+    # the platform-wide access it actually needs. (Also review finding 3,
+    # earlier in the same PR: `is_superadmin`/tenant_id were conflated,
+    # which silently dropped superadmin-role rows from a superadmin's own
+    # filtered listing — same fix, still holds under the new name.)
     pool = await db.get_pool()
-    if is_superadmin:
+    if is_platform_scoped and tenant_id is None:
         rows = await pool.fetch(
             "SELECT * FROM users WHERE deleted_at IS NULL AND NOT is_service_account ORDER BY email",
+        )
+    elif is_platform_scoped:
+        rows = await pool.fetch(
+            "SELECT * FROM users WHERE tenant_id IS NOT DISTINCT FROM $1 "
+            "AND deleted_at IS NULL AND NOT is_service_account ORDER BY email",
+            tenant_id,
         )
     else:
         rows = await pool.fetch(
@@ -72,14 +101,15 @@ async def _insert_user(
     tenant_id: Any | None,
     creator_user_id: Any | None,
     creator_user_email: str | None,
+    team: str | None = None,
 ) -> dict[str, Any]:
     """Insert + audit on a caller-supplied connection, already inside a
     transaction — so bootstrap_first_superadmin() can share its lock-holding
     transaction, which create_user()'s own connection could not."""
     row = await conn.fetchrow(
-        "INSERT INTO users (email, password_hash, role, tenant_id) "
-        "VALUES ($1, $2, $3, $4) RETURNING *",
-        email, auth.hash_password(password), role, tenant_id,
+        "INSERT INTO users (email, password_hash, role, tenant_id, team) "
+        "VALUES ($1, $2, $3, $4, $5) RETURNING *",
+        email.lower(), await asyncio.to_thread(auth.hash_password, password), role, tenant_id, team,
     )
     result = dict(row)
     await audit.write_audit(
@@ -130,7 +160,7 @@ async def bootstrap_first_superadmin(*, email: str, password: str) -> dict[str, 
     Check and insert share one advisory-locked transaction, so two concurrent
     requests can't both see "no superadmin" and both insert. A partial unique
     index would do it too, but would also forbid the legal second superadmin
-    created later via POST /users."""
+    created later via the invite flow (POST /invites, then POST /invites/accept)."""
     pool = await db.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -156,7 +186,7 @@ async def authenticate(email: str, password: str) -> dict[str, Any] | None:
     user = await get_user_by_email(email)
     if user is None:
         return None
-    if not auth.verify_password(password, user["password_hash"]):
+    if not await asyncio.to_thread(auth.verify_password, password, user["password_hash"]):
         return None
     return user
 
@@ -178,7 +208,7 @@ async def update_user(
         raise ValueError(f"update_user() got non-updatable field(s): {unknown}")
 
     if new_password is not None:
-        fields["password_hash"] = auth.hash_password(new_password)
+        fields["password_hash"] = await asyncio.to_thread(auth.hash_password, new_password)
 
     if not fields:
         raise ValueError("update_user() called with no fields to update")
@@ -236,10 +266,10 @@ async def change_password(user_id: Any, *, current_password: str, new_password: 
             if row is None:
                 raise LookupError(f"user {user_id} not found")
             user = dict(row)
-            if not auth.verify_password(current_password, user["password_hash"]):
+            if not await asyncio.to_thread(auth.verify_password, current_password, user["password_hash"]):
                 return False
 
-            new_hash = auth.hash_password(new_password)
+            new_hash = await asyncio.to_thread(auth.hash_password, new_password)
             await conn.execute(
                 "UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1",
                 user_id, new_hash,
