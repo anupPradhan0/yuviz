@@ -95,17 +95,17 @@ class ToolPolicyResolver:
         if self._pool is not None:
             await self._pool.close()
 
-    async def enabled_tools(self, agent_id: str) -> list[ResolvedToolPolicy]:
-        """No agent_id, no pool, or no matching rows all mean the same
-        thing: this agent has no tools enabled — a normal, cheap default,
-        not an error (same posture as agent_retrieval_policies' own 'no
-        row = use the default' contract)."""
+    async def enabled_tools(
+        self, agent_id: str, only: list[str] | None = None,
+    ) -> list[ResolvedToolPolicy]:
+        """Return enabled tools for agent_id. `only` subsets by name (never
+        grants); None = unnarrowed; [] = none this stage."""
         if not agent_id or self._pool is None:
             return []
 
         cached = self._cache.get(agent_id)
         if cached is not None and time.monotonic() - cached[0] < self._cache_ttl_s:
-            return cached[1]
+            return _narrow(cached[1], only)
 
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -129,10 +129,7 @@ class ToolPolicyResolver:
                 )
                 continue
             raw_extra = row["extra"]
-            # asyncpg returns JSONB as a raw string unless a codec is
-            # registered on the pool (none is, here or elsewhere in this
-            # codebase's Postgres access) — parse defensively rather than
-            # assume either shape.
+            # asyncpg may return JSONB as str without a codec — accept either.
             extra = json.loads(raw_extra) if isinstance(raw_extra, str) else (raw_extra or {})
             resolved.append(ResolvedToolPolicy(
                 definition=defn,
@@ -146,13 +143,12 @@ class ToolPolicyResolver:
 
         self._add_auto_derived_companions(resolved, agent_id)
 
+        # Cache unnarrowed; `only` is applied on read (varies per node).
         self._cache[agent_id] = (time.monotonic(), resolved)
-        return resolved
+        return _narrow(resolved, only)
 
     def _add_auto_derived_companions(self, resolved: list[ResolvedToolPolicy], agent_id: str) -> None:
-        """See _AUTO_DERIVED_COMPANIONS. An explicit row for a derived tool
-        (if one somehow exists) always wins — this only fills a gap, never
-        overrides an admin's own configuration."""
+        """Fill gaps from _AUTO_DERIVED_COMPANIONS; explicit rows win."""
         present = {p.definition.name for p in resolved}
         for source_name, derived_names in _AUTO_DERIVED_COMPANIONS.items():
             if source_name not in present:
@@ -178,3 +174,16 @@ class ToolPolicyResolver:
                     max_calls_per_turn=source.max_calls_per_turn,
                 ))
                 present.add(derived_name)
+
+
+def _narrow(
+    resolved: list[ResolvedToolPolicy], only: list[str] | None,
+) -> list[ResolvedToolPolicy]:
+    """Subset by name; companions ride along when their source is allowed."""
+    if only is None:
+        return resolved
+    allowed = set(only)
+    for source_name, derived_names in _AUTO_DERIVED_COMPANIONS.items():
+        if source_name in allowed:
+            allowed.update(derived_names)
+    return [p for p in resolved if p.definition.name in allowed]

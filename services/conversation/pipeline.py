@@ -42,6 +42,7 @@ from .providers.interfaces import ChatMessage, SttResult
 from .session import HandlerResponse
 from .session_finalizer import FinalizationResult, SessionFinalizer
 from .tools.llm_adapter import DeterministicSpokenEvent
+from .tools.llm_adapter import LocalToolCompletedEvent
 from .tools.llm_adapter import TokenEvent as ToolTokenEvent
 from .tools.llm_adapter import ToolCallStartedEvent
 from .tools.orchestrator import ToolCallOrchestrator
@@ -1296,28 +1297,14 @@ class PipelineConversationHandler:
         self, history: list[ChatMessage], session_id: str, cancel_event: asyncio.Event,
         tool_calls_made: list[str],
     ) -> AsyncGenerator[str | ToolCallStartedEvent, None]:
-        """Token stream, identical shape to self._llm.generate() except for
-        one addition — the seam that makes the rest of _llm_to_tts (sentence
-        splitting, directive parsing) mostly unaware tool-calling exists.
-        ToolCallOrchestrator.run_turn() yields TokenEvent (unwrapped to
-        .text, keeping exactly the per-sentence TTS latency it has today)
-        and, once per tool call, a single ToolCallStartedEvent passed
-        through as-is so _llm_to_tts can speak a filler before the (a
-        ToolCallEvent itself is consumed internally, folded into `history`,
-        and never surfaces here) potentially slow round-trip (see design
-        §12's state-transition note: the pause is real, but previously had
-        no caller-facing signal at all)."""
+        """Like llm.generate(), plus ToolCallStartedEvent for filler speech.
+        LocalToolCompletedEvent is absorbed (no filler yet)."""
         if self._tool_orchestrator is None:
             async for token in self._llm.generate(history):
                 yield token
             return
 
-        # Force book_appointment specifically on the one turn where it's
-        # unambiguous the LLM should call it right now — see
-        # _caller_just_confirmed_phone_number's own docstring. has_booking_tool
-        # already gates whether this agent has the tool at all (same flag
-        # _build_caller_number_context checks) — no point forcing a tool
-        # this agent was never given.
+        # Force book_appointment only on the turn right after phone confirmation.
         just_confirmed = self._has_booking_tool and _caller_just_confirmed_phone_number(
             history, self._caller_number,
         )
@@ -1335,18 +1322,10 @@ class PipelineConversationHandler:
                 tool_calls_made.append(event.tool_name)
                 yield event
                 continue
+            if isinstance(event, LocalToolCompletedEvent):
+                continue
             if isinstance(event, DeterministicSpokenEvent):
-                # Unwrapped to plain text like a TokenEvent (same sentence-
-                # splitting/TTS path) rather than given its own handling —
-                # tool_calls_made already contains this turn's tool name by
-                # now (see ToolCallStartedEvent above), so the fabrication
-                # check downstream is already correctly inert for THIS
-                # turn's text; no special-casing needed beyond getting it
-                # spoken. But record the real confirmed slot persistently
-                # too — see _confirmed_booking_slot's own comment for why
-                # a later turn's truthful recap needs this to avoid a false
-                # fabrication flag, and why it must be the actual datetime,
-                # not just a boolean "a booking happened at some point."
+                # Speak verbatim; persist confirmed slot for later fabrication checks.
                 if event.confirmed_datetime:
                     self._session(session_id).confirmed_booking_slot = event.confirmed_datetime
                 yield event.text

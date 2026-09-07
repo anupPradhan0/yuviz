@@ -79,6 +79,12 @@ class DeterministicSpokenEvent(TurnEvent):
     confirmed_datetime: str | None = None
 
 
+@dataclass(frozen=True)
+class LocalToolCompletedEvent(TurnEvent):
+    """Local tool finished; pipeline absorbs it (bridging speech comes later)."""
+    tool_name: str
+
+
 @runtime_checkable
 class IToolAwareLLM(Protocol):
     """Optional companion to ILLM. A provider class implements this
