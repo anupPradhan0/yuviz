@@ -53,6 +53,57 @@ def test_extraction_merges_typed_values():
     assert got == {"policy_number": "AB-1", "wants_callback": True}
 
 
+def test_boolean_unknown_token_is_dropped_not_coerced_to_false():
+    llm = _FakeLLM('{"wants_callback": "not sure"}')
+    got: dict = {}
+    extractor = VariableExtractor(llm, got.update)
+    asyncio.run(extractor._extract(
+        _node(variables=[("wants_callback", "boolean")]),
+        [ChatMessage(role="user", content="maybe")],
+    ))
+    assert got == {}
+
+
+def test_extract_queues_until_start_deferred():
+    llm = _FakeLLM('{"policy_number": "AB-1"}')
+    got: dict = {}
+    extractor = VariableExtractor(llm, got.update)
+    extractor.extract(_node(), [ChatMessage(role="user", content="AB-1")])
+    assert llm.calls == []
+    assert got == {}
+
+    async def _run():
+        extractor.start_deferred()
+        await extractor.flush()
+
+    asyncio.run(_run())
+    assert got == {"policy_number": "AB-1"}
+
+
+def test_cancel_pending_drops_queued_and_in_flight_work():
+    started = asyncio.Event()
+
+    class _HangLLM:
+        async def generate(self, messages):
+            started.set()
+            await asyncio.Event().wait()
+            yield "{}"
+
+    extractor = VariableExtractor(_HangLLM(), lambda _: None)
+    extractor.extract(_node(), [])
+    extractor.extract(_node(), [])  # second stays queued until start drains first loop
+
+    async def _run():
+        extractor.start_deferred()
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        extractor.cancel_pending()
+        await extractor.flush()
+
+    asyncio.run(_run())
+    assert extractor._deferred == []
+    assert extractor._pending == set()
+
+
 def test_a_node_with_no_extraction_config_never_calls_the_llm():
     llm = _FakeLLM()
     extractor = VariableExtractor(llm, lambda _: None)

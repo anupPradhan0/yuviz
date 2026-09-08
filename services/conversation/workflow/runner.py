@@ -171,8 +171,7 @@ class WorkflowRunner:
         turn: list[ChatMessage] | None,
         store: list[ChatMessage] | None,
     ) -> ToolResult:
-        # Fire-and-forget extract/summarize only — awaiting here would desync
-        # node/prompt/pending_* if barge-in cancelled mid-transition.
+        # Queue extract/summarize only — pipeline starts them after live generate.
         source = self._node
 
         if self._extractor is not None and source.extraction is not None and source.extraction.enabled:

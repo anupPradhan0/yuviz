@@ -1,6 +1,8 @@
 """Background LLM passes: variable extraction on node leave, context summarization.
 
 Out-of-band on the call's LLM — never in conversation context, never fail the call.
+Queued during a transition; pipeline starts them after the live generate finishes
+so they cannot contend with generate_with_tools on the same provider instance.
 """
 
 from __future__ import annotations
@@ -27,6 +29,8 @@ _SUMMARY_THRESHOLD_MSGS = 16
 _SUMMARY_KEEP_LAST = 4
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+_BOOL_TRUE = frozenset({"true", "yes", "1"})
+_BOOL_FALSE = frozenset({"false", "no", "0"})
 
 
 def summary_threshold_for(max_history: int) -> int:
@@ -104,12 +108,17 @@ def _coerce(value: Any, declared_type: str) -> Any:
     if declared_type == "boolean":
         if isinstance(value, bool):
             return value
-        return str(value).strip().lower() in ("true", "yes", "1")
+        token = str(value).strip().lower()
+        if token in _BOOL_TRUE:
+            return True
+        if token in _BOOL_FALSE:
+            return False
+        return None
     return str(value)
 
 
 class VariableExtractor:
-    """Fire-and-forget extract(); flush() before anything that reads the values."""
+    """Queue on extract(); start_deferred() after the live turn so the call LLM is free."""
 
     def __init__(
         self,
@@ -120,6 +129,7 @@ class VariableExtractor:
         self._llm = llm
         self._on_variables = on_variables
         self._timeout_s = timeout_s
+        self._deferred: list[tuple[Node, list[ChatMessage]]] = []
         self._pending: set[asyncio.Task] = set()
         # Teardown can fire more than once; only one final extract.
         self._final_done = False
@@ -130,12 +140,25 @@ class VariableExtractor:
         return spec is not None and spec.enabled and bool(spec.variables)
 
     def extract(self, node: Node, history: list[ChatMessage]) -> None:
-        """Background — do not block the transition on an LLM round-trip."""
+        """Queue only — start_deferred() runs the LLM after the spoken turn."""
         if not self._wants_extraction(node):
             return
-        task = asyncio.ensure_future(self._extract(node, list(history)))
-        self._pending.add(task)
-        task.add_done_callback(self._pending.discard)
+        self._deferred.append((node, list(history)))
+
+    def start_deferred(self) -> None:
+        """Spawn queued extracts. Safe to call more than once."""
+        while self._deferred:
+            node, history = self._deferred.pop(0)
+            task = asyncio.ensure_future(self._extract(node, history))
+            self._pending.add(task)
+            task.add_done_callback(self._pending.discard)
+
+    def cancel_pending(self) -> None:
+        """Drop queued work and cancel in-flight tasks (hangup timeout)."""
+        self._deferred.clear()
+        for task in list(self._pending):
+            task.cancel()
+        self._pending.clear()
 
     async def extract_final(self, node: Node, history: list[ChatMessage]) -> None:
         """Idempotent hangup pass; no-ops on end nodes with no extraction."""
@@ -182,6 +205,8 @@ class VariableExtractor:
             if values:
                 log.info("workflow: extracted %s at node=%s", sorted(values), node.name)
                 self._on_variables(values)
+        except asyncio.CancelledError:
+            raise
         except asyncio.TimeoutError:
             log.warning("workflow: variable extraction timed out node=%s", node.name)
         except Exception:
@@ -189,7 +214,7 @@ class VariableExtractor:
 
 
 class ContextSummarizer:
-    """One background summary at a time; apply by message identity so trim is safe."""
+    """Queue on maybe_summarize(); start_deferred() after the live turn."""
 
     def __init__(
         self,
@@ -202,16 +227,25 @@ class ContextSummarizer:
         self._threshold = threshold_msgs
         self._keep_last = keep_last
         self._timeout_s = timeout_s
+        self._deferred: list[ChatMessage] | None = None
         self._task: asyncio.Task | None = None
 
     def maybe_summarize(self, history: list[ChatMessage]) -> None:
         if len(history) <= self._threshold:
             return
-        # Newer transition wins — cancel the stale in-flight summary.
+        # Latest transition wins if several fire before start_deferred.
+        self._deferred = history
+
+    def start_deferred(self) -> None:
+        if self._deferred is None:
+            return
+        history = self._deferred
+        self._deferred = None
         self.cancel()
         self._task = asyncio.ensure_future(self._summarize(history))
 
     def cancel(self) -> None:
+        self._deferred = None
         if self._task is not None and not self._task.done():
             self._task.cancel()
         self._task = None

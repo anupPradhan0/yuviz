@@ -949,6 +949,10 @@ class PipelineConversationHandler:
         except Exception:
             log.exception("LLM/TTS pipeline failed session=%s", session_id)
 
+        # Transitions queue extract/summarize; start them only after the live
+        # generate so they cannot contend for the shared call LLM mid-turn.
+        self._start_workflow_background_llm()
+
         # llm_ms: time to the LLM's first token/event — the "thinking" time
         # a caller actually experiences before anything happens. tts_ms:
         # time from that first token to the first synthesized sentence
@@ -1378,6 +1382,9 @@ class PipelineConversationHandler:
         if node is None:
             return None
         self._workflow.pending_transfer = None
+        # Do not let a queued summary race the transfer path on the call LLM.
+        self._summarizer.cancel()
+        self._extractor.start_deferred()
         try:
             await asyncio.wait_for(
                 self._extractor.flush(), timeout=_TRANSFER_FLUSH_TIMEOUT_S,
@@ -1405,6 +1412,10 @@ class PipelineConversationHandler:
         self._session(session_id).transfer_requested = True
         return decision.request
 
+    def _start_workflow_background_llm(self) -> None:
+        self._extractor.start_deferred()
+        self._summarizer.start_deferred()
+
     async def _finish_workflow(self, session_id: str) -> None:
         """Best-effort final extract, then always persist path/disposition/vars."""
         self._summarizer.cancel()
@@ -1421,6 +1432,10 @@ class PipelineConversationHandler:
             )
         except Exception:
             log.exception("Workflow final extraction failed session=%s", session_id)
+        finally:
+            # Do not leave extracts calling the shared LLM after the call ends.
+            self._extractor.cancel_pending()
+            self._summarizer.cancel()
         if self._transcripts is not None:
             self._transcripts.record_workflow_outcome(
                 session_id,
@@ -1430,10 +1445,12 @@ class PipelineConversationHandler:
             )
 
     async def _finalize_extraction(self, session_id: str) -> None:
+        # Flush leave-node extracts first so extract_final cannot starve them.
+        self._extractor.start_deferred()
+        await self._extractor.flush()
         await self._extractor.extract_final(
             self._workflow.node, self._get_history(session_id),
         )
-        await self._extractor.flush()
 
     # ── Internal ───────────────────────────────────────────────────────────────
 
