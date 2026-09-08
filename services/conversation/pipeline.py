@@ -53,7 +53,13 @@ from .transfer_engine import (
     TransferTrigger,
     TriggerType,
 )
-from .workflow import WorkflowRunner, graph_for
+from .workflow import (
+    ContextSummarizer,
+    VariableExtractor,
+    WorkflowRunner,
+    graph_for,
+    summary_threshold_for,
+)
 
 log = logging.getLogger(__name__)
 
@@ -304,6 +310,11 @@ def _build_end_call_instruction(condition: str | None, scripted: bool = False) -
 # side and the servicer silently drops EndCall (see servicer.py) — the call
 # would never hang up on its own, forcing the caller to disconnect manually.
 _FALLBACK_GOODBYE = "Goodbye."
+
+# Ceiling on workflow teardown (final extraction + in-flight background work)
+# in on_session_end. Shorter than VariableExtractor's 8s per-call timeout —
+# this runs after the caller has already gone.
+_FINISH_WORKFLOW_TIMEOUT_S = 3.0
 
 # Spoken when policies.max_call_duration_s is exceeded (see
 # PipelineConversationHandler.on_speech_ended's check, right after STT).
@@ -675,6 +686,12 @@ class PipelineConversationHandler:
         self._sessions: dict[str, _SessionState] = {}
         # Conversation workflow — graph_for() falls back to starter, never None.
         now = datetime.now(timezone.utc)
+        self._extractor = VariableExtractor(self._llm, self._on_variables_extracted)
+        # Threshold from this pipeline's trim cap so summarization and trim
+        # stay aligned (see summary_threshold_for).
+        self._summarizer = ContextSummarizer(
+            self._llm, threshold_msgs=summary_threshold_for(max_history),
+        )
         graph = graph_for(runtime_config)
         self._workflow = WorkflowRunner(
             graph,
@@ -689,8 +706,8 @@ class PipelineConversationHandler:
                 "current_date":  now.strftime("%Y-%m-%d"),
                 "current_time":  now.strftime("%H:%M"),
             },
-            extractor=None,  # ponytail: wired in PR9
-            summarizer=None,
+            extractor=self._extractor,
+            summarizer=self._summarizer,
         )
         if (
             any(n.type == "transfer" for n in graph.nodes.values())
@@ -706,6 +723,10 @@ class PipelineConversationHandler:
             "Workflow active for agent %s: %d nodes, starting at %r",
             runtime_config.agent.slug, len(graph.nodes), graph.start.name,
         )
+
+    def _on_variables_extracted(self, values: dict) -> None:
+        """Merge extraction into the runner for later prompts and session-end persistence."""
+        self._workflow.update_variables(values)
 
     # ── IConversationHandler ───────────────────────────────────────────────────
 
@@ -1135,6 +1156,19 @@ class PipelineConversationHandler:
 
     async def on_session_end(self, session_id: str, reason: str,
                              final_state: str | None = None) -> None:
+        # record_workflow_outcome must run while TranscriptBuilder's write
+        # chain is still alive (end_call() drops it). Bound the wait so a
+        # stuck extraction cannot hold the gRPC stream open after hangup.
+        try:
+            await asyncio.wait_for(
+                self._finish_workflow(session_id), timeout=_FINISH_WORKFLOW_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "Workflow finalization timed out after %.1fs session=%s — "
+                "the call's path and disposition may be incomplete",
+                _FINISH_WORKFLOW_TIMEOUT_S, session_id,
+            )
         # Requirement: transfer-failure recovery turns are recorded in
         # short-term memory (history) immediately, in on_transfer_failed(),
         # but their transcript *persistence* is deferred until now — normal
@@ -1146,7 +1180,6 @@ class PipelineConversationHandler:
             "workflow outcome session=%s disposition=%s visited=%s reason=%s",
             session_id, self._workflow.disposition, self._workflow.visited, reason,
         )
-        # ponytail: DB outcome (record_workflow_outcome) lands with PR9 extractor teardown.
         if self._transcripts is not None:
             for caller_text, ai_response, interrupted in pending_recovery_turns:
                 self._transcripts.record_turn(session_id, caller_text, 1.0, ai_response, interrupted)
@@ -1357,6 +1390,8 @@ class PipelineConversationHandler:
         if node is None:
             return None
         self._workflow.pending_transfer = None
+        # Destination may use {{ vars }} still in flight — flush first.
+        await self._extractor.flush()
         destination = self._workflow.render(node.transfer_destination or "") or None
         decision = self._transfer_engine.evaluate(
             self._decision_context(session_id, destination_override=destination),
@@ -1373,6 +1408,24 @@ class PipelineConversationHandler:
             return None
         self._session(session_id).transfer_requested = True
         return decision.request
+
+    async def _finish_workflow(self, session_id: str) -> None:
+        """Final extraction + persist path/disposition/variables. Idempotent via extractor."""
+        self._summarizer.cancel()
+        try:
+            await self._extractor.extract_final(
+                self._workflow.node, self._get_history(session_id),
+            )
+            await self._extractor.flush()
+        except Exception:
+            log.exception("Workflow final extraction failed session=%s", session_id)
+        if self._transcripts is not None:
+            self._transcripts.record_workflow_outcome(
+                session_id,
+                nodes_visited=self._workflow.visited,
+                disposition=self._workflow.disposition,
+                extracted_variables=self._workflow.variables,
+            )
 
     # ── Internal ───────────────────────────────────────────────────────────────
 
@@ -1591,8 +1644,7 @@ class PipelineConversationHandler:
         return self._session(session_id).history
 
     def _trim_history(self, session_id: str) -> None:
-        state = self._session(session_id)
-        history = state.history
+        history = self._session(session_id).history
         # Preserve a leading system message so it is not silently sliced away
         # when the conversation grows past max_history turns.  Without this,
         # history[-N:] drops history[0] and the `if not history` guard on the
@@ -1600,4 +1652,5 @@ class PipelineConversationHandler:
         base = 1 if (history and history[0].role == "system") else 0
         max_msgs = self._max_history * 2 + base
         if len(history) > max_msgs:
-            state.history = history[:base] + history[-self._max_history * 2:]
+            # Splice in place: ContextSummarizer holds this list reference.
+            history[base:] = history[-self._max_history * 2:]

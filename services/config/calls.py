@@ -36,9 +36,17 @@ def _mode_of(row: dict[str, Any]) -> str:
     return "AI" if row.get("direction") == "inbound" else "WebRTC"
 
 
+# Written as JSONB by TranscriptBuilder.record_workflow_outcome(). Decode so
+# API consumers get objects/lists, not JSON strings.
+_JSON_COLUMNS = ("nodes_visited", "extracted_variables")
+
+
 def _decorate(row: dict[str, Any]) -> dict[str, Any]:
     row["status"] = _status_of(row)
     row["mode"] = _mode_of(row)
+    for column in _JSON_COLUMNS:
+        if column in row:
+            row[column] = db.json_col(row[column])
     return row
 
 
