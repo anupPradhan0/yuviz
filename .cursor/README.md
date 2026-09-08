@@ -60,17 +60,15 @@ they do not collide in the `/` menu.
 
 Do not do the specialist's work in the parent chat. Do not paste artifact bodies back to the user.
 
-## `sdlc/lessons.md` — the part that compounds
+## `.sdlc/lessons.md` — the part that compounds
 
-Every rule in `.cursor/sdlc/lessons.md` was earned from a real miss on this codebase. Every agent
-reads it before starting and must comply or say why a lesson does not apply.
+Every rule in **`.sdlc/lessons.md`** (repo-root, shared with Claude) was earned from a real miss
+on this codebase. Every agent reads it before starting and must comply or say why a lesson does
+not apply.
 
 When a review catches something a previous stage should have, `/sdlc-retro` turns it into a lesson —
 but only if it is a *class* of mistake, not a one-off. Merge aggressively; a long lessons file stops
-being read.
-
-If you also use Claude Code, keep `.claude/sdlc/lessons.md` in sync when you add lessons (or
-retro into both).
+being read. There is one file — no cross-tool mirroring.
 
 ## Layout
 
@@ -80,7 +78,8 @@ retro into both).
   rules/              # always-on / scoped engineering rules
   agents/             # specialist subagents (Task targets)
   skills/             # /sdlc-* and /review-pr stage orchestrators
-  sdlc/lessons.md     # earned rules every agent must read
+
+.sdlc/lessons.md      # earned rules (canonical; Claude + Cursor)
 ```
 
 Specialist Task names (when they differ from the skill): `sdlc-prd-author`,

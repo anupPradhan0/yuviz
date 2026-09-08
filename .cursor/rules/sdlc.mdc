@@ -14,7 +14,7 @@ Do not collapse the pipeline into one free-form chat when the user asks for a st
 - Orchestrators spawn `.cursor/agents/` specialists via Task; critics always start **fresh**.
 - Author fix rounds use Task `resume` with the prior agent ID (warm context).
 - Cap fix loops: 2 rounds normally, 3 for security. Report leftovers; do not grind.
-- Every specialist reads `.cursor/sdlc/lessons.md` first.
+- Every specialist reads `.sdlc/lessons.md` first.
 - Do not paste PRD/design/review bodies into chat — point at the file.
 - Between stages, wait for the user unless they chained the next skill.
 
