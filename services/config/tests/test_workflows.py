@@ -267,7 +267,10 @@ async def test_get_agent_does_not_expose_or_cache_the_draft(test_tenant):
     await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=DEAD_END)
     fetched = await agents.get_agent(test_tenant["slug"], "wf-no-draft")
     assert fetched is not None
-    assert "workflow" not in fetched and "workflow_draft" not in fetched
+    # Published graph stays on the agent GET/cache payload for call-setup;
+    # draft is editor-only until draft testing.
+    assert "workflow" in fetched and "workflow_draft" not in fetched
+    assert fetched["workflow"] == CREATED_GRAPH
     listed = await agents.list_agents(test_tenant["id"])
     row = next(a for a in listed if a["id"] == agent["id"])
     assert "workflow" not in row and "workflow_draft" not in row
@@ -337,13 +340,25 @@ async def test_starter_graph_sql_matches_python_starter_graph(pool):
     from libs.config_sdk.workflow import graphs_equivalent, starter_graph
 
     row = await pool.fetchval(
+        "SELECT starter_graph_sql($1, $2, $3::jsonb, $4::jsonb)",
+        "Thanks for calling.", "Be helpful.",
+        '["book_appointment"]', '["kb-1"]',
+    )
+    sql_graph = json.loads(row) if isinstance(row, str) else dict(row)
+    expected = starter_graph(
+        "Thanks for calling.", "Be helpful.",
+        ["book_appointment"], ["kb-1"],
+    )
+    assert graphs_equivalent(sql_graph, expected)
+    assert sql_graph == expected
+
+    # 3-arg form still works (knowledge defaults to []).
+    row3 = await pool.fetchval(
         "SELECT starter_graph_sql($1, $2, $3::jsonb)",
         "Thanks for calling.", "Be helpful.", '["book_appointment"]',
     )
-    sql_graph = json.loads(row) if isinstance(row, str) else dict(row)
-    expected = starter_graph("Thanks for calling.", "Be helpful.", ["book_appointment"])
-    assert graphs_equivalent(sql_graph, expected)
-    assert sql_graph == expected
+    sql3 = json.loads(row3) if isinstance(row3, str) else dict(row3)
+    assert sql3 == starter_graph("Thanks for calling.", "Be helpful.", ["book_appointment"])
 
 
 async def test_create_with_a_graph_stores_prompts_from_the_graph_not_the_body(test_tenant):

@@ -53,6 +53,7 @@ from .transfer_engine import (
     TransferTrigger,
     TriggerType,
 )
+from .workflow import WorkflowRunner, graph_for
 
 log = logging.getLogger(__name__)
 
@@ -513,16 +514,12 @@ class PipelineConversationHandler:
         tool_orchestrator: ToolCallOrchestrator | None = None,
         has_booking_tool: bool = False,
     ) -> None:
-        # default_system_prompt is a pipeline-wide fallback (PipelineConfig.
-        # llm.system), not part of RuntimeConfig — it's what a resolved
-        # agent with no custom system_prompt of its own gets, same "or
-        # cfg.llm.system" behavior this class had before this refactor.
+        self._default_system_prompt = (default_system_prompt or "").strip()
         self._stt          = provider_bundle.stt
         self._llm          = provider_bundle.llm
         self._tts          = provider_bundle.tts
         self._sample_rate  = sample_rate
         self._max_history  = max_history
-        self._greeting     = runtime_config.conversation.greeting
         self._transcripts  = transcripts
         self._tenant_id    = tenant_id
         self._call_id      = call_id
@@ -538,9 +535,6 @@ class PipelineConversationHandler:
         # insert outright, not just be cosmetically wrong.
         self._agent_id             = runtime_config.agent.id or None
         self._agent_config_version = runtime_config.version or None
-        # Overrides llm.system when non-empty.  Append the end-call marker
-        # instruction here (not conditionally later) so every agent gets the
-        # capability regardless of whether it has a custom system_prompt.
         # Scripted spoken lines (agents.farewell_message/transfer_announcement)
         # — when set, pipeline synthesizes these verbatim at end-call/transfer
         # and the injected instructions tell the LLM to emit only the token.
@@ -551,16 +545,15 @@ class PipelineConversationHandler:
             (runtime_config.conversation.transfer_announcement or "").strip() or None
         )
         self._has_booking_tool = has_booking_tool
-        system_prompt = runtime_config.conversation.system_prompt or default_system_prompt
-        self._system_prompt = (
-            system_prompt
-            + _build_current_date_context()
+        # Date / booking / directive tokens appended after each node's prompt.
+        self._prompt_suffix = (
+            _build_current_date_context()
             + (_build_caller_number_context(self._caller_number) if has_booking_tool else "")
             + _build_end_call_instruction(
                 runtime_config.conversation.end_call_prompt,
                 scripted=self._farewell_message is not None,
             )
-        ) if system_prompt else ""
+        )
         self._goodbye_grace_period_ms = runtime_config.policies.goodbye_grace_ms
         # Admin-configured hard ceiling on call length (agents.max_call_
         # duration_s) — None means unlimited, the pre-existing behavior.
@@ -620,14 +613,13 @@ class PipelineConversationHandler:
                     "agent's Escalation config",
                     runtime_config.agent.slug, tt, problem,
                 )
-            elif self._system_prompt:
+            else:
                 # Auto-inject the transfer trigger instruction — same "append
                 # to the prompt here, not conditionally later" treatment as
-                # _END_CALL_INSTRUCTION above, and same gate on a non-empty
-                # base prompt. Config validated above: a transfer the LLM can
-                # request but nothing can complete would strand callers
+                # end-call above. Config validated above: a transfer the LLM
+                # can request but nothing can complete would strand callers
                 # mid-"connecting you now".
-                self._system_prompt += _build_transfer_instruction(
+                self._prompt_suffix += _build_transfer_instruction(
                     runtime_config.conversation.transfer_prompt,
                     tt,
                     self._transfer_destination_default,
@@ -681,6 +673,39 @@ class PipelineConversationHandler:
         # _session() below; on_session_end() drops the whole entry in one
         # line instead of one pop/discard per field.
         self._sessions: dict[str, _SessionState] = {}
+        # Conversation workflow — graph_for() falls back to starter, never None.
+        now = datetime.now(timezone.utc)
+        graph = graph_for(runtime_config)
+        self._workflow = WorkflowRunner(
+            graph,
+            base_suffix=self._prompt_suffix,
+            default_global=self._default_system_prompt,
+            variables={
+                "caller_number": caller_number,
+                "called_number": called_number,
+                "direction":     direction,
+                "agent_name":    runtime_config.agent.name,
+                "business_name": runtime_config.tenant.name,
+                "current_date":  now.strftime("%Y-%m-%d"),
+                "current_time":  now.strftime("%H:%M"),
+            },
+            extractor=None,  # ponytail: wired in PR9
+            summarizer=None,
+        )
+        if (
+            any(n.type == "transfer" for n in graph.nodes.values())
+            and self._transfer_type_default in ("", "none")
+        ):
+            log.error(
+                "Workflow for agent %s has a transfer node but the agent's "
+                "transfer_type is 'none' — those transfers will be rejected; "
+                "set warm/cold on the agent's Escalation config",
+                runtime_config.agent.slug,
+            )
+        log.info(
+            "Workflow active for agent %s: %d nodes, starting at %r",
+            runtime_config.agent.slug, len(graph.nodes), graph.start.name,
+        )
 
     # ── IConversationHandler ───────────────────────────────────────────────────
 
@@ -691,9 +716,14 @@ class PipelineConversationHandler:
                 self._direction, self._caller_number, self._called_number,
                 self._agent_id, self._agent_config_version,
             )
-        if not self._greeting:
+        # Speaking the instant the line opens gets the first syllable
+        # clipped on some outbound carriers — the start node can hold off.
+        if self._workflow.delayed_start_ms > 0:
+            await asyncio.sleep(self._workflow.delayed_start_ms / 1000)
+        text = self._workflow.greeting() or ""
+        if not text:
             return []
-        return [chunk async for chunk in self._synthesize_sentence_stream(self._greeting, session_id)]
+        return [chunk async for chunk in self._synthesize_sentence_stream(text, session_id)]
 
     async def on_audio(self, session_id: str, payload: bytes) -> HandlerResponse:
         # Audio is also accumulated by ConversationSession (still the source
@@ -831,9 +861,9 @@ class PipelineConversationHandler:
         # ── 2. LLM ─────────────────────────────────────────────────────────────
         history = self._get_history(session_id)
         is_first_turn = not history
-        # Prepend per-agent system prompt as the first message if configured.
-        if self._system_prompt and not history:
-            history.append(ChatMessage(role="system", content=self._system_prompt))
+        # history[0] is the active node's prompt — refreshed every turn so a
+        # mid-call transition lands before the next generation.
+        self._refresh_node_prompt(history)
         history.append(ChatMessage(role="user", content=stt_result.text))
 
         # See _FIRST_TURN_FILLER's own comment — masks the caller's first
@@ -860,7 +890,9 @@ class PipelineConversationHandler:
         # turn is the standard, safe RAG prompting pattern and leaves
         # exactly one system message in the conversation, always.
         messages_for_llm = history
-        if self._knowledge is not None:
+        # Retrieval: node with explicit knowledge_base_ids, or all-empty graph
+        # (starter backfill) keeping agent-level RAG. See WorkflowRunner.knowledge_enabled.
+        if self._knowledge is not None and self._workflow.knowledge_enabled():
             context = await self._retrieve_context(stt_result.text, session_id)
             if context is not None and context.chunks:
                 augmented = ChatMessage(
@@ -879,7 +911,8 @@ class PipelineConversationHandler:
         first_audio_at: float | None = None
         try:
             async for chunk, tts_audio, marker_seen in self._llm_to_tts(
-                messages_for_llm, cancel_event, session_id, directives, tool_calls_made
+                messages_for_llm, cancel_event, session_id, directives, tool_calls_made,
+                store=history,
             ):
                 now = time.monotonic()
                 if first_token_at is None:
@@ -990,6 +1023,13 @@ class PipelineConversationHandler:
                 ),
             )
 
+        # End node hangup; [[END_CALL]] off-graph marks ended_off_graph for disposition.
+        ended_on_end_node = self._workflow.pending_end
+        if ended_on_end_node:
+            end_call = True
+        elif end_call:
+            self._workflow.ended_off_graph = True
+
         # Phase 6: an LLM-emitted directive takes precedence over a pending
         # escalation-threshold trigger from an earlier turn — either way,
         # at most one TransferRequest is yielded per turn. This ordering
@@ -1027,6 +1067,8 @@ class PipelineConversationHandler:
                 if decision.accepted:
                     transfer_request = decision.request
                     self._session(session_id).transfer_requested = True
+            if transfer_request is None:
+                transfer_request = await self._workflow_transfer(session_id)
             # Fall through to a pending escalation-accepted request whenever
             # the directive path produced nothing — including when a
             # directive WAS emitted but the engine rejected it as
@@ -1088,6 +1130,8 @@ class PipelineConversationHandler:
 
     async def on_cancel(self, session_id: str) -> None:
         self._cancel_event(session_id).set()
+        # Barge-in before pending_speech is consumed must not replay it next turn.
+        self._workflow.pending_speech = None
 
     async def on_session_end(self, session_id: str, reason: str,
                              final_state: str | None = None) -> None:
@@ -1098,6 +1142,11 @@ class PipelineConversationHandler:
         # turn's record_turn() call.
         state = self._sessions.get(session_id)
         pending_recovery_turns = state.pending_recovery_turns if state is not None else []
+        log.info(
+            "workflow outcome session=%s disposition=%s visited=%s reason=%s",
+            session_id, self._workflow.disposition, self._workflow.visited, reason,
+        )
+        # ponytail: DB outcome (record_workflow_outcome) lands with PR9 extractor teardown.
         if self._transcripts is not None:
             for caller_text, ai_response, interrupted in pending_recovery_turns:
                 self._transcripts.record_turn(session_id, caller_text, 1.0, ai_response, interrupted)
@@ -1110,11 +1159,14 @@ class PipelineConversationHandler:
         except Exception:
             log.exception("STT cancel_stream failed session=%s", session_id)
 
-    def _decision_context(self, session_id: str) -> DecisionContext:
+    def _decision_context(
+        self, session_id: str, destination_override: str | None = None,
+    ) -> DecisionContext:
+        """destination_override: workflow transfer node destination for this decision."""
         return DecisionContext(
             session_id=session_id, tenant_id=self._tenant_id, call_id=self._call_id,
             transfer_type=self._transfer_type_default,
-            transfer_destination=self._transfer_destination_default,
+            transfer_destination=destination_override or self._transfer_destination_default,
             escalation_threshold=self._escalation_threshold,
             already_requested=self._session(session_id).transfer_requested,
             caller_id_policy=self._caller_id_policy,
@@ -1198,8 +1250,7 @@ class PipelineConversationHandler:
         self._session_finalizer.discard_pending_summary(session_id)
 
         history = self._get_history(session_id)
-        if self._system_prompt and not history:
-            history.append(ChatMessage(role="system", content=self._system_prompt))
+        self._refresh_node_prompt(history)
 
         # AgentRuntime (the LLM call below) receives the structured system
         # event — see _build_transfer_failed_system_event's doc comment for
@@ -1215,7 +1266,7 @@ class PipelineConversationHandler:
         any_audio = False
         try:
             async for chunk, tts_audio, _end_call in self._llm_to_tts(
-                messages_for_llm, cancel_event, session_id, directives
+                messages_for_llm, cancel_event, session_id, directives, store=history,
             ):
                 full_response.append(chunk)
                 if tts_audio:
@@ -1291,14 +1342,49 @@ class PipelineConversationHandler:
             reason,
         )
 
+    # ── Workflow helpers ─────────────────────────────────────────────────
+
+    def _refresh_node_prompt(self, history: list[ChatMessage]) -> None:
+        """Refresh history[0] with the active node's rendered prompt."""
+        prompt = ChatMessage(role="system", content=self._workflow.system_prompt())
+        if history and history[0].role == "system":
+            history[0] = prompt
+        else:
+            history.insert(0, prompt)
+
+    async def _workflow_transfer(self, session_id: str) -> TransferRequest | None:
+        node = self._workflow.pending_transfer
+        if node is None:
+            return None
+        self._workflow.pending_transfer = None
+        destination = self._workflow.render(node.transfer_destination or "") or None
+        decision = self._transfer_engine.evaluate(
+            self._decision_context(session_id, destination_override=destination),
+            TransferTrigger(
+                type=TriggerType.WORKFLOW, workflow_reason=f"workflow_node:{node.name}",
+            ),
+        )
+        if not decision.accepted:
+            log.warning(
+                "Workflow transfer node %r rejected: %s session=%s",
+                node.name, decision.rejection_reason, session_id,
+            )
+            self._workflow.abandon_transfer()
+            return None
+        self._session(session_id).transfer_requested = True
+        return decision.request
+
     # ── Internal ───────────────────────────────────────────────────────────────
 
     async def _token_stream(
-        self, history: list[ChatMessage], session_id: str, cancel_event: asyncio.Event,
+        self,
+        history: list[ChatMessage],
+        session_id: str,
+        cancel_event: asyncio.Event,
         tool_calls_made: list[str],
-    ) -> AsyncGenerator[str | ToolCallStartedEvent, None]:
-        """Like llm.generate(), plus ToolCallStartedEvent for filler speech.
-        LocalToolCompletedEvent is absorbed (no filler yet)."""
+        store: list[ChatMessage] | None = None,
+    ) -> AsyncGenerator[str | ToolCallStartedEvent | LocalToolCompletedEvent, None]:
+        """LLM tokens + ToolCallStartedEvent filler + LocalToolCompletedEvent for bridging speech."""
         if self._tool_orchestrator is None:
             async for token in self._llm.generate(history):
                 yield token
@@ -1312,17 +1398,23 @@ class PipelineConversationHandler:
         if just_confirmed:
             self._session(session_id).phone_number_confirmed = True
 
+        # Callables so a mid-turn transition re-reads the new node's tools.
+        local_tools = lambda: self._workflow.local_tools(history, store)  # noqa: E731
+        only_tools = lambda: self._workflow.allowed_tool_names()       # noqa: E731
+
         async for event in self._tool_orchestrator.run_turn(
             self._agent_id or "", self._tenant_id, self._call_id, session_id, history,
             caller_number=self._caller_number, cancel_event=cancel_event,
             force_tool_name=force_tool_name,
             phone_number_confirmed=self._session(session_id).phone_number_confirmed,
+            local_tools=local_tools, only_tools=only_tools,
         ):
             if isinstance(event, ToolCallStartedEvent):
                 tool_calls_made.append(event.tool_name)
                 yield event
                 continue
             if isinstance(event, LocalToolCompletedEvent):
+                yield event
                 continue
             if isinstance(event, DeterministicSpokenEvent):
                 # Speak verbatim; persist confirmed slot for later fabrication checks.
@@ -1340,6 +1432,7 @@ class PipelineConversationHandler:
         session_id:   str,
         directives:   list[Directive],
         tool_calls_made: list[str] | None = None,
+        store:        list[ChatMessage] | None = None,
     ) -> AsyncGenerator[tuple[str, bytes, bool], None]:
         """
         Stream LLM tokens, buffer into sentences, synthesise each sentence.
@@ -1363,10 +1456,25 @@ class PipelineConversationHandler:
         text_buffer = ""  # directive-free text awaiting a sentence boundary
         if tool_calls_made is None:
             tool_calls_made = []
+        # end_call latched so transition speech / filler cannot clear [[END_CALL]].
+        end_call = False
         try:
-            async for item in self._token_stream(history, session_id, cancel_event, tool_calls_made):
+            async for item in self._token_stream(
+                history, session_id, cancel_event, tool_calls_made, store,
+            ):
                 if cancel_event.is_set():
+                    self._workflow.pending_speech = None
                     break
+                if isinstance(item, LocalToolCompletedEvent):
+                    speech = self._workflow.pending_speech
+                    if speech:
+                        self._workflow.pending_speech = None
+                        # Yield text once so full_response/history/transcript record it.
+                        first = True
+                        async for chunk in self._synthesize_sentence_stream(speech, session_id):
+                            yield speech if first else "", chunk, end_call
+                            first = False
+                    continue
                 if isinstance(item, ToolCallStartedEvent):
                     # Rotates through _TOOL_CALL_FILLERS, gap-suppressed by
                     # _TOOL_CALL_FILLER_MIN_GAP_S — see both constants' own
@@ -1387,7 +1495,7 @@ class PipelineConversationHandler:
                                     "Tool-call filler spoken tool=%s phrase=%r session=%s",
                                     item.tool_name, phrase, session_id,
                                 )
-                            yield "", chunk, False
+                            yield "", chunk, end_call
                     continue
                 token = item
                 result = DirectiveParser.parse(stream_buf.feed(token))
