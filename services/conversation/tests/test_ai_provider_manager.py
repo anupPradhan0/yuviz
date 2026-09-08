@@ -14,10 +14,12 @@ as the fakes and worth proving end-to-end against real code.
 from __future__ import annotations
 
 import asyncio
+import json
 
+import httpx
 import pytest
 
-from ..ai_provider_manager import AIProviderManager, ProviderConfig
+from ..ai_provider_manager import AIProviderManager, ProviderConfig, _make_ollama
 
 
 class FakeSecretResolver:
@@ -234,6 +236,100 @@ class TestRealOllamaFactory:
         async for tok in llm.generate([ChatMessage(role="user", content="Say hi in 2 words.")]):
             tokens.append(tok)
         assert "".join(tokens).strip() != ""
+
+
+class TestOllamaThinkResolution:
+    async def _mock_llm(self, cfg: ProviderConfig, handler):
+        llm = await _make_ollama(cfg, None)
+        llm._client = httpx.AsyncClient(base_url="http://localhost:11434", transport=httpx.MockTransport(handler))
+        return llm
+
+    async def test_think_true_reaches_generate(self):
+        from ..providers.interfaces import ChatMessage
+
+        seen_payload = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_payload.update(json.loads(request.content))
+            body = b'{"message": {"role": "assistant", "content": "ok"}, "done": true}\n'
+            return httpx.Response(200, content=body)
+
+        cfg = ProviderConfig(id="llm-1", role="llm", engine="ollama", extra={"think": True})
+        llm = await self._mock_llm(cfg, handler)
+        _ = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
+
+        assert seen_payload["think"] is True
+
+    async def test_think_true_reaches_generate_with_tools(self):
+        from ..providers.interfaces import ChatMessage
+
+        seen_payload = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_payload.update(json.loads(request.content))
+            body = b'{"message": {"role": "assistant", "content": "ok"}, "done": true}\n'
+            return httpx.Response(200, content=body)
+
+        cfg = ProviderConfig(id="llm-1", role="llm", engine="ollama", extra={"think": True})
+        llm = await self._mock_llm(cfg, handler)
+        schemas = [{"name": "book_appointment", "description": "Book it", "parameters": {"type": "object"}}]
+        _ = [e async for e in llm.generate_with_tools([ChatMessage(role="user", content="hi")], schemas)]
+
+        assert seen_payload["think"] is True
+        assert seen_payload["tools"] == [{"type": "function", "function": schemas[0]}]
+
+    async def test_think_false_reaches_generate_with_no_warning(self, caplog):
+        from ..providers.interfaces import ChatMessage
+
+        seen_payload = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_payload.update(json.loads(request.content))
+            body = b'{"message": {"role": "assistant", "content": "ok"}, "done": true}\n'
+            return httpx.Response(200, content=body)
+
+        cfg = ProviderConfig(id="llm-1", role="llm", engine="ollama", extra={"think": False})
+        with caplog.at_level("WARNING"):
+            llm = await self._mock_llm(cfg, handler)
+            _ = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
+
+        assert seen_payload["think"] is False
+        assert not any("extra.think" in record.message for record in caplog.records)
+
+    async def test_no_think_key_when_extra_is_empty(self):
+        from ..providers.interfaces import ChatMessage
+
+        seen_payload = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_payload.update(json.loads(request.content))
+            body = b'{"message": {"role": "assistant", "content": "ok"}, "done": true}\n'
+            return httpx.Response(200, content=body)
+
+        cfg = ProviderConfig(id="llm-1", role="llm", engine="ollama")
+        llm = await self._mock_llm(cfg, handler)
+        _ = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
+
+        assert "think" not in seen_payload
+
+    @pytest.mark.parametrize("bad_value", ["yes", 1, None, []])
+    async def test_non_bool_think_falls_back_and_warns(self, bad_value, caplog):
+        from ..providers.interfaces import ChatMessage
+
+        seen_payload = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_payload.update(json.loads(request.content))
+            body = b'{"message": {"role": "assistant", "content": "ok"}, "done": true}\n'
+            return httpx.Response(200, content=body)
+
+        cfg = ProviderConfig(id="llm-1", role="llm", engine="ollama", extra={"think": bad_value})
+        with caplog.at_level("WARNING"):
+            llm = await self._mock_llm(cfg, handler)
+            _ = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
+
+        assert "think" not in seen_payload
+        assert any("extra.think" in record.message for record in caplog.records)
 
 
 class TestRealMacosTtsFactory:

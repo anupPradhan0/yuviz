@@ -51,6 +51,22 @@ def voice_speed(cfg: "ProviderConfig") -> float:
     return VOICE_SPEED_DEFAULT
 
 
+_THINK_ABSENT = object()
+
+
+def _think_flag(cfg: "ProviderConfig") -> bool | None:
+    raw = (cfg.extra or {}).get("think", _THINK_ABSENT)
+    if raw is _THINK_ABSENT:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    log.warning(
+        "provider_config id=%s engine=%s: extra.think=%r is not a bool — omitting",
+        cfg.id, cfg.engine, raw,
+    )
+    return None
+
+
 # Fallback for every LLM factory below when extra has no "system" override.
 _VOICE_SYSTEM_PROMPT = (
     "You are a helpful voice assistant. "
@@ -99,6 +115,7 @@ async def _make_ollama(cfg: ProviderConfig, _api_key: str | None) -> Any:
         temperature=cfg.extra.get("temperature", 0.7),
         base_url=cfg.extra.get("base_url", "http://localhost:11434"),
         timeout_s=cfg.extra.get("timeout_s", 30.0),
+        think=_think_flag(cfg),
     )
 
 

@@ -65,6 +65,16 @@ class OllamaLLM:
     temperature — sampling temperature (0.0 = deterministic)
     base_url    — Ollama server URL
     timeout_s   — per-token generation timeout in seconds
+    think       — passed through as Ollama's "think" field when explicitly
+                  True or False; ignored by non-thinking models (confirmed
+                  live against qwen2.5:7b), but a thinking-capable model
+                  (e.g. gemma4) defaults to thinking ON and pays 5-8s/turn
+                  for it — confirmed live against gemma4:e2b: 5.4-8.0s with
+                  thinking vs 0.6-0.9s with think=False, both producing the
+                  same correct tool call. Defaults to None (omit the field
+                  entirely), which is byte-identical to today's payload and
+                  lets Ollama apply the model's own default — set explicitly
+                  to False to actually disable thinking on a thinking model.
     """
 
     def __init__(
@@ -75,17 +85,19 @@ class OllamaLLM:
         temperature: float = 0.7,
         base_url:    str = _DEFAULT_BASE_URL,
         timeout_s:   float = 30.0,
+        think:       bool | None = None,
     ) -> None:
         self._model       = model
         self._system      = system
         self._temperature = temperature
         self._base_url    = base_url.rstrip("/")
         self._timeout     = timeout_s
+        self._think       = think
         self._client      = httpx.AsyncClient(
             base_url=self._base_url,
             timeout=self._timeout,
         )
-        log.info("OllamaLLM model=%s base_url=%s", model, self._base_url)
+        log.info("OllamaLLM model=%s base_url=%s think=%s", model, self._base_url, think)
 
     async def generate(self, messages: list[ChatMessage]) -> AsyncGenerator[str, None]:
         all_messages = build_chat_messages(self._system, messages)
@@ -97,6 +109,8 @@ class OllamaLLM:
             "options": {"temperature": self._temperature},
             "keep_alive": _KEEP_ALIVE,
         }
+        if self._think is not None:
+            payload["think"] = self._think
 
         async with self._client.stream("POST", "/api/chat", json=payload) as resp:
             resp.raise_for_status()
@@ -157,6 +171,8 @@ class OllamaLLM:
             "options":  {"temperature": self._temperature},
             "keep_alive": _KEEP_ALIVE,
         }
+        if self._think is not None:
+            payload["think"] = self._think
 
         async with self._client.stream("POST", "/api/chat", json=payload) as resp:
             resp.raise_for_status()
