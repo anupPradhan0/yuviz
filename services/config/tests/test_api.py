@@ -211,19 +211,21 @@ class TestAgentEndpoints:
         assert resp.status_code == 201
         created = resp.json()
         assert created["slug"] == "support-agent"
-        assert "workflow" not in created and "workflow_draft" not in created
+        assert "workflow" in created and "workflow_draft" not in created
+        assert isinstance(created["workflow"], dict)
 
         resp = await client.get(f"/tenants/{test_tenant['slug']}/agents/support-agent")
         assert resp.status_code == 200
         body = resp.json()
         assert body["greeting"] == "Hi!"
-        assert "workflow" not in body and "workflow_draft" not in body
+        assert "workflow" in body and "workflow_draft" not in body
         wf = await client.get(f"/tenants/{test_tenant['slug']}/agents/{created['id']}/workflow")
         assert wf.status_code == 200
         graph = wf.json()["workflow"]
         assert isinstance(graph, dict)
         start = next(n for n in graph["nodes"] if n["type"] == "start")
         assert start["data"]["greeting"] == "Hi!"
+        assert body["workflow"] == graph
 
     async def test_creating_the_same_slug_twice_is_409_not_500(self, client, test_tenant):
         body = {"slug": "dupe-agent", "name": "Dupe"}
