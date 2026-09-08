@@ -331,6 +331,67 @@ class TestOllamaThinkResolution:
         assert "think" not in seen_payload
         assert any("extra.think" in record.message for record in caplog.records)
 
+    async def test_thinking_capable_model_defaults_think_false_not_omitted(self):
+        """gemma4:e2b's own Ollama default is thinking ON — the admin-ui catalog
+        makes it selectable with no way to set extra.think (ProvidersPanel has no
+        extra.* fields today), so absent think on this model must resolve to an
+        explicit False, not the omit-the-key default every other engine gets."""
+        from ..providers.interfaces import ChatMessage
+
+        seen_payload = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_payload.update(json.loads(request.content))
+            body = b'{"message": {"role": "assistant", "content": "ok"}, "done": true}\n'
+            return httpx.Response(200, content=body)
+
+        cfg = ProviderConfig(id="llm-1", role="llm", engine="ollama", model="gemma4:e2b")
+        llm = await self._mock_llm(cfg, handler)
+        _ = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
+
+        assert seen_payload["think"] is False
+
+    async def test_thinking_capable_model_explicit_true_still_honored(self):
+        from ..providers.interfaces import ChatMessage
+
+        seen_payload = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_payload.update(json.loads(request.content))
+            body = b'{"message": {"role": "assistant", "content": "ok"}, "done": true}\n'
+            return httpx.Response(200, content=body)
+
+        cfg = ProviderConfig(
+            id="llm-1", role="llm", engine="ollama", model="gemma4:e2b", extra={"think": True},
+        )
+        llm = await self._mock_llm(cfg, handler)
+        _ = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
+
+        assert seen_payload["think"] is True
+
+    @pytest.mark.parametrize("string_value,expected", [("true", True), ("false", False), ("True", True), (" False ", False)])
+    async def test_string_true_false_is_parsed_not_treated_as_malformed(self, string_value, expected, caplog):
+        """A form-driven or hand-edited config plausibly writes booleans as
+        strings (see admin-ui/components/ToolsPanel.tsx's String(raw) coercion
+        for non-boolean/non-number extra fields) — "false" must mean False,
+        not fall through to the malformed-value warning path."""
+        from ..providers.interfaces import ChatMessage
+
+        seen_payload = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_payload.update(json.loads(request.content))
+            body = b'{"message": {"role": "assistant", "content": "ok"}, "done": true}\n'
+            return httpx.Response(200, content=body)
+
+        cfg = ProviderConfig(id="llm-1", role="llm", engine="ollama", extra={"think": string_value})
+        with caplog.at_level("WARNING"):
+            llm = await self._mock_llm(cfg, handler)
+            _ = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
+
+        assert seen_payload["think"] is expected
+        assert not any("extra.think" in record.message for record in caplog.records)
+
 
 class TestRealMacosTtsFactory:
     async def test_get_tts_creates_real_macos_instance_and_synthesizes_audio(self):

@@ -93,11 +93,57 @@ class OllamaLLM:
         self._base_url    = base_url.rstrip("/")
         self._timeout     = timeout_s
         self._think       = think
+        # Set once a live 400 proves this model rejects `think` outright
+        # (some Ollama builds do, rather than ignoring it) — after that,
+        # every later call on this instance skips sending the field at
+        # all instead of retrying-and-failing every single turn.
+        self._think_unsupported = False
         self._client      = httpx.AsyncClient(
             base_url=self._base_url,
             timeout=self._timeout,
         )
         log.info("OllamaLLM model=%s base_url=%s think=%s", model, self._base_url, think)
+
+    async def _stream_chat_lines(self, payload: dict[str, Any]) -> AsyncGenerator[str, None]:
+        """POST /api/chat, degrading gracefully if this model 400s on an
+        unsupported `think` field instead of ignoring it (observed on at
+        least some Ollama builds) — retry once without the key, and
+        remember the rejection so later turns on this instance never
+        pay for the failing request again."""
+        if self._think_unsupported:
+            payload = {k: v for k, v in payload.items() if k != "think"}
+        if "think" not in payload:
+            async with self._client.stream("POST", "/api/chat", json=payload) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    yield line
+            return
+
+        rejected = False
+        async with self._client.stream("POST", "/api/chat", json=payload) as resp:
+            if resp.status_code == 400:
+                body = await resp.aread()
+                rejected = b"think" in body.lower()
+                if not rejected:
+                    resp.raise_for_status()
+            else:
+                resp.raise_for_status()
+            if not rejected:
+                async for line in resp.aiter_lines():
+                    yield line
+
+        if rejected:
+            log.warning(
+                "OllamaLLM: model=%s rejected think=%r — retrying without it "
+                "and disabling think for this instance",
+                self._model, payload["think"],
+            )
+            self._think_unsupported = True
+            fallback = {k: v for k, v in payload.items() if k != "think"}
+            async with self._client.stream("POST", "/api/chat", json=fallback) as resp2:
+                resp2.raise_for_status()
+                async for line in resp2.aiter_lines():
+                    yield line
 
     async def generate(self, messages: list[ChatMessage]) -> AsyncGenerator[str, None]:
         all_messages = build_chat_messages(self._system, messages)
@@ -112,21 +158,19 @@ class OllamaLLM:
         if self._think is not None:
             payload["think"] = self._think
 
-        async with self._client.stream("POST", "/api/chat", json=payload) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    log.warning("OllamaLLM: malformed JSON line=%r", line)
-                    continue
-                if data.get("done"):
-                    break
-                token = data.get("message", {}).get("content", "")
-                if token:
-                    yield token
+        async for line in self._stream_chat_lines(payload):
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                log.warning("OllamaLLM: malformed JSON line=%r", line)
+                continue
+            if data.get("done"):
+                break
+            token = data.get("message", {}).get("content", "")
+            if token:
+                yield token
 
     async def warm(self) -> None:
         # One real request so the model loads into memory before a live
@@ -174,32 +218,30 @@ class OllamaLLM:
         if self._think is not None:
             payload["think"] = self._think
 
-        async with self._client.stream("POST", "/api/chat", json=payload) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    log.warning("OllamaLLM: malformed JSON line=%r", line)
-                    continue
-                if data.get("done"):
-                    break
-                message = data.get("message", {})
-                tool_calls = message.get("tool_calls") or []
-                for i, call in enumerate(tool_calls):
-                    fn = call.get("function", {})
-                    yield ToolCallEvent(
-                        tool_call_id=call.get("id") or f"call_{i}",
-                        tool_name=fn.get("name", ""),
-                        arguments=fn.get("arguments") or {},
-                    )
-                if tool_calls:
-                    return
-                token = message.get("content", "")
-                if token:
-                    yield TokenEvent(text=token)
+        async for line in self._stream_chat_lines(payload):
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                log.warning("OllamaLLM: malformed JSON line=%r", line)
+                continue
+            if data.get("done"):
+                break
+            message = data.get("message", {})
+            tool_calls = message.get("tool_calls") or []
+            for i, call in enumerate(tool_calls):
+                fn = call.get("function", {})
+                yield ToolCallEvent(
+                    tool_call_id=call.get("id") or f"call_{i}",
+                    tool_name=fn.get("name", ""),
+                    arguments=fn.get("arguments") or {},
+                )
+            if tool_calls:
+                return
+            token = message.get("content", "")
+            if token:
+                yield TokenEvent(text=token)
 
     async def aclose(self) -> None:
         await self._client.aclose()

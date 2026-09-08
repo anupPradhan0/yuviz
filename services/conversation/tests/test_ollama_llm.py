@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 
 from services.conversation.providers.interfaces import ChatMessage
 from services.conversation.providers.llm.ollama import OllamaLLM
@@ -283,3 +284,50 @@ async def test_generate_with_tools_shapes_tool_call_and_result_natively():
 
     tool_msg = next(m for m in seen_payload["messages"] if m["role"] == "tool")
     assert tool_msg["content"] == '{"status": "success", "booked": true}'
+
+
+async def test_400_thinking_rejection_retries_once_without_think_and_remembers_it():
+    """Some Ollama builds 400 on an unsupported `think` field instead of
+    ignoring it. First request 400s (mentioning "think" in the body) -> the
+    client must retry once, without the key, and get a real answer. A
+    second, independent turn on the same instance must skip sending `think`
+    from the start rather than 400-then-retry every single turn forever."""
+    payloads_seen = []
+    call_count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        payloads_seen.append(payload)
+        call_count["n"] += 1
+        if "think" in payload:
+            return httpx.Response(400, content=b'{"error":"gemma3 does not support thinking"}')
+        return httpx.Response(200, content=_ndjson_body(
+            {"message": {"role": "assistant", "content": "ok"}, "done": False},
+            {"message": {"role": "assistant", "content": ""}, "done": True},
+        ))
+
+    llm = _make_llm(handler, think=False)
+
+    tokens = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
+    assert tokens == ["ok"]
+    assert len(payloads_seen) == 2  # the failing attempt, then the retry
+    assert "think" in payloads_seen[0]
+    assert "think" not in payloads_seen[1]
+
+    # Second turn: no retry needed, straight to the working shape.
+    tokens2 = [tok async for tok in llm.generate([ChatMessage(role="user", content="again")])]
+    assert tokens2 == ["ok"]
+    assert len(payloads_seen) == 3
+    assert "think" not in payloads_seen[2]
+
+
+async def test_non_thinking_related_400_is_not_swallowed():
+    """A 400 unrelated to `think` (e.g. a genuinely malformed request) must
+    still raise — the graceful-degrade path is specific to the thinking
+    rejection, not a blanket "ignore 400s" behaviour."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, content=b'{"error":"model not found"}')
+
+    llm = _make_llm(handler, think=False)
+    with pytest.raises(httpx.HTTPStatusError):
+        _ = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
