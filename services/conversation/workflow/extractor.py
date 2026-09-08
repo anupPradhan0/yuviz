@@ -1,8 +1,8 @@
 """Background LLM passes: variable extraction on node leave, context summarization.
 
 Out-of-band on the call's LLM — never in conversation context, never fail the call.
-Queued during a transition; pipeline starts them after the live generate finishes
-so they cannot contend with generate_with_tools on the same provider instance.
+Queued during a transition; pipeline starts them after the live generate finishes.
+Interrupted when the caller speaks so they cannot contend with the next turn.
 """
 
 from __future__ import annotations
@@ -28,9 +28,17 @@ _SUMMARY_THRESHOLD_MSGS = 16
 # Recent turns kept verbatim — paraphrasing them breaks the live exchange.
 _SUMMARY_KEEP_LAST = 4
 
+# Caller-controlled strings reach transfer destinations and prompts — reject
+# control chars (ESL newline injection) and cap length (prefill bloat).
+_MAX_EXTRACTED_STR_LEN = 256
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 _BOOL_TRUE = frozenset({"true", "yes", "1"})
 _BOOL_FALSE = frozenset({"false", "no", "0"})
+
+_EXTRACT_SYSTEM = "Reply with a single JSON object only. No prose, no markdown."
+_SUMMARY_SYSTEM = "Reply with a short plain-text summary only. No preamble."
 
 
 def summary_threshold_for(max_history: int) -> int:
@@ -114,7 +122,12 @@ def _coerce(value: Any, declared_type: str) -> Any:
         if token in _BOOL_FALSE:
             return False
         return None
-    return str(value)
+    text = str(value)
+    if _CONTROL_CHARS_RE.search(text):
+        return None
+    if len(text) > _MAX_EXTRACTED_STR_LEN:
+        text = text[:_MAX_EXTRACTED_STR_LEN]
+    return text
 
 
 class VariableExtractor:
@@ -131,8 +144,12 @@ class VariableExtractor:
         self._timeout_s = timeout_s
         self._deferred: list[tuple[Node, list[ChatMessage]]] = []
         self._pending: set[asyncio.Task] = set()
+        self._inflight: dict[asyncio.Task, tuple[Node, list[ChatMessage]]] = {}
         # Teardown can fire more than once; only one final extract.
         self._final_done = False
+
+    def pending_tasks(self) -> set[asyncio.Task]:
+        return set(self._pending)
 
     @staticmethod
     def _wants_extraction(node: Node) -> bool:
@@ -151,7 +168,21 @@ class VariableExtractor:
             node, history = self._deferred.pop(0)
             task = asyncio.ensure_future(self._extract(node, history))
             self._pending.add(task)
-            task.add_done_callback(self._pending.discard)
+            self._inflight[task] = (node, history)
+            task.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        self._pending.discard(task)
+        self._inflight.pop(task, None)
+
+    def interrupt_for_live_turn(self) -> None:
+        """Caller spoke — free the LLM; re-queue in-flight extracts for after this turn."""
+        for task in list(self._pending):
+            item = self._inflight.pop(task, None)
+            task.cancel()
+            if item is not None:
+                self._deferred.append(item)
+        self._pending.clear()
 
     def cancel_pending(self) -> None:
         """Drop queued work and cancel in-flight tasks (hangup timeout)."""
@@ -159,6 +190,7 @@ class VariableExtractor:
         for task in list(self._pending):
             task.cancel()
         self._pending.clear()
+        self._inflight.clear()
 
     async def extract_final(self, node: Node, history: list[ChatMessage]) -> None:
         """Idempotent hangup pass; no-ops on end nodes with no extraction."""
@@ -168,7 +200,7 @@ class VariableExtractor:
         await self._extract(node, list(history))
 
     async def flush(self) -> None:
-        """Await in-flight extracts (transfer routing / call end)."""
+        """Await in-flight extracts (call end)."""
         pending = list(self._pending)
         if not pending:
             return
@@ -192,8 +224,14 @@ class VariableExtractor:
                 "Reply with a single JSON object whose keys are exactly the names above. "
                 "Use null for anything the caller did not actually say — never guess."
             )
+            # System message suppresses the provider's voice prompt (build_chat_messages).
             raw = await _collect(
-                self._llm, [ChatMessage(role="user", content=prompt)], self._timeout_s,
+                self._llm,
+                [
+                    ChatMessage(role="system", content=_EXTRACT_SYSTEM),
+                    ChatMessage(role="user", content=prompt),
+                ],
+                self._timeout_s,
             )
             parsed = _parse_json_object(raw)
             values = {
@@ -229,6 +267,10 @@ class ContextSummarizer:
         self._timeout_s = timeout_s
         self._deferred: list[ChatMessage] | None = None
         self._task: asyncio.Task | None = None
+        self._inflight_history: list[ChatMessage] | None = None
+
+    def has_background_work(self) -> bool:
+        return self._task is not None and not self._task.done()
 
     def maybe_summarize(self, history: list[ChatMessage]) -> None:
         if len(history) <= self._threshold:
@@ -241,11 +283,31 @@ class ContextSummarizer:
             return
         history = self._deferred
         self._deferred = None
-        self.cancel()
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+        self._inflight_history = history
         self._task = asyncio.ensure_future(self._summarize(history))
+        self._task.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        if self._task is task:
+            self._task = None
+            self._inflight_history = None
+
+    def interrupt_for_live_turn(self) -> None:
+        """Caller spoke — free the LLM; re-queue an in-flight summary."""
+        if self._task is not None and not self._task.done():
+            hist = self._inflight_history
+            self._task.cancel()
+            self._task = None
+            self._inflight_history = None
+            if hist is not None and self._deferred is None:
+                self._deferred = hist
+        # Keep an already-queued _deferred for after this turn.
 
     def cancel(self) -> None:
         self._deferred = None
+        self._inflight_history = None
         if self._task is not None and not self._task.done():
             self._task.cancel()
         self._task = None
@@ -270,7 +332,12 @@ class ContextSummarizer:
                 + "\n".join(f"{m.role}: {m.content.strip()}" for m in older if (m.content or "").strip())
             )
             summary = (await _collect(
-                self._llm, [ChatMessage(role="user", content=prompt)], self._timeout_s,
+                self._llm,
+                [
+                    ChatMessage(role="system", content=_SUMMARY_SYSTEM),
+                    ChatMessage(role="user", content=prompt),
+                ],
+                self._timeout_s,
             )).strip()
             if not summary:
                 return

@@ -12,7 +12,14 @@ from libs.config_sdk.workflow import Extraction, ExtractionVariable, Node
 
 from services.conversation.providers.interfaces import ChatMessage
 from services.conversation.workflow import ContextSummarizer, VariableExtractor
-from services.conversation.workflow.extractor import _strip_transition_noise
+from services.conversation.workflow.extractor import (
+    _EXTRACT_SYSTEM,
+    _MAX_EXTRACTED_STR_LEN,
+    _SUMMARY_KEEP_LAST,
+    _coerce,
+    _strip_transition_noise,
+    summary_threshold_for,
+)
 
 
 class _FakeLLM:
@@ -64,6 +71,22 @@ def test_boolean_unknown_token_is_dropped_not_coerced_to_false():
     assert got == {}
 
 
+def test_coerce_rejects_control_chars_and_caps_length():
+    assert _coerce("555\nbgapi reloadxml", "string") is None
+    assert _coerce("ok\rcmd", "string") is None
+    assert _coerce("x" * (_MAX_EXTRACTED_STR_LEN + 50), "string") == "x" * _MAX_EXTRACTED_STR_LEN
+    assert _coerce("+15551212", "string") == "+15551212"
+
+
+def test_extraction_sends_json_only_system_prompt():
+    llm = _FakeLLM('{"policy_number": "AB-1"}')
+    extractor = VariableExtractor(llm, lambda _: None)
+    asyncio.run(extractor._extract(_node(), [ChatMessage(role="user", content="AB-1")]))
+    assert llm.calls[0][0].role == "system"
+    assert llm.calls[0][0].content == _EXTRACT_SYSTEM
+    assert llm.calls[0][1].role == "user"
+
+
 def test_extract_queues_until_start_deferred():
     llm = _FakeLLM('{"policy_number": "AB-1"}')
     got: dict = {}
@@ -73,6 +96,35 @@ def test_extract_queues_until_start_deferred():
     assert got == {}
 
     async def _run():
+        extractor.start_deferred()
+        await extractor.flush()
+
+    asyncio.run(_run())
+    assert got == {"policy_number": "AB-1"}
+
+
+def test_interrupt_for_live_turn_requeues_in_flight_extract():
+    started = asyncio.Event()
+
+    class _HangLLM:
+        async def generate(self, messages):
+            started.set()
+            await asyncio.Event().wait()
+            yield "{}"
+
+    got: dict = {}
+    extractor = VariableExtractor(_HangLLM(), got.update)
+    extractor.extract(_node(), [ChatMessage(role="user", content="AB-1")])
+
+    async def _run():
+        extractor.start_deferred()
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        assert extractor.pending_tasks()
+        extractor.interrupt_for_live_turn()
+        assert extractor.pending_tasks() == set()
+        assert len(extractor._deferred) == 1
+        # Swap in a finishing LLM so the re-queued extract can land.
+        extractor._llm = _FakeLLM('{"policy_number": "AB-1"}')
         extractor.start_deferred()
         await extractor.flush()
 
@@ -245,9 +297,21 @@ def test_a_failing_summary_keeps_the_full_context():
     assert history == before
 
 
-def test_the_summary_threshold_stays_under_the_pipelines_trim_cap():
-    from services.conversation.workflow import summary_threshold_for
+def test_the_summary_threshold_pins_formula_and_keeps_trim_slack():
+    """Pins expected values; the -4 slack must stay load-bearing (lesson 12)."""
+    assert summary_threshold_for(1) == 2
+    assert summary_threshold_for(5) == 6
+    assert summary_threshold_for(10) == 16
+    assert summary_threshold_for(40) == 76
+    for max_history in (10, 40):
+        with_slack = summary_threshold_for(max_history)
+        # Same formula without the -4 would sit at the trim floor and leave
+        # no room for the summary message under max_history*2+1.
+        without_slack = min(
+            max(_SUMMARY_KEEP_LAST + 2, max_history * 2),
+            max_history * 2,
+        )
+        assert with_slack == max_history * 2 - 4
+        assert without_slack == max_history * 2
+        assert with_slack < without_slack
 
-    for max_history in (1, 5, 10, 40):
-        trim_cap = max_history * 2 + 1      # pipeline._trim_history
-        assert summary_threshold_for(max_history) < trim_cap, max_history

@@ -771,6 +771,10 @@ class PipelineConversationHandler:
         cancel_event = asyncio.Event()
         self._session(session_id).cancelled = cancel_event
 
+        # Free the shared call LLM before this turn's generate — a prior
+        # turn's extract/summarize would otherwise queue behind Ollama.
+        self._interrupt_workflow_background_llm()
+
         # Sub-1s blips (echo tails, breaths, ambient noise) make Whisper
         # hallucinate filler or, worse, guess a wrong language entirely on
         # noise with no real content (observed live: a noise blip
@@ -949,8 +953,8 @@ class PipelineConversationHandler:
         except Exception:
             log.exception("LLM/TTS pipeline failed session=%s", session_id)
 
-        # Transitions queue extract/summarize; start them only after the live
-        # generate so they cannot contend for the shared call LLM mid-turn.
+        # Transitions queue extract/summarize; start after the live generate.
+        # on_speech_ended/on_cancel interrupt them before the next turn.
         self._start_workflow_background_llm()
 
         # llm_ms: time to the LLM's first token/event — the "thinking" time
@@ -1156,6 +1160,7 @@ class PipelineConversationHandler:
         self._cancel_event(session_id).set()
         # Barge-in before pending_speech is consumed must not replay it next turn.
         self._workflow.pending_speech = None
+        self._interrupt_workflow_background_llm()
 
     async def on_session_end(self, session_id: str, reason: str,
                              final_state: str | None = None) -> None:
@@ -1385,17 +1390,26 @@ class PipelineConversationHandler:
         # Do not let a queued summary race the transfer path on the call LLM.
         self._summarizer.cancel()
         self._extractor.start_deferred()
-        try:
-            await asyncio.wait_for(
-                self._extractor.flush(), timeout=_TRANSFER_FLUSH_TIMEOUT_S,
+        pending = self._extractor.pending_tasks()
+        if pending:
+            _done, still = await asyncio.wait(
+                pending, timeout=_TRANSFER_FLUSH_TIMEOUT_S,
             )
-        except asyncio.TimeoutError:
-            log.warning(
-                "workflow: extraction flush timed out before transfer session=%s — "
-                "routing with variables collected so far",
-                session_id,
-            )
+            if still:
+                log.warning(
+                    "workflow: extraction flush timed out before transfer session=%s — "
+                    "routing with variables collected so far; stragglers left running",
+                    session_id,
+                )
         destination = self._workflow.render(node.transfer_destination or "") or None
+        problem = transfer_destination_problem(destination)
+        if problem is not None:
+            log.warning(
+                "Workflow transfer node %r rejected: %s session=%s",
+                node.name, problem, session_id,
+            )
+            self._workflow.abandon_transfer()
+            return None
         decision = self._transfer_engine.evaluate(
             self._decision_context(session_id, destination_override=destination),
             TransferTrigger(
@@ -1411,6 +1425,10 @@ class PipelineConversationHandler:
             return None
         self._session(session_id).transfer_requested = True
         return decision.request
+
+    def _interrupt_workflow_background_llm(self) -> None:
+        self._extractor.interrupt_for_live_turn()
+        self._summarizer.interrupt_for_live_turn()
 
     def _start_workflow_background_llm(self) -> None:
         self._extractor.start_deferred()

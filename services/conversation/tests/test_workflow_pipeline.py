@@ -273,8 +273,8 @@ async def test_session_end_persists_workflow_outcome_even_when_extraction_times_
     assert "caller_number" not in (kwargs["extracted_variables"] or {})
 
 
-async def test_transfer_flush_timeout_still_routes():
-    """A stuck in-flight extract must not block transfer forever."""
+async def test_transfer_flush_timeout_still_routes_and_leaves_straggler():
+    """A stuck extract must not block transfer; wait must not cancel it."""
     import services.conversation.pipeline as pipeline_mod
 
     llm = _ScriptedToolLLM([
@@ -286,17 +286,128 @@ async def test_transfer_flush_timeout_still_routes():
         transfer_type="warm", transfer_destination="+15550001111",
     )
 
-    async def _never():
+    async def _hang():
         await asyncio.Event().wait()
 
-    handler._extractor.flush = _never  # type: ignore[method-assign]
+    straggler = asyncio.ensure_future(_hang())
+    # Inject via pending_tasks so on_speech_ended's interrupt does not cancel it —
+    # we are testing the transfer wait path only.
+    handler._extractor.pending_tasks = lambda: {straggler}  # type: ignore[method-assign]
     original = pipeline_mod._TRANSFER_FLUSH_TIMEOUT_S
     pipeline_mod._TRANSFER_FLUSH_TIMEOUT_S = 0.05
     try:
         responses = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+        assert not straggler.done(), "wait timeout must not cancel the extract"
     finally:
         pipeline_mod._TRANSFER_FLUSH_TIMEOUT_S = original
+        straggler.cancel()
+        try:
+            await straggler
+        except asyncio.CancelledError:
+            pass
 
     transfers = [r.transfer_request for r in responses if r.transfer_request]
     assert len(transfers) == 1
     assert transfers[0].destination == "+15559999"
+
+
+async def test_transfer_rejects_injected_destination_from_extracted_variable():
+    """Rendered destinations must pass transfer_destination_problem before dial."""
+    graph = {
+        "version": 1,
+        "nodes": [
+            {"id": "g1", "type": "global", "data": {
+                "name": "always applies", "prompt": "You are Ada."}},
+            {"id": "n1", "type": "start", "data": {
+                "name": "greeting", "prompt": "Ask.", "greeting": "Hi."}},
+            {"id": "n2", "type": "transfer", "data": {
+                "name": "to_human", "prompt": "Connect.",
+                "transfer_destination": "{{ callback_number }}"}},
+            {"id": "n3", "type": "end", "data": {
+                "name": "goodbye", "prompt": "Close.", "disposition": "completed"}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "n2", "data": {
+                "label": "wants a human", "condition": "caller wants a person"}},
+            {"id": "e2", "source": "n1", "target": "n3", "data": {
+                "label": "all done", "condition": "done"}},
+        ],
+    }
+    llm = _ScriptedToolLLM([
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_a_human", arguments={})],
+        [TokenEvent(text="One moment.")],
+    ])
+    handler = _handler(
+        llm, _RecordingPolicyResolver(), workflow=graph,
+        transfer_type="warm", transfer_destination="+15550001111",
+    )
+    handler._workflow.update_variables({
+        "callback_number": "+15551212\nbgapi reloadxml",
+    })
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+    assert not any(r.transfer_request for r in responses)
+    assert handler._workflow.node.name == "greeting"
+
+
+async def test_next_turn_interrupts_background_extract_before_live_generate():
+    """Nothing background may hold the shared LLM while generate_with_tools runs."""
+    extract_started = asyncio.Event()
+    extract_cancelled = asyncio.Event()
+    live_saw_clear = asyncio.Event()
+    handler_box: list = []
+
+    class _TrackingLLM(_ScriptedToolLLM):
+        async def generate(self, messages):
+            extract_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                extract_cancelled.set()
+                raise
+            yield "{}"
+
+        async def generate_with_tools(self, messages, schemas, tool_choice=None):
+            h = handler_box[0]
+            assert not h._extractor.pending_tasks()
+            assert not h._summarizer.has_background_work()
+            live_saw_clear.set()
+            async for event in super().generate_with_tools(messages, schemas, tool_choice):
+                yield event
+
+    graph = {
+        "version": 1,
+        "nodes": [
+            {"id": "g1", "type": "global", "data": {
+                "name": "always applies", "prompt": "You are Ada."}},
+            {"id": "n1", "type": "start", "data": {
+                "name": "greeting", "prompt": "Ask.", "greeting": "Hi.",
+                "extraction": {"enabled": True, "variables": [
+                    {"name": "reason", "type": "string", "prompt": "why"}]},
+            }},
+            {"id": "n2", "type": "agent", "data": {
+                "name": "booking", "prompt": "Book."}},
+            {"id": "n3", "type": "end", "data": {
+                "name": "goodbye", "prompt": "Bye.", "disposition": "qualified"}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "n2", "data": {
+                "label": "wants to book", "condition": "book"}},
+            {"id": "e2", "source": "n2", "target": "n3", "data": {
+                "label": "booked", "condition": "done"}},
+        ],
+    }
+    llm = _TrackingLLM([
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_to_book", arguments={})],
+        [TokenEvent(text="Sure.")],
+        [TokenEvent(text="What time?")],
+    ])
+    handler = _handler(llm, _RecordingPolicyResolver(), workflow=graph)
+    handler_box.append(handler)
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+    await asyncio.wait_for(extract_started.wait(), timeout=1.0)
+    assert handler._extractor.pending_tasks()
+
+    [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+    await asyncio.wait_for(live_saw_clear.wait(), timeout=1.0)
+    await asyncio.wait_for(extract_cancelled.wait(), timeout=1.0)
