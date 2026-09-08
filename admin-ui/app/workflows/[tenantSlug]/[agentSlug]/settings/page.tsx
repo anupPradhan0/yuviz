@@ -42,11 +42,8 @@ export default function AgentDetailPage() {
   const [chosenEngine, setChosenEngine] = useState<"macos" | "kokoro" | "elevenlabs" | null>(null);
   const [showEngineChooser, setShowEngineChooser] = useState(false);
 
-  // Nothing on this page is conversation text any more — it all moved into
-  // the flow (docs/workflow.md §9.1). The banner says where it went, so an
-  // operator looking for "where do I change the greeting?" is pointed at the
-  // canvas instead of concluding the field was lost. Keyed off the
-  // *published* graph, not the draft: that is what live calls execute.
+  // Greeting / system prompt live on the canvas; end-call and transfer
+  // speech still use agent columns (pipeline _prompt_suffix / scripted lines).
   const hasWorkflow = Boolean(agent?.workflow?.nodes?.length);
 
   useEffect(() => {
@@ -72,6 +69,10 @@ export default function AgentDetailPage() {
           transfer_waiting_experience: a.transfer_waiting_experience,
           max_call_duration_s: a.max_call_duration_s,
           status: a.status,
+          end_call_prompt: a.end_call_prompt,
+          transfer_prompt: a.transfer_prompt,
+          farewell_message: a.farewell_message,
+          transfer_announcement: a.transfer_announcement,
         });
         if (a.language && LANGUAGES.some((l) => l.value === a.language)) {
           setLanguageChoice(a.language);
@@ -297,13 +298,45 @@ export default function AgentDetailPage() {
           <div className="col-main">
             {hasWorkflow && (
               <div className="info-banner">
-                <strong>What this agent says lives in its{" "}
+                <strong>Stage prompts live in the{" "}
                 <Link href={`/workflows/${tenantSlug}/${agentSlug}`}>flow</Link>.</strong>{" "}
-                The greeting is on the start step, the always-applies step holds the instructions
-                that apply everywhere, and each end step says its own goodbye. What is left here
-                is how the agent sounds and what it is allowed to do.
+                Greeting is on the start step; always-applies holds global instructions.
+                End-call and transfer wording below still apply on every call.
               </div>
             )}
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-hdr">
+                <div className="card-title">Call ending</div>
+                <div className="card-sub">condition + verbatim farewell</div>
+              </div>
+              <div className="card-body">
+                <div className="form-group">
+                  <label className="form-label">
+                    End Call Condition <span className="hint">WHEN to end — a &quot;When the caller…&quot; clause, not what to say. Blank = default.</span>
+                  </label>
+                  <textarea
+                    className="form-textarea"
+                    style={{ minHeight: 48 }}
+                    value={form.end_call_prompt || ""}
+                    onChange={(e) => setForm({ ...form, end_call_prompt: e.target.value || null })}
+                    placeholder="When the conversation is genuinely finished (the caller says goodbye, has no more questions, or the issue is resolved)"
+                  />
+                </div>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label">
+                    Farewell Message <span className="hint">exact words spoken when ending the call — verbatim, never paraphrased. Blank = AI chooses the wording.</span>
+                  </label>
+                  <textarea
+                    className="form-textarea"
+                    style={{ minHeight: 48 }}
+                    value={form.farewell_message || ""}
+                    onChange={(e) => setForm({ ...form, farewell_message: e.target.value || null })}
+                    placeholder="Thank you for calling. Have a wonderful day. Goodbye!"
+                  />
+                </div>
+              </div>
+            </div>
 
             <div className="card" style={{ marginBottom: 14 }}>
               <div className="card-hdr">
@@ -507,6 +540,32 @@ export default function AgentDetailPage() {
                       value={form.transfer_destination || ""}
                       onChange={(e) => setForm({ ...form, transfer_destination: e.target.value || null })}
                       placeholder="+18005550100 or sip:agent@example.com"
+                      disabled={(form.transfer_type || "none") === "none"}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">
+                      Transfer Condition <span className="hint">WHEN to transfer — an &quot;If the caller…&quot; clause, not what to say. Blank = default.</span>
+                    </label>
+                    <textarea
+                      className="form-textarea"
+                      style={{ minHeight: 48 }}
+                      value={form.transfer_prompt || ""}
+                      onChange={(e) => setForm({ ...form, transfer_prompt: e.target.value || null })}
+                      placeholder="If the caller explicitly asks to speak to a human agent or representative"
+                      disabled={(form.transfer_type || "none") === "none"}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">
+                      Transfer Announcement <span className="hint">exact words spoken before transferring — verbatim, never paraphrased. Blank = AI chooses the wording.</span>
+                    </label>
+                    <textarea
+                      className="form-textarea"
+                      style={{ minHeight: 48 }}
+                      value={form.transfer_announcement || ""}
+                      onChange={(e) => setForm({ ...form, transfer_announcement: e.target.value || null })}
+                      placeholder="Please hold while I transfer your call."
                       disabled={(form.transfer_type || "none") === "none"}
                     />
                   </div>

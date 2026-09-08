@@ -155,7 +155,19 @@ function Panel({
   const seedPristine = useRef<string | null>(null);
   const saveGen = useRef(0);
   const saveAbort = useRef<AbortController | null>(null);
+  const configVersion = useRef<number>(0);
   const reactFlow = useReactFlow();
+
+  const applyWorkflowState = useCallback((state: Awaited<ReturnType<typeof getWorkflow>>) => {
+    const fromServer = state.workflow_draft ?? state.workflow;
+    const graph = fromServer ?? starterGraph(greeting, systemPrompt);
+    const rf = toReactFlow(graph);
+    seedPristine.current = fromServer ? null : JSON.stringify(toGraph(rf.nodes, rf.edges));
+    configVersion.current = state.config_version;
+    setNodes(rf.nodes);
+    setEdges(rf.edges);
+    setPublished(state.workflow ? canonicalize(state.workflow) : null);
+  }, [greeting, systemPrompt, setNodes, setEdges]);
 
   useEffect(() => {
     loaded.current = false;
@@ -170,14 +182,7 @@ function Panel({
       listAgentKnowledgeBases(agentId).catch(() => []),
     ])
       .then(([state, policies, kbs]) => {
-        const fromServer = state.workflow_draft ?? state.workflow;
-        const graph = fromServer ?? starterGraph(greeting, systemPrompt);
-        const rf = toReactFlow(graph);
-        // Match the editor's serialized form so an untouched seed never autosaves.
-        seedPristine.current = fromServer ? null : JSON.stringify(toGraph(rf.nodes, rf.edges));
-        setNodes(rf.nodes);
-        setEdges(rf.edges);
-        setPublished(state.workflow ? canonicalize(state.workflow) : null);
+        applyWorkflowState(state);
         setAgentTools(policies.filter((p) => p.enabled).map((p) => p.tool_name));
         setKnowledgeBases(kbs.map((kb) => ({ id: kb.kb_id, name: kb.kb_name })));
         setShowHelp(!state.workflow && !state.workflow_draft);
@@ -278,8 +283,7 @@ function Panel({
     return () => window.removeEventListener("keydown", onKey);
   }, [undo, redo]);
 
-  // ── Autosave ──────────────────────────────────────────────────────────
-  // Abort + generation so a slow PUT cannot clobber draft after publish.
+  // Autosave: abort + config_version fence so a late PUT cannot clobber after publish.
   useEffect(() => {
     if (!loaded.current || publishing) return;
     if (seedPristine.current !== null) {
@@ -292,12 +296,25 @@ function Panel({
     saveAbort.current = ac;
     setSaveState("saving");
     const timer = setTimeout(() => {
-      saveWorkflowDraft(tenantSlug, agentId, JSON.parse(serialized), ac.signal)
-        .then(() => {
-          if (gen === saveGen.current) setSaveState("saved");
+      saveWorkflowDraft(tenantSlug, agentId, JSON.parse(serialized), {
+        signal: ac.signal,
+        baseConfigVersion: configVersion.current,
+      })
+        .then((res) => {
+          if (gen !== saveGen.current) return;
+          if (typeof res.config_version === "number") configVersion.current = res.config_version;
+          setSaveState("saved");
         })
         .catch((e) => {
           if (ac.signal.aborted) return;
+          // Publish won the race — drop this save; next edit retries with fresh version.
+          if (e instanceof ApiError && e.status === 409) {
+            setSaveState("idle");
+            getWorkflow(tenantSlug, agentId).then((state) => {
+              configVersion.current = state.config_version;
+            }).catch(() => {});
+            return;
+          }
           setSaveState("idle");
           setError(e instanceof ApiError ? e.detail : String(e));
         });
@@ -473,7 +490,10 @@ function Panel({
       const result = await publishWorkflow(tenantSlug, agentId, JSON.parse(serialized));
       setWarnings(result.warnings);
       setErrors([]);
-      setPublished(canonical);
+      configVersion.current = result.config_version;
+      // Refetch so chrome-only / no-op publish cannot leave a false "clean" badge.
+      const state = await getWorkflow(tenantSlug, agentId);
+      applyWorkflowState(state);
       seedPristine.current = null;
       setVersionKey((k) => k + 1);
       setJustPublished(true);
@@ -730,13 +750,12 @@ function Panel({
               agentId={agentId}
               refreshKey={versionKey}
               onRolledBack={() => {
+                saveAbort.current?.abort();
+                saveGen.current += 1;
                 setVersionKey((k) => k + 1);
                 getWorkflow(tenantSlug, agentId).then((state) => {
-                  if (!state.workflow) return;
-                  const rf = toReactFlow(state.workflow);
-                  setNodes(rf.nodes);
-                  setEdges(rf.edges);
-                  setPublished(canonicalize(state.workflow));
+                  applyWorkflowState(state);
+                  seedPristine.current = null;
                 });
               }}
             />

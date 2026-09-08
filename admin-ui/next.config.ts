@@ -7,7 +7,7 @@ const nextConfig: NextConfig = {
   async redirects() {
     return [
       { source: "/agents", destination: "/workflows", permanent: true },
-      { source: "/agents/new", destination: "/workflows", permanent: true },
+      { source: "/agents/new", destination: "/workflows?new=1", permanent: true },
       {
         source: "/agents/:tenantSlug/:agentSlug",
         destination: "/workflows/:tenantSlug/:agentSlug/settings",

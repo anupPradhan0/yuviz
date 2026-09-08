@@ -76,6 +76,7 @@ export interface WorkflowState {
   workflow: WorkflowGraph | null;       // live — what calls execute
   workflow_draft: WorkflowGraph | null; // the editor's autosave
   published: boolean;
+  config_version: number;
 }
 
 export interface WorkflowVersion {
@@ -107,12 +108,18 @@ export const getWorkflow = (tenantSlug: string, agentId: string) =>
   request<WorkflowState>(base(tenantSlug, agentId));
 
 export const saveWorkflowDraft = (
-  tenantSlug: string, agentId: string, graph: WorkflowGraph, signal?: AbortSignal,
+  tenantSlug: string,
+  agentId: string,
+  graph: WorkflowGraph,
+  opts?: { signal?: AbortSignal; baseConfigVersion?: number },
 ) =>
-  request<{ saved: boolean }>(`${base(tenantSlug, agentId)}/draft`, {
+  request<{ saved: boolean; config_version: number }>(`${base(tenantSlug, agentId)}/draft`, {
     method: "PUT",
-    body: JSON.stringify({ graph }),
-    signal,
+    body: JSON.stringify({
+      graph,
+      base_config_version: opts?.baseConfigVersion,
+    }),
+    signal: opts?.signal,
   });
 
 export const validateWorkflow = (tenantSlug: string, agentId: string, graph: WorkflowGraph) =>

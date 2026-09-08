@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from libs.config_sdk.workflow import starter_graph
+from libs.config_sdk.workflow import graphs_equivalent, starter_graph
 from services.config import agents, workflows
 
 GRAPH = {
@@ -211,6 +211,44 @@ async def test_republishing_the_same_graph_is_a_noop(test_tenant, pool):
     assert again["config_version"] == before["config_version"]
     versions_after = await workflows.list_versions(agent["id"], test_tenant["slug"])
     assert [v["version"] for v in versions_after] == [v["version"] for v in versions_before]
+
+
+async def test_noop_publish_still_syncs_draft_chrome(test_tenant):
+    """Position-only draft must not stick as unpublished after logic-noop publish."""
+    agent = await _agent(test_tenant, slug="wf-chrome")
+    await workflows.publish(agent["id"], tenant_slug=test_tenant["slug"], graph=GRAPH)
+    moved = {
+        **GRAPH,
+        "nodes": [
+            {**n, "position": {"x": n["position"]["x"] + 40, "y": n["position"]["y"] + 10}}
+            for n in GRAPH["nodes"]
+        ],
+    }
+    await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=moved)
+    result = await workflows.publish(
+        agent["id"], tenant_slug=test_tenant["slug"], graph=moved,
+    )
+    assert result["version"] == 2  # first publish was v2 after create's v1
+    state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
+    assert state["workflow_draft"] == moved
+    assert graphs_equivalent(state["workflow"], moved)
+
+
+async def test_draft_save_with_stale_config_version_is_rejected(test_tenant):
+    agent = await _agent(test_tenant, slug="wf-stale")
+    state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
+    base = state["config_version"]
+    await workflows.publish(agent["id"], tenant_slug=test_tenant["slug"], graph=GRAPH)
+    with pytest.raises(workflows.StaleDraft):
+        await workflows.save_draft(
+            agent["id"],
+            tenant_slug=test_tenant["slug"],
+            graph=DEAD_END,
+            base_config_version=base,
+        )
+    after = await workflows.get_workflow(agent["id"], test_tenant["slug"])
+    assert after["workflow_draft"] == GRAPH
+    assert after["config_version"] == base + 1
 
 
 async def test_rollback_to_the_already_live_version_is_a_noop(test_tenant):

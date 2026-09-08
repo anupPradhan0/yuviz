@@ -66,6 +66,12 @@ export default function WorkflowsPage() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("new") !== "1") return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCreating(true);
+  }, []);
+
+  useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     listTenants()
