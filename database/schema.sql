@@ -475,6 +475,11 @@ CREATE TABLE IF NOT EXISTS calls (
 -- silent (crashed, never coming back under the same node_id) WITHOUT
 -- waiting for that exact node_id to restart — the gap the earlier
 -- startup-only reconcile_stale_calls() couldn't cover on its own.
+-- Workflow call observability (variable extraction / outcome).
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS disposition         TEXT;
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS nodes_visited       JSONB;
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS extracted_variables JSONB;
+
 CREATE TABLE IF NOT EXISTS conversation_node_heartbeats (
     node_id      TEXT PRIMARY KEY,
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

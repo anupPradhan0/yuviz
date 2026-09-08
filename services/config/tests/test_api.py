@@ -1197,6 +1197,38 @@ class TestCallEndpoints:
         await pool.execute("DELETE FROM transcript_entries WHERE session_id = $1", session_id)
         await pool.execute("DELETE FROM calls WHERE session_id = $1", session_id)
 
+    async def test_tenant_admin_cannot_read_another_tenants_call(
+        self, admin_client, test_tenant, pool,
+    ):
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+            "Other Call Tenant", f"test-other-call-{uuid.uuid4().hex[:8]}",
+        )
+        session_id = f"test-call-{uuid.uuid4().hex[:8]}"
+        try:
+            await pool.execute(
+                "INSERT INTO calls (session_id, tenant_id, direction, extracted_variables) "
+                "VALUES ($1, $2, 'inbound', $3::jsonb)",
+                session_id, other["slug"], '{"policy_number": "SECRET"}',
+            )
+            known_other = await admin_client.get(f"/calls/{session_id}")
+            unknown = await admin_client.get("/calls/does-not-exist")
+            assert known_other.status_code == unknown.status_code == 404
+            assert known_other.json() == {"detail": f"call {session_id!r} not found"}
+
+            own_id = f"test-call-{uuid.uuid4().hex[:8]}"
+            await pool.execute(
+                "INSERT INTO calls (session_id, tenant_id, direction) VALUES ($1, $2, 'inbound')",
+                own_id, test_tenant["slug"],
+            )
+            own = await admin_client.get(f"/calls/{own_id}")
+            assert own.status_code == 200
+            assert own.json()["session_id"] == own_id
+            await pool.execute("DELETE FROM calls WHERE session_id = $1", own_id)
+        finally:
+            await pool.execute("DELETE FROM calls WHERE session_id = $1", session_id)
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
 
 class TestAuthEndpoints:
     async def test_login_succeeds_with_correct_credentials(self, anon_client, test_superadmin):

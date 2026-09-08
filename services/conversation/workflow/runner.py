@@ -74,6 +74,11 @@ class WorkflowRunner:
     def update_variables(self, values: dict[str, Any]) -> None:
         self._vars.update({k: v for k, v in values.items() if v is not None})
 
+    def extracted_variables(self) -> dict[str, Any]:
+        """Values produced by extraction only — not seeded call-context keys."""
+        declared = self._graph.declared_variables()
+        return {k: v for k, v in self._vars.items() if k in declared}
+
     def system_prompt(self) -> str:
         global_part = self.render(self._global).strip() or self._default_global
         parts = [
@@ -166,8 +171,7 @@ class WorkflowRunner:
         turn: list[ChatMessage] | None,
         store: list[ChatMessage] | None,
     ) -> ToolResult:
-        # Must stay await-free until PR9 shields extractor/summarizer — a cancel
-        # mid-await would leave node/prompt/pending_* half-applied.
+        # Queue extract/summarize only — pipeline starts them after live generate.
         source = self._node
 
         if self._extractor is not None and source.extraction is not None and source.extraction.enabled:
