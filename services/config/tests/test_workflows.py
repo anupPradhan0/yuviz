@@ -273,8 +273,11 @@ async def test_get_agent_does_not_expose_or_cache_the_draft(test_tenant):
     assert fetched["workflow"] == CREATED_GRAPH
     listed = await agents.list_agents(test_tenant["id"])
     row = next(a for a in listed if a["id"] == agent["id"])
-    assert row.get("workflow") == CREATED_GRAPH
-    assert row.get("workflow_draft") == DEAD_END
+    assert "workflow" not in row and "workflow_draft" not in row
+    assert row["has_workflow"] is True
+    assert row["has_workflow_draft"] is True
+    assert row["workflow_diverged"] is True
+    assert row["workflow_node_count"] == len(DEAD_END["nodes"])
     state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
     assert state["workflow"] == CREATED_GRAPH
     assert state["workflow_draft"] == DEAD_END

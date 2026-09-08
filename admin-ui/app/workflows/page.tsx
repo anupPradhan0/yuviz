@@ -1,11 +1,7 @@
 "use client";
 
-// The agents list. An agent IS its conversation flow (2026-08-30) — creating
-// one here drops you straight onto its canvas, and everything else about it
-// (voice, model, tools, number) lives at ./[tenant]/[agent]/settings.
-//
-// The URLs stay /workflows/* while the labels say "agent": the flow is the
-// thing you edit, the agent is the thing you own. Same split Dograh uses.
+// Agents list — create drops you on the canvas; voice/model/tools/number
+// live at ./[tenant]/[agent]/settings. URLs stay /workflows/*; labels say agent.
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -19,41 +15,37 @@ import {
 } from "@/lib/api";
 import { Modal } from "@/components/Modal";
 
-type FlowState = "live" | "draft" | "none";
+type FlowState = "live" | "unpublished" | "draft" | "none";
 
 function flowState(a: AgentWithTenant): FlowState {
-  if (a.workflow) return "live";
-  if (a.workflow_draft) return "draft";
+  if (a.has_workflow) return a.workflow_diverged ? "unpublished" : "live";
+  if (a.has_workflow_draft) return "draft";
   return "none";
 }
 
 const STATE_LABEL: Record<FlowState, string> = {
   live: "Live",
+  unpublished: "Unpublished changes",
   draft: "Draft — not published",
   none: "Single prompt",
 };
 
 const STATE_BADGE: Record<FlowState, string> = {
   live: "green",
+  unpublished: "amber",
   draft: "amber",
   none: "gray",
 };
 
 function stepCount(a: AgentWithTenant): number | null {
-  const g = a.workflow ?? a.workflow_draft;
-  return g?.nodes?.length ?? null;
+  return a.workflow_node_count ?? null;
 }
 
 function slugify(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
-// A new agent's global prompt has to be non-empty: pipeline.py only appends
-// the date grounding and the [[END_CALL]] safety net when there is a system
-// prompt to append them to, so an agent created blank would have no way to
-// hang up outside its graph. Same wording as config/agents/default.yaml.
-// The flow itself comes from the server's starter_graph — this is only the
-// text that goes with it.
+// Non-empty global prompt so pipeline date grounding / [[END_CALL]] attach.
 const DEFAULT_GREETING = "Hello! How can I help you today?";
 const DEFAULT_SYSTEM_PROMPT =
   "You are a helpful voice assistant on a phone call. Answer in at most 2-3 short " +
@@ -91,9 +83,7 @@ export default function WorkflowsPage() {
     const matched = q
       ? agents.filter((a) => `${a.name} ${a.tenantName}`.toLowerCase().includes(q))
       : agents;
-    // Agents that actually run a flow first — this page is about flows, so
-    // the ones with nothing to show shouldn't be what you scroll past.
-    const rank: Record<FlowState, number> = { live: 0, draft: 1, none: 2 };
+    const rank: Record<FlowState, number> = { live: 0, unpublished: 1, draft: 2, none: 3 };
     return [...matched].sort(
       (a, b) => rank[flowState(a)] - rank[flowState(b)] || a.name.localeCompare(b.name),
     );
@@ -107,9 +97,6 @@ export default function WorkflowsPage() {
     setBusy(true);
     setCreateError(null);
     try {
-      // One call: the server creates the agent and its starter flow in the
-      // same transaction (services/config/agents.py's create_agent), so
-      // there's no window where a half-made agent exists.
       const agent = await createAgent(newTenant, {
         slug,
         name: newName.trim(),

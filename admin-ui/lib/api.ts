@@ -229,9 +229,13 @@ export interface Agent {
   // What the caller experiences while a warm transfer's agent leg rings
   // (no equivalent for cold transfer).
   transfer_waiting_experience: "announcement_moh" | "announcement_silence";
-  // Published graph (live calls) and editor autosave draft.
+  // Published graph on agent GET/cache (call-setup). List responses omit
+  // graph bodies and use the lean fields below instead.
   workflow: { nodes?: unknown[]; edges?: unknown[] } | null;
-  workflow_draft: { nodes?: unknown[]; edges?: unknown[] } | null;
+  has_workflow?: boolean;
+  has_workflow_draft?: boolean;
+  workflow_diverged?: boolean;
+  workflow_node_count?: number | null;
   // Condition-clause overrides for the built-in end-call / transfer trigger
   // instructions (null/empty = defaults). Only the condition is
   // configurable — the [[END_CALL]]/[[TRANSFER]] token mechanics are fixed

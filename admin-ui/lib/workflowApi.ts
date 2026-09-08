@@ -106,10 +106,13 @@ const base = (tenantSlug: string, agentId: string) =>
 export const getWorkflow = (tenantSlug: string, agentId: string) =>
   request<WorkflowState>(base(tenantSlug, agentId));
 
-export const saveWorkflowDraft = (tenantSlug: string, agentId: string, graph: WorkflowGraph) =>
+export const saveWorkflowDraft = (
+  tenantSlug: string, agentId: string, graph: WorkflowGraph, signal?: AbortSignal,
+) =>
   request<{ saved: boolean }>(`${base(tenantSlug, agentId)}/draft`, {
     method: "PUT",
     body: JSON.stringify({ graph }),
+    signal,
   });
 
 export const validateWorkflow = (tenantSlug: string, agentId: string, graph: WorkflowGraph) =>
@@ -148,30 +151,43 @@ export function publishErrors(e: unknown): { message: string; errors: WorkflowEr
   return { message: String(e), errors: [] };
 }
 
-/** The graph a brand-new agent starts from. Two nodes, because the validator
- *  rejects a non-terminal step with no way out (libs/config_sdk/workflow.py) —
- *  a lone start node would fail to publish. Lives here rather than in the
- *  editor because creating an agent saves it before any editor mounts. */
-export const STARTER: WorkflowGraph = {
-  version: 1,
-  nodes: [
-    {
-      id: "global", type: "global", position: { x: 330, y: 0 },
-      data: { name: "always applies", prompt: "" },
-    },
-    {
-      id: "start", type: "start", position: { x: 0, y: 0 },
-      data: { name: "greeting", prompt: "Greet the caller and find out what they need.", greeting: "" },
-    },
-    {
-      id: "end", type: "end", position: { x: 0, y: 230 },
-      data: { name: "goodbye", prompt: "Confirm anything outstanding and close warmly.", disposition: "completed" },
-    },
-  ],
-  edges: [
-    {
-      id: "e-start-end", source: "start", target: "end",
-      data: { label: "conversation finished", condition: "The caller has no further questions." },
-    },
-  ],
-};
+/** The graph a brand-new agent starts from — mirrors libs/config_sdk
+ *  starter_graph(greeting, system_prompt). Validator rejects a lone start. */
+export function starterGraph(greeting = "", systemPrompt = ""): WorkflowGraph {
+  return {
+    version: 1,
+    nodes: [
+      {
+        id: "global", type: "global", position: { x: 330, y: 0 },
+        data: { name: "always applies", prompt: systemPrompt },
+      },
+      {
+        id: "start", type: "start", position: { x: 0, y: 0 },
+        data: {
+          name: "greeting",
+          prompt: "Greet the caller and find out what they need.",
+          greeting,
+          tools: [],
+          knowledge_base_ids: [],
+        },
+      },
+      {
+        id: "end", type: "end", position: { x: 0, y: 230 },
+        data: {
+          name: "goodbye",
+          prompt: "Confirm anything outstanding and close warmly.",
+          disposition: "completed",
+        },
+      },
+    ],
+    edges: [
+      {
+        id: "e-start-end", source: "start", target: "end",
+        data: { label: "conversation finished", condition: "The caller has no further questions." },
+      },
+    ],
+  };
+}
+
+/** @deprecated Prefer starterGraph(greeting, systemPrompt) so column prompts land. */
+export const STARTER: WorkflowGraph = starterGraph();

@@ -1,16 +1,7 @@
 "use client";
 
-// The workflow editor: canvas, inspector, autosave, publish.
-//
-// No state manager. React Flow's own useNodesState/useEdgesState plus a
-// handful of useState is the whole thing (docs/workflow.md Part 6) — this is
-// a tab inside an agent page, and a store would be a dependency plus an
-// indirection layer for state that never leaves this panel.
-//
-// The draft/published split is the point of the whole tab: typing here
-// autosaves to workflow_draft, which no call ever reads. Publish validates
-// server-side and only then writes the graph live calls execute. Because
-// autosave means there is no Cancel, this panel owns an undo stack.
+// Workflow editor: canvas, inspector, autosave draft, publish. No external
+// store — React Flow state + local useState (docs/workflow.md Part 6).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
@@ -40,7 +31,7 @@ import {
   publishErrors,
   publishWorkflow,
   saveWorkflowDraft,
-  STARTER,
+  starterGraph,
   validateWorkflow,
   type WorkflowEdgeData,
   type WorkflowError,
@@ -56,20 +47,10 @@ import { nodeTypes } from "./nodes";
 import { VersionPanel } from "./VersionPanel";
 
 const AUTOSAVE_MS = 1200;
-// Checked against the same validator that gates a publish, so problems show
-// up while the operator is still drawing instead of at the end. Shorter than
-// autosave: seeing "this connection needs a condition" late is the whole
-// complaint this replaces.
 const VALIDATE_MS = 500;
-// One drag = one undo step, not sixty. Anything inside this window collapses
-// into the previous entry.
 const UNDO_COALESCE_MS = 600;
 const UNDO_LIMIT = 60;
 
-
-// Always supplied per call by WorkflowRunner (libs/config_sdk/workflow.py's
-// CALL_CONTEXT_VARIABLES) — kept in the same order the operator would think
-// of them, not the Python one.
 const CALL_CONTEXT_VARIABLES = [
   "caller_number", "called_number", "agent_name", "business_name",
   "current_date", "current_time", "direction",
@@ -82,8 +63,7 @@ const NEW_NODE_DEFAULTS: Record<Exclude<WorkflowNodeType, "start">, WorkflowNode
   global: { name: "always applies", prompt: "" },
 };
 
-/** Key-order-independent serialization, for comparing a graph the editor
- *  built against the same graph after a JSONB round-trip. */
+/** Key-order-independent serialization for JSONB round-trip compares. */
 function canonicalize(value: unknown): string {
   return JSON.stringify(value, (_key, v) =>
     v && typeof v === "object" && !Array.isArray(v)
@@ -100,13 +80,10 @@ function toReactFlow(graph: WorkflowGraph): { nodes: RFNode[]; edges: RFEdge[] }
   return {
     nodes: graph.nodes.map((n) => ({
       id: n.id, type: n.type, position: n.position, data: { ...n.data },
-      // The entry point is not something you can delete your way out of.
       deletable: n.type !== "start",
     })) as RFNode[],
     edges: graph.edges.map((e) => ({
       id: e.id, source: e.source, target: e.target,
-      // React Flow renders `label` itself; the persisted copy stays in
-      // data.label, which is what the backend reads.
       label: e.data.label, data: { ...e.data },
     })) as RFEdge[],
   };
@@ -117,19 +94,14 @@ function toGraph(nodes: RFNode[], edges: RFEdge[]): WorkflowGraph {
     version: 1,
     nodes: nodes.map((n) => {
       const { __invalid, __active, ...data } = n.data;
-      void __invalid; void __active;   // canvas-only markers, never persisted
+      void __invalid; void __active;
       return {
         id: n.id, type: (n.type || "agent") as WorkflowNodeType,
         position: n.position, data: data as WorkflowNodeData,
       };
     }),
     edges: edges.map((e) => {
-      // Same strip as the nodes above. It matters more here than it looks:
-      // onEdgeClick reads its selection off the *painted* edge, so editing
-      // any connection copies the canvas-only __invalid marker into the
-      // real edge — and from there into workflow_draft, the published
-      // graph, and every version row. The backend ignores unknown keys, so
-      // nothing breaks; it just quietly accumulates junk forever.
+      // Strip canvas-only markers so they never land in draft/versions.
       const { __invalid, ...data } = (e.data || { label: "", condition: "" }) as WorkflowEdgeData;
       void __invalid;
       return {
@@ -140,15 +112,21 @@ function toGraph(nodes: RFNode[], edges: RFEdge[]): WorkflowGraph {
   };
 }
 
-/** Set when the editor owns the whole page (app/workflows/[t]/[a]). The
- *  back link, the agent name and "Settings" then live in the editor's
- *  own toolbar instead of a second header row above it — one row, the way
- *  the reference editors do it. Omitted when the panel is embedded. */
+/** Full-page editor chrome (back / title / settings) in the toolbar. */
 export type WorkflowHeader = { title: string; backHref: string; settingsHref: string };
 
+type PanelProps = {
+  tenantSlug: string;
+  agentId: string;
+  agentSlug: string;
+  greeting?: string;
+  systemPrompt?: string;
+  header?: WorkflowHeader;
+};
+
 function Panel({
-  tenantSlug, agentId, agentSlug, header,
-}: { tenantSlug: string; agentId: string; agentSlug: string; header?: WorkflowHeader }) {
+  tenantSlug, agentId, agentSlug, greeting = "", systemPrompt = "", header,
+}: PanelProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState<RFNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<RFEdge>([]);
   const [selection, setSelection] = useState<Selection | null>(null);
@@ -165,23 +143,25 @@ function Panel({
   const [agentTools, setAgentTools] = useState<string[]>([]);
   const [knowledgeBases, setKnowledgeBases] = useState<{ id: string; name: string }[]>([]);
   const [addOpen, setAddOpen] = useState(false);
-  // At most one always-applies node per flow — a second would concatenate
-  // with the first in whatever order the nodes happen to be stored, which is
-  // a prompt nobody wrote. The server rejects it too; this just stops the
-  // operator drawing something that can't publish.
+  // Server rejects a second global; UI mirrors that.
   const hasGlobal = nodes.some((n) => n.type === "global");
   const [moreOpen, setMoreOpen] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
-  // Browser voice test against the published agent (draft live-highlight lands later).
+  // Browser voice test hits the published agent (draft live-highlight later).
   const [testing, setTesting] = useState(false);
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
-  // Suppresses the autosave that would otherwise fire from the very first
-  // render's setNodes — an empty draft overwriting a real one.
   const loaded = useRef(false);
+  // Client-only seed: skip autosave until the canvas diverges from this snapshot.
+  const seedPristine = useRef<string | null>(null);
+  const saveGen = useRef(0);
+  const saveAbort = useRef<AbortController | null>(null);
   const reactFlow = useReactFlow();
 
   useEffect(() => {
     loaded.current = false;
+    seedPristine.current = null;
+    saveAbort.current?.abort();
+    saveGen.current += 1;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     Promise.all([
@@ -190,14 +170,16 @@ function Panel({
       listAgentKnowledgeBases(agentId).catch(() => []),
     ])
       .then(([state, policies, kbs]) => {
-        const graph = state.workflow_draft ?? state.workflow ?? STARTER;
+        const fromServer = state.workflow_draft ?? state.workflow;
+        const graph = fromServer ?? starterGraph(greeting, systemPrompt);
         const rf = toReactFlow(graph);
+        // Match the editor's serialized form so an untouched seed never autosaves.
+        seedPristine.current = fromServer ? null : JSON.stringify(toGraph(rf.nodes, rf.edges));
         setNodes(rf.nodes);
         setEdges(rf.edges);
         setPublished(state.workflow ? canonicalize(state.workflow) : null);
         setAgentTools(policies.filter((p) => p.enabled).map((p) => p.tool_name));
         setKnowledgeBases(kbs.map((kb) => ({ id: kb.kb_id, name: kb.kb_name })));
-        // Someone who has never seen this tab gets told what it is once.
         setShowHelp(!state.workflow && !state.workflow_draft);
         loaded.current = true;
       })
@@ -206,9 +188,6 @@ function Panel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantSlug, agentId]);
 
-  // Everything the operator can legitimately drop into a prompt: the
-  // per-call context plus whatever any stage captures. Offering exactly this
-  // set is what stops {{ custmer_name }} reaching a call recording.
   const availableVariables = useMemo(() => {
     const declared = nodes.flatMap((n) =>
       n.data.extraction?.enabled ? n.data.extraction.variables.map((v) => v.name) : [],
@@ -300,21 +279,31 @@ function Panel({
   }, [undo, redo]);
 
   // ── Autosave ──────────────────────────────────────────────────────────
-  // No save button, no lost work. Drafts are never validated and never read
-  // by a call, so this can fire on a half-drawn graph without consequence.
+  // Abort + generation so a slow PUT cannot clobber draft after publish.
   useEffect(() => {
-    if (!loaded.current) return;
+    if (!loaded.current || publishing) return;
+    if (seedPristine.current !== null) {
+      if (serialized === seedPristine.current) return;
+      seedPristine.current = null;
+    }
+    const gen = ++saveGen.current;
+    saveAbort.current?.abort();
+    const ac = new AbortController();
+    saveAbort.current = ac;
     setSaveState("saving");
     const timer = setTimeout(() => {
-      saveWorkflowDraft(tenantSlug, agentId, JSON.parse(serialized))
-        .then(() => setSaveState("saved"))
+      saveWorkflowDraft(tenantSlug, agentId, JSON.parse(serialized), ac.signal)
+        .then(() => {
+          if (gen === saveGen.current) setSaveState("saved");
+        })
         .catch((e) => {
+          if (ac.signal.aborted) return;
           setSaveState("idle");
           setError(e instanceof ApiError ? e.detail : String(e));
         });
     }, AUTOSAVE_MS);
     return () => clearTimeout(timer);
-  }, [serialized, tenantSlug, agentId]);
+  }, [serialized, tenantSlug, agentId, publishing]);
 
   // ── Live validation ───────────────────────────────────────────────────
   // The same check that gates a publish, run as you draw — so "this
@@ -475,6 +464,9 @@ function Panel({
 
   // ── Publish ───────────────────────────────────────────────────────────
   const publish = async () => {
+    // Invalidate in-flight draft PUTs before writing live+draft on the server.
+    saveAbort.current?.abort();
+    saveGen.current += 1;
     setPublishing(true);
     setError(null);
     try {
@@ -482,6 +474,7 @@ function Panel({
       setWarnings(result.warnings);
       setErrors([]);
       setPublished(canonical);
+      seedPristine.current = null;
       setVersionKey((k) => k + 1);
       setJustPublished(true);
       setTimeout(() => setJustPublished(false), 4000);
@@ -542,10 +535,14 @@ function Panel({
           </button>
           <button
             className={`btn btn-sm ${testing ? "btn-primary" : "btn-ghost"}`}
-            title="Try this agent in the browser before publishing changes"
+            title={
+              diverged
+                ? "Tests the live (published) agent — unpublished canvas changes are not included yet"
+                : "Try the live agent in the browser"
+            }
             onClick={() => { setTesting(!testing); setActiveNodeId(null); }}
           >
-            Test Agent
+            {diverged ? "Test live agent" : "Test Agent"}
           </button>
 
           <span className={`badge ${published === null ? "gray" : diverged ? "amber" : "green"}`}>
@@ -788,9 +785,13 @@ function ProblemList({
 }
 
 export function WorkflowPanel(props: {
-  tenantSlug: string; agentId: string; agentSlug: string; header?: WorkflowHeader;
+  tenantSlug: string;
+  agentId: string;
+  agentSlug: string;
+  greeting?: string;
+  systemPrompt?: string;
+  header?: WorkflowHeader;
 }) {
-  // ReactFlowProvider is required for the hooks the canvas uses internally.
   return (
     <ReactFlowProvider>
       <Panel {...props} />

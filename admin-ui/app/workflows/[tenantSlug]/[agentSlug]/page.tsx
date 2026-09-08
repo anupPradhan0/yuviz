@@ -33,6 +33,8 @@ export default function WorkflowEditorPage() {
         tenantSlug={tenantSlug}
         agentId={agent.id}
         agentSlug={agentSlug}
+        greeting={agent.greeting}
+        systemPrompt={agent.system_prompt}
         header={{
           title: agent.name,
           backHref: "/workflows",
