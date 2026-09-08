@@ -6,6 +6,9 @@ transition speech, and workflow transfer.
 
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import MagicMock
+
 from services.conversation.tools.executor_registry import ExecutorRegistry
 from services.conversation.tools.llm_adapter import LLMAdapter, TokenEvent, ToolCallEvent
 from services.conversation.tools.orchestrator import ToolCallOrchestrator
@@ -219,3 +222,81 @@ async def test_workflow_transfer_rejected_when_agent_transfer_disabled():
     assert handler._workflow.node.name == "greeting"
     assert handler._workflow.pending_transfer is None
     assert not any(r.transfer_request for r in responses)
+
+
+async def test_session_end_persists_workflow_outcome_even_when_extraction_times_out():
+    """Hangup must still write path/disposition if the final LLM extract stalls."""
+    import services.conversation.pipeline as pipeline_mod
+
+    llm = _ScriptedToolLLM([
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_booked", arguments={})],
+        [TokenEvent(text="Bye!")],
+    ])
+    # Start already on booking so we can end in one transition.
+    graph = {
+        "version": 1,
+        "nodes": [
+            {"id": "g1", "type": "global", "data": {"name": "g", "prompt": "Ada."}},
+            {"id": "n2", "type": "start", "data": {
+                "name": "booking", "prompt": "Book.", "greeting": "Hi.",
+                "extraction": {"enabled": True, "variables": [
+                    {"name": "reason", "type": "string", "prompt": "why"}]},
+            }},
+            {"id": "n3", "type": "end", "data": {
+                "name": "goodbye", "prompt": "Bye.", "disposition": "qualified"}},
+        ],
+        "edges": [
+            {"id": "e2", "source": "n2", "target": "n3", "data": {
+                "label": "booked", "condition": "done"}},
+        ],
+    }
+    handler = _handler(llm, _RecordingPolicyResolver(), workflow=graph)
+    transcripts = MagicMock()
+    handler._transcripts = transcripts
+
+    async def _stall(_sid):
+        await asyncio.Event().wait()
+
+    handler._finalize_extraction = _stall  # type: ignore[method-assign]
+    original_timeout = pipeline_mod._FINISH_WORKFLOW_TIMEOUT_S
+    pipeline_mod._FINISH_WORKFLOW_TIMEOUT_S = 0.05
+    try:
+        [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+        await handler.on_session_end("s1", "hangup")
+    finally:
+        pipeline_mod._FINISH_WORKFLOW_TIMEOUT_S = original_timeout
+
+    transcripts.record_workflow_outcome.assert_called_once()
+    kwargs = transcripts.record_workflow_outcome.call_args.kwargs
+    assert kwargs["disposition"] == "qualified"
+    assert kwargs["nodes_visited"] == ["booking", "goodbye"]
+    assert "caller_number" not in (kwargs["extracted_variables"] or {})
+
+
+async def test_transfer_flush_timeout_still_routes():
+    """A stuck in-flight extract must not block transfer forever."""
+    import services.conversation.pipeline as pipeline_mod
+
+    llm = _ScriptedToolLLM([
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_a_human", arguments={})],
+        [TokenEvent(text="Connecting you now.")],
+    ])
+    handler = _handler(
+        llm, _RecordingPolicyResolver(), workflow=TRANSFER_GRAPH,
+        transfer_type="warm", transfer_destination="+15550001111",
+    )
+
+    async def _never():
+        await asyncio.Event().wait()
+
+    handler._extractor.flush = _never  # type: ignore[method-assign]
+    original = pipeline_mod._TRANSFER_FLUSH_TIMEOUT_S
+    pipeline_mod._TRANSFER_FLUSH_TIMEOUT_S = 0.05
+    try:
+        responses = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+    finally:
+        pipeline_mod._TRANSFER_FLUSH_TIMEOUT_S = original
+
+    transfers = [r.transfer_request for r in responses if r.transfer_request]
+    assert len(transfers) == 1
+    assert transfers[0].destination == "+15559999"

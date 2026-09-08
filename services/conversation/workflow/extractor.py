@@ -20,51 +20,42 @@ log = logging.getLogger(__name__)
 _EXTRACTION_TIMEOUT_S = 8.0
 _SUMMARY_TIMEOUT_S = 8.0
 
-# Above this many messages, a transition triggers a background
-# summarization. Well clear of a normal few-turn stage — this is for the
-# call that has been through five nodes and is carrying the tool traffic of
-# all of them.
-#
-# It MUST stay below pipeline._trim_history's own cap (max_history * 2 + 1,
-# so 21 at the default max_history=10), which is why the pipeline derives it
-# rather than taking this default — see summary_threshold_for(). Chosen
-# independently, the two drifted: at 24 vs 21, history could only cross the
-# threshold transiently mid-turn on tool traffic, and by the time the
-# background summary resolved trim had already cut back below the cutoff, so
-# the apply-time guard bailed every time and the whole summarization half of
-# this module was dead.
+# Default when pipeline does not pass summary_threshold_for(max_history).
+# Must stay under trim cap (max_history*2+1); pipeline derives the live value.
 _SUMMARY_THRESHOLD_MSGS = 16
-
-
-def summary_threshold_for(max_history: int) -> int:
-    """The message count a transition summarizes above, for a pipeline that
-    trims to `max_history` turn pairs. Kept a couple of exchanges under the
-    trim cap so a summary is requested while there is still something for it
-    to compress, and lands before trim would have discarded it outright.
-
-    Clamped rather than just floored: at a very small max_history the floor
-    would climb back above the cap and disable summarization again, which is
-    the exact bug this function exists to make impossible. Below the cap it
-    is a harmless no-op instead — _summarize's own `cutoff <= 1` guard
-    returns before it asks the LLM for anything."""
-    return min(max(_SUMMARY_KEEP_LAST + 2, max_history * 2 - 4), max_history * 2)
-# Turns kept verbatim after the summary. The most recent exchange is what
-# the model is actually responding to; paraphrasing it would be the one
-# place summarization can visibly break a conversation.
+# Recent turns kept verbatim — paraphrasing them breaks the live exchange.
 _SUMMARY_KEEP_LAST = 4
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 
 
+def summary_threshold_for(max_history: int) -> int:
+    """Threshold under the pipeline trim cap so a summary can still apply."""
+    return min(max(_SUMMARY_KEEP_LAST + 2, max_history * 2 - 4), max_history * 2)
+
+
+def _goto_tool_call_ids(msg: ChatMessage) -> set[str] | None:
+    """Ids if every tool_call on this assistant message is a goto_* transition."""
+    if msg.role != "assistant" or not msg.tool_calls:
+        return None
+    names = [str(tc.get("name") or "") for tc in msg.tool_calls]
+    if not names or not all(n.startswith("goto_") for n in names):
+        return None
+    return {str(tc["id"]) for tc in msg.tool_calls if tc.get("id")}
+
+
 def _strip_transition_noise(history: list[ChatMessage]) -> list[ChatMessage]:
-    """Drop the transition tool traffic — dozens of {"status": "done"}
-    results and their matching assistant calls accumulate over a long call
-    and are pure noise to a model being asked what the caller said."""
+    """Drop goto_* transition calls/results only — keep real tool traffic."""
+    drop_ids: set[str] = set()
+    for msg in history:
+        ids = _goto_tool_call_ids(msg)
+        if ids is not None:
+            drop_ids |= ids
     kept: list[ChatMessage] = []
     for msg in history:
-        if msg.role == "tool" and '"status": "done"' in (msg.content or ""):
+        if _goto_tool_call_ids(msg) is not None:
             continue
-        if msg.role == "assistant" and msg.tool_calls and not (msg.content or "").strip():
+        if msg.role == "tool" and msg.tool_call_id and msg.tool_call_id in drop_ids:
             continue
         kept.append(msg)
     return kept
@@ -90,8 +81,7 @@ async def _collect(llm: Any, messages: list[ChatMessage], timeout_s: float) -> s
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
-    """Models wrap JSON in prose or a code fence often enough that not
-    handling it means throwing away most successful extractions."""
+    """Pull a JSON object out of prose or a ```json fence."""
     fenced = _JSON_FENCE_RE.search(text)
     candidate = fenced.group(1) if fenced else text
     start, end = candidate.find("{"), candidate.rfind("}")
@@ -119,8 +109,7 @@ def _coerce(value: Any, declared_type: str) -> Any:
 
 
 class VariableExtractor:
-    """Fire-and-forget by default (see extract()), with an explicit flush
-    for the two moments something actually reads the values."""
+    """Fire-and-forget extract(); flush() before anything that reads the values."""
 
     def __init__(
         self,
@@ -132,9 +121,7 @@ class VariableExtractor:
         self._on_variables = on_variables
         self._timeout_s = timeout_s
         self._pending: set[asyncio.Task] = set()
-        # Multiple teardown paths converge (caller hangs up, agent ends the
-        # call, max duration, transfer completes). Without this guard they
-        # race to write the same row twice.
+        # Teardown can fire more than once; only one final extract.
         self._final_done = False
 
     @staticmethod
@@ -143,9 +130,7 @@ class VariableExtractor:
         return spec is not None and spec.enabled and bool(spec.variables)
 
     def extract(self, node: Node, history: list[ChatMessage]) -> None:
-        """Background by default: blocking a transition on an extraction
-        round-trip adds a full LLM latency to a moment the caller is
-        already waiting through."""
+        """Background — do not block the transition on an LLM round-trip."""
         if not self._wants_extraction(node):
             return
         task = asyncio.ensure_future(self._extract(node, list(history)))
@@ -153,21 +138,14 @@ class VariableExtractor:
         task.add_done_callback(self._pending.discard)
 
     async def extract_final(self, node: Node, history: list[ChatMessage]) -> None:
-        """Idempotent — see _final_done. Same guard as extract(): a call
-        normally ends on an `end` node, which declares no extraction at all,
-        and running one anyway would spend an LLM round-trip on teardown for
-        every workflow call (and, before the guard, raise on the missing
-        config)."""
+        """Idempotent hangup pass; no-ops on end nodes with no extraction."""
         if self._final_done or not self._wants_extraction(node):
             return
         self._final_done = True
         await self._extract(node, list(history))
 
     async def flush(self) -> None:
-        """Await whatever is still in flight. Called before anything that
-        READS the values — transfer routing and call end — because a
-        transfer that routes on {{ wants_callback }} cannot read a value
-        still on the wire."""
+        """Await in-flight extracts (transfer routing / call end)."""
         pending = list(self._pending)
         if not pending:
             return
@@ -207,14 +185,11 @@ class VariableExtractor:
         except asyncio.TimeoutError:
             log.warning("workflow: variable extraction timed out node=%s", node.name)
         except Exception:
-            # Extraction is analytics. It never fails a call.
             log.exception("workflow: variable extraction failed node=%s", node.name)
 
 
 class ContextSummarizer:
-    """One background summarization at a time, applied by index snapshot at
-    apply time (not request time) so messages added while it was generating
-    survive."""
+    """One background summary at a time; apply by message identity so trim is safe."""
 
     def __init__(
         self,
@@ -232,9 +207,7 @@ class ContextSummarizer:
     def maybe_summarize(self, history: list[ChatMessage]) -> None:
         if len(history) <= self._threshold:
             return
-        # A second transition before the first summary landed makes that
-        # summary stale — the conversation has moved on. Cancel rather than
-        # let two of them race to splice the same list.
+        # Newer transition wins — cancel the stale in-flight summary.
         self.cancel()
         self._task = asyncio.ensure_future(self._summarize(history))
 
@@ -246,16 +219,13 @@ class ContextSummarizer:
     async def _summarize(self, history: list[ChatMessage]) -> None:
         try:
             cutoff = len(history) - self._keep_last
-            # Never cut so that the retained tail STARTS with a tool result
-            # whose assistant tool_calls message is on the deleted side —
-            # OpenAI-shaped providers reject that request outright ("tool
-            # must respond to a preceding tool_calls"), which would kill the
-            # turn mid-call. Move the cut forward past any such orphan.
+            # Do not leave a tool result without its assistant tool_calls parent.
             while cutoff < len(history) and history[cutoff].role == "tool":
                 cutoff += 1
             if cutoff <= 1 or cutoff >= len(history):
                 return
-            older = _strip_transition_noise(history[1:cutoff])
+            to_replace = list(history[1:cutoff])
+            older = _strip_transition_noise(to_replace)
             if not older:
                 return
             prompt = (
@@ -271,23 +241,23 @@ class ContextSummarizer:
             if not summary:
                 return
 
-            # Apply-time splice. `cutoff` still points at the same messages
-            # it did at request time — everything that happened since was
-            # appended past it — and re-reading len(history) here is what
-            # keeps those new messages.
-            if len(history) < cutoff or history[0].role != "system":
+            # Identity splice: trim/append may have shifted indexes while we waited.
+            if not history or history[0].role != "system":
                 return
-            del history[1:cutoff]
-            history.insert(1, ChatMessage(
-                role="user",
-                content=f"[Earlier in this call]\n{summary}",
-            ))
-            log.info("workflow: summarized %d earlier messages into context", cutoff - 1)
+            drop_ids = {id(m) for m in to_replace}
+            if not any(id(m) in drop_ids for m in history[1:]):
+                return
+            kept = [m for m in history[1:] if id(m) not in drop_ids]
+            while kept and kept[0].role == "tool":
+                kept.pop(0)
+            history[1:] = [
+                ChatMessage(role="user", content=f"[Earlier in this call]\n{summary}"),
+                *kept,
+            ]
+            log.info("workflow: summarized %d earlier messages into context", len(to_replace))
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
-            # Keeping the full context is a worse token bill, not a worse
-            # call. Degrading the other way loses information.
             log.warning("workflow: context summarization timed out — keeping full context")
         except Exception:
             log.exception("workflow: context summarization failed — keeping full context")

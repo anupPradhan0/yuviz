@@ -12,6 +12,7 @@ from libs.config_sdk.workflow import Extraction, ExtractionVariable, Node
 
 from services.conversation.providers.interfaces import ChatMessage
 from services.conversation.workflow import ContextSummarizer, VariableExtractor
+from services.conversation.workflow.extractor import _strip_transition_noise
 
 
 class _FakeLLM:
@@ -53,8 +54,6 @@ def test_extraction_merges_typed_values():
 
 
 def test_a_node_with_no_extraction_config_never_calls_the_llm():
-    # A call normally ends on an `end` node, which declares nothing. Running
-    # one anyway would spend a round-trip on teardown for every call.
     llm = _FakeLLM()
     extractor = VariableExtractor(llm, lambda _: None)
     end_node = Node(id="n9", type="end", name="goodbye", prompt="")
@@ -90,6 +89,31 @@ def test_a_broken_llm_reply_never_raises():
     asyncio.run(extractor._extract(_node(), []))   # logged, not raised
 
 
+def test_strip_drops_goto_traffic_but_keeps_real_tools():
+    history = [
+        ChatMessage(role="system", content="p"),
+        ChatMessage(role="user", content="book me"),
+        ChatMessage(
+            role="assistant", content="",
+            tool_calls=[{"id": "g1", "name": "goto_wants_to_book", "arguments": {}}],
+        ),
+        ChatMessage(role="tool", content='{"status": "done"}', tool_call_id="g1"),
+        ChatMessage(
+            role="assistant", content="",
+            tool_calls=[{"id": "b1", "name": "book_appointment", "arguments": {}}],
+        ),
+        ChatMessage(role="tool", content='{"ok": true}', tool_call_id="b1"),
+        ChatMessage(role="assistant", content="Booked for Tuesday."),
+    ]
+    kept = _strip_transition_noise(history)
+    assert not any(
+        m.tool_calls and any(str(tc.get("name") or "").startswith("goto_") for tc in m.tool_calls)
+        for m in kept
+    )
+    assert any(m.tool_call_id == "b1" for m in kept)
+    assert any(m.content == "Booked for Tuesday." for m in kept)
+
+
 def _long_history(n: int) -> list[ChatMessage]:
     history = [ChatMessage(role="system", content="prompt")]
     for i in range(n):
@@ -111,9 +135,6 @@ def test_summary_replaces_the_older_half_and_keeps_the_system_prompt():
 
 
 def test_summary_never_orphans_a_tool_result():
-    # A tool result whose assistant tool_calls parent was deleted makes
-    # OpenAI-shaped providers reject the whole request — which would kill
-    # the turn mid-call, the one failure mode summarization must not have.
     history = _long_history(10)
     history.append(ChatMessage(role="assistant", content="", tool_calls=[{"id": "c1", "name": "book"}]))
     history.append(ChatMessage(role="tool", content='{"status":"ok"}', tool_call_id="c1"))
@@ -128,6 +149,39 @@ def test_summary_never_orphans_a_tool_result():
         assert prior.role == "assistant" and prior.tool_calls, "tool result lost its call"
 
 
+def test_summary_apply_survives_a_concurrent_trim():
+    """Trim rewrites indexes while summarize awaits — identity splice must not
+    delete the retained recent turns."""
+    history = _long_history(15)
+    recent_tail = list(history[-4:])
+
+    class _TrimDuringGenerate:
+        async def generate(self, messages):
+            history[1:] = history[-20:]
+            yield "Earlier they asked about hours."
+
+    asyncio.run(ContextSummarizer(_TrimDuringGenerate(), keep_last=4)._summarize(history))
+
+    assert history[0].role == "system"
+    assert "Earlier they asked" in history[1].content
+    for msg in recent_tail:
+        assert msg in history, "trim+summary must not drop the live tail"
+
+
+def test_summary_bails_if_trim_already_dropped_the_older_slice():
+    history = _long_history(15)
+
+    class _DropOlder:
+        async def generate(self, messages):
+            history[1:] = history[-4:]
+            yield "stale summary"
+
+    before_tail = list(history[-4:])
+    asyncio.run(ContextSummarizer(_DropOlder(), keep_last=4)._summarize(history))
+    assert history[1:] == before_tail
+    assert not any("stale summary" in (m.content or "") for m in history)
+
+
 def test_a_failing_summary_keeps_the_full_context():
     class _Broken:
         async def generate(self, messages):
@@ -137,16 +191,10 @@ def test_a_failing_summary_keeps_the_full_context():
     history = _long_history(15)
     before = list(history)
     asyncio.run(ContextSummarizer(_Broken())._summarize(history))
-    # Degrading to "more tokens" beats degrading to "lost the caller's name".
     assert history == before
 
 
 def test_the_summary_threshold_stays_under_the_pipelines_trim_cap():
-    """The two are the same constraint and were chosen independently, which
-    is how they drifted (24 vs a 21-message cap) and left summarization
-    unable to ever apply: history could only cross the threshold transiently
-    mid-turn, and trim had cut back below the cutoff by the time the
-    background summary resolved."""
     from services.conversation.workflow import summary_threshold_for
 
     for max_history in (1, 5, 10, 40):

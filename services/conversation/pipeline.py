@@ -311,10 +311,9 @@ def _build_end_call_instruction(condition: str | None, scripted: bool = False) -
 # would never hang up on its own, forcing the caller to disconnect manually.
 _FALLBACK_GOODBYE = "Goodbye."
 
-# Ceiling on workflow teardown (final extraction + in-flight background work)
-# in on_session_end. Shorter than VariableExtractor's 8s per-call timeout —
-# this runs after the caller has already gone.
+# Bound LLM wait on hangup / pre-transfer flush; outcome is always persisted.
 _FINISH_WORKFLOW_TIMEOUT_S = 3.0
+_TRANSFER_FLUSH_TIMEOUT_S = 1.5
 
 # Spoken when policies.max_call_duration_s is exceeded (see
 # PipelineConversationHandler.on_speech_ended's check, right after STT).
@@ -1156,19 +1155,8 @@ class PipelineConversationHandler:
 
     async def on_session_end(self, session_id: str, reason: str,
                              final_state: str | None = None) -> None:
-        # record_workflow_outcome must run while TranscriptBuilder's write
-        # chain is still alive (end_call() drops it). Bound the wait so a
-        # stuck extraction cannot hold the gRPC stream open after hangup.
-        try:
-            await asyncio.wait_for(
-                self._finish_workflow(session_id), timeout=_FINISH_WORKFLOW_TIMEOUT_S,
-            )
-        except asyncio.TimeoutError:
-            log.warning(
-                "Workflow finalization timed out after %.1fs session=%s — "
-                "the call's path and disposition may be incomplete",
-                _FINISH_WORKFLOW_TIMEOUT_S, session_id,
-            )
+        # Outcome must spawn before end_call() drops the write chain.
+        await self._finish_workflow(session_id)
         # Requirement: transfer-failure recovery turns are recorded in
         # short-term memory (history) immediately, in on_transfer_failed(),
         # but their transcript *persistence* is deferred until now — normal
@@ -1390,8 +1378,16 @@ class PipelineConversationHandler:
         if node is None:
             return None
         self._workflow.pending_transfer = None
-        # Destination may use {{ vars }} still in flight — flush first.
-        await self._extractor.flush()
+        try:
+            await asyncio.wait_for(
+                self._extractor.flush(), timeout=_TRANSFER_FLUSH_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "workflow: extraction flush timed out before transfer session=%s — "
+                "routing with variables collected so far",
+                session_id,
+            )
         destination = self._workflow.render(node.transfer_destination or "") or None
         decision = self._transfer_engine.evaluate(
             self._decision_context(session_id, destination_override=destination),
@@ -1410,13 +1406,19 @@ class PipelineConversationHandler:
         return decision.request
 
     async def _finish_workflow(self, session_id: str) -> None:
-        """Final extraction + persist path/disposition/variables. Idempotent via extractor."""
+        """Best-effort final extract, then always persist path/disposition/vars."""
         self._summarizer.cancel()
         try:
-            await self._extractor.extract_final(
-                self._workflow.node, self._get_history(session_id),
+            await asyncio.wait_for(
+                self._finalize_extraction(session_id),
+                timeout=_FINISH_WORKFLOW_TIMEOUT_S,
             )
-            await self._extractor.flush()
+        except asyncio.TimeoutError:
+            log.warning(
+                "Workflow finalization timed out after %.1fs session=%s — "
+                "persisting path/disposition with variables collected so far",
+                _FINISH_WORKFLOW_TIMEOUT_S, session_id,
+            )
         except Exception:
             log.exception("Workflow final extraction failed session=%s", session_id)
         if self._transcripts is not None:
@@ -1424,8 +1426,14 @@ class PipelineConversationHandler:
                 session_id,
                 nodes_visited=self._workflow.visited,
                 disposition=self._workflow.disposition,
-                extracted_variables=self._workflow.variables,
+                extracted_variables=self._workflow.extracted_variables(),
             )
+
+    async def _finalize_extraction(self, session_id: str) -> None:
+        await self._extractor.extract_final(
+            self._workflow.node, self._get_history(session_id),
+        )
+        await self._extractor.flush()
 
     # ── Internal ───────────────────────────────────────────────────────────────
 

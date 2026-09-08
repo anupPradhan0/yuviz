@@ -123,6 +123,13 @@ def test_extracted_variables_reach_later_nodes_prompts():
     assert "+15550000" in runner.system_prompt()
 
 
+def test_extracted_variables_projection_excludes_call_context():
+    runner = _runner()
+    runner.update_variables({"reason": "checkup", "caller_number": "+15550000"})
+    assert runner.extracted_variables() == {"reason": "checkup"}
+    assert "caller_number" in runner.variables
+
+
 def test_transition_swaps_the_system_prompt_inside_the_same_turn():
     # The trap in §5.3: run_turn mutates history in place, so a transition
     # that only took effect between turns would leave the rest of this
