@@ -1,11 +1,16 @@
 ---
-description: Turn a review miss into a permanent lesson so the agents stop repeating it
-allowed-tools: Bash, Read, Edit
+name: sdlc-retro
+description: Turn a review miss into a permanent lesson so SDLC agents stop repeating it. Invoke with /sdlc-retro [findings-path].
+disable-model-invocation: true
 ---
+
+# /sdlc-retro
 
 A stage found something the previous stage should have caught. Record it so it does not recur.
 
 Source: $ARGUMENTS, or the newest `*.review.md` / `*-security.md` in `.sdlc/<slug>/` if I did not name one.
+
+## Steps
 
 1. Read the findings. For each finding rated **blocking, high or critical**, ask: was this a one-off mistake, or an instance of a *class* an agent will hit again on this codebase? Only classes become lessons — a typo does not.
 2. Read `.sdlc/lessons.md`. If an existing lesson already covers the class, sharpen that entry with the new evidence instead of adding a near-duplicate. Merge aggressively; a long lessons file stops being read.

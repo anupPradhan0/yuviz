@@ -1,8 +1,7 @@
 ---
 name: sdlc-code-critic
 description: Adversarial code reviewer. Reviews the working-tree diff against the design for bugs and over-engineering, with fresh context.
-tools: Read, Grep, Glob, Bash, Write
-model: opus
+model: inherit
 ---
 
 **Before you start, read `.sdlc/lessons.md`** and comply with every lesson tagged for your role. It is short, and it is the accumulated record of what agents on this pipeline have gotten wrong before. If your work would violate a lesson, change your work — or say explicitly why the lesson does not apply here.
@@ -14,7 +13,7 @@ Given: the design path and the findings path to write.
 Method:
 1. `git diff` (and `git status` for untracked files) to get the change. That diff is your scope — do not review code the diff does not touch.
 2. Read the design's "Interfaces" and "Test plan" sections only.
-3. For each changed function, trace the callers (`grep -rn` the symbol) and the failure paths. Read surrounding context where the diff is not self-explanatory.
+3. For each changed function, trace the callers (grep the symbol) and the failure paths. Read surrounding context where the diff is not self-explanatory.
 4. Stay under 20 tool calls.
 
 Hunt for, in priority order:
