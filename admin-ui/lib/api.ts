@@ -8,12 +8,18 @@ import { clearToken, getToken } from "./auth";
 const BASE_URL = process.env.NEXT_PUBLIC_CONFIG_SERVICE_URL || "http://localhost:8000";
 
 export class ApiError extends Error {
-  constructor(public status: number, public detail: string) {
+  /** Full parsed error JSON when present (workflow publish returns `errors`). */
+  constructor(
+    public status: number,
+    public detail: string,
+    public body?: Record<string, unknown>,
+  ) {
     super(detail);
   }
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+// Exported for lib/workflowApi.ts (same auth / 401 redirect).
+export async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const token = getToken();
   const res = await fetch(`${BASE_URL}${path}`, {
     ...options,
@@ -25,9 +31,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     let detail = res.statusText;
+    let body: Record<string, unknown> | undefined;
     try {
-      const body = await res.json();
-      detail = body.detail || detail;
+      body = await res.json();
+      detail = (body?.detail as string) || detail;
     } catch {
       // response body wasn't JSON — fall back to statusText
     }
@@ -37,7 +44,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
       clearToken();
       if (window.location.pathname !== "/login") window.location.href = "/login";
     }
-    throw new ApiError(res.status, detail);
+    throw new ApiError(res.status, detail, body);
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -222,6 +229,9 @@ export interface Agent {
   // What the caller experiences while a warm transfer's agent leg rings
   // (no equivalent for cold transfer).
   transfer_waiting_experience: "announcement_moh" | "announcement_silence";
+  // Published graph (live calls) and editor autosave draft.
+  workflow: { nodes?: unknown[]; edges?: unknown[] } | null;
+  workflow_draft: { nodes?: unknown[]; edges?: unknown[] } | null;
   // Condition-clause overrides for the built-in end-call / transfer trigger
   // instructions (null/empty = defaults). Only the condition is
   // configurable — the [[END_CALL]]/[[TRANSFER]] token mechanics are fixed
@@ -418,6 +428,9 @@ export interface Call {
   agent_name: string | null;
   status: CallStatus;
   mode: CallMode;
+  disposition: string | null;
+  nodes_visited: string[] | null;
+  extracted_variables: Record<string, unknown> | null;
 }
 
 export interface CallListResult {
@@ -435,6 +448,8 @@ export interface TranscriptEntry {
   ai_response: string | null;
   interrupted: boolean;
   created_at: string;
+  node_id: string | null;
+  node_name: string | null;
 }
 
 export const listCalls = (

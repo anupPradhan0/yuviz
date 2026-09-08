@@ -133,11 +133,14 @@ async def list_agents(tenant_id: Any) -> list[dict[str, Any]]:
         "SELECT * FROM agents WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY name",
         tenant_id,
     )
-    # Call-setup needs workflow on GET/cache; the agent list does not.
+    # Editor index needs published + draft graphs for badges/step counts.
+    # GET/cache still strips draft via _public_agent.
     out = []
     for row in rows:
-        agent = _public_agent(_row(row))
-        agent.pop("workflow", None)
+        raw = _row(row)
+        agent = _public_agent(raw)
+        agent["workflow"] = raw.get("workflow")
+        agent["workflow_draft"] = raw.get("workflow_draft")
         out.append(agent)
     return out
 

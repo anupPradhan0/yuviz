@@ -229,6 +229,42 @@ export default function CallsPage() {
                 </>
               )}
             </div>
+            {/* The path this call took through its workflow, and how it
+                ended — the questions a single-prompt agent simply can't
+                answer (docs/workflow.md §7.1). Absent entirely for one. */}
+            {detailCall.nodes_visited && detailCall.nodes_visited.length > 0 && (
+              <>
+                <div style={{ fontSize: ".65rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".09em", color: "var(--text-3)", marginBottom: 6 }}>
+                  Path
+                </div>
+                <div style={{ marginBottom: 14, display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, fontSize: ".75rem" }}>
+                  {detailCall.nodes_visited.map((node, i) => (
+                    <span key={`${node}-${i}`} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      {i > 0 && <span style={{ color: "var(--text-3)" }}>→</span>}
+                      <span className="badge gray">{node}</span>
+                    </span>
+                  ))}
+                  {detailCall.disposition && (
+                    <span className="badge indigo" style={{ marginLeft: 6 }}>{detailCall.disposition}</span>
+                  )}
+                </div>
+              </>
+            )}
+            {detailCall.extracted_variables && Object.keys(detailCall.extracted_variables).length > 0 && (
+              <>
+                <div style={{ fontSize: ".65rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".09em", color: "var(--text-3)", marginBottom: 6 }}>
+                  Captured
+                </div>
+                <div style={{ marginBottom: 14, fontSize: ".75rem" }}>
+                  {Object.entries(detailCall.extracted_variables).map(([k, v]) => (
+                    <div key={k}>
+                      <span style={{ color: "var(--text-3)" }}>{k}</span>{" "}
+                      <span className="mono" style={{ color: "var(--text)" }}>{String(v)}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
             <div style={{ fontSize: ".65rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".09em", color: "var(--text-3)" }}>
               Transcript
             </div>
@@ -238,8 +274,15 @@ export default function CallsPage() {
               <div style={{ color: "var(--text-3)", fontSize: ".75rem", marginTop: 4 }}>No transcript available.</div>
             ) : (
               <div style={{ background: "var(--surf-2)", border: "1px solid var(--border)", borderRadius: "var(--rs)", padding: "10px 12px", fontSize: ".75rem", lineHeight: 1.7, marginTop: 4 }}>
-                {transcript.map((t) => (
+                {transcript.map((t, i) => (
                   <div key={t.id} style={{ marginBottom: 8 }}>
+                    {/* Segment the transcript by stage — only shown at the
+                        turn where the stage actually changed. */}
+                    {t.node_name && t.node_name !== transcript[i - 1]?.node_name && (
+                      <div style={{ margin: "6px 0 4px", fontSize: ".62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--text-3)" }}>
+                        {t.node_name}
+                      </div>
+                    )}
                     <div>Caller: {t.caller_text || "—"}</div>
                     <div>Agent: {t.ai_response || "—"}</div>
                   </div>
