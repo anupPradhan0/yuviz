@@ -468,9 +468,6 @@ body {
 .wf-node:focus-visible { outline: none; border-color: var(--cyan); box-shadow: 0 0 0 3px var(--cyan-dim); }
 .wf-node.selected { border-color: var(--cyan); box-shadow: 0 0 0 2px var(--cyan-dim), 0 0 22px rgba(14, 165, 233, .22); }
 .wf-node.invalid { border-color: var(--red); box-shadow: 0 0 0 2px var(--red-dim); }
-/* Lit while a live test call is actually in this stage — see
-   TestAgentPanel's onNodeChanged. */
-.wf-node.active { border-color: var(--green); box-shadow: 0 0 0 3px var(--green-dim), 0 0 24px rgba(34, 197, 94, .2); }
 
 /* The type pill. Solid fill and overlapping the corner, so the kind of a
    node is legible zoomed out — the one thing you scan a graph for. */
@@ -494,7 +491,6 @@ body {
   font-size: .84rem; font-weight: 700; color: var(--text);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.wf-node-live { margin-left: auto; font-size: .6rem; font-weight: 700; color: var(--green); flex-shrink: 0; }
 
 .wf-node-body { padding: 11px 14px 13px; }
 .wf-node-label { font-size: .64rem; font-weight: 600; color: var(--text-3); margin-bottom: 5px; }

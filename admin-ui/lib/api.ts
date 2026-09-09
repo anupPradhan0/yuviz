@@ -230,8 +230,8 @@ export interface Agent {
   // (no equivalent for cold transfer).
   transfer_waiting_experience: "announcement_moh" | "announcement_silence";
   // Published graph on agent GET/cache (call-setup). List responses omit
-  // graph bodies and use the lean fields below instead.
-  workflow: { nodes?: unknown[]; edges?: unknown[] } | null;
+  // graph bodies and use the lean has_workflow* fields instead.
+  workflow?: { nodes?: unknown[]; edges?: unknown[] } | null;
   has_workflow?: boolean;
   has_workflow_draft?: boolean;
   workflow_diverged?: boolean;
@@ -452,8 +452,6 @@ export interface TranscriptEntry {
   ai_response: string | null;
   interrupted: boolean;
   created_at: string;
-  node_id: string | null;
-  node_name: string | null;
 }
 
 export const listCalls = (

@@ -72,8 +72,8 @@ function canonicalize(value: unknown): string {
   );
 }
 
-// __invalid / __active are canvas-only markers stripped before persisting.
-type RFNode = Node<WorkflowNodeData & { __invalid?: boolean; __active?: boolean }>;
+// __invalid is a canvas-only marker stripped before persisting.
+type RFNode = Node<WorkflowNodeData & { __invalid?: boolean }>;
 type RFEdge = Edge<WorkflowEdgeData>;
 
 function toReactFlow(graph: WorkflowGraph): { nodes: RFNode[]; edges: RFEdge[] } {
@@ -93,8 +93,8 @@ function toGraph(nodes: RFNode[], edges: RFEdge[]): WorkflowGraph {
   return {
     version: 1,
     nodes: nodes.map((n) => {
-      const { __invalid, __active, ...data } = n.data;
-      void __invalid; void __active;
+      const { __invalid, ...data } = n.data;
+      void __invalid;
       return {
         id: n.id, type: (n.type || "agent") as WorkflowNodeType,
         position: n.position, data: data as WorkflowNodeData,
@@ -149,7 +149,6 @@ function Panel({
   const [showHelp, setShowHelp] = useState(false);
   // Browser voice test hits the published agent (draft live-highlight later).
   const [testing, setTesting] = useState(false);
-  const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
   const loaded = useRef(false);
   // Client-only seed: skip autosave until the canvas diverges from this snapshot.
   const seedPristine = useRef<string | null>(null);
@@ -353,10 +352,9 @@ function Panel({
 
   const paintedNodes = useMemo(() => nodes.map((n) => {
     const invalid = badNodeIds.has(n.id);
-    const active = n.id === activeNodeId;
-    if (Boolean(n.data.__invalid) === invalid && Boolean(n.data.__active) === active) return n;
-    return { ...n, data: { ...n.data, __invalid: invalid, __active: active } };
-  }), [nodes, badNodeIds, activeNodeId]);
+    if (Boolean(n.data.__invalid) === invalid) return n;
+    return { ...n, data: { ...n.data, __invalid: invalid } };
+  }), [nodes, badNodeIds]);
 
   // ConditionEdge draws the label itself, and reads __invalid off data.
   // toGraph strips the marker on the way out (see there) — it can't just be
@@ -560,7 +558,7 @@ function Panel({
                 ? "Tests the live (published) agent — unpublished canvas changes are not included yet"
                 : "Try the live agent in the browser"
             }
-            onClick={() => { setTesting(!testing); setActiveNodeId(null); }}
+            onClick={() => setTesting(!testing)}
           >
             {diverged ? "Test live agent" : "Test Agent"}
           </button>
@@ -575,9 +573,10 @@ function Panel({
           <div className="wf-toolbar-right">
             <button
               className="btn btn-primary btn-sm"
-              disabled={publishing || blocking || (!diverged && !justPublished)}
+              disabled={publishing || blocking || !diverged || justPublished}
               title={
                 blocking ? "Fix the problems listed below first"
+                  : justPublished ? "Just published"
                   : !diverged ? "Nothing has changed since the last publish"
                   : "Make this the flow live calls run"
               }
@@ -719,7 +718,7 @@ function Panel({
             {testing ? (
               <TestAgentPanel
                 open
-                onClose={() => { setTesting(false); setActiveNodeId(null); }}
+                onClose={() => setTesting(false)}
                 tenantSlug={tenantSlug}
                 agentSlug={agentSlug}
               />

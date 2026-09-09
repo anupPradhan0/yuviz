@@ -44,7 +44,6 @@ export default function AgentDetailPage() {
 
   // Greeting / system prompt live on the canvas; end-call and transfer
   // speech still use agent columns (pipeline _prompt_suffix / scripted lines).
-  const hasWorkflow = Boolean(agent?.workflow?.nodes?.length);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -296,14 +295,13 @@ export default function AgentDetailPage() {
       {tab === "behaviour" && (
         <div className="cols">
           <div className="col-main">
-            {hasWorkflow && (
-              <div className="info-banner">
-                <strong>Stage prompts live in the{" "}
-                <Link href={`/workflows/${tenantSlug}/${agentSlug}`}>flow</Link>.</strong>{" "}
-                Greeting is on the start step; always-applies holds global instructions.
-                End-call and transfer wording below still apply on every call.
-              </div>
-            )}
+            <div className="info-banner">
+              <strong>Stage prompts live in the{" "}
+              <Link href={`/workflows/${tenantSlug}/${agentSlug}`}>flow</Link>.</strong>{" "}
+              Greeting is on the start step; always-applies holds global instructions
+              (one freeform textarea — the old Personality / Environment / Tone splitter
+              is gone). End-call and transfer wording below still apply on every call.
+            </div>
 
             <div className="card" style={{ marginBottom: 14 }}>
               <div className="card-hdr">

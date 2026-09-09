@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from libs.config_sdk.workflow import graphs_equivalent, starter_graph
+from libs.config_sdk.workflow import starter_graph
 from services.config import agents, workflows
 
 GRAPH = {
@@ -213,10 +213,10 @@ async def test_republishing_the_same_graph_is_a_noop(test_tenant, pool):
     assert [v["version"] for v in versions_after] == [v["version"] for v in versions_before]
 
 
-async def test_noop_publish_still_syncs_draft_chrome(test_tenant):
-    """Position-only draft must not stick as unpublished after logic-noop publish."""
+async def test_chrome_only_publish_writes_live_positions(test_tenant, pool):
+    """Position-only publish must update agents.workflow (editor compares positions)."""
     agent = await _agent(test_tenant, slug="wf-chrome")
-    await workflows.publish(agent["id"], tenant_slug=test_tenant["slug"], graph=GRAPH)
+    first = await workflows.publish(agent["id"], tenant_slug=test_tenant["slug"], graph=GRAPH)
     moved = {
         **GRAPH,
         "nodes": [
@@ -228,10 +228,12 @@ async def test_noop_publish_still_syncs_draft_chrome(test_tenant):
     result = await workflows.publish(
         agent["id"], tenant_slug=test_tenant["slug"], graph=moved,
     )
-    assert result["version"] == 2  # first publish was v2 after create's v1
+    # No new history row — logic unchanged — but live JSON and config_version move.
+    assert result["version"] == first["version"]
+    assert result["config_version"] == first["config_version"] + 1
     state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
-    assert state["workflow_draft"] == moved
-    assert graphs_equivalent(state["workflow"], moved)
+    assert state["workflow"]["nodes"] == moved["nodes"]
+    assert state["workflow_draft"]["nodes"] == moved["nodes"]
 
 
 async def test_draft_save_with_stale_config_version_is_rejected(test_tenant):
@@ -276,7 +278,7 @@ async def test_empty_workflow_object_at_create_uses_the_starter_graph(test_tenan
     assert [v["version"] for v in versions] == [1]
 
 
-async def test_republishing_with_only_position_changes_is_a_noop(test_tenant, pool):
+async def test_republishing_with_only_position_changes_updates_live_chrome(test_tenant, pool):
     agent = await _agent(test_tenant, slug="wf-pos-noop")
     first = await workflows.publish(
         agent["id"], tenant_slug=test_tenant["slug"], graph=GRAPH,
@@ -292,9 +294,11 @@ async def test_republishing_with_only_position_changes_is_a_noop(test_tenant, po
         agent["id"], tenant_slug=test_tenant["slug"], graph=moved,
     )
     assert again["version"] == first["version"]
-    assert again["config_version"] == first["config_version"]
+    assert again["config_version"] == first["config_version"] + 1
     versions = await workflows.list_versions(agent["id"], test_tenant["slug"])
     assert [v["version"] for v in versions] == [first["version"], 1]
+    state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
+    assert state["workflow"]["nodes"] == moved["nodes"]
 
 
 async def test_get_agent_does_not_expose_or_cache_the_draft(test_tenant):

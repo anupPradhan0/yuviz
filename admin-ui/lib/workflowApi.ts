@@ -158,8 +158,9 @@ export function publishErrors(e: unknown): { message: string; errors: WorkflowEr
   return { message: String(e), errors: [] };
 }
 
-/** The graph a brand-new agent starts from — mirrors libs/config_sdk
- *  starter_graph(greeting, system_prompt). Validator rejects a lone start. */
+/** Client fallback matching libs/config_sdk/workflow.starter_graph — only
+ *  used when both draft and live are missing (legacy rows). create_agent
+ *  already seeds the server-side graph for new agents. */
 export function starterGraph(greeting = "", systemPrompt = ""): WorkflowGraph {
   return {
     version: 1,
@@ -195,6 +196,3 @@ export function starterGraph(greeting = "", systemPrompt = ""): WorkflowGraph {
     ],
   };
 }
-
-/** @deprecated Prefer starterGraph(greeting, systemPrompt) so column prompts land. */
-export const STARTER: WorkflowGraph = starterGraph();

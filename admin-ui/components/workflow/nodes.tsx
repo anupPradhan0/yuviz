@@ -80,10 +80,10 @@ function Badges({ data, type }: { data: WorkflowNodeData; type: WorkflowNodeType
 }
 
 function NodeShell({
-  id, type, data, selected, invalid, active,
+  id, type, data, selected, invalid,
 }: {
   id: string; type: WorkflowNodeType; data: WorkflowNodeData;
-  selected: boolean; invalid: boolean; active: boolean;
+  selected: boolean; invalid: boolean;
 }) {
   const { addConnectedStage } = useEditorActions();
   const unwired = type === "global";
@@ -95,13 +95,12 @@ function NodeShell({
   return (
     <div
       className={`wf-node wf-node-${type}${selected ? " selected" : ""}` +
-        `${invalid ? " invalid" : ""}${active ? " active" : ""}`}
+        `${invalid ? " invalid" : ""}`}
       // Reachable and announced for keyboard/screen-reader users — a bare
       // div of prompt text tells them nothing about what it is.
       tabIndex={0}
       role="button"
       aria-label={label}
-      aria-current={active ? "true" : undefined}
       title={TYPE_HINT[type]}
     >
       {type !== "start" && !unwired && <Handle type="target" position={Position.Top} />}
@@ -115,7 +114,6 @@ function NodeShell({
 
       <div className="wf-node-hdr">
         <span className="wf-node-name">{data.name || <em>unnamed</em>}</span>
-        {active && <span className="wf-node-live">● live</span>}
       </div>
 
       <div className="wf-node-body">
@@ -161,7 +159,6 @@ function make(type: WorkflowNodeType) {
       data={data as unknown as WorkflowNodeData}
       selected={!!selected}
       invalid={!!(data as { __invalid?: boolean }).__invalid}
-      active={!!(data as { __active?: boolean }).__active}
     />
   );
   Component.displayName = `${type}Node`;
