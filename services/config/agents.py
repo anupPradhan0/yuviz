@@ -20,7 +20,7 @@ import json
 import uuid
 from typing import Any
 
-from libs.config_sdk.workflow import starter_graph
+from libs.config_sdk.workflow import graphs_equivalent, starter_graph
 
 from . import audit, cache, db
 
@@ -64,6 +64,29 @@ def _public_agent(row: dict[str, Any]) -> dict[str, Any]:
     out = dict(row)
     out.pop("workflow_draft", None)
     return out
+
+
+def _graph_node_count(graph: Any) -> int | None:
+    if not isinstance(graph, dict):
+        return None
+    nodes = graph.get("nodes")
+    return len(nodes) if isinstance(nodes, list) else None
+
+
+def _list_workflow_fields(raw: dict[str, Any]) -> dict[str, Any]:
+    """Lean list metadata for the editor index — never full graph bodies."""
+    wf = raw.get("workflow") if isinstance(raw.get("workflow"), dict) else None
+    draft = raw.get("workflow_draft") if isinstance(raw.get("workflow_draft"), dict) else None
+    has_wf = wf is not None
+    has_draft = draft is not None
+    diverged = bool(has_wf and has_draft and not graphs_equivalent(wf, draft))
+    count_src = draft if (has_draft and (not has_wf or diverged)) else wf
+    return {
+        "has_workflow": has_wf,
+        "has_workflow_draft": has_draft,
+        "workflow_diverged": diverged,
+        "workflow_node_count": _graph_node_count(count_src),
+    }
 
 
 def _coerce_prompt(value: Any) -> str:
@@ -133,11 +156,14 @@ async def list_agents(tenant_id: Any) -> list[dict[str, Any]]:
         "SELECT * FROM agents WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY name",
         tenant_id,
     )
-    # Call-setup needs workflow on GET/cache; the agent list does not.
+    # List stays lean: badges/step counts only. Full graphs stay on GET
+    # (published) and /workflow (draft+live); Conversation prewarm uses list.
     out = []
     for row in rows:
-        agent = _public_agent(_row(row))
+        raw = _row(row)
+        agent = _public_agent(raw)
         agent.pop("workflow", None)
+        agent.update(_list_workflow_fields(raw))
         out.append(agent)
     return out
 
