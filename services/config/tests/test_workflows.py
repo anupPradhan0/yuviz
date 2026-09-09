@@ -325,19 +325,21 @@ async def test_get_agent_exposes_and_caches_the_draft(test_tenant):
     assert state["workflow_draft"] == DEAD_END
 
 
-async def test_draft_save_write_through_updates_cached_draft(test_tenant):
-    """Autosave must patch Redis so the next text-chat session sees the edit."""
+async def test_draft_save_invalidates_agent_cache(test_tenant):
+    """Autosave must drop the Redis entry so the next session reloads draft."""
     agent = await agents.create_agent(
-        tenant_id=test_tenant["id"], slug="wf-draft-wt", name="Draft WT",
+        tenant_id=test_tenant["id"], slug="wf-draft-inv", name="Draft Inv",
         system_prompt=AGENT_PROMPT, tenant_slug=test_tenant["slug"],
     )
-    # Warm cache with create's starter, then overwrite draft.
-    await agents.get_agent(test_tenant["slug"], "wf-draft-wt")
+    key = agents.cache_key(test_tenant["slug"], "wf-draft-inv")
+    await agents.get_agent(test_tenant["slug"], "wf-draft-inv")
+    assert await cache.get_json(key) is not None
     await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=DEAD_END)
-    cached = await cache.get_json(agents.cache_key(test_tenant["slug"], "wf-draft-wt"))
-    assert cached is not None
-    assert cached["workflow_draft"] == DEAD_END
-    assert cached["workflow"] == CREATED_GRAPH
+    assert await cache.get_json(key) is None
+    fetched = await agents.get_agent(test_tenant["slug"], "wf-draft-inv")
+    assert fetched is not None
+    assert fetched["workflow_draft"] == DEAD_END
+    assert fetched["workflow"] == CREATED_GRAPH
 
 
 async def test_patching_greeting_mirrors_into_the_published_graph(test_tenant, pool):

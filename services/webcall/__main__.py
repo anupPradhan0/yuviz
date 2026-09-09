@@ -92,6 +92,74 @@ def _dump_dir() -> str | None:
     return os.environ.get("WEBCALL_DUMP_AUDIO_DIR")
 
 
+# Same fence as services/config/deps.CONSOLE_ROLES — supervisor/agent JWTs
+# must not reach unpublished drafts (lesson 4).
+_CONSOLE_ROLES = frozenset({"superadmin", "admin", "viewer"})
+
+
+async def _config_tenant_allowed(token: str, tenant_slug: str) -> bool:
+    """True only if Config would let this JWT GET /tenants/{slug} (404 on mismatch)."""
+    base = os.environ.get("CONFIG_SERVICE_URL", "http://localhost:8000").rstrip("/")
+    url = f"{base}/tenants/{tenant_slug}"
+
+    def _get() -> int:
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return int(resp.getcode())
+        except urllib.error.HTTPError as exc:
+            return int(exc.code)
+        except Exception:
+            return 0
+
+    return await asyncio.to_thread(_get) == 200
+
+
+async def _draft_auth_problem(token: str | None, tenant_slug: str) -> str | None:
+    """Gate draft sessions: console role + Config tenant isolation."""
+    secret = os.environ.get("JWT_SECRET", "").strip()
+    if not secret:
+        return "draft testing is unavailable (JWT_SECRET not set on webcall)"
+    if not token:
+        return "draft testing requires a signed-in session"
+    try:
+        import jwt
+        payload = jwt.decode(token, secret, algorithms=["HS256"])
+    except Exception:
+        return "draft testing token is invalid or expired"
+    if payload.get("is_service_account"):
+        return "draft testing requires an interactive admin session"
+    if payload.get("role") not in _CONSOLE_ROLES:
+        return "draft testing is not allowed for this account"
+    # Bind ?tenant= to the JWT via Config — same 404-on-mismatch as the API.
+    if not await _config_tenant_allowed(token, tenant_slug):
+        return "draft testing is not allowed for this tenant"
+    return None
+
+
+async def _await_draft_auth(ws: ServerConnection, tenant_slug: str) -> str | None:
+    """First WS text frame must be {"type":"auth","token":...} — never put JWT in the URL."""
+    try:
+        raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+    except asyncio.TimeoutError:
+        return "draft testing timed out waiting for auth"
+    if not isinstance(raw, str):
+        return "draft testing expected an auth text frame"
+    try:
+        msg = json.loads(raw)
+    except json.JSONDecodeError:
+        return "draft testing auth frame was not JSON"
+    if msg.get("type") != "auth":
+        return "draft testing requires an auth frame first"
+    problem = await _draft_auth_problem(msg.get("token"), tenant_slug)
+    if problem:
+        return problem
+    await ws.send(json.dumps({"type": "auth_ok"}))
+    return None
+
+
 def _write_wav_dump(session_id: str, utterance_num: int, pcm: bytes) -> None:
     """Debug aid only, opt-in via WEBCALL_DUMP_AUDIO_DIR: writes each
     utterance's raw audio to a WAV file so it can actually be listened to.
@@ -318,25 +386,6 @@ async def _grpc_to_browser(ws: ServerConnection, call, response_watchdog: Respon
         # conversation_finalized: nothing the browser can act on.
 
 
-def _draft_token_problem(token: str | None) -> str | None:
-    """Gate ?draft=1: unpublished graphs must not be open to an anonymous WS."""
-    secret = os.environ.get("JWT_SECRET", "").strip()
-    if not secret:
-        return "draft testing is unavailable (JWT_SECRET not set on webcall)"
-    if not token:
-        return "draft testing requires a signed-in session"
-    try:
-        import jwt
-        payload = jwt.decode(token, secret, algorithms=["HS256"])
-    except Exception:
-        return "draft testing token is invalid or expired"
-    if payload.get("is_service_account"):
-        return "draft testing requires an interactive admin session"
-    if payload.get("role") not in ("superadmin", "admin", "viewer", "supervisor", "agent"):
-        return "draft testing is not allowed for this account"
-    return None
-
-
 async def _handle_connection(ws: ServerConnection) -> None:
     params = _parse_query(ws.request.path)
     tenant_slug = params.get("tenant")
@@ -347,7 +396,8 @@ async def _handle_connection(ws: ServerConnection) -> None:
 
     use_draft = params.get("draft") in ("1", "true")
     if use_draft:
-        problem = _draft_token_problem(params.get("token"))
+        # Auth arrives as the first WS text frame — never as ?token= (logs/Referer).
+        problem = await _await_draft_auth(ws, tenant_slug)
         if problem:
             log.warning("webcall: refusing draft session — %s", problem)
             try:
@@ -380,7 +430,7 @@ async def _handle_connection(ws: ServerConnection) -> None:
             sample_rate=SAMPLE_RATE,
             channels=1,
             direction="test",
-            # ?draft=1 (+ valid admin JWT) — exercise an unpublished graph.
+            # ?draft=1 (+ first-frame admin JWT) — exercise an unpublished graph.
             use_workflow_draft=use_draft,
             # ?mode=text — type at the agent instead of talking to it. No
             # audio flows in either direction; STT and TTS are skipped.

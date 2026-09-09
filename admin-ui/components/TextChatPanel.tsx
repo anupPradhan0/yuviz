@@ -53,8 +53,7 @@ export function TextChatPanel({
     setTurns([]);
     setError(null);
 
-    // draft=1 requires the admin JWT — unpublished graphs must not be
-    // reachable from an unauthenticated webcall URL alone.
+    // draft=1: auth is a first WS frame (never ?token= — that lands in logs).
     const token = useDraft ? getToken() : null;
     if (useDraft && !token) {
       setError("Sign in again to test an unpublished draft.");
@@ -64,11 +63,17 @@ export function TextChatPanel({
     const qs =
       `${WEBCALL_URL}/webcall?mode=text&tenant=${encodeURIComponent(tenantSlug)}` +
       `&agent=${encodeURIComponent(agentSlug)}` +
-      (useDraft ? `&draft=1&token=${encodeURIComponent(token!)}` : "");
+      (useDraft ? "&draft=1" : "");
     const ws = new WebSocket(qs);
     wsRef.current = ws;
 
-    ws.onopen = () => setState("ready");
+    ws.onopen = () => {
+      if (useDraft) {
+        ws.send(JSON.stringify({ type: "auth", token }));
+        return;
+      }
+      setState("ready");
+    };
     ws.onerror = () => {
       setError("Couldn't reach the test service. Is the webcall service running?");
       setState("error");
@@ -85,6 +90,9 @@ export function TextChatPanel({
         return;
       }
       switch (msg.type) {
+        case "auth_ok":
+          setState("ready");
+          break;
         case "agent_text":
           setTurns((t) => [...t, { role: "agent", text: msg.text }]);
           setError(null);

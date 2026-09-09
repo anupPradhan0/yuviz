@@ -146,9 +146,9 @@ async def save_draft(
 ) -> dict[str, Any]:
     """Autosave. Optional base_config_version fences publish races (409 StaleDraft).
 
-    Does not bump config_version (draft-only trigger skip). Write-through
-    patches Redis workflow_draft so the next test session sees the edit
-    without invalidating the published call-setup cache.
+    Does not bump config_version (draft-only trigger skip). Invalidates the
+    agent Redis entry so the next test session reloads draft from Postgres —
+    avoids a get-then-set race with publish that could revive a stale live graph.
     """
     pool = await db.get_pool()
     if base_config_version is None:
@@ -194,21 +194,8 @@ async def save_draft(
         if base_config_version is not None:
             raise StaleDraft()
         raise LookupError(f"agent {agent_id} not found under tenant {tenant_slug!r}")
-    await _patch_cached_draft(tenant_slug, row["slug"], graph)
+    await cache.invalidate(agents_service.cache_key(tenant_slug, row["slug"]))
     return {"saved": True, "config_version": row["config_version"]}
-
-
-async def _patch_cached_draft(
-    tenant_slug: str, agent_slug: str, graph: dict[str, Any],
-) -> None:
-    """Update workflow_draft on a warm agent cache entry; miss = next GET reloads."""
-    key = agents_service.cache_key(tenant_slug, agent_slug)
-    cached = await cache.get_json(key)
-    if cached is None:
-        return
-    patched = dict(cached)
-    patched["workflow_draft"] = graph
-    await cache.set_json(key, patched)
 
 
 async def _peek_draft(agent_id: Any, tenant_slug: str) -> dict[str, Any] | None:
