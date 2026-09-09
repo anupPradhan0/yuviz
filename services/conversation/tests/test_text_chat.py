@@ -196,3 +196,59 @@ async def test_a_blank_turn_leaves_the_session_usable():
     assert session.fsm_state is CallFsmState.LISTENING
     replies = [r async for r in session.text_input("hello")]
     assert any(r.agent_text for r in replies)
+
+
+async def test_text_only_tool_fillers_do_not_enter_assistant_history():
+    """Voice fillers yield ("", tts); text must not put the phrase in full_response."""
+    from services.conversation.pipeline import _TOOL_CALL_FILLERS
+    from services.conversation.tools.llm_adapter import TokenEvent, ToolCallStartedEvent
+    from .test_pipeline import _FakeToolOrchestrator
+
+    orchestrator = _FakeToolOrchestrator([
+        ToolCallStartedEvent(tool_name="book_appointment"),
+        TokenEvent(text="You're booked."),
+    ])
+    handler = _make_handler(
+        _make_stt("x"), _make_llm(["unused"]), _make_tts(),
+        text_only=True, tool_orchestrator=orchestrator, has_booking_tool=True,
+    )
+    [r async for r in handler.on_text("s1", "book me")]
+    history = handler._session("s1").history
+    assistant = [m.content for m in history if m.role == "assistant"]
+    assert assistant == ["You're booked."]
+    assert not any(f in "".join(assistant) for f in _TOOL_CALL_FILLERS)
+
+
+async def test_use_workflow_draft_runs_the_draft_graph_not_published():
+    published = {
+        "version": 1,
+        "nodes": [
+            {"id": "n1", "type": "start", "position": {"x": 0, "y": 0},
+             "data": {"name": "live", "prompt": "Published.", "greeting": "Live hello."}},
+            {"id": "n2", "type": "end", "position": {"x": 0, "y": 190},
+             "data": {"name": "bye", "prompt": "Done.", "disposition": "completed"}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "n2",
+             "data": {"label": "done", "condition": "Caller is done."}},
+        ],
+    }
+    draft = {
+        "version": 1,
+        "nodes": [
+            {"id": "d1", "type": "start", "position": {"x": 0, "y": 0},
+             "data": {"name": "draft-start", "prompt": "Draft.", "greeting": "Draft hello."}},
+            {"id": "d2", "type": "end", "position": {"x": 0, "y": 190},
+             "data": {"name": "draft-end", "prompt": "Draft bye.", "disposition": "completed"}},
+        ],
+        "edges": [
+            {"id": "de1", "source": "d1", "target": "d2",
+             "data": {"label": "finish", "condition": "Caller is done."}},
+        ],
+    }
+    handler = _make_handler(
+        _make_stt("x"), _make_llm(["ok"]), _make_tts(),
+        text_only=True, workflow=published, workflow_draft=draft, use_workflow_draft=True,
+    )
+    assert handler._workflow.node.name == "draft-start"
+    assert handler.greeting_message() == "Draft hello."

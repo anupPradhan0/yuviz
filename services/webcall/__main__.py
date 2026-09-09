@@ -318,6 +318,25 @@ async def _grpc_to_browser(ws: ServerConnection, call, response_watchdog: Respon
         # conversation_finalized: nothing the browser can act on.
 
 
+def _draft_token_problem(token: str | None) -> str | None:
+    """Gate ?draft=1: unpublished graphs must not be open to an anonymous WS."""
+    secret = os.environ.get("JWT_SECRET", "").strip()
+    if not secret:
+        return "draft testing is unavailable (JWT_SECRET not set on webcall)"
+    if not token:
+        return "draft testing requires a signed-in session"
+    try:
+        import jwt
+        payload = jwt.decode(token, secret, algorithms=["HS256"])
+    except Exception:
+        return "draft testing token is invalid or expired"
+    if payload.get("is_service_account"):
+        return "draft testing requires an interactive admin session"
+    if payload.get("role") not in ("superadmin", "admin", "viewer", "supervisor", "agent"):
+        return "draft testing is not allowed for this account"
+    return None
+
+
 async def _handle_connection(ws: ServerConnection) -> None:
     params = _parse_query(ws.request.path)
     tenant_slug = params.get("tenant")
@@ -325,6 +344,20 @@ async def _handle_connection(ws: ServerConnection) -> None:
     if not tenant_slug or not agent_slug:
         await ws.close(code=1008, reason="missing tenant/agent query params")
         return
+
+    use_draft = params.get("draft") in ("1", "true")
+    if use_draft:
+        problem = _draft_token_problem(params.get("token"))
+        if problem:
+            log.warning("webcall: refusing draft session — %s", problem)
+            try:
+                await ws.send(json.dumps({
+                    "type": "error", "message": problem, "fatal": True,
+                }))
+            except Exception:
+                pass
+            await ws.close(code=1008, reason=problem[:120])
+            return
 
     # Default to Envoy's gRPC proxy (config/gateway.yaml uses the same
     # target) so this bridge load-balances across both ConvSvc instances
@@ -347,8 +380,8 @@ async def _handle_connection(ws: ServerConnection) -> None:
             sample_rate=SAMPLE_RATE,
             channels=1,
             direction="test",
-            # ?draft=1 — hear an unpublished graph before publishing it.
-            use_workflow_draft=params.get("draft") in ("1", "true"),
+            # ?draft=1 (+ valid admin JWT) — exercise an unpublished graph.
+            use_workflow_draft=use_draft,
             # ?mode=text — type at the agent instead of talking to it. No
             # audio flows in either direction; STT and TTS are skipped.
             text_only=params.get("mode") == "text",

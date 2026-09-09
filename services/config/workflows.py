@@ -1,7 +1,8 @@
 """
 Workflow draft/publish/versions for agents.workflow (docs/workflow.md §4.2).
 
-- workflow_draft: editor autosave; may be invalid; never read by a call
+- workflow_draft: editor autosave; may be invalid; read only by admin
+  test sessions with SessionOpenRequest.use_workflow_draft (text chat)
 - workflow: live graph; only written by publish/create after validation
 - agent_workflow_versions: append-only publish history (rollback republishes)
 
@@ -145,8 +146,9 @@ async def save_draft(
 ) -> dict[str, Any]:
     """Autosave. Optional base_config_version fences publish races (409 StaleDraft).
 
-    Draft is not cached on the agent row (GET /agents strips it), so no cache
-    invalidation — GET .../workflow always reads Postgres.
+    Does not bump config_version (draft-only trigger skip). Write-through
+    patches Redis workflow_draft so the next test session sees the edit
+    without invalidating the published call-setup cache.
     """
     pool = await db.get_pool()
     if base_config_version is None:
@@ -159,7 +161,7 @@ async def save_draft(
                AND t.id = a.tenant_id
                AND t.slug = $2
                AND a.deleted_at IS NULL
-         RETURNING a.config_version
+         RETURNING a.config_version, a.slug
             """,
             agent_id, tenant_slug, json.dumps(graph),
         )
@@ -174,7 +176,7 @@ async def save_draft(
                AND t.slug = $2
                AND a.deleted_at IS NULL
                AND a.config_version = $4
-         RETURNING a.config_version
+         RETURNING a.config_version, a.slug
             """,
             agent_id, tenant_slug, json.dumps(graph), base_config_version,
         )
@@ -192,7 +194,21 @@ async def save_draft(
         if base_config_version is not None:
             raise StaleDraft()
         raise LookupError(f"agent {agent_id} not found under tenant {tenant_slug!r}")
+    await _patch_cached_draft(tenant_slug, row["slug"], graph)
     return {"saved": True, "config_version": row["config_version"]}
+
+
+async def _patch_cached_draft(
+    tenant_slug: str, agent_slug: str, graph: dict[str, Any],
+) -> None:
+    """Update workflow_draft on a warm agent cache entry; miss = next GET reloads."""
+    key = agents_service.cache_key(tenant_slug, agent_slug)
+    cached = await cache.get_json(key)
+    if cached is None:
+        return
+    patched = dict(cached)
+    patched["workflow_draft"] = graph
+    await cache.set_json(key, patched)
 
 
 async def _peek_draft(agent_id: Any, tenant_slug: str) -> dict[str, Any] | None:

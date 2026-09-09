@@ -13,6 +13,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { getToken } from "@/lib/auth";
+
 const WEBCALL_URL = process.env.NEXT_PUBLIC_WEBCALL_URL || "ws://localhost:8300";
 
 type Turn = { role: "you" | "agent" | "note"; text: string };
@@ -51,10 +53,19 @@ export function TextChatPanel({
     setTurns([]);
     setError(null);
 
-    const ws = new WebSocket(
+    // draft=1 requires the admin JWT — unpublished graphs must not be
+    // reachable from an unauthenticated webcall URL alone.
+    const token = useDraft ? getToken() : null;
+    if (useDraft && !token) {
+      setError("Sign in again to test an unpublished draft.");
+      setState("error");
+      return;
+    }
+    const qs =
       `${WEBCALL_URL}/webcall?mode=text&tenant=${encodeURIComponent(tenantSlug)}` +
-        `&agent=${encodeURIComponent(agentSlug)}${useDraft ? "&draft=1" : ""}`,
-    );
+      `&agent=${encodeURIComponent(agentSlug)}` +
+      (useDraft ? `&draft=1&token=${encodeURIComponent(token!)}` : "");
+    const ws = new WebSocket(qs);
     wsRef.current = ws;
 
     ws.onopen = () => setState("ready");
@@ -76,6 +87,7 @@ export function TextChatPanel({
       switch (msg.type) {
         case "agent_text":
           setTurns((t) => [...t, { role: "agent", text: msg.text }]);
+          setError(null);
           setState("ready");
           break;
         case "stt_result":
@@ -99,8 +111,9 @@ export function TextChatPanel({
           setState("ended");
           break;
         case "no_response":
+          // Stay locked on "thinking" — unlocking here lets a second send
+          // race a late agent_text from the still-running turn.
           setError(msg.message);
-          setState("ready");
           break;
         case "error":
           setError(msg.message || "The agent hit an error.");

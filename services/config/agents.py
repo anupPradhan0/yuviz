@@ -59,11 +59,9 @@ def _audit_view(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _public_agent(row: dict[str, Any]) -> dict[str, Any]:
-    """Published workflow stays on the agent GET/cache payload so call-setup
-    can carry it into RuntimeConfig. Draft is editor-only until draft testing."""
-    out = dict(row)
-    out.pop("workflow_draft", None)
-    return out
+    """Published + draft graphs on the agent GET/cache payload for call-setup
+    (RuntimeConfig / admin text-chat with use_workflow_draft). List stays lean."""
+    return dict(row)
 
 
 def _graph_node_count(graph: Any) -> int | None:
@@ -157,12 +155,13 @@ async def list_agents(tenant_id: Any) -> list[dict[str, Any]]:
         tenant_id,
     )
     # List stays lean: badges/step counts only. Full graphs stay on GET
-    # (published) and /workflow (draft+live); Conversation prewarm uses list.
+    # (published + draft for call-setup) and /workflow (editor).
     out = []
     for row in rows:
         raw = _row(row)
         agent = _public_agent(raw)
         agent.pop("workflow", None)
+        agent.pop("workflow_draft", None)
         agent.update(_list_workflow_fields(raw))
         out.append(agent)
     return out

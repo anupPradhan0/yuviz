@@ -1679,6 +1679,11 @@ class PipelineConversationHandler:
                         idx = state.tool_call_filler_index
                         state.tool_call_filler_index = idx + 1
                         phrase = _TOOL_CALL_FILLERS[idx % len(_TOOL_CALL_FILLERS)]
+                        # text_only: skip fillers — yielding the phrase into
+                        # full_response would append it to assistant history
+                        # (voice yields "", chunk so fillers never land there).
+                        if self._text_only:
+                            continue
                         any_filler_chunk = False
                         async for chunk in self._synthesize_sentence_stream(phrase, session_id):
                             if not any_filler_chunk:
@@ -1688,10 +1693,6 @@ class PipelineConversationHandler:
                                     item.tool_name, phrase, session_id,
                                 )
                             yield "", chunk, end_call
-                        if self._text_only and not any_filler_chunk:
-                            # text_only: synthesis is a no-op — still surface
-                            # the filler as agent_text so chat sessions see it.
-                            yield phrase, b"", end_call
                     continue
                 token = item
                 result = DirectiveParser.parse(stream_buf.feed(token))

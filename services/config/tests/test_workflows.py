@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from libs.config_sdk.workflow import starter_graph
-from services.config import agents, workflows
+from services.config import agents, cache, workflows
 
 GRAPH = {
     "version": 1,
@@ -301,18 +301,18 @@ async def test_republishing_with_only_position_changes_updates_live_chrome(test_
     assert state["workflow"]["nodes"] == moved["nodes"]
 
 
-async def test_get_agent_does_not_expose_or_cache_the_draft(test_tenant):
+async def test_get_agent_exposes_and_caches_the_draft(test_tenant):
     agent = await agents.create_agent(
-        tenant_id=test_tenant["id"], slug="wf-no-draft", name="No Draft",
+        tenant_id=test_tenant["id"], slug="wf-draft-cache", name="Draft Cache",
         system_prompt=AGENT_PROMPT, tenant_slug=test_tenant["slug"],
     )
     await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=DEAD_END)
-    fetched = await agents.get_agent(test_tenant["slug"], "wf-no-draft")
+    fetched = await agents.get_agent(test_tenant["slug"], "wf-draft-cache")
     assert fetched is not None
-    # Published graph stays on the agent GET/cache payload for call-setup;
-    # draft is editor-only until draft testing.
-    assert "workflow" in fetched and "workflow_draft" not in fetched
+    # Call-setup (and admin text-chat with use_workflow_draft) needs the draft
+    # on the agent GET/cache payload; list stays lean.
     assert fetched["workflow"] == CREATED_GRAPH
+    assert fetched["workflow_draft"] == DEAD_END
     listed = await agents.list_agents(test_tenant["id"])
     row = next(a for a in listed if a["id"] == agent["id"])
     assert "workflow" not in row and "workflow_draft" not in row
@@ -323,6 +323,21 @@ async def test_get_agent_does_not_expose_or_cache_the_draft(test_tenant):
     state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
     assert state["workflow"] == CREATED_GRAPH
     assert state["workflow_draft"] == DEAD_END
+
+
+async def test_draft_save_write_through_updates_cached_draft(test_tenant):
+    """Autosave must patch Redis so the next text-chat session sees the edit."""
+    agent = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="wf-draft-wt", name="Draft WT",
+        system_prompt=AGENT_PROMPT, tenant_slug=test_tenant["slug"],
+    )
+    # Warm cache with create's starter, then overwrite draft.
+    await agents.get_agent(test_tenant["slug"], "wf-draft-wt")
+    await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=DEAD_END)
+    cached = await cache.get_json(agents.cache_key(test_tenant["slug"], "wf-draft-wt"))
+    assert cached is not None
+    assert cached["workflow_draft"] == DEAD_END
+    assert cached["workflow"] == CREATED_GRAPH
 
 
 async def test_patching_greeting_mirrors_into_the_published_graph(test_tenant, pool):

@@ -261,8 +261,7 @@ def graph_for(runtime_config: RuntimeConfig, *, draft: bool = False) -> Workflow
     greeting/system_prompt (until PR11 drops those columns).
 
     draft=True prefers workflow_draft; invalid draft falls back to published.
-    Callers that want draft testing must pass draft=True (admin test-call path;
-    not wired on SessionOpenRequest yet — PR10).
+    Admin text-chat sets SessionOpenRequest.use_workflow_draft for this path.
     """
     raw = runtime_config.conversation.workflow
     if draft and runtime_config.conversation.workflow_draft:

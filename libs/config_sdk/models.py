@@ -152,7 +152,8 @@ class Agent:
     # own comment for what this controls. None = unlimited.
     max_call_duration_s: int | None = None
     # Published / draft graphs on agents.workflow / workflow_draft. Call-setup
-    # carries published on RuntimeConfig; draft stripped from public agent until PR10.
+    # carries both into RuntimeConfig so admin text-chat can set
+    # use_workflow_draft; list endpoints stay lean (flags/counts only).
     workflow: dict[str, Any] | None = None
     workflow_draft: dict[str, Any] | None = None
 
