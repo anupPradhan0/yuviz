@@ -155,6 +155,7 @@ def _make_handler(
     has_booking_tool: bool = False,
     workflow: dict | None = None, node_tools: list[str] | None = None,
     node_knowledge: list[str] | None = None,
+    text_only: bool = False,
 ) -> PipelineConversationHandler:
     """Builds the minimal (RuntimeConfig, ProviderBundle) pair these tests
     need — PipelineConversationHandler's real constructor contract now (see
@@ -212,7 +213,7 @@ def _make_handler(
     bundle = ProviderBundle(stt=stt, llm=llm, tts=tts)
     return PipelineConversationHandler(
         runtime_config, bundle, knowledge=knowledge, tool_orchestrator=tool_orchestrator,
-        has_booking_tool=has_booking_tool,
+        has_booking_tool=has_booking_tool, text_only=text_only,
     )
 
 

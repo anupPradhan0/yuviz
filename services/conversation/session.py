@@ -46,6 +46,15 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 @dataclass
+class NodeChanged:
+    """A workflow transition, as the pipeline reports it."""
+    node_id:   str
+    node_name: str
+    node_type: str
+    via:       str = ""   # the edge's tool name; empty when entering the start node
+
+
+@dataclass
 class HandlerResponse:
     """
     Rich result from IConversationHandler.on_audio().
@@ -53,6 +62,10 @@ class HandlerResponse:
     stt_text / stt_confidence  — transcript produced for this audio segment;
                                   empty string means STT produced no output.
     tts_payloads               — zero or more raw PCM chunks to stream back.
+    agent_text                 — the agent's reply as text. Only ever set in
+                                  a text_only session (Admin UI chat test),
+                                  where it takes the place of tts_payloads;
+                                  a voice call never sets it.
     end_call                   — the agent decided this turn ends the call;
                                   the servicer sends EndCall once this turn's
                                   TTS is fully streamed (see pipeline.py).
@@ -60,6 +73,13 @@ class HandlerResponse:
                                   the caller to speak up before hanging up;
                                   0 = gateway uses its own configured default.
                                   Only meaningful when end_call is True.
+    node_changed               — the workflow's active node changed during
+                                  this turn (name, id, type, and the edge
+                                  that caused it). Observability only: the
+                                  gateway ignores it, and the admin UI's
+                                  test-call panel uses it to light up the
+                                  current node on the canvas. None for
+                                  every single-prompt agent.
     transfer_request           — set when this turn detected a [[TRANSFER]]
                                   directive or an escalation-threshold
                                   breach (see pipeline.py). The servicer
@@ -71,9 +91,11 @@ class HandlerResponse:
     stt_text:       str         = ""
     stt_confidence: float       = 0.0
     tts_payloads:   list[bytes] = field(default_factory=list)
+    agent_text:     str         = ""
     end_call:       bool        = False
     end_call_grace_period_ms: int = 0
     transfer_request: TransferRequest | None = None
+    node_changed:   "NodeChanged | None" = None
 
 
 class IConversationHandler(Protocol):
@@ -111,7 +133,13 @@ class IConversationHandler(Protocol):
 
     async def greeting(self, session_id: str) -> list[bytes]: ...
 
+    def greeting_message(self) -> str: ...
+
     async def on_audio(self, session_id: str, payload: bytes) -> HandlerResponse: ...
+
+    def on_text(
+        self, session_id: str, text: str,
+    ) -> AsyncGenerator[HandlerResponse, None]: ...
 
     def on_speech_ended(
         self,
@@ -150,6 +178,12 @@ class SessionContext:
     called_did:  str = ""
     direction:   str = ""
     script_id:   str = ""
+    # Run the agent's unpublished workflow draft (docs/workflow.md §6.4).
+    # Only ever true for an admin-UI test call; the gateway never sets it.
+    use_workflow_draft: bool = False
+    # Text-chat session: no audio in either direction. See the proto's
+    # text_only and ConversationSession.text_input().
+    text_only: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +264,12 @@ class ConversationSession:
         if payloads:
             self._tts_seq += len(payloads)
             yield HandlerResponse(tts_payloads=payloads)
+        elif self._ctx.text_only:
+            # greeting() still ran for its side effects (begin_call, the
+            # start node's delayed start); it just had no TTS to produce.
+            text = self._handler.greeting_message()
+            if text:
+                yield HandlerResponse(agent_text=text)
 
     async def push_audio(self, payload: bytes, *, trace_id: str = "") -> HandlerResponse:
         """
@@ -295,6 +335,38 @@ class ConversationSession:
         # SPEAKING is included: if TTS was buffered by the servicer but never
         # sent to the gateway (e.g. barge-in cleared the buffer), the gateway
         # will never send playback_finished, leaving the FSM stuck in SPEAKING.
+        if self._fsm.state in (
+            CallFsmState.RECOGNIZING,
+            CallFsmState.THINKING,
+            CallFsmState.SYNTHESIZING,
+            CallFsmState.SPEAKING,
+        ):
+            self._fsm.on_cancel()
+
+    async def text_input(self, text: str) -> AsyncGenerator[HandlerResponse, None]:
+        """One typed caller turn (text_only sessions). Drives the same FSM
+        states a spoken turn does, minus the audio ones — there is no
+        synthesis and no playback, so the turn ends in THINKING and the tail
+        below returns the FSM to LISTENING.
+
+        Without that reset the FSM would sit mid-turn forever and every
+        message after the first would be dropped by the guard at the top.
+        """
+        if self._fsm.state not in _SPEECH_ENDED_STATES:
+            log.debug(
+                "text_input: ignoring in state %s session=%s",
+                self._fsm.state.value, self._ctx.session_id,
+            )
+            return
+
+        self._fsm.on_speech_started(0.0)
+        self._fsm.on_speech_ended(0, 0.0)
+
+        async for response in self._handler.on_text(self._ctx.session_id, text):
+            if response.stt_text:
+                self._fsm.on_stt_final(response.stt_text, response.stt_confidence)
+            yield response
+
         if self._fsm.state in (
             CallFsmState.RECOGNIZING,
             CallFsmState.THINKING,

@@ -34,6 +34,15 @@ class EchoConversationHandler:
     async def greeting(self, session_id: str) -> list[bytes]:
         return []
 
+    def greeting_message(self) -> str:
+        return ""
+
+    async def on_text(self, session_id: str, text: str):
+        """Text chat is an Admin-UI-only path; the echo stub answers it the
+        same way it answers audio, so a text_only session against this
+        handler still exercises the wire protocol end to end."""
+        yield HandlerResponse(stt_text=text, stt_confidence=1.0, agent_text=text)
+
     async def on_audio(self, session_id: str, payload: bytes) -> HandlerResponse:
         if not payload:
             return HandlerResponse()

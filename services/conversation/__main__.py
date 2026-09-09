@@ -321,6 +321,12 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 called_number=ctx.called_did,
                 knowledge=knowledge,
                 has_booking_tool=has_booking_tool,
+                # Admin-UI test calls only (see SessionOpenRequest) — a real
+                # call always runs the published graph.
+                use_workflow_draft=ctx.use_workflow_draft,
+                # Admin-UI chat test: skip STT/TTS entirely and answer in
+                # text. Never set by a real call.
+                text_only=ctx.text_only,
             )
 
     # grpc.aio.server() defaults to SO_REUSEPORT, which lets a second process

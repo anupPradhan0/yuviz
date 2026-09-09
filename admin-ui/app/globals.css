@@ -468,6 +468,7 @@ body {
 .wf-node:focus-visible { outline: none; border-color: var(--cyan); box-shadow: 0 0 0 3px var(--cyan-dim); }
 .wf-node.selected { border-color: var(--cyan); box-shadow: 0 0 0 2px var(--cyan-dim), 0 0 22px rgba(14, 165, 233, .22); }
 .wf-node.invalid { border-color: var(--red); box-shadow: 0 0 0 2px var(--red-dim); }
+.wf-node.active { border-color: var(--cyan); box-shadow: 0 0 0 3px var(--cyan-dim), 0 0 28px rgba(14, 165, 233, .35); }
 
 /* The type pill. Solid fill and overlapping the corner, so the kind of a
    node is legible zoomed out — the one thing you scan a graph for. */
