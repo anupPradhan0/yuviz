@@ -252,3 +252,44 @@ async def test_use_workflow_draft_runs_the_draft_graph_not_published():
     )
     assert handler._workflow.node.name == "draft-start"
     assert handler.greeting_message() == "Draft hello."
+    opening = handler.opening_events()
+    assert any(r.node_changed and r.node_changed.node_name == "draft-start" for r in opening)
+    assert not handler._draft_fell_back
+
+
+async def test_invalid_draft_falls_back_and_notes_it():
+    published = {
+        "version": 1,
+        "nodes": [
+            {"id": "n1", "type": "start", "position": {"x": 0, "y": 0},
+             "data": {"name": "live", "prompt": "Published.", "greeting": "Live hello."}},
+            {"id": "n2", "type": "end", "position": {"x": 0, "y": 190},
+             "data": {"name": "bye", "prompt": "Done.", "disposition": "completed"}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "n2",
+             "data": {"label": "done", "condition": "Caller is done."}},
+        ],
+    }
+    # Dead-end draft: agent node with no outbound edge — parse/validate fails.
+    bad_draft = {
+        "version": 1,
+        "nodes": [
+            {"id": "d1", "type": "start", "position": {"x": 0, "y": 0},
+             "data": {"name": "broken", "prompt": "x", "greeting": "Nope."}},
+            {"id": "d2", "type": "agent", "position": {"x": 0, "y": 190},
+             "data": {"name": "stuck", "prompt": "y"}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "d1", "target": "d2",
+             "data": {"label": "go", "condition": "go"}},
+        ],
+    }
+    handler = _make_handler(
+        _make_stt("x"), _make_llm(["ok"]), _make_tts(),
+        text_only=True, workflow=published, workflow_draft=bad_draft, use_workflow_draft=True,
+    )
+    assert handler._draft_fell_back
+    assert handler._workflow.node.name == "live"
+    notes = [r.session_note for r in handler.opening_events() if r.session_note]
+    assert notes and "doesn't parse" in notes[0]

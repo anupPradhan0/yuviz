@@ -196,6 +196,25 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
         # Synthesize the agent's opening line and stream it to the caller.
         # Audio arriving from the gateway during synthesis accumulates in msg_q.
         async for response in session.greet():
+            if response.session_note:
+                yield pb.ServiceMessage(
+                    error=pb.ServiceError(
+                        session_id=sid,
+                        code="draft_fallback" if "doesn't parse" in response.session_note
+                        else "session_note",
+                        message=response.session_note,
+                        fatal=False,
+                    )
+                )
+            if response.node_changed is not None:
+                nc = response.node_changed
+                yield pb.ServiceMessage(
+                    workflow_node_changed=pb.WorkflowNodeChanged(
+                        session_id=sid, node_id=nc.node_id,
+                        node_name=nc.node_name, node_type=nc.node_type,
+                        via=nc.via,
+                    )
+                )
             # A text-chat session opens with the same line, as text.
             if response.agent_text:
                 yield pb.ServiceMessage(
@@ -565,6 +584,13 @@ class ConversationServicer(pb_grpc.ConversationServiceServicer):
                                 agent_text=pb.AgentText(
                                     session_id=sid, trace_id=ti.trace_id,
                                     text=response.agent_text,
+                                )
+                            )
+                        elif response.turn_complete:
+                            # Silent tool-only turn — empty AgentText unlocks chat.
+                            yield pb.ServiceMessage(
+                                agent_text=pb.AgentText(
+                                    session_id=sid, trace_id=ti.trace_id, text="",
                                 )
                             )
                         if response.end_call:

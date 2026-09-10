@@ -301,18 +301,18 @@ async def test_republishing_with_only_position_changes_updates_live_chrome(test_
     assert state["workflow"]["nodes"] == moved["nodes"]
 
 
-async def test_get_agent_exposes_and_caches_the_draft(test_tenant):
+async def test_get_agent_does_not_expose_or_cache_the_draft(test_tenant):
     agent = await agents.create_agent(
-        tenant_id=test_tenant["id"], slug="wf-draft-cache", name="Draft Cache",
+        tenant_id=test_tenant["id"], slug="wf-no-draft", name="No Draft",
         system_prompt=AGENT_PROMPT, tenant_slug=test_tenant["slug"],
     )
     await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=DEAD_END)
-    fetched = await agents.get_agent(test_tenant["slug"], "wf-draft-cache")
+    fetched = await agents.get_agent(test_tenant["slug"], "wf-no-draft")
     assert fetched is not None
-    # Call-setup (and admin text-chat with use_workflow_draft) needs the draft
-    # on the agent GET/cache payload; list stays lean.
+    # Published graph stays on the agent GET/cache payload for call-setup;
+    # draft is loaded from GET .../workflow for use_workflow_draft only.
+    assert "workflow" in fetched and "workflow_draft" not in fetched
     assert fetched["workflow"] == CREATED_GRAPH
-    assert fetched["workflow_draft"] == DEAD_END
     listed = await agents.list_agents(test_tenant["id"])
     row = next(a for a in listed if a["id"] == agent["id"])
     assert "workflow" not in row and "workflow_draft" not in row
@@ -326,7 +326,7 @@ async def test_get_agent_exposes_and_caches_the_draft(test_tenant):
 
 
 async def test_draft_save_invalidates_agent_cache(test_tenant):
-    """Autosave must drop the Redis entry so the next session reloads draft."""
+    """Autosave drops Redis so a stale entry cannot retain a prior draft body."""
     agent = await agents.create_agent(
         tenant_id=test_tenant["id"], slug="wf-draft-inv", name="Draft Inv",
         system_prompt=AGENT_PROMPT, tenant_slug=test_tenant["slug"],
@@ -338,7 +338,7 @@ async def test_draft_save_invalidates_agent_cache(test_tenant):
     assert await cache.get_json(key) is None
     fetched = await agents.get_agent(test_tenant["slug"], "wf-draft-inv")
     assert fetched is not None
-    assert fetched["workflow_draft"] == DEAD_END
+    assert "workflow_draft" not in fetched
     assert fetched["workflow"] == CREATED_GRAPH
 
 

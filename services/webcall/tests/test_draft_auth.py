@@ -1,14 +1,20 @@
-"""Draft-session auth gates for webcall (?draft=1)."""
+"""Webcall session auth gates (every session, not only ?draft=1)."""
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import jwt
 import pytest
 
-from services.webcall.__main__ import _CONSOLE_ROLES, _draft_auth_problem
+from services.webcall.__main__ import (
+    _CONSOLE_ROLES,
+    _await_session_auth,
+    _config_tenant_check,
+    _session_auth_problem,
+)
 
 SECRET = "dev-only-insecure-secret-do-not-deploy-dev-only-insecure-secret-do-not-deploy-"
 
@@ -34,26 +40,102 @@ def _jwt_secret(monkeypatch):
 @pytest.mark.asyncio
 async def test_console_roles_only():
     assert _CONSOLE_ROLES == frozenset({"superadmin", "admin", "viewer"})
-    with patch("services.webcall.__main__._config_tenant_allowed", new_callable=AsyncMock) as allowed:
-        allowed.return_value = True
+    with patch(
+        "services.webcall.__main__._config_tenant_check", new_callable=AsyncMock,
+    ) as check:
+        check.return_value = None
         for role in ("admin", "viewer", "superadmin"):
-            assert await _draft_auth_problem(_tok(role=role), "acme") is None
+            assert await _session_auth_problem(_tok(role=role), "acme") is None
         for role in ("agent", "supervisor"):
-            err = await _draft_auth_problem(_tok(role=role), "acme")
+            err = await _session_auth_problem(_tok(role=role), "acme")
             assert err and "not allowed" in err
 
 
 @pytest.mark.asyncio
 async def test_rejects_when_config_denies_tenant():
     token = _tok()
-    with patch("services.webcall.__main__._config_tenant_allowed", new_callable=AsyncMock) as allowed:
-        allowed.return_value = False
-        err = await _draft_auth_problem(token, "other-tenant")
+    with patch(
+        "services.webcall.__main__._config_tenant_check", new_callable=AsyncMock,
+    ) as check:
+        check.return_value = "session is not allowed for this tenant"
+        err = await _session_auth_problem(token, "other-tenant")
         assert err and "tenant" in err
-        allowed.assert_awaited_once_with(token, "other-tenant")
+        check.assert_awaited_once_with(token, "other-tenant")
 
 
 @pytest.mark.asyncio
 async def test_rejects_missing_and_service_account():
-    assert await _draft_auth_problem(None, "acme")
-    assert await _draft_auth_problem(_tok(is_service_account=True), "acme")
+    assert await _session_auth_problem(None, "acme")
+    assert await _session_auth_problem(_tok(is_service_account=True), "acme")
+
+
+@pytest.mark.asyncio
+async def test_config_tenant_check_distinguishes_transport_from_forbidden(monkeypatch):
+    monkeypatch.setenv("CONFIG_SERVICE_URL", "http://config.test")
+
+    with patch("services.webcall.__main__.asyncio.to_thread", new_callable=AsyncMock) as thr:
+        thr.return_value = 404
+        err = await _config_tenant_check(_tok(), "other")
+        assert err and "not allowed" in err
+
+        thr.return_value = None  # transport failure
+        err = await _config_tenant_check(_tok(), "acme")
+        assert err and "could not verify" in err
+
+        thr.return_value = 200
+        assert await _config_tenant_check(_tok(), "acme") is None
+
+        thr.return_value = 503
+        err = await _config_tenant_check(_tok(), "acme")
+        assert err and "could not verify" in err
+
+
+class _FakeWs:
+    def __init__(self, frames):
+        self._frames = list(frames)
+        self.sent: list[str] = []
+
+    async def recv(self):
+        if not self._frames:
+            raise TimeoutError("no frames")
+        return self._frames.pop(0)
+
+    async def send(self, data: str):
+        self.sent.append(data)
+
+
+@pytest.mark.asyncio
+async def test_await_session_auth_happy_path():
+    token = _tok()
+    ws = _FakeWs([json.dumps({"type": "auth", "token": token})])
+    with patch(
+        "services.webcall.__main__._config_tenant_check", new_callable=AsyncMock,
+    ) as check:
+        check.return_value = None
+        assert await _await_session_auth(ws, "acme") is None
+    assert json.loads(ws.sent[0]) == {"type": "auth_ok"}
+
+
+@pytest.mark.asyncio
+async def test_await_session_auth_rejects_bad_frames():
+    import asyncio
+
+    ws = MagicMock()
+    with patch(
+        "services.webcall.__main__.asyncio.wait_for",
+        side_effect=asyncio.TimeoutError,
+    ):
+        err = await _await_session_auth(ws, "acme")
+        assert err and "timed out" in err
+
+    ws = _FakeWs([b"\x00\x01"])
+    err = await _await_session_auth(ws, "acme")
+    assert err and "text frame" in err
+
+    ws = _FakeWs(["not-json{"])
+    err = await _await_session_auth(ws, "acme")
+    assert err and "not JSON" in err
+
+    ws = _FakeWs([json.dumps({"type": "text_input", "text": "hi"})])
+    err = await _await_session_auth(ws, "acme")
+    assert err and "auth frame first" in err

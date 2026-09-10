@@ -93,16 +93,17 @@ def _dump_dir() -> str | None:
 
 
 # Same fence as services/config/deps.CONSOLE_ROLES — supervisor/agent JWTs
-# must not reach unpublished drafts (lesson 4).
+# must not open webcall sessions (lesson 4).
 _CONSOLE_ROLES = frozenset({"superadmin", "admin", "viewer"})
 
 
-async def _config_tenant_allowed(token: str, tenant_slug: str) -> bool:
-    """True only if Config would let this JWT GET /tenants/{slug} (404 on mismatch)."""
+async def _config_tenant_check(token: str, tenant_slug: str) -> str | None:
+    """None if Config would allow GET /tenants/{slug}; else an operator message."""
     base = os.environ.get("CONFIG_SERVICE_URL", "http://localhost:8000").rstrip("/")
     url = f"{base}/tenants/{tenant_slug}"
 
-    def _get() -> int:
+    def _get() -> int | None:
+        """HTTP status, or None on transport failure."""
         import urllib.error
         import urllib.request
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
@@ -112,52 +113,63 @@ async def _config_tenant_allowed(token: str, tenant_slug: str) -> bool:
         except urllib.error.HTTPError as exc:
             return int(exc.code)
         except Exception:
-            return 0
+            log.exception("webcall: Config tenant check transport failure tenant=%s", tenant_slug)
+            return None
 
-    return await asyncio.to_thread(_get) == 200
+    status = await asyncio.to_thread(_get)
+    if status == 200:
+        return None
+    if status is None:
+        return "could not verify tenant access — is Config Service reachable?"
+    if status in (401, 403, 404):
+        return "session is not allowed for this tenant"
+    log.warning("webcall: Config tenant check status=%s tenant=%s", status, tenant_slug)
+    return "could not verify tenant access — is Config Service reachable?"
 
 
-async def _draft_auth_problem(token: str | None, tenant_slug: str) -> str | None:
-    """Gate draft sessions: console role + Config tenant isolation."""
+async def _session_auth_problem(token: str | None, tenant_slug: str) -> str | None:
+    """Gate every webcall session: console role + Config tenant isolation."""
     secret = os.environ.get("JWT_SECRET", "").strip()
     if not secret:
-        return "draft testing is unavailable (JWT_SECRET not set on webcall)"
+        return "webcall auth is unavailable (JWT_SECRET not set on webcall)"
     if not token:
-        return "draft testing requires a signed-in session"
+        return "webcall requires a signed-in session"
     try:
         import jwt
         payload = jwt.decode(token, secret, algorithms=["HS256"])
     except Exception:
-        return "draft testing token is invalid or expired"
+        return "webcall token is invalid or expired"
     if payload.get("is_service_account"):
-        return "draft testing requires an interactive admin session"
+        return "webcall requires an interactive admin session"
     if payload.get("role") not in _CONSOLE_ROLES:
-        return "draft testing is not allowed for this account"
-    # Bind ?tenant= to the JWT via Config — same 404-on-mismatch as the API.
-    if not await _config_tenant_allowed(token, tenant_slug):
-        return "draft testing is not allowed for this tenant"
-    return None
+        return "webcall is not allowed for this account"
+    return await _config_tenant_check(token, tenant_slug)
 
 
-async def _await_draft_auth(ws: ServerConnection, tenant_slug: str) -> str | None:
+async def _await_session_auth(ws: ServerConnection, tenant_slug: str) -> str | None:
     """First WS text frame must be {"type":"auth","token":...} — never put JWT in the URL."""
     try:
         raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
     except asyncio.TimeoutError:
-        return "draft testing timed out waiting for auth"
+        return "webcall timed out waiting for auth"
     if not isinstance(raw, str):
-        return "draft testing expected an auth text frame"
+        return "webcall expected an auth text frame"
     try:
         msg = json.loads(raw)
     except json.JSONDecodeError:
-        return "draft testing auth frame was not JSON"
+        return "webcall auth frame was not JSON"
     if msg.get("type") != "auth":
-        return "draft testing requires an auth frame first"
-    problem = await _draft_auth_problem(msg.get("token"), tenant_slug)
+        return "webcall requires an auth frame first"
+    problem = await _session_auth_problem(msg.get("token"), tenant_slug)
     if problem:
         return problem
     await ws.send(json.dumps({"type": "auth_ok"}))
     return None
+
+
+# Back-compat aliases (tests may still import the draft_* names).
+_draft_auth_problem = _session_auth_problem
+_await_draft_auth = _await_session_auth
 
 
 def _write_wav_dump(session_id: str, utterance_num: int, pcm: bytes) -> None:
@@ -213,9 +225,9 @@ async def _browser_to_grpc(
             text = str(control.get("text", "")).strip()
             if not text:
                 continue
-            # Same watchdog as a spoken turn: an LLM that never answers
-            # would otherwise leave the chat sitting on "Thinking…".
-            response_watchdog.arm()
+            # Do not arm here — the servicer may still be in greeting or may
+            # refuse non-text_only sessions. Arm when stt_result echoes back
+            # (see ResponseWatchdog.saw), proving the turn was accepted.
             await call.write(pb.GatewayMessage(text_input=pb.TextInput(
                 session_id=session_id, text=text,
             )))
@@ -281,16 +293,20 @@ class ResponseWatchdog:
     # pipeline is alive.
     #
     # A text turn is different. The service echoes the caller's own words
-    # back as stt_result the moment it receives them — always, immediately,
-    # before the model has been asked anything. Disarming on that made the
-    # watchdog dead code in exactly the mode it matters most in: with a slow
-    # or unreachable LLM the chat sat on "Thinking…" with nothing to
-    # eventually say otherwise. So in text mode only a message that ends the
-    # turn counts.
+    # back as stt_result once it has accepted the turn — that is when we
+    # arm. Disarming on stt_result made the watchdog dead; arming on send
+    # started the clock before the servicer accepted the input. Only a
+    # message that ends the turn disarms.
     _TEXT_TURN_ENDING = frozenset({"agent_text", "end_call", "error", "transfer_request"})
 
     def saw(self, which: str) -> None:
-        if self._text_mode and which not in self._TEXT_TURN_ENDING:
+        if self._text_mode:
+            if which == "stt_result":
+                self.arm()
+                return
+            if which not in self._TEXT_TURN_ENDING:
+                return
+            self.disarm()
             return
         self.disarm()
 
@@ -364,12 +380,18 @@ async def _grpc_to_browser(ws: ServerConnection, call, response_watchdog: Respon
         elif which == "cancel_ack":
             await ws.send(json.dumps({"type": "cancel_ack"}))
         elif which == "error":
-            await ws.send(json.dumps({
-                "type": "error", "code": msg.error.code,
-                "message": msg.error.message, "fatal": msg.error.fatal,
-            }))
-            if msg.error.fatal:
-                return
+            code = msg.error.code or ""
+            if code in ("draft_fallback", "session_note"):
+                await ws.send(json.dumps({
+                    "type": "note", "text": msg.error.message, "kind": code,
+                }))
+            else:
+                await ws.send(json.dumps({
+                    "type": "error", "code": code,
+                    "message": msg.error.message, "fatal": msg.error.fatal,
+                }))
+                if msg.error.fatal:
+                    return
         elif which == "workflow_node_changed":
             # Lets the workflow editor highlight the stage the call is
             # actually in, live — the difference between "the transition
@@ -395,19 +417,18 @@ async def _handle_connection(ws: ServerConnection) -> None:
         return
 
     use_draft = params.get("draft") in ("1", "true")
-    if use_draft:
-        # Auth arrives as the first WS text frame — never as ?token= (logs/Referer).
-        problem = await _await_draft_auth(ws, tenant_slug)
-        if problem:
-            log.warning("webcall: refusing draft session — %s", problem)
-            try:
-                await ws.send(json.dumps({
-                    "type": "error", "message": problem, "fatal": True,
-                }))
-            except Exception:
-                pass
-            await ws.close(code=1008, reason=problem[:120])
-            return
+    # Auth every session — draft=1 is only an extra capability on top.
+    problem = await _await_session_auth(ws, tenant_slug)
+    if problem:
+        log.warning("webcall: refusing session — %s", problem)
+        try:
+            await ws.send(json.dumps({
+                "type": "error", "message": problem, "fatal": True,
+            }))
+        except Exception:
+            pass
+        await ws.close(code=1008, reason=problem[:120])
+        return
 
     # Default to Envoy's gRPC proxy (config/gateway.yaml uses the same
     # target) so this bridge load-balances across both ConvSvc instances
@@ -415,7 +436,10 @@ async def _handle_connection(ws: ServerConnection) -> None:
     # found live 2026-08-04 during a deployment audit.
     conv_target = os.environ.get("CONVERSATION_SVC_TARGET", "localhost:10000")
     session_id = str(uuid.uuid4())
-    log.info("webcall: session=%s tenant=%s agent=%s -> %s", session_id, tenant_slug, agent_slug, conv_target)
+    log.info(
+        "webcall: session=%s tenant=%s agent=%s draft=%s -> %s",
+        session_id, tenant_slug, agent_slug, use_draft, conv_target,
+    )
 
     async with grpc.aio.insecure_channel(conv_target) as channel:
         stub = pb_grpc.ConversationServiceStub(channel)

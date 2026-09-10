@@ -59,9 +59,12 @@ def _audit_view(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _public_agent(row: dict[str, Any]) -> dict[str, Any]:
-    """Published + draft graphs on the agent GET/cache payload for call-setup
-    (RuntimeConfig / admin text-chat with use_workflow_draft). List stays lean."""
-    return dict(row)
+    """Published workflow on the agent GET/cache payload for call-setup.
+    Draft stays off this path (Redis is read on every real call) — chat
+    loads it from GET .../workflow when use_workflow_draft is set."""
+    out = dict(row)
+    out.pop("workflow_draft", None)
+    return out
 
 
 def _graph_node_count(graph: Any) -> int | None:

@@ -96,6 +96,12 @@ class HandlerResponse:
     end_call_grace_period_ms: int = 0
     transfer_request: TransferRequest | None = None
     node_changed:   "NodeChanged | None" = None
+    # Operator-facing note (e.g. draft fell back to published). Servicer maps
+    # it to a non-fatal ServiceError with code session_note / draft_fallback.
+    session_note:   str = ""
+    # text_only: turn finished with nothing to say (e.g. goto_* only) — still
+    # emit an empty AgentText so the chat composer unlocks.
+    turn_complete:  bool = False
 
 
 class IConversationHandler(Protocol):
@@ -260,6 +266,11 @@ class ConversationSession:
 
     async def greet(self) -> AsyncGenerator[HandlerResponse, None]:
         """Synthesize the opening greeting and yield it as a HandlerResponse."""
+        # Start-node highlight + draft-fallback notes before any audio/text.
+        opening = getattr(self._handler, "opening_events", None)
+        if opening is not None:
+            for ev in opening():
+                yield ev
         payloads = await self._handler.greeting(self._ctx.session_id)
         if payloads:
             self._tts_seq += len(payloads)

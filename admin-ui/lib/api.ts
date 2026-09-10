@@ -229,10 +229,9 @@ export interface Agent {
   // What the caller experiences while a warm transfer's agent leg rings
   // (no equivalent for cold transfer).
   transfer_waiting_experience: "announcement_moh" | "announcement_silence";
-  // Published + draft on agent GET/cache (call-setup / draft text-chat).
-  // List responses omit graph bodies and use the lean has_workflow* fields instead.
+  // Published graph on agent GET/cache (call-setup). Draft is editor-only
+  // (GET .../workflow); list responses use the lean has_workflow* fields.
   workflow?: { nodes?: unknown[]; edges?: unknown[] } | null;
-  workflow_draft?: { nodes?: unknown[]; edges?: unknown[] } | null;
   has_workflow?: boolean;
   has_workflow_draft?: boolean;
   workflow_diverged?: boolean;

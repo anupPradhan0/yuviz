@@ -263,6 +263,14 @@ def graph_for(runtime_config: RuntimeConfig, *, draft: bool = False) -> Workflow
     draft=True prefers workflow_draft; invalid draft falls back to published.
     Admin text-chat sets SessionOpenRequest.use_workflow_draft for this path.
     """
+    graph, _fell_back = resolve_graph(runtime_config, draft=draft)
+    return graph
+
+
+def resolve_graph(
+    runtime_config: RuntimeConfig, *, draft: bool = False,
+) -> tuple[WorkflowGraph, bool]:
+    """Like graph_for, plus whether an invalid draft forced the published graph."""
     raw = runtime_config.conversation.workflow
     if draft and runtime_config.conversation.workflow_draft:
         raw = runtime_config.conversation.workflow_draft
@@ -273,11 +281,11 @@ def graph_for(runtime_config: RuntimeConfig, *, draft: bool = False) -> Workflow
                 "seeded from greeting/system_prompt",
                 runtime_config.agent.slug,
             )
-        return _fallback_graph(runtime_config, raw=None)
+        return _fallback_graph(runtime_config, raw=None), False
     if not draft:
         cached = _cache_get(runtime_config)
         if cached is not None:
-            return cached
+            return cached, False
     try:
         graph = parse_graph(raw)
     except WorkflowInvalid as exc:
@@ -286,7 +294,8 @@ def graph_for(runtime_config: RuntimeConfig, *, draft: bool = False) -> Workflow
                 "workflow: draft for agent %s does not parse (%s) — using published",
                 runtime_config.agent.slug, exc,
             )
-            return graph_for(runtime_config, draft=False)
+            published, _ = resolve_graph(runtime_config, draft=False)
+            return published, True
         log.error(
             "workflow: agent %s published graph does not parse (%s) — starter fallback",
             runtime_config.agent.slug, exc,
@@ -297,7 +306,7 @@ def graph_for(runtime_config: RuntimeConfig, *, draft: bool = False) -> Workflow
         graph = _fallback_graph(runtime_config, raw=raw if isinstance(raw, dict) else None)
     if not draft:
         _cache_put(runtime_config, graph)
-    return graph
+    return graph, False
 
 
 def _fallback_graph(

@@ -20,6 +20,20 @@ const WEBCALL_URL = process.env.NEXT_PUBLIC_WEBCALL_URL || "ws://localhost:8300"
 type Turn = { role: "you" | "agent" | "note"; text: string };
 type ChatState = "connecting" | "ready" | "thinking" | "ended" | "error";
 
+/** Bearer JWT only over wss://, or cleartext ws to loopback. */
+function canSendAuthToken(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol === "wss:") return true;
+    if (u.protocol === "ws:" && (u.hostname === "localhost" || u.hostname === "127.0.0.1")) {
+      return true;
+    }
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
 export function TextChatPanel({
   open,
   onClose,
@@ -39,6 +53,7 @@ export function TextChatPanel({
   const [turns, setTurns] = useState<Turn[]>([]);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [draftFellBack, setDraftFellBack] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
   // The callback is captured once by ws.onmessage; a ref keeps it current
@@ -52,11 +67,19 @@ export function TextChatPanel({
     setState("connecting");
     setTurns([]);
     setError(null);
+    setDraftFellBack(false);
 
-    // draft=1: auth is a first WS frame (never ?token= — that lands in logs).
-    const token = useDraft ? getToken() : null;
-    if (useDraft && !token) {
-      setError("Sign in again to test an unpublished draft.");
+    const token = getToken();
+    if (!token) {
+      setError("Sign in again to run a test session.");
+      setState("error");
+      return;
+    }
+    if (!canSendAuthToken(WEBCALL_URL)) {
+      setError(
+        "Test chat needs a secure webcall URL (wss://), or ws://localhost. "
+        + "Refusing to send your session token over cleartext.",
+      );
       setState("error");
       return;
     }
@@ -68,11 +91,7 @@ export function TextChatPanel({
     wsRef.current = ws;
 
     ws.onopen = () => {
-      if (useDraft) {
-        ws.send(JSON.stringify({ type: "auth", token }));
-        return;
-      }
-      setState("ready");
+      ws.send(JSON.stringify({ type: "auth", token }));
     };
     ws.onerror = () => {
       setError("Couldn't reach the test service. Is the webcall service running?");
@@ -93,14 +112,16 @@ export function TextChatPanel({
         case "auth_ok":
           setState("ready");
           break;
+        case "note":
+          if (msg.kind === "draft_fallback") setDraftFellBack(true);
+          setTurns((t) => [...t, { role: "note", text: msg.text }]);
+          break;
         case "agent_text":
-          setTurns((t) => [...t, { role: "agent", text: msg.text }]);
+          if (msg.text) setTurns((t) => [...t, { role: "agent", text: msg.text }]);
           setError(null);
           setState("ready");
           break;
         case "stt_result":
-          // The service echoes the turn it actually processed. An empty one
-          // means it decided there was nothing to answer.
           break;
         case "workflow_node":
           nodeChangedRef.current?.({
@@ -119,9 +140,9 @@ export function TextChatPanel({
           setState("ended");
           break;
         case "no_response":
-          // Stay locked on "thinking" — unlocking here lets a second send
-          // race a late agent_text from the still-running turn.
+          // Unlock — the socket is still open and the next turn is valid.
           setError(msg.message);
+          setState("ready");
           break;
         case "error":
           setError(msg.message || "The agent hit an error.");
@@ -146,6 +167,13 @@ export function TextChatPanel({
 
   const busy = state === "thinking";
   const closed = state === "ended" || state === "error";
+  const statusLabel = state === "connecting" ? "Connecting…"
+    : busy ? "Thinking…"
+    : state === "ended" ? "Session over"
+    : state === "error" ? "Disconnected"
+    : draftFellBack ? "Running the live flow (draft invalid)"
+    : useDraft ? "Running your draft"
+    : "Running the live flow";
 
   const send = () => {
     const text = draft.trim();
@@ -166,13 +194,7 @@ export function TextChatPanel({
   return (
     <div className="wf-testpanel wf-chat">
       <div className="wf-chat-hdr">
-        <span className="wf-chat-state">
-          {state === "connecting" ? "Connecting…"
-            : busy ? "Thinking…"
-            : state === "ended" ? "Session over"
-            : state === "error" ? "Disconnected"
-            : useDraft ? "Running your draft" : "Running the live flow"}
-        </span>
+        <span className="wf-chat-state">{statusLabel}</span>
         <button className="btn btn-ghost btn-sm" onClick={onClose}>End</button>
       </div>
 

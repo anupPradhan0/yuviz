@@ -57,7 +57,7 @@ from .workflow import (
     ContextSummarizer,
     VariableExtractor,
     WorkflowRunner,
-    graph_for,
+    resolve_graph,
     summary_threshold_for,
 )
 
@@ -689,8 +689,9 @@ class PipelineConversationHandler:
         # _session() below; on_session_end() drops the whole entry in one
         # line instead of one pop/discard per field.
         self._sessions: dict[str, _SessionState] = {}
-        # Conversation workflow — graph_for() falls back to starter, never None.
+        # Conversation workflow — resolve_graph() falls back to starter, never None.
         self._last_reported_node_id: str | None = None
+        self._draft_fell_back = False
         now = datetime.now(timezone.utc)
         self._extractor = VariableExtractor(self._llm, self._on_variables_extracted)
         # Threshold from this pipeline's trim cap so summarization and trim
@@ -698,7 +699,9 @@ class PipelineConversationHandler:
         self._summarizer = ContextSummarizer(
             self._llm, threshold_msgs=summary_threshold_for(max_history),
         )
-        graph = graph_for(runtime_config, draft=use_workflow_draft)
+        graph, self._draft_fell_back = resolve_graph(
+            runtime_config, draft=use_workflow_draft,
+        )
         self._workflow = WorkflowRunner(
             graph,
             base_suffix=self._prompt_suffix,
@@ -928,6 +931,9 @@ class PipelineConversationHandler:
                 end_call=True,
                 end_call_grace_period_ms=self._goodbye_grace_period_ms,
             )
+            node_changed = self._take_node_changed()
+            if node_changed is not None:
+                yield HandlerResponse(node_changed=node_changed)
             return
 
         # ── 2. LLM ─────────────────────────────────────────────────────────────
@@ -1114,9 +1120,14 @@ class PipelineConversationHandler:
         # model actually generated is delivered here instead. One message
         # per turn, after the tool calls and any mid-turn transition have
         # settled, so the text matches what a caller would have heard.
-        if self._text_only and assistant_text and not cancel_event.is_set():
-            any_audio = True
-            yield HandlerResponse(agent_text=assistant_text)
+        # Empty assistant_text still emits turn_complete so a goto-only turn
+        # unlocks the chat composer.
+        if self._text_only and not cancel_event.is_set():
+            if assistant_text:
+                any_audio = True
+                yield HandlerResponse(agent_text=assistant_text, turn_complete=True)
+            else:
+                yield HandlerResponse(turn_complete=True)
 
         # Report the transition (if any) before the turn's terminal events —
         # the editor's canvas should light up the node that just spoke, even
@@ -1717,14 +1728,18 @@ class PipelineConversationHandler:
         except Exception:
             log.exception("LLM streaming failed session=%s", session_id)
             if not cancel_event.is_set():
-                # The text first and unconditionally: synthesis yields
-                # nothing in a text_only session (and can fail outright in a
-                # voice one), and the caller keys the whole turn off
-                # full_response — so gating the words on the audio would
-                # lose the apology entirely.
-                yield _FALLBACK_LLM_ERROR, b"", False
-                async for chunk in self._synthesize_sentence_stream(_FALLBACK_LLM_ERROR, session_id):
-                    yield "", chunk, False
+                # text_only must put the apology in full_response (synthesis
+                # is a no-op). Voice keeps the prior shape: text rides the
+                # first TTS chunk so llm_ms / transcripts stay unchanged.
+                if self._text_only:
+                    yield _FALLBACK_LLM_ERROR, b"", False
+                else:
+                    fallback_text = _FALLBACK_LLM_ERROR
+                    async for chunk in self._synthesize_sentence_stream(
+                        _FALLBACK_LLM_ERROR, session_id,
+                    ):
+                        yield fallback_text, chunk, False
+                        fallback_text = ""
 
         # Whatever StreamBuffer still has pending never closed into a
         # complete tag — a false-positive lookalike (the model literally
@@ -1801,6 +1816,21 @@ class PipelineConversationHandler:
         side effects (begin_call, the start node's delayed start) belong to
         greeting(), which runs first either way."""
         return self._workflow.greeting() or ""
+
+    def opening_events(self) -> list[HandlerResponse]:
+        """Start-node highlight + draft-fallback note for the admin UI."""
+        out: list[HandlerResponse] = []
+        if self._draft_fell_back:
+            out.append(HandlerResponse(
+                session_note=(
+                    "Your draft doesn't parse — running the published (live) "
+                    "flow instead."
+                ),
+            ))
+        node_changed = self._take_node_changed()
+        if node_changed is not None:
+            out.append(HandlerResponse(node_changed=node_changed))
+        return out
 
     def _session(self, session_id: str) -> _SessionState:
         state = self._sessions.get(session_id)

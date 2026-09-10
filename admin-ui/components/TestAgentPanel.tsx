@@ -2,9 +2,23 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Modal } from "@/components/Modal";
+import { getToken } from "@/lib/auth";
 
 const WEBCALL_URL = process.env.NEXT_PUBLIC_WEBCALL_URL || "ws://localhost:8300";
 const SAMPLE_RATE = 16000;
+
+function canSendAuthToken(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol === "wss:") return true;
+    if (u.protocol === "ws:" && (u.hostname === "localhost" || u.hostname === "127.0.0.1")) {
+      return true;
+    }
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
 
 // --- VAD tuning ---
 // Energy-based (RMS in dB), adaptive to the room's noise floor rather than
@@ -221,6 +235,21 @@ export function TestAgentPanel({
       // Deliberately not connected to ctx.destination — we don't want the
       // caller's own mic echoed back to them.
 
+      const token = getToken();
+      if (!token) {
+        setState("error");
+        setErrorMsg("Sign in again to run a test call.");
+        return;
+      }
+      if (!canSendAuthToken(WEBCALL_URL)) {
+        setState("error");
+        setErrorMsg(
+          "Test call needs a secure webcall URL (wss://), or ws://localhost. "
+          + "Refusing to send your session token over cleartext.",
+        );
+        return;
+      }
+
       const ws = new WebSocket(
         `${WEBCALL_URL}/webcall?tenant=${encodeURIComponent(tenantSlug)}&agent=${encodeURIComponent(agentSlug)}`,
       );
@@ -228,8 +257,7 @@ export function TestAgentPanel({
       wsRef.current = ws;
 
       ws.onopen = () => {
-        // Wait for service_ready before allowing talk — matches the
-        // documented wire protocol ordering in conversation.proto.
+        ws.send(JSON.stringify({ type: "auth", token }));
       };
       ws.onerror = () => {
         setState("error");
@@ -246,6 +274,10 @@ export function TestAgentPanel({
         }
         const msg = JSON.parse(ev.data);
         switch (msg.type) {
+          case "auth_ok":
+            // Wait for service_ready before allowing talk — matches the
+            // documented wire protocol ordering in conversation.proto.
+            break;
           case "service_ready":
             setState("ready");
             break;
