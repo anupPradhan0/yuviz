@@ -292,6 +292,28 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                     agent, ctx.tenant_id or "default", ctx.script_id or "default", stt, llm, tts,
                 )
 
+            # Draft stays off agent Redis/GET (every telephony call reads that
+            # key). Chat with use_workflow_draft loads it from /workflow.
+            if ctx.use_workflow_draft:
+                from dataclasses import replace as _dc_replace
+                try:
+                    state = await http_config_repo.fetch_agent_workflow(
+                        ctx.tenant_id or "", runtime_config.agent.id,
+                    )
+                    draft = (state or {}).get("workflow_draft")
+                except Exception:
+                    log.exception(
+                        "Failed to fetch workflow draft tenant=%s agent=%s",
+                        ctx.tenant_id, runtime_config.agent.slug,
+                    )
+                    draft = None
+                runtime_config = _dc_replace(
+                    runtime_config,
+                    conversation=_dc_replace(
+                        runtime_config.conversation, workflow_draft=draft,
+                    ),
+                )
+
             tool_orchestrator = ToolCallOrchestrator(
                 llm_adapter=LLMAdapter(bundle.llm),
                 policy_resolver=tool_policy_resolver,
@@ -321,6 +343,12 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 called_number=ctx.called_did,
                 knowledge=knowledge,
                 has_booking_tool=has_booking_tool,
+                # Admin-UI test calls only (see SessionOpenRequest) — a real
+                # call always runs the published graph.
+                use_workflow_draft=ctx.use_workflow_draft,
+                # Admin-UI chat test: skip STT/TTS entirely and answer in
+                # text. Never set by a real call.
+                text_only=ctx.text_only,
             )
 
     # grpc.aio.server() defaults to SO_REUSEPORT, which lets a second process

@@ -226,6 +226,7 @@ class TestAgentEndpoints:
         start = next(n for n in graph["nodes"] if n["type"] == "start")
         assert start["data"]["greeting"] == "Hi!"
         assert body["workflow"] == graph
+        assert wf.json()["workflow_draft"] == graph
 
     async def test_creating_the_same_slug_twice_is_409_not_500(self, client, test_tenant):
         body = {"slug": "dupe-agent", "name": "Dupe"}

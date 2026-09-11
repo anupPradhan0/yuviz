@@ -179,12 +179,19 @@ services:
     <<: *python-service
     command: ["python", "-m", "services.webcall", "--port", "8300"]
     environment:
+      WEBCALL_RESPONSE_TIMEOUT_S: ${WEBCALL_RESPONSE_TIMEOUT_S:-8}
+      # Same secret as Config — required to gate ?draft=1 on an admin JWT.
+      JWT_SECRET: ${JWT_SECRET}
+      # Draft auth binds ?tenant= via Config GET /tenants/{slug} (404 on mismatch).
+      CONFIG_SERVICE_URL: http://config:8000
       # Direct to conversation — this stack runs no Envoy, which webcall's :10000 default expects.
       CONVERSATION_SVC_TARGET: conversation:50051
       LOG_LEVEL: INFO
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${WEBCALL_PORT:-8300}:8300"
     depends_on:
+      config:
+        condition: service_healthy
       conversation:
         condition: service_healthy
     healthcheck:

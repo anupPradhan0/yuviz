@@ -30,6 +30,14 @@ Audio contract (matches AUDIO_CODEC_PCM_S16LE in the proto exactly):
 responsible for resampling/converting its mic capture to this format
 before sending — see components/TestAgentPanel.tsx.
 
+Text chat (?mode=text) skips the audio contract entirely: the browser sends
+{"type":"text_input","text":...} and receives {"type":"agent_text",...},
+and Conversation Service runs the turn with STT and TTS switched off (see
+SessionOpenRequest.text_only). Everything between — the workflow graph, its
+transitions, per-node tools, knowledge retrieval, extraction, end-call and
+transfer handling — is the identical code a voice call runs, which is the
+only reason testing a workflow this way is worth anything.
+
 v1 is push-to-talk, not continuous VAD: the browser sends a
 {"type":"speech_ended"} control message when the caller releases the
 talk button, which this bridge turns directly into a
@@ -84,6 +92,86 @@ def _dump_dir() -> str | None:
     return os.environ.get("WEBCALL_DUMP_AUDIO_DIR")
 
 
+# Same fence as services/config/deps.CONSOLE_ROLES — supervisor/agent JWTs
+# must not open webcall sessions (lesson 4).
+_CONSOLE_ROLES = frozenset({"superadmin", "admin", "viewer"})
+
+
+async def _config_tenant_check(token: str, tenant_slug: str) -> str | None:
+    """None if Config would allow GET /tenants/{slug}; else an operator message."""
+    base = os.environ.get("CONFIG_SERVICE_URL", "http://localhost:8000").rstrip("/")
+    url = f"{base}/tenants/{tenant_slug}"
+
+    def _get() -> int | None:
+        """HTTP status, or None on transport failure."""
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return int(resp.getcode())
+        except urllib.error.HTTPError as exc:
+            return int(exc.code)
+        except Exception:
+            log.exception("webcall: Config tenant check transport failure tenant=%s", tenant_slug)
+            return None
+
+    status = await asyncio.to_thread(_get)
+    if status == 200:
+        return None
+    if status is None:
+        return "could not verify tenant access — is Config Service reachable?"
+    if status in (401, 403, 404):
+        return "session is not allowed for this tenant"
+    log.warning("webcall: Config tenant check status=%s tenant=%s", status, tenant_slug)
+    return "could not verify tenant access — is Config Service reachable?"
+
+
+async def _session_auth_problem(token: str | None, tenant_slug: str) -> str | None:
+    """Gate every webcall session: console role + Config tenant isolation."""
+    secret = os.environ.get("JWT_SECRET", "").strip()
+    if not secret:
+        return "webcall auth is unavailable (JWT_SECRET not set on webcall)"
+    if not token:
+        return "webcall requires a signed-in session"
+    try:
+        import jwt
+        payload = jwt.decode(token, secret, algorithms=["HS256"])
+    except Exception:
+        return "webcall token is invalid or expired"
+    if payload.get("is_service_account"):
+        return "webcall requires an interactive admin session"
+    if payload.get("role") not in _CONSOLE_ROLES:
+        return "webcall is not allowed for this account"
+    return await _config_tenant_check(token, tenant_slug)
+
+
+async def _await_session_auth(ws: ServerConnection, tenant_slug: str) -> str | None:
+    """First WS text frame must be {"type":"auth","token":...} — never put JWT in the URL."""
+    try:
+        raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+    except asyncio.TimeoutError:
+        return "webcall timed out waiting for auth"
+    if not isinstance(raw, str):
+        return "webcall expected an auth text frame"
+    try:
+        msg = json.loads(raw)
+    except json.JSONDecodeError:
+        return "webcall auth frame was not JSON"
+    if msg.get("type") != "auth":
+        return "webcall requires an auth frame first"
+    problem = await _session_auth_problem(msg.get("token"), tenant_slug)
+    if problem:
+        return problem
+    await ws.send(json.dumps({"type": "auth_ok"}))
+    return None
+
+
+# Back-compat aliases (tests may still import the draft_* names).
+_draft_auth_problem = _session_auth_problem
+_await_draft_auth = _await_session_auth
+
+
 def _write_wav_dump(session_id: str, utterance_num: int, pcm: bytes) -> None:
     """Debug aid only, opt-in via WEBCALL_DUMP_AUDIO_DIR: writes each
     utterance's raw audio to a WAV file so it can actually be listened to.
@@ -133,7 +221,17 @@ async def _browser_to_grpc(
             continue
 
         kind = control.get("type")
-        if kind == "speech_ended":
+        if kind == "text_input":
+            text = str(control.get("text", "")).strip()
+            if not text:
+                continue
+            # Do not arm here — the servicer may still be in greeting or may
+            # refuse non-text_only sessions. Arm when stt_result echoes back
+            # (see ResponseWatchdog.saw), proving the turn was accepted.
+            await call.write(pb.GatewayMessage(text_input=pb.TextInput(
+                session_id=session_id, text=text,
+            )))
+        elif kind == "speech_ended":
             utterance_num += 1
             if current_utterance is not None:
                 _write_wav_dump(session_id, utterance_num, bytes(current_utterance))
@@ -168,14 +266,49 @@ class ResponseWatchdog:
     the timeout, and the browser should say so instead of hanging on
     'Thinking...' indefinitely."""
 
-    def __init__(self, ws: ServerConnection, timeout_s: float = 8.0) -> None:
+    def __init__(
+        self, ws: ServerConnection, timeout_s: float | None = None, text_mode: bool = False,
+    ) -> None:
+        # 8s suits a GPU or a hosted LLM. CPU inference is far slower — a 3B
+        # model on CPU takes ~17s per turn, so the default fires mid-think and
+        # tells the browser "no response" for a reply that is still coming
+        # (confirmed live 2026-08-28). Raise it with WEBCALL_RESPONSE_TIMEOUT_S
+        # rather than sitting behind a watchdog that is faster than the stack
+        # it is watching.
+        if timeout_s is None:
+            timeout_s = float(os.environ.get("WEBCALL_RESPONSE_TIMEOUT_S", "8"))
         self._ws = ws
         self._timeout_s = timeout_s
+        # The default message blames the microphone, which is nonsense
+        # advice for someone who just typed a sentence.
+        self._text_mode = text_mode
         self._task: asyncio.Task | None = None
 
     def arm(self) -> None:
         self.disarm()
         self._task = asyncio.create_task(self._fire())
+
+    # Anything arriving at all proves a *voice* turn isn't stuck: the first
+    # thing back is either the STT result or an error, and both mean the
+    # pipeline is alive.
+    #
+    # A text turn is different. The service echoes the caller's own words
+    # back as stt_result once it has accepted the turn — that is when we
+    # arm. Disarming on stt_result made the watchdog dead; arming on send
+    # started the clock before the servicer accepted the input. Only a
+    # message that ends the turn disarms.
+    _TEXT_TURN_ENDING = frozenset({"agent_text", "end_call", "error", "transfer_request"})
+
+    def saw(self, which: str) -> None:
+        if self._text_mode:
+            if which == "stt_result":
+                self.arm()
+                return
+            if which not in self._TEXT_TURN_ENDING:
+                return
+            self.disarm()
+            return
+        self.disarm()
 
     def disarm(self) -> None:
         if self._task and not self._task.done():
@@ -189,6 +322,10 @@ class ResponseWatchdog:
             await self._ws.send(json.dumps({
                 "type": "no_response",
                 "message": (
+                    f"No response after {self._timeout_s:.0f}s — the model is still "
+                    "thinking or is unreachable. Check the agent's LLM provider, or "
+                    "raise WEBCALL_RESPONSE_TIMEOUT_S if it is simply slow."
+                    if self._text_mode else
                     f"No response after {self._timeout_s:.0f}s — the agent likely didn't "
                     "recognize any speech in that recording (silence, background noise, or "
                     "audio too quiet/unclear). Try again, speaking clearly and a bit louder."
@@ -204,8 +341,8 @@ async def _grpc_to_browser(ws: ServerConnection, call, response_watchdog: Respon
     browser — TTS audio payloads as binary frames, everything else as a
     small JSON text frame."""
     async for msg in call:
-        response_watchdog.disarm()  # anything arriving at all proves the turn isn't stuck
         which = msg.WhichOneof("payload")
+        response_watchdog.saw(which or "")
         if which == "tts_chunk":
             # A chunk can legitimately carry an empty payload (seen live:
             # the chunk right before is_final) — nothing to actually play,
@@ -222,23 +359,53 @@ async def _grpc_to_browser(ws: ServerConnection, call, response_watchdog: Respon
                 "type": "stt_result", "text": msg.stt_result.text,
                 "confidence": msg.stt_result.confidence,
             }))
+        elif which == "agent_text":
+            await ws.send(json.dumps({
+                "type": "agent_text", "text": msg.agent_text.text,
+            }))
+        elif which == "transfer_request":
+            # A browser test has no human-transfer path to execute, so this
+            # is reported, never acted on. It is reported rather than
+            # dropped (as it used to be) because `transfer` is a first-class
+            # workflow node type: a test that reaches one and shows nothing
+            # reads as the stage having done nothing at all. Both panels
+            # render it as a note and stop.
+            await ws.send(json.dumps({
+                "type": "transfer",
+                "destination": msg.transfer_request.destination,
+                "reason": msg.transfer_request.reason,
+            }))
         elif which == "tts_started":
             await ws.send(json.dumps({"type": "tts_started"}))
         elif which == "cancel_ack":
             await ws.send(json.dumps({"type": "cancel_ack"}))
         elif which == "error":
+            code = msg.error.code or ""
+            if code in ("draft_fallback", "session_note"):
+                await ws.send(json.dumps({
+                    "type": "note", "text": msg.error.message, "kind": code,
+                }))
+            else:
+                await ws.send(json.dumps({
+                    "type": "error", "code": code,
+                    "message": msg.error.message, "fatal": msg.error.fatal,
+                }))
+                if msg.error.fatal:
+                    return
+        elif which == "workflow_node_changed":
+            # Lets the workflow editor highlight the stage the call is
+            # actually in, live — the difference between "the transition
+            # didn't fire" being a guess and something you watch happen.
             await ws.send(json.dumps({
-                "type": "error", "code": msg.error.code,
-                "message": msg.error.message, "fatal": msg.error.fatal,
+                "type": "workflow_node", "node_id": msg.workflow_node_changed.node_id,
+                "node_name": msg.workflow_node_changed.node_name,
+                "node_type": msg.workflow_node_changed.node_type,
             }))
-            if msg.error.fatal:
-                return
         elif which == "end_call":
             await ws.send(json.dumps({
                 "type": "end_call", "reason": msg.end_call.reason,
             }))
-        # transfer_request/conversation_finalized: no human-transfer path
-        # exists in a browser test call — deliberately not forwarded.
+        # conversation_finalized: nothing the browser can act on.
 
 
 async def _handle_connection(ws: ServerConnection) -> None:
@@ -249,13 +416,30 @@ async def _handle_connection(ws: ServerConnection) -> None:
         await ws.close(code=1008, reason="missing tenant/agent query params")
         return
 
+    use_draft = params.get("draft") in ("1", "true")
+    # Auth every session — draft=1 is only an extra capability on top.
+    problem = await _await_session_auth(ws, tenant_slug)
+    if problem:
+        log.warning("webcall: refusing session — %s", problem)
+        try:
+            await ws.send(json.dumps({
+                "type": "error", "message": problem, "fatal": True,
+            }))
+        except Exception:
+            pass
+        await ws.close(code=1008, reason=problem[:120])
+        return
+
     # Default to Envoy's gRPC proxy (config/gateway.yaml uses the same
     # target) so this bridge load-balances across both ConvSvc instances
     # like the C++ Gateway does, instead of pinning every call to :50051 —
     # found live 2026-08-04 during a deployment audit.
     conv_target = os.environ.get("CONVERSATION_SVC_TARGET", "localhost:10000")
     session_id = str(uuid.uuid4())
-    log.info("webcall: session=%s tenant=%s agent=%s -> %s", session_id, tenant_slug, agent_slug, conv_target)
+    log.info(
+        "webcall: session=%s tenant=%s agent=%s draft=%s -> %s",
+        session_id, tenant_slug, agent_slug, use_draft, conv_target,
+    )
 
     async with grpc.aio.insecure_channel(conv_target) as channel:
         stub = pb_grpc.ConversationServiceStub(channel)
@@ -270,9 +454,14 @@ async def _handle_connection(ws: ServerConnection) -> None:
             sample_rate=SAMPLE_RATE,
             channels=1,
             direction="test",
+            # ?draft=1 (+ first-frame admin JWT) — exercise an unpublished graph.
+            use_workflow_draft=use_draft,
+            # ?mode=text — type at the agent instead of talking to it. No
+            # audio flows in either direction; STT and TTS are skipped.
+            text_only=params.get("mode") == "text",
         )))
 
-        response_watchdog = ResponseWatchdog(ws)
+        response_watchdog = ResponseWatchdog(ws, text_mode=params.get("mode") == "text")
         try:
             await asyncio.gather(
                 _browser_to_grpc(ws, call, session_id, response_watchdog),

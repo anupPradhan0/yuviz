@@ -99,3 +99,11 @@ class HttpConfigRepository:
 
     async def list_agents(self, tenant_slug: str) -> list[dict[str, Any]]:
         return await self._get(f"/tenants/{tenant_slug}/agents") or []
+
+    async def fetch_agent_workflow(
+        self, tenant_slug: str, agent_id: str,
+    ) -> dict[str, Any] | None:
+        """Editor/call-setup workflow state (published + draft). Used when
+        SessionOpenRequest.use_workflow_draft so draft stays off the agent
+        Redis payload every real call reads."""
+        return await self._get(f"/tenants/{tenant_slug}/agents/{agent_id}/workflow")

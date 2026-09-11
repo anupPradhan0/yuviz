@@ -80,10 +80,10 @@ function Badges({ data, type }: { data: WorkflowNodeData; type: WorkflowNodeType
 }
 
 function NodeShell({
-  id, type, data, selected, invalid,
+  id, type, data, selected, invalid, active,
 }: {
   id: string; type: WorkflowNodeType; data: WorkflowNodeData;
-  selected: boolean; invalid: boolean;
+  selected: boolean; invalid: boolean; active: boolean;
 }) {
   const { addConnectedStage } = useEditorActions();
   const unwired = type === "global";
@@ -95,7 +95,7 @@ function NodeShell({
   return (
     <div
       className={`wf-node wf-node-${type}${selected ? " selected" : ""}` +
-        `${invalid ? " invalid" : ""}`}
+        `${invalid ? " invalid" : ""}${active ? " active" : ""}`}
       // Reachable and announced for keyboard/screen-reader users — a bare
       // div of prompt text tells them nothing about what it is.
       tabIndex={0}
@@ -159,6 +159,7 @@ function make(type: WorkflowNodeType) {
       data={data as unknown as WorkflowNodeData}
       selected={!!selected}
       invalid={!!(data as { __invalid?: boolean }).__invalid}
+      active={!!(data as { __active?: boolean }).__active}
     />
   );
   Component.displayName = `${type}Node`;

@@ -396,6 +396,14 @@ void GrpcConversationTransport::reader_loop() noexcept {
             break;
         }
 
+        case ::voiceai::v1::ServiceMessage::kWorkflowNodeChanged:
+            // Observability for the admin UI's workflow editor only (it
+            // highlights the live node on the canvas during a test call).
+            // Nothing about telephony depends on it — named explicitly so a
+            // real call doesn't log an "unknown payload_case" warning on
+            // every conversation transition.
+            break;
+
         default:
             logger_.warn("GrpcTransport: unknown payload_case={} session={}",
                          static_cast<int>(msg.payload_case()), session_id_);

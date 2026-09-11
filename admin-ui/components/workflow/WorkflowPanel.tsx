@@ -24,6 +24,7 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import { TestAgentPanel } from "@/components/TestAgentPanel";
+import { TextChatPanel } from "@/components/TextChatPanel";
 import { ApiError, listAgentToolPolicies } from "@/lib/api";
 import { listAgentKnowledgeBases } from "@/lib/knowledgeApi";
 import {
@@ -147,8 +148,10 @@ function Panel({
   const hasGlobal = nodes.some((n) => n.type === "global");
   const [moreOpen, setMoreOpen] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
-  // Browser voice test hits the published agent (draft live-highlight later).
-  const [testing, setTesting] = useState(false);
+  // null = not testing. "call" = browser voice (published agent); "chat" =
+  // text_only session against the draft (see TextChatPanel).
+  const [testing, setTesting] = useState<"call" | "chat" | null>(null);
+  const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
   const loaded = useRef(false);
   // Client-only seed: skip autosave until the canvas diverges from this snapshot.
   const seedPristine = useRef<string | null>(null);
@@ -352,9 +355,10 @@ function Panel({
 
   const paintedNodes = useMemo(() => nodes.map((n) => {
     const invalid = badNodeIds.has(n.id);
-    if (Boolean(n.data.__invalid) === invalid) return n;
-    return { ...n, data: { ...n.data, __invalid: invalid } };
-  }), [nodes, badNodeIds]);
+    const active = n.id === activeNodeId;
+    if (Boolean(n.data.__invalid) === invalid && Boolean(n.data.__active) === active) return n;
+    return { ...n, data: { ...n.data, __invalid: invalid, __active: active } };
+  }), [nodes, badNodeIds, activeNodeId]);
 
   // ConditionEdge draws the label itself, and reads __invalid off data.
   // toGraph strips the marker on the way out (see there) — it can't just be
@@ -553,14 +557,10 @@ function Panel({
           </button>
           <button
             className={`btn btn-sm ${testing ? "btn-primary" : "btn-ghost"}`}
-            title={
-              diverged
-                ? "Tests the live (published) agent — unpublished canvas changes are not included yet"
-                : "Try the live agent in the browser"
-            }
-            onClick={() => setTesting(!testing)}
+            title="Try this flow — talk (published agent) or type (draft chat). Chat lights up the active stage on the canvas."
+            onClick={() => { setTesting(testing ? null : "call"); setActiveNodeId(null); }}
           >
-            {diverged ? "Test live agent" : "Test Agent"}
+            Test Agent
           </button>
 
           <span className={`badge ${published === null ? "gray" : diverged ? "amber" : "green"}`}>
@@ -715,12 +715,56 @@ function Panel({
               front of you while you are drawing a flow. */}
           {(testing || selection) && (
           <div className="wf-side">
-            {testing ? (
+            {testing && (
+              <div className="wf-test-tabs" role="tablist">
+                <button
+                  role="tab"
+                  aria-selected={testing === "call"}
+                  className={testing === "call" ? "active" : ""}
+                  onClick={() => { setTesting("call"); setActiveNodeId(null); }}
+                >
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="M8 1.5a2.2 2.2 0 012.2 2.2v4a2.2 2.2 0 01-4.4 0v-4A2.2 2.2 0 018 1.5z" />
+                    <path d="M3.8 7.5V8a4.2 4.2 0 008.4 0v-.5M8 12.2v2.3" />
+                  </svg>
+                  Test Audio
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={testing === "chat"}
+                  className={testing === "chat" ? "active" : ""}
+                  onClick={() => { setTesting("chat"); setActiveNodeId(null); }}
+                >
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="M2 3.5h12v7H6.5L3.5 13v-2.5H2z" />
+                  </svg>
+                  Test Chat
+                </button>
+                <button
+                  className="wf-test-close"
+                  title="Close the test panel"
+                  aria-label="Close the test panel"
+                  onClick={() => { setTesting(null); setActiveNodeId(null); }}
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+            {testing === "call" ? (
               <TestAgentPanel
                 open
-                onClose={() => setTesting(false)}
+                onClose={() => { setTesting(null); setActiveNodeId(null); }}
                 tenantSlug={tenantSlug}
                 agentSlug={agentSlug}
+              />
+            ) : testing === "chat" ? (
+              <TextChatPanel
+                open
+                onClose={() => { setTesting(null); setActiveNodeId(null); }}
+                tenantSlug={tenantSlug}
+                agentSlug={agentSlug}
+                useDraft
+                onNodeChanged={(node) => setActiveNodeId(node.id)}
               />
             ) : (
               <Inspector

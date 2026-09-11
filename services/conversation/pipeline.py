@@ -39,7 +39,7 @@ from .guardrails import GuardrailCounter, GuardrailDetector
 from .metrics import IMetrics, NullMetrics
 from .provider_bundle import ProviderBundle
 from .providers.interfaces import ChatMessage, SttResult
-from .session import HandlerResponse
+from .session import HandlerResponse, NodeChanged
 from .session_finalizer import FinalizationResult, SessionFinalizer
 from .tools.llm_adapter import DeterministicSpokenEvent
 from .tools.llm_adapter import LocalToolCompletedEvent
@@ -57,7 +57,7 @@ from .workflow import (
     ContextSummarizer,
     VariableExtractor,
     WorkflowRunner,
-    graph_for,
+    resolve_graph,
     summary_threshold_for,
 )
 
@@ -523,6 +523,8 @@ class PipelineConversationHandler:
         metrics:       IMetrics | None = None,
         tool_orchestrator: ToolCallOrchestrator | None = None,
         has_booking_tool: bool = False,
+        use_workflow_draft: bool = False,
+        text_only:     bool = False,
     ) -> None:
         self._default_system_prompt = (default_system_prompt or "").strip()
         self._stt          = provider_bundle.stt
@@ -530,6 +532,10 @@ class PipelineConversationHandler:
         self._tts          = provider_bundle.tts
         self._sample_rate  = sample_rate
         self._max_history  = max_history
+        # Text-chat session (Admin UI): no STT ran and no TTS will run, so
+        # every place the pipeline would have spoken yields the words
+        # instead. See _speak() and the proto's text_only.
+        self._text_only    = text_only
         self._transcripts  = transcripts
         self._tenant_id    = tenant_id
         self._call_id      = call_id
@@ -683,7 +689,9 @@ class PipelineConversationHandler:
         # _session() below; on_session_end() drops the whole entry in one
         # line instead of one pop/discard per field.
         self._sessions: dict[str, _SessionState] = {}
-        # Conversation workflow — graph_for() falls back to starter, never None.
+        # Conversation workflow — resolve_graph() falls back to starter, never None.
+        self._last_reported_node_id: str | None = None
+        self._draft_fell_back = False
         now = datetime.now(timezone.utc)
         self._extractor = VariableExtractor(self._llm, self._on_variables_extracted)
         # Threshold from this pipeline's trim cap so summarization and trim
@@ -691,7 +699,9 @@ class PipelineConversationHandler:
         self._summarizer = ContextSummarizer(
             self._llm, threshold_msgs=summary_threshold_for(max_history),
         )
-        graph = graph_for(runtime_config)
+        graph, self._draft_fell_back = resolve_graph(
+            runtime_config, draft=use_workflow_draft,
+        )
         self._workflow = WorkflowRunner(
             graph,
             base_suffix=self._prompt_suffix,
@@ -815,6 +825,46 @@ class PipelineConversationHandler:
         log.info("STT result=%r session=%s", stt_result.text, session_id)
         yield HandlerResponse(stt_text=stt_result.text, stt_confidence=stt_result.confidence)
 
+        async for response in self._run_turn(
+            session_id, stt_result.text, stt_result.confidence, cancel_event, turn_start, stt_ms,
+        ):
+            yield response
+
+    async def on_text(
+        self, session_id: str, text: str,
+    ) -> AsyncGenerator[HandlerResponse, None]:
+        """A typed caller turn (text_only sessions — see the proto's
+        TextInput). Everything downstream of STT is the same code the voice
+        path runs, so a workflow tested in the chat panel is the workflow
+        that will run on a call: same prompts, same transitions, same tool
+        narrowing, same extraction, same end/transfer handling."""
+        text = text.strip()
+        if not text:
+            return
+        # Fresh per-turn cancel event, same contract as on_speech_ended's.
+        cancel_event = asyncio.Event()
+        self._session(session_id).cancelled = cancel_event
+        # Same interrupt as voice: free extract/summarize before this turn.
+        self._interrupt_workflow_background_llm()
+        yield HandlerResponse(stt_text=text, stt_confidence=1.0)
+        async for response in self._run_turn(
+            session_id, text, 1.0, cancel_event, time.monotonic(), None,
+        ):
+            yield response
+
+    async def _run_turn(
+        self,
+        session_id:   str,
+        user_text:    str,
+        confidence:   float,
+        cancel_event: asyncio.Event,
+        turn_start:   float,
+        stt_ms:       float | None,
+    ) -> AsyncGenerator[HandlerResponse, None]:
+        """One conversation turn, from the caller's words to the agent's
+        reply. Split out of on_speech_ended so on_text can reach it without
+        a microphone; `stt_ms` is None for a typed turn, where there was no
+        recognition step to time."""
         # Deterministic, inline caller-frustration/abuse signal (see
         # guardrails.py) — the "real detector" record_guardrail_violation()
         # was built to receive. Runs on the transcript already in hand: no
@@ -826,7 +876,7 @@ class PipelineConversationHandler:
         # surfaces near its end (see the transfer_request block below): the
         # agent still finishes responding to this utterance normally, then
         # the transfer follows right after, same as an LLM-emitted directive.
-        violation = GuardrailDetector.check(stt_result.text)
+        violation = GuardrailDetector.check(user_text)
         if violation is not None:
             log.info(
                 "Guardrail violation category=%s matched=%r session=%s",
@@ -857,29 +907,33 @@ class PipelineConversationHandler:
                 self._max_call_duration_s, session_id,
             )
             got_audio = False
-            async for chunk in self._synthesize_sentence_stream(_MAX_DURATION_GOODBYE, session_id):
+            async for response in self._speak(_MAX_DURATION_GOODBYE, session_id):
                 got_audio = True
-                yield HandlerResponse(tts_payloads=[chunk])
+                yield response
             if not got_audio:
                 # Synthesis failed outright — fall back so tts_started_sent
                 # still flips true on the gateway side (see servicer.py);
                 # otherwise EndCall below would be silently dropped, same
                 # reasoning as _FALLBACK_GOODBYE.
-                async for chunk in self._synthesize_sentence_stream(_FALLBACK_GOODBYE, session_id):
-                    yield HandlerResponse(tts_payloads=[chunk])
+                async for response in self._speak(_FALLBACK_GOODBYE, session_id):
+                    yield response
             if self._transcripts is not None:
                 self._transcripts.record_turn(
-                    session_id, stt_result.text, stt_result.confidence,
+                    session_id, user_text, confidence,
                     _MAX_DURATION_GOODBYE, False,
                     latency=TurnLatency(
-                        stt_ms=stt_ms, stt_engine=type(self._stt).__name__,
-                        tts_engine=type(self._tts).__name__,
+                        stt_ms=stt_ms,
+                        stt_engine=None if self._text_only else type(self._stt).__name__,
+                        tts_engine=None if self._text_only else type(self._tts).__name__,
                     ),
                 )
             yield HandlerResponse(
                 end_call=True,
                 end_call_grace_period_ms=self._goodbye_grace_period_ms,
             )
+            node_changed = self._take_node_changed()
+            if node_changed is not None:
+                yield HandlerResponse(node_changed=node_changed)
             return
 
         # ── 2. LLM ─────────────────────────────────────────────────────────────
@@ -888,17 +942,24 @@ class PipelineConversationHandler:
         # history[0] is the active node's prompt — refreshed every turn so a
         # mid-call transition lands before the next generation.
         self._refresh_node_prompt(history)
-        history.append(ChatMessage(role="user", content=stt_result.text))
+        history.append(ChatMessage(role="user", content=user_text))
 
         # See _FIRST_TURN_FILLER's own comment — masks the caller's first
         # wait (knowledge retrieval + LLM + TTS, all still to come below)
         # instead of leaving them in silence for it. Spoken here, before
         # any of that work starts, not overlapped with it — same posture
-        # as the tool-call filler elsewhere in this method.
-        if is_first_turn and not self._session(session_id).first_turn_filler_spoken:
+        # as the tool-call filler elsewhere in this method. Skipped for
+        # text_only: there is no silence to cover in a chat panel, and a
+        # filler that lands as its own agent bubble before the real reply
+        # (or before the failure fallback) reads as a broken turn.
+        if (
+            is_first_turn
+            and not self._text_only
+            and not self._session(session_id).first_turn_filler_spoken
+        ):
             self._session(session_id).first_turn_filler_spoken = True
-            async for chunk in self._synthesize_sentence_stream(_FIRST_TURN_FILLER, session_id):
-                yield HandlerResponse(tts_payloads=[chunk])
+            async for response in self._speak(_FIRST_TURN_FILLER, session_id):
+                yield response
 
         # ── Knowledge retrieval — exactly one call per turn, never zero,
         # never more than one. Folded into this turn's own user-message
@@ -917,11 +978,11 @@ class PipelineConversationHandler:
         # Retrieval: node with explicit knowledge_base_ids, or all-empty graph
         # (starter backfill) keeping agent-level RAG. See WorkflowRunner.knowledge_enabled.
         if self._knowledge is not None and self._workflow.knowledge_enabled():
-            context = await self._retrieve_context(stt_result.text, session_id)
+            context = await self._retrieve_context(user_text, session_id)
             if context is not None and context.chunks:
                 augmented = ChatMessage(
                     role="user",
-                    content=f"{self._format_context(context)}\n\nCaller's question: {stt_result.text}",
+                    content=f"{self._format_context(context)}\n\nCaller's question: {user_text}",
                 )
                 messages_for_llm = history[:-1] + [augmented]
 
@@ -1042,14 +1103,38 @@ class PipelineConversationHandler:
 
         if self._transcripts is not None:
             self._transcripts.record_turn(
-                session_id, stt_result.text, stt_result.confidence,
+                session_id, user_text, confidence,
                 assistant_text, cancel_event.is_set(),
                 latency=TurnLatency(
                     stt_ms=stt_ms, llm_ms=llm_ms, tts_ms=tts_ms, voice_to_voice_ms=voice_to_voice_ms,
-                    stt_engine=type(self._stt).__name__, llm_engine=type(self._llm).__name__,
-                    tts_engine=type(self._tts).__name__,
+                    # Naming an engine that never ran is worse than naming
+                    # none: a typed turn transcribed nothing and spoke
+                    # nothing, and call analytics shouldn't read as if it did.
+                    stt_engine=None if self._text_only else type(self._stt).__name__,
+                    llm_engine=type(self._llm).__name__,
+                    tts_engine=None if self._text_only else type(self._tts).__name__,
                 ),
             )
+
+        # In a chat session nothing above produced audio, so the reply the
+        # model actually generated is delivered here instead. One message
+        # per turn, after the tool calls and any mid-turn transition have
+        # settled, so the text matches what a caller would have heard.
+        # Empty assistant_text still emits turn_complete so a goto-only turn
+        # unlocks the chat composer.
+        if self._text_only and not cancel_event.is_set():
+            if assistant_text:
+                any_audio = True
+                yield HandlerResponse(agent_text=assistant_text, turn_complete=True)
+            else:
+                yield HandlerResponse(turn_complete=True)
+
+        # Report the transition (if any) before the turn's terminal events —
+        # the editor's canvas should light up the node that just spoke, even
+        # on a turn that also ends the call.
+        node_changed = self._take_node_changed()
+        if node_changed is not None:
+            yield HandlerResponse(node_changed=node_changed)
 
         # End node hangup; [[END_CALL]] off-graph marks ended_off_graph for disposition.
         ended_on_end_node = self._workflow.pending_end
@@ -1121,15 +1206,15 @@ class PipelineConversationHandler:
                 # only the token, so this is normally the only speech; if the
                 # model spoke anyway, the script still plays after it
                 # (deterministic wording beats deduplication here).
-                async for chunk in self._synthesize_sentence_stream(self._farewell_message, session_id):
+                async for response in self._speak(self._farewell_message, session_id):
                     got_farewell_audio = True
-                    yield HandlerResponse(tts_payloads=[chunk])
+                    yield response
             if not any_audio and not got_farewell_audio:
                 # Marker-only reply with no scripted line (or its synthesis
                 # failed): synthesize a fallback so the servicer actually
                 # has audio to key EndCall off of.
-                async for chunk in self._synthesize_sentence_stream(_FALLBACK_GOODBYE, session_id):
-                    yield HandlerResponse(tts_payloads=[chunk])
+                async for response in self._speak(_FALLBACK_GOODBYE, session_id):
+                    yield response
             yield HandlerResponse(
                 end_call=True,
                 end_call_grace_period_ms=self._goodbye_grace_period_ms,
@@ -1152,8 +1237,8 @@ class PipelineConversationHandler:
                 # the servicer holds the TransferRequest until it has
                 # actually played (see servicer.py's pending_transfer),
                 # exactly like an LLM-spoken acknowledgment would be.
-                async for chunk in self._synthesize_sentence_stream(announcement, session_id):
-                    yield HandlerResponse(tts_payloads=[chunk])
+                async for response in self._speak(announcement, session_id):
+                    yield response
             yield HandlerResponse(transfer_request=transfer_request)
 
     async def on_cancel(self, session_id: str) -> None:
@@ -1313,8 +1398,11 @@ class PipelineConversationHandler:
             # LLM produced nothing usable — never leave dead air, same
             # reasoning as _FALLBACK_GOODBYE above.
             assistant_text = _TRANSFER_FAILED_FALLBACK
-            async for chunk in self._synthesize_sentence_stream(assistant_text, session_id):
-                yield HandlerResponse(tts_payloads=[chunk])
+            async for response in self._speak(assistant_text, session_id):
+                yield response
+        elif self._text_only and assistant_text and not cancel_event.is_set():
+            # Chat recovery: _llm_to_tts produced no audio; deliver the words.
+            yield HandlerResponse(agent_text=assistant_text)
 
         # Recorded as a normal assistant turn (memory) — no matching
         # "user" turn is stored, same asymmetry RAG-augmented turns already
@@ -1373,6 +1461,19 @@ class PipelineConversationHandler:
         )
 
     # ── Workflow helpers ─────────────────────────────────────────────────
+
+    def _take_node_changed(self) -> NodeChanged | None:
+        """Whether the active node moved since the last time this was
+        asked. Diffed rather than pushed from the runner, so the runner
+        keeps knowing nothing about gRPC messages or who is watching."""
+        node = self._workflow.node
+        if node.id == self._last_reported_node_id:
+            return None
+        self._last_reported_node_id = node.id
+        return NodeChanged(
+            node_id=node.id, node_name=node.name, node_type=node.type,
+            via=self._workflow.last_transition,
+        )
 
     def _refresh_node_prompt(self, history: list[ChatMessage]) -> None:
         """Refresh history[0] with the active node's rendered prompt."""
@@ -1565,11 +1666,17 @@ class PipelineConversationHandler:
                     speech = self._workflow.pending_speech
                     if speech:
                         self._workflow.pending_speech = None
-                        # Yield text once so full_response/history/transcript record it.
-                        first = True
-                        async for chunk in self._synthesize_sentence_stream(speech, session_id):
-                            yield speech if first else "", chunk, end_call
-                            first = False
+                        if self._text_only:
+                            # _synthesize_sentence_stream is a no-op in a chat
+                            # session, so the words have to be yielded as text
+                            # or the bridging line vanishes entirely.
+                            yield speech, b"", end_call
+                        else:
+                            # Yield text once so full_response/history/transcript record it.
+                            first = True
+                            async for chunk in self._synthesize_sentence_stream(speech, session_id):
+                                yield speech if first else "", chunk, end_call
+                                first = False
                     continue
                 if isinstance(item, ToolCallStartedEvent):
                     # Rotates through _TOOL_CALL_FILLERS, gap-suppressed by
@@ -1583,6 +1690,11 @@ class PipelineConversationHandler:
                         idx = state.tool_call_filler_index
                         state.tool_call_filler_index = idx + 1
                         phrase = _TOOL_CALL_FILLERS[idx % len(_TOOL_CALL_FILLERS)]
+                        # text_only: skip fillers — yielding the phrase into
+                        # full_response would append it to assistant history
+                        # (voice yields "", chunk so fillers never land there).
+                        if self._text_only:
+                            continue
                         any_filler_chunk = False
                         async for chunk in self._synthesize_sentence_stream(phrase, session_id):
                             if not any_filler_chunk:
@@ -1616,10 +1728,18 @@ class PipelineConversationHandler:
         except Exception:
             log.exception("LLM streaming failed session=%s", session_id)
             if not cancel_event.is_set():
-                fallback_text = _FALLBACK_LLM_ERROR
-                async for chunk in self._synthesize_sentence_stream(_FALLBACK_LLM_ERROR, session_id):
-                    yield fallback_text, chunk, False
-                    fallback_text = ""  # yielded once — see full_response.append(chunk) at the call site
+                # text_only must put the apology in full_response (synthesis
+                # is a no-op). Voice keeps the prior shape: text rides the
+                # first TTS chunk so llm_ms / transcripts stay unchanged.
+                if self._text_only:
+                    yield _FALLBACK_LLM_ERROR, b"", False
+                else:
+                    fallback_text = _FALLBACK_LLM_ERROR
+                    async for chunk in self._synthesize_sentence_stream(
+                        _FALLBACK_LLM_ERROR, session_id,
+                    ):
+                        yield fallback_text, chunk, False
+                        fallback_text = ""
 
         # Whatever StreamBuffer still has pending never closed into a
         # complete tag — a false-positive lookalike (the model literally
@@ -1661,6 +1781,12 @@ class PipelineConversationHandler:
         # but greeting/farewell_message/transfer_announcement/fallback
         # strings never do (see strip_markdown_chars' docstring), so this
         # is where all of them get covered instead of at every call site.
+        if self._text_only:
+            # A chat session must not touch the TTS provider at all —
+            # loading a voice model takes seconds and produces audio nobody
+            # will play. Callers pair every synthesis site with _speak(),
+            # which emits the words themselves in this mode.
+            return
         text = strip_markdown_chars(text)
         # Forwards each chunk the TTS provider yields immediately — real
         # latency win only for a provider with genuine incremental
@@ -1672,6 +1798,39 @@ class PipelineConversationHandler:
                 yield chunk
         except Exception:
             log.exception("TTS streaming failed text=%r session=%s", text, session_id)
+
+    async def _speak(self, text: str, session_id: str) -> AsyncGenerator[HandlerResponse, None]:
+        """Deliver one fixed line to the caller — as synthesized audio on a
+        call, as text in a chat session. Every scripted line (greeting,
+        farewell, max-duration wrap-up, transfer announcement) goes through
+        here so none of them can be silently dropped in text mode."""
+        if self._text_only:
+            if text.strip():
+                yield HandlerResponse(agent_text=text)
+            return
+        async for chunk in self._synthesize_sentence_stream(text, session_id):
+            yield HandlerResponse(tts_payloads=[chunk])
+
+    def greeting_message(self) -> str:
+        """The opening line as text, for a text_only session. Pure — the
+        side effects (begin_call, the start node's delayed start) belong to
+        greeting(), which runs first either way."""
+        return self._workflow.greeting() or ""
+
+    def opening_events(self) -> list[HandlerResponse]:
+        """Start-node highlight + draft-fallback note for the admin UI."""
+        out: list[HandlerResponse] = []
+        if self._draft_fell_back:
+            out.append(HandlerResponse(
+                session_note=(
+                    "Your draft doesn't parse — running the published (live) "
+                    "flow instead."
+                ),
+            ))
+        node_changed = self._take_node_changed()
+        if node_changed is not None:
+            out.append(HandlerResponse(node_changed=node_changed))
+        return out
 
     def _session(self, session_id: str) -> _SessionState:
         state = self._sessions.get(session_id)

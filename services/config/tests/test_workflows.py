@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from libs.config_sdk.workflow import starter_graph
-from services.config import agents, workflows
+from services.config import agents, cache, workflows
 
 GRAPH = {
     "version": 1,
@@ -310,7 +310,7 @@ async def test_get_agent_does_not_expose_or_cache_the_draft(test_tenant):
     fetched = await agents.get_agent(test_tenant["slug"], "wf-no-draft")
     assert fetched is not None
     # Published graph stays on the agent GET/cache payload for call-setup;
-    # draft is editor-only until draft testing.
+    # draft is loaded from GET .../workflow for use_workflow_draft only.
     assert "workflow" in fetched and "workflow_draft" not in fetched
     assert fetched["workflow"] == CREATED_GRAPH
     listed = await agents.list_agents(test_tenant["id"])
@@ -323,6 +323,23 @@ async def test_get_agent_does_not_expose_or_cache_the_draft(test_tenant):
     state = await workflows.get_workflow(agent["id"], test_tenant["slug"])
     assert state["workflow"] == CREATED_GRAPH
     assert state["workflow_draft"] == DEAD_END
+
+
+async def test_draft_save_invalidates_agent_cache(test_tenant):
+    """Autosave drops Redis so a stale entry cannot retain a prior draft body."""
+    agent = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="wf-draft-inv", name="Draft Inv",
+        system_prompt=AGENT_PROMPT, tenant_slug=test_tenant["slug"],
+    )
+    key = agents.cache_key(test_tenant["slug"], "wf-draft-inv")
+    await agents.get_agent(test_tenant["slug"], "wf-draft-inv")
+    assert await cache.get_json(key) is not None
+    await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=DEAD_END)
+    assert await cache.get_json(key) is None
+    fetched = await agents.get_agent(test_tenant["slug"], "wf-draft-inv")
+    assert fetched is not None
+    assert "workflow_draft" not in fetched
+    assert fetched["workflow"] == CREATED_GRAPH
 
 
 async def test_patching_greeting_mirrors_into_the_published_graph(test_tenant, pool):

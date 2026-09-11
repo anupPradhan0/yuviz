@@ -152,7 +152,8 @@ class Agent:
     # own comment for what this controls. None = unlimited.
     max_call_duration_s: int | None = None
     # Published / draft graphs on agents.workflow / workflow_draft. Call-setup
-    # carries published on RuntimeConfig; draft stripped from public agent until PR10.
+    # carries published only; draft is fetched on demand for admin text-chat
+    # (use_workflow_draft) so Redis call-setup does not ship a second graph.
     workflow: dict[str, Any] | None = None
     workflow_draft: dict[str, Any] | None = None
 
