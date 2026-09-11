@@ -83,6 +83,7 @@ export function TestAgentPanel({
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [micLevelPct, setMicLevelPct] = useState(0);
+  const [draftFellBack, setDraftFellBack] = useState(false);
 
   // Incremented on every handleStart(); the end_call teardown delay
   // captures the value at schedule time and checks it before firing, so a
@@ -231,6 +232,23 @@ export function TestAgentPanel({
     sessionGenRef.current += 1;
     setState("connecting");
     setErrorMsg(null);
+    setDraftFellBack(false);
+
+    const token = getToken();
+    if (!token) {
+      setState("error");
+      setErrorMsg("Sign in again to run a test call.");
+      return;
+    }
+    if (!canSendAuthToken(WEBCALL_URL)) {
+      setState("error");
+      setErrorMsg(
+        "Test call needs a secure webcall URL (wss://), or ws://localhost. "
+        + "Refusing to send your session token over cleartext.",
+      );
+      return;
+    }
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } });
       streamRef.current = stream;
@@ -249,21 +267,6 @@ export function TestAgentPanel({
       source.connect(worklet);
       // Deliberately not connected to ctx.destination — we don't want the
       // caller's own mic echoed back to them.
-
-      const token = getToken();
-      if (!token) {
-        setState("error");
-        setErrorMsg("Sign in again to run a test call.");
-        return;
-      }
-      if (!canSendAuthToken(WEBCALL_URL)) {
-        setState("error");
-        setErrorMsg(
-          "Test call needs a secure webcall URL (wss://), or ws://localhost. "
-          + "Refusing to send your session token over cleartext.",
-        );
-        return;
-      }
 
       const ws = new WebSocket(
         `${WEBCALL_URL}/webcall?tenant=${encodeURIComponent(tenantSlug)}&agent=${encodeURIComponent(agentSlug)}` +
@@ -296,6 +299,12 @@ export function TestAgentPanel({
             break;
           case "service_ready":
             setState("ready");
+            break;
+          case "note":
+            if (msg.kind === "draft_fallback") setDraftFellBack(true);
+            if (msg.text) {
+              setTranscript((t) => [...t, { text: msg.text, ts: Date.now() }]);
+            }
             break;
           case "stt_result":
             if (msg.text) setTranscript((prev) => [...prev, { text: msg.text, ts: Date.now() }]);
@@ -439,7 +448,11 @@ export function TestAgentPanel({
   const statusText: Record<CallState, string> = {
     idle: "Run a live test call with this agent's real voice, prompt, and tools — using your laptop's microphone, no phone call involved.",
     connecting: "Connecting…",
-    ready: "Listening — just start talking whenever you're ready.",
+    ready: draftFellBack
+      ? "Listening — draft invalid, running the live flow. Just start talking."
+      : useDraft
+        ? "Listening — running your draft. Just start talking whenever you're ready."
+        : "Listening — just start talking whenever you're ready.",
     talking: "Hearing you…",
     thinking: "Thinking…",
     speaking: "Speaking… (start talking to interrupt)",

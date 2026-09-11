@@ -1468,6 +1468,9 @@ class PipelineConversationHandler:
         # caller who asks again must get a fresh TransferDecisionEngine
         # evaluation, not an "already_transferring" rejection.
         self._session(session_id).transfer_requested = False
+        # Leave the terminal transfer node — no outbound edges; without this
+        # the model has nowhere to go after recovery.
+        self._workflow.abandon_transfer()
         # The speculative summary started on TransferInitiated (see
         # start_finalization()) was for a call that was about to end — it
         # isn't, so throw it away rather than let it run unattended.
@@ -1536,6 +1539,7 @@ class PipelineConversationHandler:
         then asks again must get a fresh TransferDecisionEngine evaluation,
         not an "already_transferring" rejection."""
         self._session(session_id).transfer_requested = False
+        self._workflow.abandon_transfer()
         self._session_finalizer.discard_pending_summary(session_id)
 
     def start_finalization(self, session_id: str) -> None:
@@ -1685,14 +1689,15 @@ class PipelineConversationHandler:
                         if self._text_only:
                             # _synthesize_sentence_stream is a no-op in a chat
                             # session, so the words have to be yielded as text
-                            # or the bridging line vanishes entirely. Every
-                            # other scripted line goes through _speak() for
-                            # exactly this reason, and a workflow tested in the
-                            # chat panel has to show what a call would say.
+                            # or the bridging line vanishes entirely.
                             yield speech, b"", end_call
                         else:
+                            # Yield text once so full_response/history/transcript
+                            # record it (same as text_only above).
+                            first = True
                             async for chunk in self._synthesize_sentence_stream(speech, session_id):
-                                yield "", chunk, end_call
+                                yield speech if first else "", chunk, end_call
+                                first = False
                     continue
                 if isinstance(item, ToolCallStartedEvent):
                     # Rotates through _TOOL_CALL_FILLERS, gap-suppressed by

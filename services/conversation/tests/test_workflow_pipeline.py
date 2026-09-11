@@ -195,7 +195,12 @@ async def test_transition_speech_is_spoken_during_the_round_trip():
     # Spoken before the new node's own words, not after them.
     assert spoken.index("Let me pull up the calendar.") < spoken.index("Sure.")
     assert handler._workflow.pending_speech is None
-
+    # Authored transition speech must land in history for the LLM / transcript.
+    history = handler._get_history("s1")
+    assert any(
+        m.role == "assistant" and "Let me pull up the calendar." in (m.content or "")
+        for m in history
+    )
 
 
 async def test_an_end_call_marker_survives_a_transition_in_the_same_turn():
@@ -275,6 +280,25 @@ async def test_workflow_transfer_rejected_when_agent_transfer_disabled():
     assert handler._workflow.node.name == "greeting"
     assert handler._workflow.pending_transfer is None
     assert not any(r.transfer_request for r in responses)
+
+
+async def test_transfer_failed_abandons_workflow_transfer_node():
+    """Post-dispatch TransferFailed must leave the transfer node too."""
+    llm = _ScriptedToolLLM([
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_a_human", arguments={})],
+        [TokenEvent(text="Connecting you now.")],
+        [TokenEvent(text="Sorry about that — how else can I help?")],
+    ])
+    handler = _handler(
+        llm, _RecordingPolicyResolver(), workflow=TRANSFER_GRAPH,
+        transfer_type="warm", transfer_destination="+15550001111",
+    )
+    [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+    assert handler._workflow.node.name == "to_human"
+
+    [r async for r in handler.on_transfer_failed("s1", "+15559999", "gateway timeout")]
+    assert handler._workflow.node.name == "greeting"
+    assert handler._workflow.pending_transfer is None
 
 
 async def test_session_end_persists_workflow_outcome_even_when_extraction_times_out():
