@@ -23,7 +23,6 @@ instance attribute: no session map, no cross-call leakage, no cleanup path.
 from __future__ import annotations
 
 import logging
-from functools import lru_cache
 from typing import Any, Awaitable, Callable
 
 from libs.config_sdk import RuntimeConfig
@@ -51,6 +50,11 @@ _NO_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
 # these from its transcript for exactly that reason (see
 # extractor.py) — dozens of them accumulate and they are noise.
 _TRANSITION_RESULT = ToolResult(status=ToolStatus.SUCCESS, payload={"status": "done"})
+
+
+def _transition_tool_name(edge: Edge) -> str:
+    """Prefix so edge labels cannot shadow ToolRegistry names (book_appointment…)."""
+    return f"goto_{edge.tool_name}"
 
 
 class WorkflowRunner:
@@ -87,6 +91,8 @@ class WorkflowRunner:
         # transition so a log line and the editor both say WHY it moved, not
         # just where to.
         self.last_transition: str = ""
+        # Node we left when entering a transfer — abandon_transfer() reverts here.
+        self._pre_transfer_node: Node | None = None
 
     # ── What the pipeline asks for each turn ──────────────────────────────
 
@@ -103,6 +109,11 @@ class WorkflowRunner:
         later node's prompt can say {{ policy_number }} about something the
         caller said three nodes ago."""
         self._vars.update({k: v for k, v in values.items() if v is not None})
+
+    def extracted_variables(self) -> dict[str, Any]:
+        """Values produced by extraction only — not seeded call-context keys."""
+        declared = self._graph.declared_variables()
+        return {k: v for k, v in self._vars.items() if k in declared}
 
     def system_prompt(self) -> str:
         """Composed fresh every turn, not cached: rendering happens at
@@ -194,8 +205,9 @@ class WorkflowRunner:
         """
         tools: dict[str, tuple[ToolDefinition, Callable[..., Awaitable[ToolResult]]]] = {}
         for edge in self._node.out_edges:
+            name = _transition_tool_name(edge)
             definition = ToolDefinition(
-                name=edge.tool_name,
+                name=name,
                 # The condition is the prompt that actually decides the
                 # transition — it matters more than the node prompt, which
                 # is why the editor gives it more room than the label.
@@ -207,8 +219,21 @@ class WorkflowRunner:
             def handler(_args: dict[str, Any], _edge: Edge = edge) -> Awaitable[ToolResult]:
                 return self._transition(_edge, turn, store if store is not None else turn)
 
-            tools[edge.tool_name] = (definition, handler)
+            tools[name] = (definition, handler)
         return tools
+
+    def abandon_transfer(self) -> None:
+        """Move off a rejected transfer node so the caller is not dead-ended."""
+        if self._pre_transfer_node is None or self._node.type != "transfer":
+            self.pending_transfer = None
+            return
+        source = self._pre_transfer_node
+        self._node = source
+        self._pre_transfer_node = None
+        self.pending_transfer = None
+        if self.visited and self.visited[-1] != source.name:
+            self.visited.pop()
+        log.info("workflow: transfer rejected — reverted to %s", source.name)
 
     # ── The state machine ─────────────────────────────────────────────────
 
@@ -220,9 +245,8 @@ class WorkflowRunner:
     ) -> ToolResult:
         source = self._node
 
-        # 1. Extract before leaving. This node's slice of the conversation
-        #    is the extraction window; after the swap it is just historical
-        #    context the next node's extraction would have to re-derive.
+        # 1. Queue extract before leaving — pipeline start_deferred() runs it
+        #    after the live generate so it does not contend for the call LLM.
         if self._extractor is not None and source.extraction is not None and source.extraction.enabled:
             self._extractor.extract(source, store or [])
 
@@ -243,8 +267,12 @@ class WorkflowRunner:
         #    new teardown.
         if self._node.type == "end":
             self.pending_end = True
+            self._pre_transfer_node = None
         elif self._node.type == "transfer":
             self.pending_transfer = self._node
+            self._pre_transfer_node = source
+        else:
+            self._pre_transfer_node = None
 
         # 5. Swap the prompt for the remainder of THIS turn — see
         #    local_tools()'s docstring for why between-turns is too late,
@@ -281,25 +309,37 @@ class WorkflowRunner:
 _GRAPH_CACHE: dict[tuple[str, int, bool], WorkflowGraph] = {}
 
 
+def _str_names_from_raw(raw: dict[str, Any] | None, field: str) -> list[str]:
+    """Best-effort scrape of node list fields from unparseable published JSON."""
+    if not isinstance(raw, dict):
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for node in raw.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        data = node.get("data") if isinstance(node.get("data"), dict) else {}
+        for item in data.get(field) or []:
+            if isinstance(item, str) and item and item not in seen:
+                seen.add(item)
+                names.append(item)
+    return names
+
+
 def graph_for(runtime_config: RuntimeConfig, *, draft: bool = False) -> WorkflowGraph:
-    """Every agent runs a graph — an agent IS its workflow (docs/workflow.md
-    §9.1), and one is created with the row itself. There is no single-prompt
-    mode to fall back to any more.
+    """Never raises. Missing/bad published graph → starter seeded from tools.
 
-    Never raises, and never returns None: a config-plane problem must not
-    reject a call (same posture as agent_resolver.py's fallback). When the
-    stored graph is missing or unparseable — which a published graph can only
-    be after a code regression, since publish validates — the call runs the
-    built-in starter graph. Degrading to a generic-but-working agent beats
-    dropping a caller, and the log line says loudly which agent to republish.
-
-    draft=True runs the agent's UNPUBLISHED graph instead — only ever set
-    by the admin UI's own test-call path (see SessionOpenRequest.
-    use_workflow_draft), so an operator can hear a change before publishing
-    it to real traffic. A draft is not validated on save, so this is the
-    one place a graph that fails to parse is expected rather than alarming;
-    it falls back to the published one.
+    draft=True prefers workflow_draft; invalid draft falls back to published.
+    Admin text-chat sets SessionOpenRequest.use_workflow_draft for this path.
     """
+    graph, _fell_back = resolve_graph(runtime_config, draft=draft)
+    return graph
+
+
+def resolve_graph(
+    runtime_config: RuntimeConfig, *, draft: bool = False,
+) -> tuple[WorkflowGraph, bool]:
+    """Like graph_for, plus whether an invalid draft forced the published graph."""
     raw = runtime_config.conversation.workflow
     if draft and runtime_config.conversation.workflow_draft:
         raw = runtime_config.conversation.workflow_draft
@@ -310,44 +350,46 @@ def graph_for(runtime_config: RuntimeConfig, *, draft: bool = False) -> Workflow
                 "graph; publish one from the editor",
                 runtime_config.agent.slug,
             )
-        return _fallback_graph()
+        return _fallback_graph(runtime_config, raw=None), False
     # Drafts are deliberately NOT cached: a draft save doesn't bump
-    # config_version (see bump_agent_config_version in database/schema.sql),
-    # so there is no key that would go stale correctly — a cached draft would
-    # make every later test call replay the first one the process ever saw.
-    # Test calls are rare and off the latency path, so parsing each time is
-    # the cheaper mistake.
+    # config_version (see bump_agent_config_version in database/schema.sql).
     key = (runtime_config.agent.id or runtime_config.agent.slug, runtime_config.version, draft)
     if not draft and key in _GRAPH_CACHE:
-        return _GRAPH_CACHE[key]
+        return _GRAPH_CACHE[key], False
     try:
         graph = parse_graph(raw)
     except WorkflowInvalid as exc:
         if draft:
-            # A draft is never validated on save, so a half-drawn one is
-            # expected here rather than alarming — test the published graph
-            # instead of the starter one mid-test.
             log.info(
                 "workflow: draft for agent %s does not parse (%s) — testing the "
                 "published graph instead", runtime_config.agent.slug, exc,
             )
-            return graph_for(runtime_config, draft=False)
+            published, _ = resolve_graph(runtime_config, draft=False)
+            return published, True
         log.error(
             "workflow: agent %s has a published graph that does not parse (%s) — "
             "running the starter graph; republish it from the editor",
             runtime_config.agent.slug, exc,
         )
-        graph = _fallback_graph()
+        graph = _fallback_graph(runtime_config, raw=raw if isinstance(raw, dict) else None)
     except Exception:
         log.exception("workflow: unexpected failure parsing graph for agent %s", runtime_config.agent.slug)
-        graph = _fallback_graph()
+        graph = _fallback_graph(runtime_config, raw=raw if isinstance(raw, dict) else None)
     if not draft:
         _GRAPH_CACHE[key] = graph
-    return graph
+    return graph, False
 
 
-@lru_cache(maxsize=1)
-def _fallback_graph() -> WorkflowGraph:
-    """Parsed once per process — it is the same three nodes every time, and
-    the only paths that reach it are already error paths."""
-    return parse_graph(starter_graph())
+def _fallback_graph(
+    runtime_config: RuntimeConfig, *, raw: dict[str, Any] | None,
+) -> WorkflowGraph:
+    # Prefer RuntimeConfig.tools; scrape broken published JSON so a parse
+    # failure does not silently strip booking/SMS (Node.tools is default-deny).
+    tools = [t.name for t in runtime_config.tools] or _str_names_from_raw(raw, "tools")
+    kb_ids = _str_names_from_raw(raw, "knowledge_base_ids")
+    return parse_graph(starter_graph(
+        runtime_config.conversation.greeting or "",
+        runtime_config.conversation.system_prompt or "",
+        tools,
+        kb_ids,
+    ))

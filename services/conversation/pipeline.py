@@ -57,7 +57,7 @@ from .workflow import (
     ContextSummarizer,
     VariableExtractor,
     WorkflowRunner,
-    graph_for,
+    resolve_graph,
     summary_threshold_for,
 )
 
@@ -299,6 +299,9 @@ _FALLBACK_GOODBYE = "Goodbye."
 # on_session_end. Shorter than VariableExtractor's own 8s per-call timeout
 # on purpose: this runs after the caller has already gone.
 _FINISH_WORKFLOW_TIMEOUT_S = 3.0
+# Bound leave-node extract flush before a workflow transfer routes — stragglers
+# keep running; we route with whatever variables landed so far.
+_TRANSFER_FLUSH_TIMEOUT_S = 1.5
 
 # Spoken when policies.max_call_duration_s is exceeded (see
 # PipelineConversationHandler.on_speech_ended's check, right after STT).
@@ -658,10 +661,10 @@ class PipelineConversationHandler:
         # line instead of one pop/discard per field.
         self._sessions: dict[str, _SessionState] = {}
         # Conversation workflow (docs/workflow.md). Always present — an agent
-        # IS its workflow (§9.1), graph_for() falls back to the starter graph
-        # rather than returning None, and there is no single-prompt mode left
-        # to branch on.
+        # IS its workflow (§9.1), resolve_graph() falls back to the starter
+        # graph rather than returning None.
         self._last_reported_node_id: str | None = None
+        self._draft_fell_back = False
         now = datetime.now(timezone.utc)
         self._extractor = VariableExtractor(self._llm, self._on_variables_extracted)
         # Threshold derived from this pipeline's own trim cap rather than
@@ -671,7 +674,9 @@ class PipelineConversationHandler:
         self._summarizer = ContextSummarizer(
             self._llm, threshold_msgs=summary_threshold_for(max_history),
         )
-        graph = graph_for(runtime_config, draft=use_workflow_draft)
+        graph, self._draft_fell_back = resolve_graph(
+            runtime_config, draft=use_workflow_draft,
+        )
         self._workflow = WorkflowRunner(
             graph,
             # The always-on instruction comes from the graph's own global
@@ -765,6 +770,10 @@ class PipelineConversationHandler:
         cancel_event = asyncio.Event()
         self._session(session_id).cancelled = cancel_event
 
+        # Free the shared call LLM before this turn's generate — a prior
+        # turn's extract/summarize would otherwise queue behind Ollama.
+        self._interrupt_workflow_background_llm()
+
         # Sub-1s blips (echo tails, breaths, ambient noise) make Whisper
         # hallucinate filler or, worse, guess a wrong language entirely on
         # noise with no real content (observed live: a noise blip
@@ -824,6 +833,8 @@ class PipelineConversationHandler:
         # Fresh per-turn cancel event, same contract as on_speech_ended's.
         cancel_event = asyncio.Event()
         self._session(session_id).cancelled = cancel_event
+        # Same interrupt as voice: free extract/summarize before this turn.
+        self._interrupt_workflow_background_llm()
         yield HandlerResponse(stt_text=text, stt_confidence=1.0)
         async for response in self._run_turn(
             session_id, text, 1.0, cancel_event, time.monotonic(), None,
@@ -992,6 +1003,10 @@ class PipelineConversationHandler:
         except Exception:
             log.exception("LLM/TTS pipeline failed session=%s", session_id)
 
+        # Transitions queue extract/summarize; start after the live generate.
+        # on_speech_ended/on_cancel interrupt them before the next turn.
+        self._start_workflow_background_llm()
+
         # llm_ms: time to the LLM's first token/event — the "thinking" time
         # a caller actually experiences before anything happens. tts_ms:
         # time from that first token to the first synthesized sentence
@@ -1099,9 +1114,14 @@ class PipelineConversationHandler:
         # model actually generated is delivered here instead. One message
         # per turn, after the tool calls and any mid-turn transition have
         # settled, so the text matches what a caller would have heard.
-        if self._text_only and assistant_text and not cancel_event.is_set():
-            any_audio = True
-            yield HandlerResponse(agent_text=assistant_text)
+        # Empty assistant_text still emits turn_complete so a goto-only turn
+        # unlocks the chat composer.
+        if self._text_only and not cancel_event.is_set():
+            if assistant_text:
+                any_audio = True
+                yield HandlerResponse(agent_text=assistant_text, turn_complete=True)
+            else:
+                yield HandlerResponse(turn_complete=True)
 
         # Report the transition (if any) before the turn's terminal events —
         # the editor's canvas should light up the node that just spoke, even
@@ -1219,29 +1239,14 @@ class PipelineConversationHandler:
 
     async def on_cancel(self, session_id: str) -> None:
         self._cancel_event(session_id).set()
+        # Barge-in before pending_speech is consumed must not replay it next turn.
+        self._workflow.pending_speech = None
+        self._interrupt_workflow_background_llm()
 
     async def on_session_end(self, session_id: str, reason: str,
                              final_state: str | None = None) -> None:
-        # Before the transcript writes below — record_workflow_outcome has
-        # to land on the calls row while TranscriptBuilder's per-session
-        # write chain is still alive (end_call() drops it).
-        #
-        # Bounded: ConversationSession.close() and the servicer both await
-        # this with no timeout of their own, so an unbounded extraction
-        # round-trip here would hold the gRPC stream (and the calls row's
-        # finalization) open for its full timeout after the caller has
-        # already hung up. A missed final extraction is analytics; a call
-        # that takes 8 seconds to disappear from the live list is not.
-        try:
-            await asyncio.wait_for(
-                self._finish_workflow(session_id), timeout=_FINISH_WORKFLOW_TIMEOUT_S,
-            )
-        except asyncio.TimeoutError:
-            log.warning(
-                "Workflow finalization timed out after %.1fs session=%s — "
-                "the call's path and disposition may be incomplete",
-                _FINISH_WORKFLOW_TIMEOUT_S, session_id,
-            )
+        # Outcome must spawn before end_call() drops the write chain.
+        await self._finish_workflow(session_id)
         # Requirement: transfer-failure recovery turns are recorded in
         # short-term memory (history) immediately, in on_transfer_failed(),
         # but their transcript *persistence* is deferred until now — normal
@@ -1312,11 +1317,29 @@ class PipelineConversationHandler:
         if node is None:
             return None
         self._workflow.pending_transfer = None
-        # A destination that reads {{ some_variable }} cannot be resolved
-        # against a value still in flight — flush first (see
-        # VariableExtractor.flush).
-        await self._extractor.flush()
+        # Do not let a queued summary race the transfer path on the call LLM.
+        self._summarizer.cancel()
+        self._extractor.start_deferred()
+        pending = self._extractor.pending_tasks()
+        if pending:
+            _done, still = await asyncio.wait(
+                pending, timeout=_TRANSFER_FLUSH_TIMEOUT_S,
+            )
+            if still:
+                log.warning(
+                    "workflow: extraction flush timed out before transfer session=%s — "
+                    "routing with variables collected so far; stragglers left running",
+                    session_id,
+                )
         destination = self._workflow.render(node.transfer_destination or "") or None
+        problem = transfer_destination_problem(destination)
+        if problem is not None:
+            log.warning(
+                "Workflow transfer node %r rejected: %s session=%s",
+                node.name, problem, session_id,
+            )
+            self._workflow.abandon_transfer()
+            return None
         decision = self._transfer_engine.evaluate(
             self._decision_context(session_id, destination_override=destination),
             TransferTrigger(
@@ -1328,31 +1351,54 @@ class PipelineConversationHandler:
                 "Workflow transfer node %r rejected: %s session=%s",
                 node.name, decision.rejection_reason, session_id,
             )
+            self._workflow.abandon_transfer()
             return None
         self._session(session_id).transfer_requested = True
         return decision.request
 
+    def _interrupt_workflow_background_llm(self) -> None:
+        self._extractor.interrupt_for_live_turn()
+        self._summarizer.interrupt_for_live_turn()
+
+    def _start_workflow_background_llm(self) -> None:
+        self._extractor.start_deferred()
+        self._summarizer.start_deferred()
+
     async def _finish_workflow(self, session_id: str) -> None:
-        """One final extraction pass on whatever node the call ended in,
-        then the call's path and outcome. Idempotent by way of
-        VariableExtractor's own guard — several teardown paths converge
-        here (caller hangs up, agent ends, max duration, transfer
-        completes) and without that they race to write the same row."""
+        """Best-effort final extract, then always persist path/disposition/vars."""
         self._summarizer.cancel()
         try:
-            await self._extractor.extract_final(
-                self._workflow.node, self._get_history(session_id),
+            await asyncio.wait_for(
+                self._finalize_extraction(session_id),
+                timeout=_FINISH_WORKFLOW_TIMEOUT_S,
             )
-            await self._extractor.flush()
+        except asyncio.TimeoutError:
+            log.warning(
+                "Workflow finalization timed out after %.1fs session=%s — "
+                "persisting path/disposition with variables collected so far",
+                _FINISH_WORKFLOW_TIMEOUT_S, session_id,
+            )
         except Exception:
             log.exception("Workflow final extraction failed session=%s", session_id)
+        finally:
+            # Do not leave extracts calling the shared LLM after the call ends.
+            self._extractor.cancel_pending()
+            self._summarizer.cancel()
         if self._transcripts is not None:
             self._transcripts.record_workflow_outcome(
                 session_id,
                 nodes_visited=self._workflow.visited,
                 disposition=self._workflow.disposition,
-                extracted_variables=self._workflow.variables,
+                extracted_variables=self._workflow.extracted_variables(),
             )
+
+    async def _finalize_extraction(self, session_id: str) -> None:
+        # Flush leave-node extracts first so extract_final cannot starve them.
+        self._extractor.start_deferred()
+        await self._extractor.flush()
+        await self._extractor.extract_final(
+            self._workflow.node, self._get_history(session_id),
+        )
 
     def record_guardrail_violation(self, session_id: str) -> TransferRequest | None:
         """
@@ -1625,6 +1671,7 @@ class PipelineConversationHandler:
                 history, session_id, cancel_event, tool_calls_made, store,
             ):
                 if cancel_event.is_set():
+                    self._workflow.pending_speech = None
                     break
                 if isinstance(item, LocalToolCompletedEvent):
                     # A workflow transition just happened. Speak its
@@ -1659,6 +1706,11 @@ class PipelineConversationHandler:
                         idx = state.tool_call_filler_index
                         state.tool_call_filler_index = idx + 1
                         phrase = _TOOL_CALL_FILLERS[idx % len(_TOOL_CALL_FILLERS)]
+                        # text_only: skip fillers — yielding the phrase into
+                        # full_response would append it to assistant history
+                        # (voice yields "", chunk so fillers never land there).
+                        if self._text_only:
+                            continue
                         any_filler_chunk = False
                         async for chunk in self._synthesize_sentence_stream(phrase, session_id):
                             if not any_filler_chunk:
@@ -1668,10 +1720,6 @@ class PipelineConversationHandler:
                                     item.tool_name, phrase, session_id,
                                 )
                             yield "", chunk, end_call
-                        if self._text_only and not any_filler_chunk:
-                            # text_only: synthesis is a no-op — still surface
-                            # the filler as agent_text so chat sessions see it.
-                            yield phrase, b"", end_call
                     continue
                 token = item
                 result = DirectiveParser.parse(stream_buf.feed(token))
@@ -1696,14 +1744,18 @@ class PipelineConversationHandler:
         except Exception:
             log.exception("LLM streaming failed session=%s", session_id)
             if not cancel_event.is_set():
-                # The text first and unconditionally: synthesis yields
-                # nothing in a text_only session (and can fail outright in a
-                # voice one), and the caller keys the whole turn off
-                # full_response — so gating the words on the audio would
-                # lose the apology entirely.
-                yield _FALLBACK_LLM_ERROR, b"", False
-                async for chunk in self._synthesize_sentence_stream(_FALLBACK_LLM_ERROR, session_id):
-                    yield "", chunk, False
+                # text_only must put the apology in full_response (synthesis
+                # is a no-op). Voice keeps the prior shape: text rides the
+                # first TTS chunk so llm_ms / transcripts stay unchanged.
+                if self._text_only:
+                    yield _FALLBACK_LLM_ERROR, b"", False
+                else:
+                    fallback_text = _FALLBACK_LLM_ERROR
+                    async for chunk in self._synthesize_sentence_stream(
+                        _FALLBACK_LLM_ERROR, session_id,
+                    ):
+                        yield fallback_text, chunk, False
+                        fallback_text = ""
 
         # Whatever StreamBuffer still has pending never closed into a
         # complete tag — a false-positive lookalike (the model literally
@@ -1780,6 +1832,21 @@ class PipelineConversationHandler:
         side effects (begin_call, the start node's delayed start) belong to
         greeting(), which runs first either way."""
         return self._workflow.greeting() or ""
+
+    def opening_events(self) -> list[HandlerResponse]:
+        """Start-node highlight + draft-fallback note for the admin UI."""
+        out: list[HandlerResponse] = []
+        if self._draft_fell_back:
+            out.append(HandlerResponse(
+                session_note=(
+                    "Your draft doesn't parse — running the published (live) "
+                    "flow instead."
+                ),
+            ))
+        node_changed = self._take_node_changed()
+        if node_changed is not None:
+            out.append(HandlerResponse(node_changed=node_changed))
+        return out
 
     def _session(self, session_id: str) -> _SessionState:
         state = self._sessions.get(session_id)

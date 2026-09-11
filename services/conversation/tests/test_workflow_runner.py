@@ -79,14 +79,14 @@ def test_qualified_path():
     assert runner.node.name == "greeting"
 
     tools = runner.local_tools()
-    assert set(tools) == {"caller_wants_to_book", "just_a_question", "wants_a_human"}
-    asyncio.run(tools["caller_wants_to_book"][1]({}))
+    assert set(tools) == {"goto_caller_wants_to_book", "goto_just_a_question", "goto_wants_a_human"}
+    asyncio.run(tools["goto_caller_wants_to_book"][1]({}))
 
     assert runner.node.name == "booking"
     assert runner.allowed_tool_names() == ["book_appointment"]
     assert runner.pending_speech == "Of course, let me pull up the calendar."
 
-    asyncio.run(runner.local_tools()["booked"][1]({}))
+    asyncio.run(runner.local_tools()["goto_booked"][1]({}))
     assert runner.node.name == "goodbye"
     assert runner.pending_end is True
     assert runner.disposition == "qualified"
@@ -102,7 +102,7 @@ def test_the_booking_tool_does_not_exist_until_the_booking_node_is_active():
 
 def test_prompt_is_global_then_node_then_suffix_and_renders_variables():
     runner = _runner()
-    asyncio.run(runner.local_tools()["caller_wants_to_book"][1]({}))
+    asyncio.run(runner.local_tools()["goto_caller_wants_to_book"][1]({}))
     assert runner.system_prompt() == (
         "You are Ada, a receptionist.\n\n"
         "Book an appointment for +15551234.\n\n"
@@ -119,7 +119,7 @@ def test_greeting_comes_from_the_start_node_with_a_fallback():
 def test_extracted_variables_reach_later_nodes_prompts():
     runner = _runner()
     runner.update_variables({"caller_number": "+15550000"})
-    asyncio.run(runner.local_tools()["caller_wants_to_book"][1]({}))
+    asyncio.run(runner.local_tools()["goto_caller_wants_to_book"][1]({}))
     assert "+15550000" in runner.system_prompt()
 
 
@@ -139,23 +139,34 @@ def test_transition_swaps_the_system_prompt_inside_the_same_turn():
         ChatMessage(role="system", content=runner.system_prompt()),
         ChatMessage(role="user", content="I'd like to book something"),
     ]
-    asyncio.run(runner.local_tools(history)["caller_wants_to_book"][1]({}))
+    asyncio.run(runner.local_tools(history)["goto_caller_wants_to_book"][1]({}))
     assert "Book an appointment" in history[0].content
     assert history[1].role == "user"
 
 
 def test_reaching_a_transfer_node_flags_a_transfer_not_an_end():
     runner = _runner()
-    asyncio.run(runner.local_tools()["wants_a_human"][1]({}))
+    asyncio.run(runner.local_tools()["goto_wants_a_human"][1]({}))
     assert runner.pending_end is False
     assert runner.pending_transfer is not None
     assert runner.pending_transfer.transfer_destination == "+15559999"
 
 
+def test_abandon_transfer_reverts_to_source_node():
+    runner = _runner()
+    asyncio.run(runner.local_tools()["goto_wants_a_human"][1]({}))
+    assert runner.node.name == "to_human"
+    assert runner.pending_transfer is not None
+    runner.abandon_transfer()
+    assert runner.node.name == "greeting"
+    assert runner.pending_transfer is None
+    assert runner.visited == ["greeting"]
+
+
 def test_knowledge_is_per_stage():
     runner = _runner()
     assert runner.knowledge_enabled() is False       # start node has no KB
-    asyncio.run(runner.local_tools()["just_a_question"][1]({}))
+    asyncio.run(runner.local_tools()["goto_just_a_question"][1]({}))
     assert runner.knowledge_enabled() is True        # q&a node does
 
 
@@ -167,9 +178,9 @@ def test_extraction_fires_before_leaving_the_node_not_after():
             seen.append((node.name, len(history)))
 
     runner = _runner(extractor=_Extractor())
-    asyncio.run(runner.local_tools()["caller_wants_to_book"][1]({}))
+    asyncio.run(runner.local_tools()["goto_caller_wants_to_book"][1]({}))
     assert seen == []                       # the start node declares none
-    asyncio.run(runner.local_tools()["booked"][1]({}))
+    asyncio.run(runner.local_tools()["goto_booked"][1]({}))
     # Extracted from the booking node, while booking was still the active
     # one — after the swap this segment is just historical context.
     assert seen == [("booking", 0)]
@@ -195,3 +206,106 @@ def test_a_graph_with_no_global_node_just_has_no_global_prefix():
     assert runner.system_prompt() == (
         "Greet the caller and find out what they want.\n\nToday is 2026-08-28."
     )
+
+
+def test_graph_for_fallback_seeds_greeting_and_system_prompt():
+    from datetime import datetime, timezone
+
+    from libs.config_sdk import (
+        Agent, ConversationInfo, MediaInfo, Policies, ProviderConfig, ProviderConfigs,
+        RuntimeConfig, Tenant,
+    )
+    from services.conversation.workflow.runner import _GRAPH_CACHE, graph_for
+
+    _GRAPH_CACHE.clear()
+    now = datetime.now(timezone.utc)
+    placeholder = ProviderConfig(
+        id="p1", role="stt", engine="fake", model=None, voice=None, language=None, api_key_ref=None,
+    )
+    rc = RuntimeConfig(
+        tenant=Tenant(
+            id="t1", slug="t", name="T", region="us",
+            vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
+            no_speech_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None,
+            transfer_timeout_ms=None,
+            default_stt_config_id=None, default_llm_config_id=None, default_tts_config_id=None,
+            config_version=1, updated_at=now,
+        ),
+        agent=Agent(
+            id="a1", slug="agent", tenant_id="t1", name="Agent",
+            greeting="Hi from column.", system_prompt="Be the column prompt.",
+            goodbye_grace_ms=0, stt_config_id=None, llm_config_id=None, tts_config_id=None,
+            status="active", config_version=1, updated_at=now,
+        ),
+        providers=ProviderConfigs(stt=placeholder, llm=placeholder, tts=placeholder),
+        conversation=ConversationInfo(
+            greeting="Hi from column.", system_prompt="Be the column prompt.", workflow=None,
+        ),
+        media=MediaInfo(voice=None, language=None),
+        policies=Policies(
+            vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
+            silence_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None, goodbye_grace_ms=0,
+        ),
+        tools=[], version=1, resolved_at=now,
+    )
+    graph = graph_for(rc)
+    assert "Hi from column." in (graph.start.greeting or "")
+    assert "Be the column prompt." in (graph.global_prompt or "")
+
+
+def test_graph_for_fallback_preserves_tools_from_broken_published_json():
+    from datetime import datetime, timezone
+
+    from libs.config_sdk import (
+        Agent, ConversationInfo, MediaInfo, Policies, ProviderConfig, ProviderConfigs,
+        RuntimeConfig, Tenant,
+    )
+    from services.conversation.workflow.runner import _GRAPH_CACHE, graph_for
+
+    _GRAPH_CACHE.clear()
+    now = datetime.now(timezone.utc)
+    placeholder = ProviderConfig(
+        id="p1", role="stt", engine="fake", model=None, voice=None, language=None, api_key_ref=None,
+    )
+    # Missing end node → WorkflowInvalid → starter fallback must keep tools.
+    broken = {
+        "version": 1,
+        "nodes": [
+            {"id": "g1", "type": "global", "data": {"name": "g", "prompt": "Be helpful."}},
+            {"id": "n1", "type": "start", "data": {
+                "name": "greeting", "prompt": "hi", "greeting": "Hi",
+                "tools": ["book_appointment", "send_sms"],
+                "knowledge_base_ids": ["kb-1"],
+            }},
+        ],
+        "edges": [],
+    }
+    rc = RuntimeConfig(
+        tenant=Tenant(
+            id="t1", slug="t", name="T", region="us",
+            vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
+            no_speech_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None,
+            transfer_timeout_ms=None,
+            default_stt_config_id=None, default_llm_config_id=None, default_tts_config_id=None,
+            config_version=1, updated_at=now,
+        ),
+        agent=Agent(
+            id="a1", slug="agent", tenant_id="t1", name="Agent",
+            greeting="Hi", system_prompt="Be helpful.",
+            goodbye_grace_ms=0, stt_config_id=None, llm_config_id=None, tts_config_id=None,
+            status="active", config_version=1, updated_at=now,
+        ),
+        providers=ProviderConfigs(stt=placeholder, llm=placeholder, tts=placeholder),
+        conversation=ConversationInfo(
+            greeting="Hi", system_prompt="Be helpful.", workflow=broken,
+        ),
+        media=MediaInfo(voice=None, language=None),
+        policies=Policies(
+            vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
+            silence_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None, goodbye_grace_ms=0,
+        ),
+        tools=[], version=1, resolved_at=now,
+    )
+    graph = graph_for(rc)
+    assert graph.start.tools == ["book_appointment", "send_sms"]
+    assert graph.start.knowledge_base_ids == ["kb-1"]

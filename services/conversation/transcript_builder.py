@@ -258,25 +258,6 @@ class TranscriptBuilder:
         disposition: str | None = None,
         extracted_variables: dict | None = None,
     ) -> None:
-        """The path this call took, how it ended, and what it learned (see
-        docs/workflow.md §7.1). Only a workflow call ever calls this; every
-        other call leaves all three columns NULL. Must be spawned BEFORE
-        end_call() — that method drops this session's write chain once its
-        own write lands."""
-        if self._pool is None:
-            return
-        self._spawn(session_id, self._record_workflow_outcome(
-            session_id, nodes_visited, disposition, extracted_variables,
-        ))
-
-    def record_workflow_outcome(
-        self,
-        session_id: str,
-        *,
-        nodes_visited: list[str] | None = None,
-        disposition: str | None = None,
-        extracted_variables: dict | None = None,
-    ) -> None:
         """Path, disposition, and extracted vars for a workflow call. Spawn before end_call()."""
         if self._pool is None:
             return

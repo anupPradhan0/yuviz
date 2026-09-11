@@ -149,10 +149,14 @@ def _make_handler(
     stt, llm, tts, *, greeting: str = "", system_prompt: str = "", goodbye_grace_ms: int = 0,
     knowledge=None, transfer_type: str = "none", transfer_destination: str | None = None,
     escalation_threshold: int | None = None,
+    end_call_prompt: str | None = None, transfer_prompt: str | None = None,
+    farewell_message: str | None = None, transfer_announcement: str | None = None,
     tool_orchestrator=None, max_call_duration_s: int | None = None,
     has_booking_tool: bool = False,
     workflow: dict | None = None, node_tools: list[str] | None = None,
     node_knowledge: list[str] | None = None, text_only: bool = False,
+    workflow_draft: dict | None = None,
+    use_workflow_draft: bool = False,
 ) -> PipelineConversationHandler:
     """Builds the minimal (RuntimeConfig, ProviderBundle) pair these tests
     need — PipelineConversationHandler's real constructor contract now (see
@@ -183,16 +187,22 @@ def _make_handler(
             start["data"]["knowledge_base_ids"] = node_knowledge
     agent = Agent(
         id="a1", slug="test-agent", tenant_id="t1", name="Test Agent",
-        goodbye_grace_ms=goodbye_grace_ms,
+        greeting=greeting, system_prompt=system_prompt, goodbye_grace_ms=goodbye_grace_ms,
         stt_config_id=None, llm_config_id=None, tts_config_id=None,
         status="active", config_version=1, updated_at=now,
-        workflow=workflow,
     )
     placeholder = SDKProviderConfig(id="p1", role="stt", engine="fake", model=None, voice=None, language=None, api_key_ref=None)
     runtime_config = RuntimeConfig(
         tenant=tenant, agent=agent,
         providers=ProviderConfigs(stt=placeholder, llm=placeholder, tts=placeholder),
-        conversation=ConversationInfo(workflow=workflow, workflow_draft=workflow),
+        conversation=ConversationInfo(
+            greeting=greeting, system_prompt=system_prompt,
+            end_call_prompt=end_call_prompt, transfer_prompt=transfer_prompt,
+            farewell_message=farewell_message,
+            transfer_announcement=transfer_announcement,
+            workflow=workflow,
+            workflow_draft=workflow_draft if workflow_draft is not None else workflow,
+        ),
         media=MediaInfo(voice=None, language=None),
         policies=Policies(
             vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
@@ -208,6 +218,7 @@ def _make_handler(
     return PipelineConversationHandler(
         runtime_config, bundle, knowledge=knowledge, tool_orchestrator=tool_orchestrator,
         has_booking_tool=has_booking_tool, text_only=text_only,
+        use_workflow_draft=use_workflow_draft,
     )
 
 
@@ -572,7 +583,7 @@ async def test_agent_id_falsy_sentinel_becomes_none_not_a_fake_string():
     now = datetime.now(timezone.utc)
     real_agent = Agent(
         id="real-agent-id", slug="sup", tenant_id="t1", name="Sup",
-        goodbye_grace_ms=0,
+        greeting="", system_prompt="", goodbye_grace_ms=0,
         stt_config_id=None, llm_config_id=None, tts_config_id=None,
         status="active", config_version=7, updated_at=now,
     )
@@ -588,7 +599,9 @@ async def test_agent_id_falsy_sentinel_becomes_none_not_a_fake_string():
         ),
         agent=real_agent,
         providers=ProviderConfigs(stt=placeholder, llm=placeholder, tts=placeholder),
-        conversation=ConversationInfo(workflow=starter_graph()),
+        conversation=ConversationInfo(
+            greeting="", system_prompt="", workflow=starter_graph(),
+        ),
         media=MediaInfo(voice=None, language=None),
         policies=Policies(
             vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
