@@ -2,9 +2,7 @@
 # Schemas -> service account -> default agent. Idempotent.
 set -euo pipefail
 
-# Before the schemas, because schema.sql is where the DROP COLUMN lives and
-# the text has to be out of those columns first. No-op on a fresh database
-# and on every boot after the first.
+# Before schema.sql DROP COLUMN — migrate text into the graph first.
 echo "→ moving conversation text into workflow graphs"
 python3 /app/scripts/migrate_workflow_text.py
 

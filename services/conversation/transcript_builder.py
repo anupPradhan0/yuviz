@@ -1,17 +1,4 @@
-"""
-TranscriptBuilder — fire-and-forget persistence to the calls /
-transcript_entries tables (database/schema.sql).
-
-Every public method schedules its write as a background asyncio task and
-returns immediately; none are awaited by the conversation pipeline, so a
-slow or unreachable database can never add latency to a live call. Writes
-for a given session_id are chained in order (not run concurrently) so a
-transcript_entries row can never reach Postgres before the calls row
-it references — required by the schema's foreign key.
-
-Disabled (all methods become no-ops) when constructed with pool=None, i.e.
-when POSTGRES_DSN is unset — persistence is opt-in.
-"""
+"""Fire-and-forget call/transcript persistence (ordered per session_id)."""
 
 from __future__ import annotations
 
@@ -44,14 +31,7 @@ class TurnLatency:
 class TranscriptBuilder:
     def __init__(self, pool: asyncpg.Pool | None, node_id: str | None = None) -> None:
         self._pool = pool
-        # Identifies THIS process instance (see connect()'s docstring) —
-        # stamped onto every call this instance begins, and used to scope
-        # reconcile_stale_calls() so restarting one instance can never
-        # touch a call another still-running instance is legitimately
-        # serving (see project history, 2026-07-29: an earlier version of
-        # reconcile_stale_calls() closed out EVERY live call platform-wide,
-        # which is only safe with exactly one Conversation Service process
-        # — this project runs two, :50051 and :50052, behind Envoy).
+        # Process instance id — scopes reconcile so peer processes' calls stay live.
         self._node_id = node_id
         self._chains:          dict[str, asyncio.Task] = {}
         self._turn_counts:     dict[str, int]           = {}

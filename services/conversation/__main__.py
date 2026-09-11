@@ -78,12 +78,7 @@ def _build_tts(cfg: PipelineConfig):
 
 
 def _enabled(leg: str) -> bool:
-    """VOICEAI_ENABLE_STT / VOICEAI_ENABLE_TTS, set by deployment/sh/dev.sh's
-    --no-stt / --no-tts. Off means "don't spend startup on this leg" — the
-    models are hundreds of MB and are fetched the first time they're
-    touched, so warming them here is precisely what those flags exist to
-    avoid. Absent or anything but "0" means on: a real deployment sets
-    neither and behaves exactly as it always has."""
+    """VOICEAI_ENABLE_{STT,TTS}; "0" skips prewarm (dev.sh --no-stt/--no-tts)."""
     return os.environ.get(f"VOICEAI_ENABLE_{leg}", "1") != "0"
 
 
@@ -93,27 +88,10 @@ async def _prewarm_agents(
     config: IConfigProvider,
     cfg: PipelineConfig,
 ) -> None:
-    """Load every active agent's STT/LLM/TTS providers once, at startup, via
-    the exact same resolve_handler_deps() path a real call uses — so the
-    first real call to any given agent never pays model-instantiation cost
-    (e.g. FasterWhisper's ~1s CTranslate2 load) synchronously during
-    session_open. Without this, whichever Conversation Service process
-    happens to serve an agent's first call pays that cost mid-call, which
-    read to the caller as added latency and choppy/robotic audio.
-
-    Never raises — a Config Service that's unreachable or has zero tenants
-    yet just means nothing gets prewarmed; the first real call still falls
-    back to on-demand loading via AIProviderManager's existing cache-miss
-    path, unchanged.
-    """
+    """Prewarm STT/LLM/TTS (+ graph) for every active agent at startup."""
     log = logging.getLogger(__name__)
 
-    # Either flag is enough to skip the whole thing: resolve_handler_deps()
-    # builds all three providers together and that is where the cost lives
-    # (_make_faster_whisper awaits inst.load(), KokoroTTS builds a
-    # KPipeline), so there is no way to warm one leg without paying for the
-    # other. Checked here rather than per agent — the answer is the same for
-    # the whole process, and this way it costs no Config Service calls.
+    # Either flag skips prewarm (providers resolve together).
     if not _enabled("STT") or not _enabled("TTS"):
         log.info("prewarm: skipped (stt=%s tts=%s) — providers load on first use",
                  _enabled("STT"), _enabled("TTS"))
@@ -142,16 +120,7 @@ async def _prewarm_agents(
             if not agent_slug:
                 continue
             if not _enabled("STT") or not _enabled("TTS"):
-                # Either flag is enough to skip the whole prewarm, because
-                # resolve_handler_deps() below builds all three providers
-                # together and that is where the cost lives:
-                # _make_faster_whisper() awaits inst.load(), and KokoroTTS's
-                # constructor builds a KPipeline. There is no way to resolve
-                # one leg without paying for the other, so an "and" here
-                # made --no-stt on its own do nothing except move whisper's
-                # download from dev.sh into container startup. Whatever is
-                # still enabled loads lazily on its first real use, exactly
-                # as it did before prewarm existed.
+                # Either flag skips prewarm (deps resolve STT+LLM+TTS together).
                 log.info("prewarm: tenant=%s agent=%s skipped (stt=%s tts=%s)",
                          tenant_slug, agent_slug, _enabled("STT"), _enabled("TTS"))
                 continue
@@ -163,10 +132,7 @@ async def _prewarm_agents(
                 log.warning("prewarm: tenant=%s agent=%s did not resolve — skipping", tenant_slug, agent_slug)
                 continue
             _, bundle = resolved
-            # Parse and cache the conversation graph too (see workflow.runner's
-            # graph_for): parsing per call is wasted work on the latency path,
-            # and a parse failure found at call time is a dropped call — here
-            # it is a log line and a fallback to the starter graph.
+            # Warm graph cache; parse failure here is a log + starter fallback.
             graph = graph_for(resolved[0])
             # Object construction != model loaded — Ollama needs a real
             # request first (see OllamaLLM.warm()). No-op for cloud LLMs.
@@ -176,15 +142,7 @@ async def _prewarm_agents(
                     await warm()
                 except Exception:
                     log.exception("prewarm: LLM warm() failed tenant=%s agent=%s", tenant_slug, agent_slug)
-            # Synthesize one throwaway word per agent. Loading the TTS model
-            # is not enough: Kokoro fetches the *voice* file (af_sarah.pt and
-            # friends) from HuggingFace on its first actual synthesis, so
-            # without this the first real call pays a ~9s download before the
-            # greeting is heard — long enough that the webcall bridge's
-            # response watchdog gives up and the caller hears nothing at all
-            # (confirmed live 2026-08-28). Same reasoning as warming the STT
-            # model above; this just warms the half that only a real
-            # synthesis touches.
+            # Warm Kokoro voice file (~9s HF fetch on first real synth otherwise).
             try:
                 async for _chunk in bundle.tts.synthesize_stream("Hello.", cfg.sample_rate):
                     break
@@ -327,8 +285,7 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                     agent, ctx.tenant_id or "default", ctx.script_id or "default", stt, llm, tts,
                 )
 
-            # Draft stays off agent Redis/GET (every telephony call reads that
-            # key). Chat with use_workflow_draft loads it from /workflow.
+            # Draft off agent Redis/GET; chat draft loads via /workflow.
             if ctx.use_workflow_draft:
                 from dataclasses import replace as _dc_replace
                 try:
@@ -377,11 +334,9 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 called_number=ctx.called_did,
                 knowledge=knowledge,
                 has_booking_tool=has_booking_tool,
-                # Admin-UI test calls only (see SessionOpenRequest) — a real
-                # call always runs the published graph.
+                # Admin-UI test only; live calls always use published graph.
                 use_workflow_draft=ctx.use_workflow_draft,
-                # Admin-UI chat test: skip STT/TTS entirely and answer in
-                # text. Never set by a real call.
+                # Admin-UI chat: skip STT/TTS.
                 text_only=ctx.text_only,
             )
 

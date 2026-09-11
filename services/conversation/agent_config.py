@@ -1,23 +1,4 @@
-"""
-AgentConfig — per-agent settings loaded from config/agents/<script_id>.yaml.
-
-Each YAML file may define:
-  name          — human-readable label (informational only)
-  greeting      — text the AI speaks immediately when the call connects;
-                  empty string disables the greeting
-  system_prompt — LLM system prompt; overrides the pipeline default when set
-  goodbye_grace_period_ms — ms the gateway waits after the goodbye finishes
-                  playing, watching for the caller to speak up, before
-                  actually hanging up (see EndCall in the gRPC protocol)
-
-File resolution:
-  1. config/agents/<script_id>.yaml  (caller-supplied agent ID)
-  2. config/agents/default.yaml      (fallback)
-  3. Hard-coded defaults in AgentConfig (if no YAML exists at all)
-
-The agents directory is resolved relative to the repo root so the service
-can be launched from any working directory.
-"""
+"""Legacy YAML agent config + RuntimeConfig adapter for the fallback path."""
 
 from __future__ import annotations
 
@@ -59,11 +40,7 @@ class AgentConfig:
     name:          str = "Default Assistant"
     greeting:      str = "Hello! How can I help you today?"
     system_prompt: str = ""
-    # The conversation graph this fallback agent runs. None means "build one
-    # from greeting/system_prompt above" — this path exists for when the
-    # config plane is unreachable mid-call (see agent_resolver.py), and a
-    # degraded call still has to be a graph-driven one now that there is no
-    # single-prompt mode. A YAML file may supply its own under `workflow:`.
+    # None → build starter from greeting/system_prompt (config plane down).
     workflow:      dict | None = None
     # Matches CallFsmTimerConfig::goodbye_timeout's gateway-side default
     # (config/gateway.yaml has no per-tenant override yet) — keep them in
