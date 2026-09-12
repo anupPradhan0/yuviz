@@ -82,14 +82,19 @@ class WorkflowRunner:
         ]
         return "\n\n".join(p.strip() for p in parts if p and p.strip())
 
-    def allowed_tool_names(self) -> list[str]:
-        """Node tool list for ToolPolicyResolver `only`. Empty = none (default-deny)."""
+    def allowed_tool_names(self) -> list[str] | None:
+        """ToolPolicyResolver `only`: None = do not narrow (starter); [] = deny all."""
+        if self._graph.is_single_stage:
+            return None
         return list(self._node.tools)
 
     def knowledge_enabled(self) -> bool:
-        """Whether this stage does RAG. Per-KB filtering not wired yet (ponytail)."""
-        # ponytail: filter knowledge_base_ids via RetrievalPolicy when multi-KB agents exist.
-        return bool(self._node.knowledge_base_ids)
+        """RAG on/off. Single-stage / all-empty keep agent-level RAG; else per-node ids."""
+        if self._node.knowledge_base_ids:
+            return True
+        if self._graph.is_single_stage:
+            return True
+        return not any(n.knowledge_base_ids for n in self._graph.nodes.values())
 
     def greeting(self) -> str | None:
         """Start-node greeting (wins over any legacy agent greeting)."""
@@ -197,8 +202,32 @@ class WorkflowRunner:
         return _TRANSITION_RESULT
 
 
-# Cache by config_version (publish invalidates). Drafts are never cached.
-_GRAPH_CACHE: dict[tuple[str, int, bool], WorkflowGraph] = {}
+# One entry per (tenant, agent); version stored beside the graph. Cap bounds fleet size.
+_GRAPH_CACHE_MAX = 256
+_GRAPH_CACHE: dict[tuple[str, str], tuple[int, WorkflowGraph]] = {}
+
+
+def _cache_key(runtime_config: RuntimeConfig) -> tuple[str, str]:
+    agent = runtime_config.agent.id or runtime_config.agent.slug or ""
+    tenant = runtime_config.tenant.id or runtime_config.tenant.slug or ""
+    return (tenant, agent)
+
+
+def _cache_get(runtime_config: RuntimeConfig) -> WorkflowGraph | None:
+    item = _GRAPH_CACHE.get(_cache_key(runtime_config))
+    if item is None:
+        return None
+    version, graph = item
+    if version != runtime_config.version:
+        return None
+    return graph
+
+
+def _cache_put(runtime_config: RuntimeConfig, graph: WorkflowGraph) -> None:
+    key = _cache_key(runtime_config)
+    if key not in _GRAPH_CACHE and len(_GRAPH_CACHE) >= _GRAPH_CACHE_MAX:
+        _GRAPH_CACHE.pop(next(iter(_GRAPH_CACHE)))
+    _GRAPH_CACHE[key] = (runtime_config.version, graph)
 
 
 def _str_names_from_raw(raw: dict[str, Any] | None, field: str) -> list[str]:
@@ -243,9 +272,10 @@ def resolve_graph(
             )
         return _fallback_graph(runtime_config, raw=None), False
     # Drafts not cached: draft save does not bump config_version.
-    key = (runtime_config.agent.id or runtime_config.agent.slug, runtime_config.version, draft)
-    if not draft and key in _GRAPH_CACHE:
-        return _GRAPH_CACHE[key], False
+    if not draft:
+        cached = _cache_get(runtime_config)
+        if cached is not None:
+            return cached, False
     try:
         graph = parse_graph(raw)
     except WorkflowInvalid as exc:
@@ -266,7 +296,7 @@ def resolve_graph(
         log.exception("workflow: unexpected failure parsing graph for agent %s", runtime_config.agent.slug)
         graph = _fallback_graph(runtime_config, raw=raw if isinstance(raw, dict) else None)
     if not draft:
-        _GRAPH_CACHE[key] = graph
+        _cache_put(runtime_config, graph)
     return graph, False
 
 
