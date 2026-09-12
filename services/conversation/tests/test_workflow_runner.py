@@ -152,6 +152,17 @@ def test_reaching_a_transfer_node_flags_a_transfer_not_an_end():
     assert runner.pending_transfer.transfer_destination == "+15559999"
 
 
+def test_abandon_transfer_reverts_to_source_node():
+    runner = _runner()
+    asyncio.run(runner.local_tools()["goto_wants_a_human"][1]({}))
+    assert runner.node.name == "to_human"
+    assert runner.pending_transfer is not None
+    runner.abandon_transfer()
+    assert runner.node.name == "greeting"
+    assert runner.pending_transfer is None
+    assert runner.visited == ["greeting"]
+
+
 def test_knowledge_is_per_stage():
     runner = _runner()
     assert runner.knowledge_enabled() is False       # start node has no KB
@@ -180,38 +191,6 @@ def test_all_empty_knowledge_keeps_agent_level_rag():
     runner = WorkflowRunner(parse_graph(bare))
     assert runner.knowledge_enabled() is True
     assert runner.allowed_tool_names() is None  # policies win on starter shape
-
-
-def test_empty_global_falls_back_to_default_system_prompt():
-    bare = {
-        "version": 1,
-        "nodes": [
-            {"id": "n1", "type": "start", "data": {
-                "name": "greeting", "prompt": "Ask what they need.", "greeting": "Hi",
-            }},
-            {"id": "n2", "type": "end", "data": {
-                "name": "goodbye", "prompt": "Bye", "disposition": "completed",
-            }},
-        ],
-        "edges": [
-            {"id": "e1", "source": "n1", "target": "n2",
-             "data": {"label": "done", "condition": "Finished."}},
-        ],
-    }
-    runner = WorkflowRunner(parse_graph(bare), default_global="You are the clinic receptionist.")
-    assert runner.system_prompt().startswith("You are the clinic receptionist.")
-    assert "Ask what they need." in runner.system_prompt()
-
-
-def test_abandon_transfer_reverts_to_source_node():
-    runner = _runner()
-    asyncio.run(runner.local_tools()["goto_wants_a_human"][1]({}))
-    assert runner.node.name == "to_human"
-    assert runner.pending_transfer is not None
-    runner.abandon_transfer()
-    assert runner.node.name == "greeting"
-    assert runner.pending_transfer is None
-    assert runner.visited == ["greeting"]
 
 
 def test_extraction_fires_before_leaving_the_node_not_after():
@@ -243,6 +222,8 @@ def test_no_dead_ends_and_the_happy_path_reaches_an_end_node():
 
 
 def test_a_graph_with_no_global_node_just_has_no_global_prefix():
+    """Every instruction being per-step is a legitimate graph, not an error —
+    the composition simply starts at the node's own prompt."""
     bare = {**GRAPH, "nodes": [n for n in GRAPH["nodes"] if n["type"] != "global"]}
     runner = WorkflowRunner(parse_graph(bare), base_suffix="Today is 2026-08-28.")
     assert runner.system_prompt() == (
@@ -250,23 +231,31 @@ def test_a_graph_with_no_global_node_just_has_no_global_prefix():
     )
 
 
-def test_graph_for_fallback_seeds_greeting_and_system_prompt():
+def _runtime(
+    *,
+    tenant_id: str,
+    tenant_slug: str,
+    agent_id: str,
+    agent_slug: str,
+    version: int,
+    workflow: dict | None,
+    greeting: str = "Hi",
+    system_prompt: str = "Be helpful.",
+):
     from datetime import datetime, timezone
 
     from libs.config_sdk import (
         Agent, ConversationInfo, MediaInfo, Policies, ProviderConfig, ProviderConfigs,
         RuntimeConfig, Tenant,
     )
-    from services.conversation.workflow.runner import _GRAPH_CACHE, graph_for
 
-    _GRAPH_CACHE.clear()
     now = datetime.now(timezone.utc)
     placeholder = ProviderConfig(
         id="p1", role="stt", engine="fake", model=None, voice=None, language=None, api_key_ref=None,
     )
-    rc = RuntimeConfig(
+    return RuntimeConfig(
         tenant=Tenant(
-            id="t1", slug="t", name="T", region="us",
+            id=tenant_id, slug=tenant_slug, name=tenant_slug, region="us",
             vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
             no_speech_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None,
             transfer_timeout_ms=None,
@@ -274,21 +263,82 @@ def test_graph_for_fallback_seeds_greeting_and_system_prompt():
             config_version=1, updated_at=now,
         ),
         agent=Agent(
-            id="a1", slug="agent", tenant_id="t1", name="Agent",
-            greeting="Hi from column.", system_prompt="Be the column prompt.",
+            id=agent_id, slug=agent_slug, tenant_id=tenant_id, name=agent_slug,
+            greeting=greeting, system_prompt=system_prompt,
             goodbye_grace_ms=0, stt_config_id=None, llm_config_id=None, tts_config_id=None,
-            status="active", config_version=1, updated_at=now,
+            status="active", config_version=version, updated_at=now,
         ),
         providers=ProviderConfigs(stt=placeholder, llm=placeholder, tts=placeholder),
         conversation=ConversationInfo(
-            greeting="Hi from column.", system_prompt="Be the column prompt.", workflow=None,
+            greeting=greeting, system_prompt=system_prompt, workflow=workflow,
         ),
         media=MediaInfo(voice=None, language=None),
         policies=Policies(
             vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
             silence_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None, goodbye_grace_ms=0,
         ),
-        tools=[], version=1, resolved_at=now,
+        tools=[], version=version, resolved_at=now,
+    )
+
+
+def test_graph_cache_is_tenant_scoped_for_legacy_fallback_ids():
+    """Legacy agent_resolver sets agent.id='' / version=0 — tenants must not share."""
+    from libs.config_sdk.workflow import starter_graph
+    from services.conversation.workflow.runner import _GRAPH_CACHE, graph_for
+
+    _GRAPH_CACHE.clear()
+    a = _runtime(
+        tenant_id="", tenant_slug="acme", agent_id="", agent_slug="default", version=0,
+        workflow=starter_graph("Hello Acme.", "You are Acme."),
+    )
+    b = _runtime(
+        tenant_id="", tenant_slug="beta", agent_id="", agent_slug="default", version=0,
+        workflow=starter_graph("Hello Beta.", "You are Beta."),
+    )
+    ga = graph_for(a)
+    gb = graph_for(b)
+    assert "Acme" in (ga.start.greeting or "")
+    assert "Beta" in (gb.start.greeting or "")
+    assert ga is not gb
+
+
+def test_graph_cache_replaces_on_version_bump_and_caps_size():
+    from libs.config_sdk.workflow import starter_graph
+    from services.conversation.workflow.runner import (
+        _GRAPH_CACHE, _GRAPH_CACHE_MAX, graph_for,
+    )
+
+    _GRAPH_CACHE.clear()
+    v1 = _runtime(
+        tenant_id="t1", tenant_slug="t", agent_id="a1", agent_slug="agent", version=1,
+        workflow=starter_graph("v1", "Be v1."),
+    )
+    graph_for(v1)
+    v2 = _runtime(
+        tenant_id="t1", tenant_slug="t", agent_id="a1", agent_slug="agent", version=2,
+        workflow=starter_graph("v2", "Be v2."),
+    )
+    g2 = graph_for(v2)
+    assert "v2" in (g2.start.greeting or "")
+    assert len(_GRAPH_CACHE) == 1  # same (tenant, agent) overwrites
+    assert "v1" in (graph_for(v1).start.greeting or "")
+    assert "v2" in (graph_for(v2).start.greeting or "")
+    # Cap: filling beyond max must not grow unbounded.
+    for i in range(_GRAPH_CACHE_MAX + 10):
+        graph_for(_runtime(
+            tenant_id=f"t{i}", tenant_slug=f"t{i}", agent_id=f"a{i}", agent_slug=f"a{i}",
+            version=1, workflow=starter_graph(f"g{i}", f"p{i}"),
+        ))
+    assert len(_GRAPH_CACHE) <= _GRAPH_CACHE_MAX
+
+
+def test_graph_for_fallback_seeds_greeting_and_system_prompt():
+    from services.conversation.workflow.runner import _GRAPH_CACHE, graph_for
+
+    _GRAPH_CACHE.clear()
+    rc = _runtime(
+        tenant_id="t1", tenant_slug="t", agent_id="a1", agent_slug="agent", version=1,
+        workflow=None, greeting="Hi from column.", system_prompt="Be the column prompt.",
     )
     graph = graph_for(rc)
     assert "Hi from column." in (graph.start.greeting or "")
@@ -296,19 +346,9 @@ def test_graph_for_fallback_seeds_greeting_and_system_prompt():
 
 
 def test_graph_for_fallback_preserves_tools_from_broken_published_json():
-    from datetime import datetime, timezone
-
-    from libs.config_sdk import (
-        Agent, ConversationInfo, MediaInfo, Policies, ProviderConfig, ProviderConfigs,
-        RuntimeConfig, Tenant,
-    )
     from services.conversation.workflow.runner import _GRAPH_CACHE, graph_for
 
     _GRAPH_CACHE.clear()
-    now = datetime.now(timezone.utc)
-    placeholder = ProviderConfig(
-        id="p1", role="stt", engine="fake", model=None, voice=None, language=None, api_key_ref=None,
-    )
     # Missing end node → WorkflowInvalid → starter fallback must keep tools.
     broken = {
         "version": 1,
@@ -322,33 +362,10 @@ def test_graph_for_fallback_preserves_tools_from_broken_published_json():
         ],
         "edges": [],
     }
-    rc = RuntimeConfig(
-        tenant=Tenant(
-            id="t1", slug="t", name="T", region="us",
-            vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
-            no_speech_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None,
-            transfer_timeout_ms=None,
-            default_stt_config_id=None, default_llm_config_id=None, default_tts_config_id=None,
-            config_version=1, updated_at=now,
-        ),
-        agent=Agent(
-            id="a1", slug="agent", tenant_id="t1", name="Agent",
-            greeting="Hi", system_prompt="Be helpful.",
-            goodbye_grace_ms=0, stt_config_id=None, llm_config_id=None, tts_config_id=None,
-            status="active", config_version=1, updated_at=now,
-        ),
-        providers=ProviderConfigs(stt=placeholder, llm=placeholder, tts=placeholder),
-        conversation=ConversationInfo(
-            greeting="Hi", system_prompt="Be helpful.", workflow=broken,
-        ),
-        media=MediaInfo(voice=None, language=None),
-        policies=Policies(
-            vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
-            silence_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None, goodbye_grace_ms=0,
-        ),
-        tools=[], version=1, resolved_at=now,
+    rc = _runtime(
+        tenant_id="t1", tenant_slug="t", agent_id="a1", agent_slug="agent", version=1,
+        workflow=broken,
     )
     graph = graph_for(rc)
     assert graph.start.tools == ["book_appointment", "send_sms"]
     assert graph.start.knowledge_base_ids == ["kb-1"]
-

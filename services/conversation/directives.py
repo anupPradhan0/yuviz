@@ -1,40 +1,4 @@
-"""
-Directive detection for streamed LLM output.
-
-A "directive" is an inline control token the LLM emits in its response text
-to signal something other than spoken words — e.g. [[END_CALL]] (no
-attributes) or [[TRANSFER type="warm" destination="+1555..." reason="..."]]
-(attributes). Three components, each with one job:
-
-  StreamBuffer   — buffers streamed chunks, holds back an *unterminated*
-                   "[[...]]" region so it's never handed out as "safe to
-                   use" text. Knows nothing about directive names/attrs —
-                   purely bracket-matching.
-  DirectiveParser — pure str -> DirectiveResult parsing. Only ever called
-                   with text StreamBuffer has confirmed contains complete
-                   tags (or none). Knows nothing about streaming/chunking.
-  DirectiveResult — clean_text (safe for the sentence splitter/TTS) +
-                   directives (everything found, typed, in order).
-
-Pipeline (see pipeline.py's _llm_to_tts):
-
-    LLM token stream -> StreamBuffer.feed() -> safe text (no partial tags)
-                     -> DirectiveParser.parse() -> DirectiveResult
-    result.clean_text  -> sentence splitter -> TTS   (never sees a directive)
-    result.directives  -> session/servicer            (never touches TTS)
-
-Adding a new directive kind (e.g. a future [[ESCALATE]] or [[PLAY ...]])
-needs a new typed dataclass and one branch in DirectiveParser._build() —
-no new buffering/streaming logic anywhere.
-
-Streaming-safety rationale: a directive's attribute values (e.g.
-reason="the issue is resolved. thanks") can contain sentence-ending
-punctuation that would otherwise confuse a downstream sentence splitter —
-chopping a live tag in half and reading raw "[[TRANSFER ..." fragments
-aloud. StreamBuffer.feed() prevents that by construction: text is never
-returned as "safe" while a "[[" it contains hasn't yet been closed by "]]".
-"""
-
+"""Streaming-safe [[END_CALL]] / [[TRANSFER]] parsing (StreamBuffer + DirectiveParser)."""
 from __future__ import annotations
 
 import re
@@ -46,47 +10,17 @@ from typing import Union
 _TAG_RE  = re.compile(r'\[\[(?P<name>[A-Z_]+)(?P<attrs>[^\]]*)\]\]')
 _ATTR_RE = re.compile(r'(\w+)="([^"]*)"')
 
-# LLMs occasionally emit markdown (**bold**, bullet lists, headers) even
-# when never asked to — harmless as text, but a TTS engine speaks these
-# characters literally (e.g. "*" -> "asterisk"); confirmed live, spoken
-# right before a time ("**Time:** 10:00 AM"). A blanket strip rather
-# than a paired **...** regex on purpose: DirectiveParser.parse() is called
-# per streamed chunk (see StreamBuffer.feed()), and a bold marker can land
-# split across two chunks — stripping every occurrence of these characters
-# unconditionally is naturally robust to that, no pairing/state needed.
+# Strip markdown chars TTS would speak literally; per-chunk so split ** is fine.
 _MARKDOWN_CHARS_RE = re.compile(r"[*_`#]")
 
 
 def strip_markdown_chars(text: str) -> str:
-    """Public wrapper around _MARKDOWN_CHARS_RE — DirectiveParser.parse()
-    only runs on the LLM-token path (see pipeline.py's _llm_to_tts); text
-    that reaches TTS a different way (agent.greeting, farewell_message,
-    transfer_announcement, the fixed fallback/filler strings) never passes
-    through it, and any markdown an admin typed into those fields would
-    reach TTS unstripped. pipeline.py's _synthesize_sentence_stream calls
-    this directly since it's the one shared boundary all of those paths
-    (plus the already-DirectiveParser-cleaned assistant_text) funnel
-    through — safe to call twice on already-clean text, since stripping is
-    idempotent."""
+    """Strip markdown chars TTS would speak; idempotent (shared TTS boundary)."""
     return _MARKDOWN_CHARS_RE.sub("", text)
 
 
 class TransferType(str, Enum):
-    """
-    Mirrors database/schema.sql's agents.transfer_type CHECK constraint
-    ('warm', 'cold', 'none'). Deliberately duplicated rather than shared:
-    the DB constraint validates persistence, this enum gives the
-    Conversation Service's domain logic (TransferDirective/TransferRequest)
-    real type-checking instead of raw string comparisons scattered around.
-    No shared source of truth generates one from the other today — if the
-    DB's allowed values ever change, both need updating.
-
-    Inherits str so equality against a raw config string still works
-    (TransferType.WARM == "warm"), but str(TransferType.WARM) is
-    "TransferType.WARM", not "warm" — use `.value` wherever the plain
-    string is needed (logging, the TransferRequested event, escalation
-    defaults sourced from RuntimeConfig.policies.transfer_type).
-    """
+    """warm | cold | none — mirrors agents.transfer_type CHECK."""
     WARM = "warm"
     COLD = "cold"
     NONE = "none"

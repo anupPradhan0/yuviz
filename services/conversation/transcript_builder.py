@@ -1,17 +1,4 @@
-"""
-TranscriptBuilder — fire-and-forget persistence to the calls /
-transcript_entries tables (database/schema.sql).
-
-Every public method schedules its write as a background asyncio task and
-returns immediately; none are awaited by the conversation pipeline, so a
-slow or unreachable database can never add latency to a live call. Writes
-for a given session_id are chained in order (not run concurrently) so a
-transcript_entries row can never reach Postgres before the calls row
-it references — required by the schema's foreign key.
-
-Disabled (all methods become no-ops) when constructed with pool=None, i.e.
-when POSTGRES_DSN is unset — persistence is opt-in.
-"""
+"""Fire-and-forget call/transcript persistence (ordered per session_id)."""
 
 from __future__ import annotations
 
@@ -44,14 +31,7 @@ class TurnLatency:
 class TranscriptBuilder:
     def __init__(self, pool: asyncpg.Pool | None, node_id: str | None = None) -> None:
         self._pool = pool
-        # Identifies THIS process instance (see connect()'s docstring) —
-        # stamped onto every call this instance begins, and used to scope
-        # reconcile_stale_calls() so restarting one instance can never
-        # touch a call another still-running instance is legitimately
-        # serving (see project history, 2026-07-29: an earlier version of
-        # reconcile_stale_calls() closed out EVERY live call platform-wide,
-        # which is only safe with exactly one Conversation Service process
-        # — this project runs two, :50051 and :50052, behind Envoy).
+        # Process instance id — scopes reconcile so peer processes' calls stay live.
         self._node_id = node_id
         self._chains:          dict[str, asyncio.Task] = {}
         self._turn_counts:     dict[str, int]           = {}
@@ -236,6 +216,8 @@ class TranscriptBuilder:
         ai_response:       str,
         interrupted:       bool,
         latency:           "TurnLatency | None" = None,
+        node_id:           str | None = None,
+        node_name:         str | None = None,
     ) -> None:
         if self._pool is None:
             return
@@ -245,7 +227,7 @@ class TranscriptBuilder:
             self._barge_in_counts[session_id] = self._barge_in_counts.get(session_id, 0) + 1
         self._spawn(session_id, self._record_turn(
             session_id, turn_number, caller_text, caller_confidence, ai_response, interrupted,
-            latency or TurnLatency(),
+            latency or TurnLatency(), node_id, node_name,
         ))
 
     def record_workflow_outcome(
@@ -344,6 +326,8 @@ class TranscriptBuilder:
         ai_response:        str,
         interrupted:        bool,
         latency:            TurnLatency,
+        node_id:            str | None = None,
+        node_name:          str | None = None,
     ) -> None:
         # latency_ms JSONB mirrors the individual *_latency_ms columns —
         # kept alongside them (not instead of) so a future latency field
@@ -359,13 +343,13 @@ class TranscriptBuilder:
                     "INSERT INTO transcript_entries "
                     "(session_id, turn_number, caller_text, caller_confidence, ai_response, interrupted, "
                     "stt_engine, stt_latency_ms, llm_engine, llm_latency_ms, tts_engine, tts_latency_ms, "
-                    "latency_ms) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)",
+                    "latency_ms, node_id, node_name) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14, $15)",
                     session_id, turn_number, caller_text, caller_confidence, ai_response, interrupted,
                     latency.stt_engine, _round_or_none(latency.stt_ms),
                     latency.llm_engine, _round_or_none(latency.llm_ms),
                     latency.tts_engine, _round_or_none(latency.tts_ms),
-                    latency_json,
+                    latency_json, node_id, node_name,
                 )
         except Exception:
             log.exception(

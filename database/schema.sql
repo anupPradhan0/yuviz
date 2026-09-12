@@ -529,6 +529,9 @@ CREATE TABLE IF NOT EXISTS transcript_entries (
     metadata            JSONB
 );
 
+ALTER TABLE transcript_entries ADD COLUMN IF NOT EXISTS node_id   TEXT;
+ALTER TABLE transcript_entries ADD COLUMN IF NOT EXISTS node_name TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_transcript_entries_session ON transcript_entries(session_id);
 CREATE INDEX IF NOT EXISTS te_intent_idx ON transcript_entries(intent) WHERE intent IS NOT NULL;
 CREATE INDEX IF NOT EXISTS te_entities_idx ON transcript_entries USING GIN(entities) WHERE entities IS NOT NULL;

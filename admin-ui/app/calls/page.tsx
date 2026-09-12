@@ -229,9 +229,7 @@ export default function CallsPage() {
                 </>
               )}
             </div>
-            {/* The path this call took through its workflow, and how it
-                ended — the questions a single-prompt agent simply can't
-                answer (docs/workflow.md §7.1). Absent entirely for one. */}
+            {/* Workflow path + disposition (absent for legacy single-prompt). */}
             {detailCall.nodes_visited && detailCall.nodes_visited.length > 0 && (
               <>
                 <div style={{ fontSize: ".65rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".09em", color: "var(--text-3)", marginBottom: 6 }}>
@@ -274,8 +272,14 @@ export default function CallsPage() {
               <div style={{ color: "var(--text-3)", fontSize: ".75rem", marginTop: 4 }}>No transcript available.</div>
             ) : (
               <div style={{ background: "var(--surf-2)", border: "1px solid var(--border)", borderRadius: "var(--rs)", padding: "10px 12px", fontSize: ".75rem", lineHeight: 1.7, marginTop: 4 }}>
-                {transcript.map((t) => (
+                {transcript.map((t, i) => (
                   <div key={t.id} style={{ marginBottom: 8 }}>
+                    {/* Stage label only when node_name changes. */}
+                    {t.node_name && t.node_name !== transcript[i - 1]?.node_name && (
+                      <div style={{ margin: "6px 0 4px", fontSize: ".62rem", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--text-3)" }}>
+                        {t.node_name}
+                      </div>
+                    )}
                     <div>Caller: {t.caller_text || "—"}</div>
                     <div>Agent: {t.ai_response || "—"}</div>
                   </div>

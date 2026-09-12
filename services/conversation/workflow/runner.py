@@ -1,14 +1,8 @@
-"""
-WorkflowRunner — which node is active. No audio/providers (dry-run friendly).
-
-Outgoing edges are local LLM tools; calling one advances the node.
-Constructed per call with the handler — plain attrs, no session map.
-"""
+"""WorkflowRunner — which node is active (docs/workflow.md §5.2). No audio/providers."""
 
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any, Awaitable, Callable
 
 from libs.config_sdk import RuntimeConfig
@@ -22,12 +16,11 @@ from ..tools.types import ToolDefinition, ToolResult, ToolStatus
 
 log = logging.getLogger(__name__)
 
+# Explicit empty schema: providers differ on a missing `parameters` key (llm_adapter).
 _NO_PARAMETERS: dict[str, Any] = {"type": "object", "properties": {}}
-_TRANSITION_RESULT = ToolResult(status=ToolStatus.SUCCESS, payload={"status": "done"})
 
-# One entry per agent; replaced when config_version changes. Cap bounds fleet size.
-_GRAPH_CACHE_MAX = 256
-_GRAPH_CACHE: dict[tuple[str, str], tuple[int, WorkflowGraph]] = {}
+# Minimal identical result; extractor strips these (noise if they accumulate).
+_TRANSITION_RESULT = ToolResult(status=ToolStatus.SUCCESS, payload={"status": "done"})
 
 
 def _transition_tool_name(edge: Edge) -> str:
@@ -41,7 +34,6 @@ class WorkflowRunner:
         graph: WorkflowGraph,
         *,
         base_suffix: str = "",
-        default_global: str = "",
         variables: dict[str, Any] | None = None,
         extractor: Any | None = None,
         summarizer: Any | None = None,
@@ -49,18 +41,19 @@ class WorkflowRunner:
         self._graph = graph
         self._node = graph.start
         self._global = graph.global_prompt
-        self._default_global = (default_global or "").strip()
-        self._suffix = base_suffix
+        self._suffix = base_suffix  # date + [[END_CALL]] instruction
         self._vars: dict[str, Any] = dict(variables or {})
         self._extractor = extractor
         self._summarizer = summarizer
         self.visited: list[str] = [self._node.name]
-        # Pipeline reads/clears these after each turn (speech / hangup / transfer).
+        # Pipeline reads/clears after each turn; we only flag, never act.
         self.pending_speech: str | None = None
         self.pending_end: bool = False
         self.pending_transfer: Node | None = None
+        # Set when [[END_CALL]] fired off a non-terminal node (see disposition).
         self.ended_off_graph: bool = False
         self.last_transition: str = ""
+        # Node left on transfer enter — abandon_transfer() reverts here.
         self._pre_transfer_node: Node | None = None
 
     @property
@@ -72,6 +65,7 @@ class WorkflowRunner:
         return dict(self._vars)
 
     def update_variables(self, values: dict[str, Any]) -> None:
+        """Merge extraction results into prompt variables."""
         self._vars.update({k: v for k, v in values.items() if v is not None})
 
     def extracted_variables(self) -> dict[str, Any]:
@@ -80,31 +74,22 @@ class WorkflowRunner:
         return {k: v for k, v in self._vars.items() if k in declared}
 
     def system_prompt(self) -> str:
-        global_part = self.render(self._global).strip() or self._default_global
+        """Compose global + node + suffix; re-render so earlier extractions vars appear."""
         parts = [
-            global_part,
+            self.render(self._global),
             self.render(self._node.prompt),
             self._suffix,
         ]
         return "\n\n".join(p.strip() for p in parts if p and p.strip())
 
     def allowed_tool_names(self) -> list[str] | None:
-        """Node tool allow-list for ToolPolicyResolver `only`.
-
-        None = do not narrow (starter/backfill — agent_tool_policies win).
-        [] = deny every DB tool on this authored node.
-        """
+        """ToolPolicyResolver `only`: None = do not narrow (starter); [] = deny all."""
         if self._graph.is_single_stage:
             return None
         return list(self._node.tools)
 
     def knowledge_enabled(self) -> bool:
-        """RAG on/off for this node.
-
-        Single-stage / all-empty graphs keep agent_knowledge_bases RAG.
-        Authored multi-node: non-empty ids → on; empty when another node
-        opted in → off (per-stage).
-        """
+        """RAG on/off. Single-stage / all-empty keep agent-level RAG; else per-node ids."""
         if self._node.knowledge_base_ids:
             return True
         if self._graph.is_single_stage:
@@ -112,6 +97,7 @@ class WorkflowRunner:
         return not any(n.knowledge_base_ids for n in self._graph.nodes.values())
 
     def greeting(self) -> str | None:
+        """Start-node greeting (wins over any legacy agent greeting)."""
         text = self.render(self._graph.start.greeting or "")
         return text or None
 
@@ -121,7 +107,7 @@ class WorkflowRunner:
 
     @property
     def disposition(self) -> str | None:
-        """End-node code, or ENDED_EARLY if [[END_CALL]] left a non-terminal node."""
+        """End-node code, or ENDED_EARLY if [[END_CALL]] mid-graph (vs caller hangup)."""
         if self.ended_off_graph and not self._node.is_terminal:
             return ENDED_EARLY
         return self._node.disposition
@@ -134,8 +120,8 @@ class WorkflowRunner:
         turn: list[ChatMessage] | None = None,
         store: list[ChatMessage] | None = None,
     ) -> dict[str, tuple[ToolDefinition, Callable[[dict[str, Any]], Awaitable[ToolResult]]]]:
-        """One local tool per outgoing edge. `turn`/`store` may differ when RAG
-        built a throwaway copy — prompt swap must hit both; extract/summarize only `store`."""
+        """One transition tool per outgoing edge. Swap prompt mid-turn on turn+store
+        (RAG copies differ; between-turns is too late — see docs/workflow.md §5.3)."""
         tools: dict[str, tuple[ToolDefinition, Callable[..., Awaitable[ToolResult]]]] = {}
         for edge in self._node.out_edges:
             name = _transition_tool_name(edge)
@@ -171,13 +157,14 @@ class WorkflowRunner:
         turn: list[ChatMessage] | None,
         store: list[ChatMessage] | None,
     ) -> ToolResult:
-        # Queue extract/summarize only — pipeline starts them after live generate.
         source = self._node
 
+        # Queue extract before leave — pipeline runs it after live generate.
         if self._extractor is not None and source.extraction is not None and source.extraction.enabled:
             self._extractor.extract(source, store or [])
 
         self.pending_speech = self.render(edge.transition_speech or "") or None
+
         self._node = self._graph.nodes[edge.target]
         self.last_transition = edge.tool_name
         self.visited.append(self._node.name)
@@ -194,7 +181,7 @@ class WorkflowRunner:
         else:
             self._pre_transfer_node = None
 
-        # Swap prompt mid-turn so the rest of this generate uses the new node.
+        # Mid-turn prompt swap on both lists when they differ (see local_tools).
         prompt: str | None = None
         for messages in (turn, store):
             if not messages:
@@ -206,12 +193,18 @@ class WorkflowRunner:
             else:
                 messages.insert(0, ChatMessage(role="system", content=prompt))
             if messages is turn and store is turn:
-                break
+                break  # same object, don't swap twice
 
+        # Only persistent history — RAG turn copy is throwaway.
         if store and self._summarizer is not None:
             self._summarizer.maybe_summarize(store)
 
         return _TRANSITION_RESULT
+
+
+# One entry per (tenant, agent); version stored beside the graph. Cap bounds fleet size.
+_GRAPH_CACHE_MAX = 256
+_GRAPH_CACHE: dict[tuple[str, str], tuple[int, WorkflowGraph]] = {}
 
 
 def _cache_key(runtime_config: RuntimeConfig) -> tuple[str, str]:
@@ -221,8 +214,7 @@ def _cache_key(runtime_config: RuntimeConfig) -> tuple[str, str]:
 
 
 def _cache_get(runtime_config: RuntimeConfig) -> WorkflowGraph | None:
-    key = _cache_key(runtime_config)
-    item = _GRAPH_CACHE.get(key)
+    item = _GRAPH_CACHE.get(_cache_key(runtime_config))
     if item is None:
         return None
     version, graph = item
@@ -234,7 +226,6 @@ def _cache_get(runtime_config: RuntimeConfig) -> WorkflowGraph | None:
 def _cache_put(runtime_config: RuntimeConfig, graph: WorkflowGraph) -> None:
     key = _cache_key(runtime_config)
     if key not in _GRAPH_CACHE and len(_GRAPH_CACHE) >= _GRAPH_CACHE_MAX:
-        # Drop an arbitrary entry — only current versions are retained per agent.
         _GRAPH_CACHE.pop(next(iter(_GRAPH_CACHE)))
     _GRAPH_CACHE[key] = (runtime_config.version, graph)
 
@@ -257,11 +248,9 @@ def _str_names_from_raw(raw: dict[str, Any] | None, field: str) -> list[str]:
 
 
 def graph_for(runtime_config: RuntimeConfig, *, draft: bool = False) -> WorkflowGraph:
-    """Never raises. Missing/bad published graph → starter seeded from column
-    greeting/system_prompt (until PR11 drops those columns).
+    """Never raises. Missing/bad published graph → starter seeded from tools.
 
     draft=True prefers workflow_draft; invalid draft falls back to published.
-    Admin text-chat sets SessionOpenRequest.use_workflow_draft for this path.
     """
     graph, _fell_back = resolve_graph(runtime_config, draft=draft)
     return graph
@@ -277,11 +266,12 @@ def resolve_graph(
     if not raw:
         if not draft:
             log.error(
-                "workflow: agent %s has no published graph — running starter "
-                "seeded from greeting/system_prompt",
+                "workflow: agent %s has no published graph — running the starter "
+                "graph; publish one from the editor",
                 runtime_config.agent.slug,
             )
         return _fallback_graph(runtime_config, raw=None), False
+    # Drafts not cached: draft save does not bump config_version.
     if not draft:
         cached = _cache_get(runtime_config)
         if cached is not None:
@@ -291,18 +281,19 @@ def resolve_graph(
     except WorkflowInvalid as exc:
         if draft:
             log.info(
-                "workflow: draft for agent %s does not parse (%s) — using published",
-                runtime_config.agent.slug, exc,
+                "workflow: draft for agent %s does not parse (%s) — testing the "
+                "published graph instead", runtime_config.agent.slug, exc,
             )
             published, _ = resolve_graph(runtime_config, draft=False)
             return published, True
         log.error(
-            "workflow: agent %s published graph does not parse (%s) — starter fallback",
+            "workflow: agent %s has a published graph that does not parse (%s) — "
+            "running the starter graph; republish it from the editor",
             runtime_config.agent.slug, exc,
         )
         graph = _fallback_graph(runtime_config, raw=raw if isinstance(raw, dict) else None)
     except Exception:
-        log.exception("workflow: unexpected parse failure for agent %s", runtime_config.agent.slug)
+        log.exception("workflow: unexpected failure parsing graph for agent %s", runtime_config.agent.slug)
         graph = _fallback_graph(runtime_config, raw=raw if isinstance(raw, dict) else None)
     if not draft:
         _cache_put(runtime_config, graph)
@@ -312,8 +303,7 @@ def resolve_graph(
 def _fallback_graph(
     runtime_config: RuntimeConfig, *, raw: dict[str, Any] | None,
 ) -> WorkflowGraph:
-    # Prefer RuntimeConfig.tools; scrape broken published JSON so a parse
-    # failure does not silently strip booking/SMS (Node.tools is default-deny).
+    # Prefer RuntimeConfig.tools; scrape broken JSON so parse failure ≠ strip tools.
     tools = [t.name for t in runtime_config.tools] or _str_names_from_raw(raw, "tools")
     kb_ids = _str_names_from_raw(raw, "knowledge_base_ids")
     return parse_graph(starter_graph(

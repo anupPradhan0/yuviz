@@ -49,7 +49,7 @@ async def test_get_by_did_returns_agent_config_version(test_tenant, pool):
 
     # An agent update bumps config_version via the existing trigger — a
     # fresh (post-invalidation) resolution must reflect the new version.
-    await agents.update_agent(agent["id"], tenant_slug=test_tenant["slug"], greeting="Updated greeting")
+    await agents.update_agent(agent["id"], tenant_slug=test_tenant["slug"], name="Updated name")
     await cache.invalidate(f"did:{did}")
 
     assert (await phone_numbers.get_by_did(did))["version"] == 2

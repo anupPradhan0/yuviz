@@ -78,12 +78,7 @@ def _build_tts(cfg: PipelineConfig):
 
 
 def _enabled(leg: str) -> bool:
-    """VOICEAI_ENABLE_STT / VOICEAI_ENABLE_TTS, set by deployment/sh/dev.sh's
-    --no-stt / --no-tts. Off means "don't spend startup on this leg" — the
-    models are hundreds of MB and are fetched the first time they're
-    touched, so warming them here is precisely what those flags exist to
-    avoid. Absent or anything but "0" means on: a real deployment sets
-    neither and behaves exactly as it always has."""
+    """VOICEAI_ENABLE_{STT,TTS}; "0" skips prewarm (dev.sh --no-stt/--no-tts)."""
     return os.environ.get(f"VOICEAI_ENABLE_{leg}", "1") != "0"
 
 
@@ -91,28 +86,12 @@ async def _prewarm_agents(
     http_config_repo: HttpConfigRepository,
     provider_registry: ProviderRegistry,
     config: IConfigProvider,
+    cfg: PipelineConfig,
 ) -> None:
-    """Load every active agent's STT/LLM/TTS providers once, at startup, via
-    the exact same resolve_handler_deps() path a real call uses — so the
-    first real call to any given agent never pays model-instantiation cost
-    (e.g. FasterWhisper's ~1s CTranslate2 load) synchronously during
-    session_open. Without this, whichever Conversation Service process
-    happens to serve an agent's first call pays that cost mid-call, which
-    read to the caller as added latency and choppy/robotic audio.
-
-    Never raises — a Config Service that's unreachable or has zero tenants
-    yet just means nothing gets prewarmed; the first real call still falls
-    back to on-demand loading via AIProviderManager's existing cache-miss
-    path, unchanged.
-    """
+    """Prewarm STT/LLM/TTS (+ graph) for every active agent at startup."""
     log = logging.getLogger(__name__)
 
-    # Either flag is enough to skip the whole thing: resolve_handler_deps()
-    # builds all three providers together and that is where the cost lives
-    # (_make_faster_whisper awaits inst.load(), KokoroTTS builds a
-    # KPipeline), so there is no way to warm one leg without paying for the
-    # other. Checked here rather than per agent — the answer is the same for
-    # the whole process, and this way it costs no Config Service calls.
+    # Either flag skips prewarm (providers resolve together).
     if not _enabled("STT") or not _enabled("TTS"):
         log.info("prewarm: skipped (stt=%s tts=%s) — providers load on first use",
                  _enabled("STT"), _enabled("TTS"))
@@ -140,6 +119,11 @@ async def _prewarm_agents(
             agent_slug = agent.get("slug")
             if not agent_slug:
                 continue
+            if not _enabled("STT") or not _enabled("TTS"):
+                # Either flag skips prewarm (deps resolve STT+LLM+TTS together).
+                log.info("prewarm: tenant=%s agent=%s skipped (stt=%s tts=%s)",
+                         tenant_slug, agent_slug, _enabled("STT"), _enabled("TTS"))
+                continue
             try:
                 resolved = await resolve_handler_deps(tenant_slug, agent_slug, provider_registry, config)
             except Exception:
@@ -148,6 +132,7 @@ async def _prewarm_agents(
                 log.warning("prewarm: tenant=%s agent=%s did not resolve — skipping", tenant_slug, agent_slug)
                 continue
             _, bundle = resolved
+            # Warm graph cache; parse failure here is a log + starter fallback.
             graph = graph_for(resolved[0])
             # Object construction != model loaded — Ollama needs a real
             # request first (see OllamaLLM.warm()). No-op for cloud LLMs.
@@ -157,9 +142,17 @@ async def _prewarm_agents(
                     await warm()
                 except Exception:
                     log.exception("prewarm: LLM warm() failed tenant=%s agent=%s", tenant_slug, agent_slug)
+            # Warm Kokoro voice file (~9s HF fetch on first real synth otherwise).
+            try:
+                async for _chunk in bundle.tts.synthesize_stream("Hello.", cfg.sample_rate):
+                    break
+            except Exception:
+                log.warning("prewarm: TTS warm-up failed tenant=%s agent=%s — the first call "
+                            "will pay the voice-load cost", tenant_slug, agent_slug, exc_info=True)
             log.info(
-                "prewarm: tenant=%s agent=%s providers ready, workflow graph parsed (%d nodes)",
-                tenant_slug, agent_slug, len(graph.nodes),
+                "prewarm: tenant=%s agent=%s providers ready%s",
+                tenant_slug, agent_slug,
+                f", workflow graph parsed ({len(graph.nodes)} nodes)" if graph else "",
             )
 
 
@@ -292,8 +285,7 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                     agent, ctx.tenant_id or "default", ctx.script_id or "default", stt, llm, tts,
                 )
 
-            # Draft stays off agent Redis/GET (every telephony call reads that
-            # key). Chat with use_workflow_draft loads it from /workflow.
+            # Draft off agent Redis/GET; chat draft loads via /workflow.
             if ctx.use_workflow_draft:
                 from dataclasses import replace as _dc_replace
                 try:
@@ -333,7 +325,6 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 runtime_config, bundle,
                 sample_rate=cfg.sample_rate,
                 max_history=cfg.max_history,
-                default_system_prompt=cfg.llm.system,
                 transcripts=transcripts,
                 tenant_id=ctx.tenant_id,
                 call_id=ctx.call_id,
@@ -343,11 +334,9 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 called_number=ctx.called_did,
                 knowledge=knowledge,
                 has_booking_tool=has_booking_tool,
-                # Admin-UI test calls only (see SessionOpenRequest) — a real
-                # call always runs the published graph.
+                # Admin-UI test only; live calls always use published graph.
                 use_workflow_draft=ctx.use_workflow_draft,
-                # Admin-UI chat test: skip STT/TTS entirely and answer in
-                # text. Never set by a real call.
+                # Admin-UI chat: skip STT/TTS.
                 text_only=ctx.text_only,
             )
 
@@ -377,10 +366,10 @@ async def serve(port: int, args: argparse.Namespace) -> None:
              listen_addr, args.mode)
 
     async def _load_and_promote() -> None:
-        if stt is not None:
+        if stt is not None and _enabled("STT"):
             await stt.load()
         if args.mode != "echo":
-            await _prewarm_agents(http_config_repo, provider_registry, config)
+            await _prewarm_agents(http_config_repo, provider_registry, config, cfg)
         health_servicer.set(SERVICE_NAME, health_pb2.HealthCheckResponse.SERVING)
         log.info("ConversationService SERVING")
 

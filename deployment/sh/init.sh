@@ -2,6 +2,10 @@
 # Schemas -> service account -> default agent. Idempotent.
 set -euo pipefail
 
+# Before schema.sql DROP COLUMN — migrate text into the graph first.
+echo "→ moving conversation text into workflow graphs"
+python3 /app/scripts/migrate_workflow_text.py
+
 echo "→ applying schemas"
 for f in schema knowledge_schema telephony_schema; do
     psql "$POSTGRES_DSN" -v ON_ERROR_STOP=1 -q -f "/app/database/${f}.sql" >/dev/null

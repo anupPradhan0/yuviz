@@ -20,35 +20,17 @@ function canSendAuthToken(url: string): boolean {
   return false;
 }
 
-// --- VAD tuning ---
-// Energy-based (RMS in dB), adaptive to the room's noise floor rather than
-// a fixed absolute threshold — a quiet home office and a noisy open-plan
-// office need very different absolute cutoffs, but both have a "quiet
-// baseline" the mic settles into that speech reliably rises above.
-const ONSET_FRAMES_REQUIRED = 4; // consecutive worklet callbacks of sustained speech to confirm onset
-const SILENCE_MS_TO_END = 700; // hangover before declaring end-of-utterance
+// --- VAD (RMS dB, adaptive noise floor) ---
+const ONSET_FRAMES_REQUIRED = 4; // sustained frames to confirm onset
+const SILENCE_MS_TO_END = 700; // hangover before end-of-utterance
 const NOISE_FLOOR_ADAPT_RATE = 0.02;
 const ONSET_MARGIN_DB = 9;
-// Without headphones, the agent's own TTS leaks from the speakers back into
-// the mic and can be misread as a barge-in — found live 2026-08-01 testing
-// a standalone version of this same logic: the agent's farewell kept
-// "interrupting itself" the instant it started talking, so the call never
-// actually disconnected. A real barge-in from a person at the mic is much
-// louder/closer than reflected speaker output, so demand a stricter bar
-// specifically while the agent is speaking.
+// Stricter while agent speaks — speaker bleed looked like barge-in (farewell loop).
 const ONSET_MARGIN_DB_WHILE_AGENT_SPEAKING = 22;
 const ONSET_FRAMES_REQUIRED_WHILE_AGENT_SPEAKING = 10;
-// How long to measure the room's real ambient level before trusting any
-// onset/offset decision at all — replaces a hardcoded starting guess that
-// was wrong often enough to matter (see noiseFloorDbRef's comment).
-const CALIBRATION_MS = 600;
-// Hard backstop: no real caller utterance runs this long uninterrupted. If
-// the VAD's own silence detection somehow fails to release, force the
-// utterance to end anyway rather than letting audio accumulate forever.
-const MAX_UTTERANCE_MS = 15_000;
-// Backstop for the end_call teardown delay (below), in case the playhead
-// math is ever off for some reason — never wait longer than this.
-const MAX_END_CALL_WAIT_MS = 10_000;
+const CALIBRATION_MS = 600; // measure room before trusting onset
+const MAX_UTTERANCE_MS = 15_000; // force end if silence detect fails
+const MAX_END_CALL_WAIT_MS = 10_000; // cap end_call teardown wait
 
 type CallState = "idle" | "connecting" | "ready" | "talking" | "thinking" | "speaking" | "ended" | "error";
 
@@ -57,22 +39,26 @@ export function TestAgentPanel({
   onClose,
   tenantSlug,
   agentSlug,
+  useDraft = false,
+  inline = false,
+  onNodeChanged,
 }: {
   open: boolean;
   onClose: () => void;
   tenantSlug: string;
   agentSlug: string;
+  useDraft?: boolean; // unpublished draft (workflow editor)
+  inline?: boolean; // side column — modal would cover the lit canvas
+  onNodeChanged?: (node: { id: string; name: string; type: string }) => void;
 }) {
   const [state, setState] = useState<CallState>("idle");
   const [transcript, setTranscript] = useState<{ text: string; ts: number }[]>([]);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [micLevelPct, setMicLevelPct] = useState(0);
+  const [draftFellBack, setDraftFellBack] = useState(false);
 
-  // Incremented on every handleStart(); the end_call teardown delay
-  // captures the value at schedule time and checks it before firing, so a
-  // quick "Start New Test" click during that delay can't let a stale timer
-  // tear down the new call's live resources instead of the old one's.
+  // Bump on start; stale end_call timers must not tear down a new session.
   const sessionGenRef = useRef<number>(0);
   const wsRef = useRef<WebSocket | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -80,26 +66,16 @@ export function TestAgentPanel({
   const workletRef = useRef<AudioWorkletNode | null>(null);
   const talkStartRef = useRef<number>(0);
   const playheadRef = useRef<number>(0);
-  // Every currently-scheduled/playing agent audio chunk — tracked so a
-  // barge-in can stop them all instantly instead of letting old audio keep
-  // playing over the caller's new speech.
+  // Playing agent chunks — barge-in stops them all.
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
-  // The worklet's onmessage callback is assigned once (in handleStart) and
-  // never re-created, so it can't see updates to React state — plain refs
-  // avoid the stale-closure trap for everything the VAD loop needs live.
+  // Refs for VAD loop (worklet callback is assigned once — no stale state).
   const recordingRef = useRef<boolean>(false);
   const agentSpeakingRef = useRef<boolean>(false);
   const anyAudioSentRef = useRef<boolean>(false);
   const noiseFloorDbRef = useRef<number>(-50);
   const onsetStreakRef = useRef<number>(0);
   const silenceMsAccumRef = useRef<number>(0);
-  // A hardcoded -50dB starting guess for the ambient noise floor was found
-  // live 2026-08-02 to be badly wrong for a typical laptop mic/room (fan
-  // noise, room tone) — every frame, including real silence, read as
-  // "speech," so recording never released and a single utterance ran for
-  // 57 seconds straight before anything happened. Calibrate against the
-  // actual room for the first CALIBRATION_MS instead of assuming a fixed
-  // floor, and cap any single utterance as a hard backstop regardless.
+  // Calibrate noise floor (fixed -50dB guess stuck recording for ~57s).
   const calibratingUntilRef = useRef<number>(0);
   const calibrationSamplesRef = useRef<number[]>([]);
   const recordingStartedAtRef = useRef<number>(0);
@@ -132,9 +108,7 @@ export function TestAgentPanel({
     audioCtxRef.current = null;
   };
 
-  // Reset everything whenever the modal closes, and tear down on unmount —
-  // a stray open mic or WS connection after closing the modal would be a
-  // real privacy/resource bug, not just an untidy one.
+  // Teardown on close/unmount — stray mic/WS is a privacy bug.
   useEffect(() => {
     if (!open) {
       teardown();
@@ -152,10 +126,7 @@ export function TestAgentPanel({
     const ctx = audioCtxRef.current;
     if (!ctx) return;
     const int16 = new Int16Array(buf);
-    // Web Audio's createBuffer() throws NotSupportedError for 0 frames — a
-    // TTS chunk can legitimately arrive empty (seen live: a chunk right
-    // before is_final), which isn't an error condition on its own, just
-    // nothing to actually play.
+    // Empty TTS chunk is valid (pre-is_final); createBuffer(0) throws.
     if (int16.length === 0) return;
     const float32 = new Float32Array(int16.length);
     for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7fff);
@@ -188,10 +159,7 @@ export function TestAgentPanel({
     recordingStartedAtRef.current = talkStartRef.current;
     setErrorMsg(null);
     if (agentSpeakingRef.current) {
-      // Barge-in: the caller started talking while the agent's own audio
-      // was still playing. Stop it immediately (both locally and on the
-      // conversation service, which is otherwise mid-generation) rather
-      // than letting it talk over them.
+      // Barge-in while agent audio playing.
       stopAgentPlayback();
       wsRef.current?.send(JSON.stringify({ type: "cancel" }));
       wsRef.current?.send(JSON.stringify({ type: "playback_finished", interrupted: true }));
@@ -216,6 +184,23 @@ export function TestAgentPanel({
     sessionGenRef.current += 1;
     setState("connecting");
     setErrorMsg(null);
+    setDraftFellBack(false);
+
+    const token = getToken();
+    if (!token) {
+      setState("error");
+      setErrorMsg("Sign in again to run a test call.");
+      return;
+    }
+    if (!canSendAuthToken(WEBCALL_URL)) {
+      setState("error");
+      setErrorMsg(
+        "Test call needs a secure webcall URL (wss://), or ws://localhost. "
+        + "Refusing to send your session token over cleartext.",
+      );
+      return;
+    }
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true } });
       streamRef.current = stream;
@@ -235,23 +220,9 @@ export function TestAgentPanel({
       // Deliberately not connected to ctx.destination — we don't want the
       // caller's own mic echoed back to them.
 
-      const token = getToken();
-      if (!token) {
-        setState("error");
-        setErrorMsg("Sign in again to run a test call.");
-        return;
-      }
-      if (!canSendAuthToken(WEBCALL_URL)) {
-        setState("error");
-        setErrorMsg(
-          "Test call needs a secure webcall URL (wss://), or ws://localhost. "
-          + "Refusing to send your session token over cleartext.",
-        );
-        return;
-      }
-
       const ws = new WebSocket(
-        `${WEBCALL_URL}/webcall?tenant=${encodeURIComponent(tenantSlug)}&agent=${encodeURIComponent(agentSlug)}`,
+        `${WEBCALL_URL}/webcall?tenant=${encodeURIComponent(tenantSlug)}&agent=${encodeURIComponent(agentSlug)}` +
+          (useDraft ? "&draft=1" : ""),
       );
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
@@ -281,6 +252,12 @@ export function TestAgentPanel({
           case "service_ready":
             setState("ready");
             break;
+          case "note":
+            if (msg.kind === "draft_fallback") setDraftFellBack(true);
+            if (msg.text) {
+              setTranscript((t) => [...t, { text: msg.text, ts: Date.now() }]);
+            }
+            break;
           case "stt_result":
             if (msg.text) setTranscript((prev) => [...prev, { text: msg.text, ts: Date.now() }]);
             setState((s) => (s === "talking" ? "thinking" : s));
@@ -291,16 +268,15 @@ export function TestAgentPanel({
           case "tts_chunk_final":
             setState((s) => (s === "talking" ? s : "ready"));
             break;
+          case "transfer":
+            // Browser can't hand off — surface transfer in the transcript.
+            setTranscript((t) => [...t, {
+              text: `[the agent handed the call to ${msg.destination || "a human"}]`,
+              ts: Date.now(),
+            }]);
+            break;
           case "end_call": {
-            // Found live 2026-08-02: this only updated the status label —
-            // the mic and WebSocket stayed open indefinitely after the
-            // server had already tried to hang up. Fixed by tearing down
-            // here — but found live 2026-08-04: the server sends end_call
-            // right after the final tts_chunk, not after it's actually
-            // played, so an immediate teardown() cut the farewell audio
-            // off mid-sentence (stopAgentPlayback() kills queued Web Audio
-            // sources synchronously). Wait for the scheduled audio to
-            // actually finish playing before tearing down.
+            // Wait for scheduled farewell audio before teardown (else cuts mid-sentence).
             const ctx = audioCtxRef.current;
             const remainingMs = ctx ? Math.max(0, (playheadRef.current - ctx.currentTime) * 1000) : 0;
             const gen = sessionGenRef.current;
@@ -310,10 +286,11 @@ export function TestAgentPanel({
             }, Math.min(remainingMs, MAX_END_CALL_WAIT_MS));
             break;
           }
+          case "workflow_node":
+            onNodeChanged?.({ id: msg.node_id, name: msg.node_name, type: msg.node_type });
+            break;
           case "no_response":
-            // The agent heard nothing recognizable (silence/noise/unclear
-            // audio) and never replied at all — without this, the UI would
-            // otherwise wait forever for a message that's never coming.
+            // No reply coming — unblock the UI.
             setErrorMsg(msg.message);
             setState("ready");
             break;
@@ -324,10 +301,7 @@ export function TestAgentPanel({
         }
       };
 
-      // Fully hands-free: every worklet callback runs the VAD — no button,
-      // no manual start/stop. Onset auto-arms recording (and barges in on
-      // the agent if it's mid-response); sustained silence auto-ends the
-      // utterance and sends speech_ended, exactly like a real phone call.
+      // Hands-free VAD: onset arms recording; silence sends speech_ended.
       worklet.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
         const pcm16 = new Int16Array(ev.data);
         if (pcm16.length === 0) return;
@@ -343,9 +317,7 @@ export function TestAgentPanel({
 
         const now = performance.now();
         if (now < calibratingUntilRef.current) {
-          // Still measuring the room — collect samples, don't make any
-          // onset/offset decisions yet (a false onset mid-calibration would
-          // just get stuck the same way the old hardcoded guess did).
+          // Calibrating — no onset decisions yet.
           calibrationSamplesRef.current.push(db);
           return;
         }
@@ -411,7 +383,11 @@ export function TestAgentPanel({
   const statusText: Record<CallState, string> = {
     idle: "Run a live test call with this agent's real voice, prompt, and tools — using your laptop's microphone, no phone call involved.",
     connecting: "Connecting…",
-    ready: "Listening — just start talking whenever you're ready.",
+    ready: draftFellBack
+      ? "Listening — draft invalid, running the live flow. Just start talking."
+      : useDraft
+        ? "Listening — running your draft. Just start talking whenever you're ready."
+        : "Listening — just start talking whenever you're ready.",
     talking: "Hearing you…",
     thinking: "Thinking…",
     speaking: "Speaking… (start talking to interrupt)",
@@ -422,8 +398,7 @@ export function TestAgentPanel({
   const active = state === "talking" || state === "thinking" || state === "speaking";
   const listening = state === "ready" || state === "talking" || state === "thinking" || state === "speaking";
 
-  return (
-    <Modal open={open} title="Test Agent" onClose={onClose} footer={null}>
+  const body = (
       <div style={{ textAlign: "center", padding: "12px 4px" }}>
         <div
           className={`test-agent-orb${active ? " active" : ""}${state === "speaking" ? " speaking" : ""}`}
@@ -506,6 +481,27 @@ export function TestAgentPanel({
           </button>
         )}
       </div>
+  );
+
+  if (inline) {
+    // Inline: hide when closed (modal handles that itself).
+    if (!open) return null;
+    return (
+      <div className="wf-testpanel">
+        <div className="wf-inspector-hdr">
+          <span className="wf-inspector-title">Test call</span>
+          <button className="btn btn-ghost btn-sm" style={{ marginLeft: "auto" }} onClick={onClose}>
+            Close
+          </button>
+        </div>
+        {body}
+      </div>
+    );
+  }
+
+  return (
+    <Modal open={open} title="Test Agent" onClose={onClose} footer={null}>
+      {body}
     </Modal>
   );
 }

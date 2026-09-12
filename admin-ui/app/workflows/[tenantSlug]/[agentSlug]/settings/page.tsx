@@ -298,42 +298,9 @@ export default function AgentDetailPage() {
             <div className="info-banner">
               <strong>Stage prompts live in the{" "}
               <Link href={`/workflows/${tenantSlug}/${agentSlug}`}>flow</Link>.</strong>{" "}
-              Greeting is on the start step; always-applies holds global instructions
-              (one freeform textarea — the old Personality / Environment / Tone splitter
-              is gone). End-call and transfer wording below still apply on every call.
-            </div>
-
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-hdr">
-                <div className="card-title">Call ending</div>
-                <div className="card-sub">condition + verbatim farewell</div>
-              </div>
-              <div className="card-body">
-                <div className="form-group">
-                  <label className="form-label">
-                    End Call Condition <span className="hint">WHEN to end — a &quot;When the caller…&quot; clause, not what to say. Blank = default.</span>
-                  </label>
-                  <textarea
-                    className="form-textarea"
-                    style={{ minHeight: 48 }}
-                    value={form.end_call_prompt || ""}
-                    onChange={(e) => setForm({ ...form, end_call_prompt: e.target.value || null })}
-                    placeholder="When the conversation is genuinely finished (the caller says goodbye, has no more questions, or the issue is resolved)"
-                  />
-                </div>
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label">
-                    Farewell Message <span className="hint">exact words spoken when ending the call — verbatim, never paraphrased. Blank = AI chooses the wording.</span>
-                  </label>
-                  <textarea
-                    className="form-textarea"
-                    style={{ minHeight: 48 }}
-                    value={form.farewell_message || ""}
-                    onChange={(e) => setForm({ ...form, farewell_message: e.target.value || null })}
-                    placeholder="Thank you for calling. Have a wonderful day. Goodbye!"
-                  />
-                </div>
-              </div>
+              Greeting is on the start step; always-applies holds global instructions.
+              End-call and transfer speech are owned by end/transfer steps on the
+              canvas — the pipeline no longer reads the old agent-column wording fields.
             </div>
 
             <div className="card" style={{ marginBottom: 14 }}>
@@ -538,32 +505,6 @@ export default function AgentDetailPage() {
                       value={form.transfer_destination || ""}
                       onChange={(e) => setForm({ ...form, transfer_destination: e.target.value || null })}
                       placeholder="+18005550100 or sip:agent@example.com"
-                      disabled={(form.transfer_type || "none") === "none"}
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">
-                      Transfer Condition <span className="hint">WHEN to transfer — an &quot;If the caller…&quot; clause, not what to say. Blank = default.</span>
-                    </label>
-                    <textarea
-                      className="form-textarea"
-                      style={{ minHeight: 48 }}
-                      value={form.transfer_prompt || ""}
-                      onChange={(e) => setForm({ ...form, transfer_prompt: e.target.value || null })}
-                      placeholder="If the caller explicitly asks to speak to a human agent or representative"
-                      disabled={(form.transfer_type || "none") === "none"}
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">
-                      Transfer Announcement <span className="hint">exact words spoken before transferring — verbatim, never paraphrased. Blank = AI chooses the wording.</span>
-                    </label>
-                    <textarea
-                      className="form-textarea"
-                      style={{ minHeight: 48 }}
-                      value={form.transfer_announcement || ""}
-                      onChange={(e) => setForm({ ...form, transfer_announcement: e.target.value || null })}
-                      placeholder="Please hold while I transfer your call."
                       disabled={(form.transfer_type || "none") === "none"}
                     />
                   </div>
