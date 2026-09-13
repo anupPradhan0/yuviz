@@ -24,6 +24,32 @@ from ..types import ToolExecutionRequest, ToolResult, ToolStatus
 
 log = logging.getLogger(__name__)
 
+
+def _to_e164(phone: str, caller_number: str | None) -> str:
+    """Prepends a country code to a bare national number the LLM collected
+    digit-by-digit from the caller, using the caller's own ANI as the
+    source of the code — Cal.com's /v2/bookings requires E.164
+    (attendee.phoneNumber), but a caller stating their number aloud never
+    includes one. Confirmed live 2026-09-12: a correctly-transcribed,
+    correctly-confirmed 10-digit number ("8971188211") still came back
+    invalid_number from Cal.com because it was sent with no country code
+    at all, while the ANI-fallback path (already full E.164) always
+    worked — this was silently treated as a phone-number-accuracy problem
+    when it was actually a formatting gap. If caller_number's own national
+    number is a different length than phone (an unrelated alternate
+    number was given), there's no reliable prefix to borrow, so the raw
+    value is returned unchanged rather than guessing wrong silently."""
+    if not phone or phone.startswith("+"):
+        return phone
+    digits = "".join(c for c in phone if c.isdigit())
+    if not caller_number or not caller_number.startswith("+"):
+        return phone
+    caller_digits = "".join(c for c in caller_number if c.isdigit())
+    if len(caller_digits) <= len(digits) or not caller_digits.endswith(digits):
+        return phone
+    country_code = caller_digits[: len(caller_digits) - len(digits)]
+    return f"+{country_code}{digits}"
+
 # Holds references to in-flight fire-and-forget SMS sends — asyncio only
 # weakly tracks a task once nothing else holds it, so without this a task
 # can be garbage-collected mid-send under GC pressure, silently dropping
@@ -106,6 +132,7 @@ class CalendarExecutor:
         # already-rejected ANI, ignoring whatever real number the caller
         # had just stated — the retry path could never actually succeed.
         attendee_phone = (args.get("attendee_phone") or request.context.caller_number or "").strip()
+        attendee_phone = _to_e164(attendee_phone, request.context.caller_number)
 
         # Deterministic gate (not just a prompt instruction) — an LLM can
         # silently skip confirming the ANI and book anyway. Only applies

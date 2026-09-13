@@ -14,6 +14,15 @@ from typing import Any, AsyncGenerator, Awaitable, Callable, TypeAlias
 
 from ..metrics import IMetrics
 from ..providers.interfaces import ChatMessage
+from ..tool_latency import ToolLatencyStore
+from .date_sanity import (
+    correct_year_if_wrong,
+    date_field_for_tool,
+    is_in_the_past,
+    no_time_stated,
+    parse_requested_date,
+    stated_day_mismatch,
+)
 from .executor_registry import ExecutorRegistry
 from .llm_adapter import (
     DeterministicSpokenEvent,
@@ -53,6 +62,8 @@ class ToolCallOrchestrator:
         metrics:           IMetrics | None = None,
         max_tool_iterations: int = DEFAULT_MAX_TOOL_ITERATIONS,
         max_local_tool_calls: int = DEFAULT_MAX_LOCAL_TOOL_CALLS,
+        latency_store: ToolLatencyStore | None = None,
+        calendar_timezone: str = "UTC",
     ) -> None:
         self._llm_adapter = llm_adapter
         self._policy_resolver = policy_resolver
@@ -61,6 +72,8 @@ class ToolCallOrchestrator:
         self._metrics = metrics
         self._max_tool_iterations = max_tool_iterations
         self._max_local_tool_calls = max_local_tool_calls
+        self._latency_store = latency_store
+        self._calendar_timezone = calendar_timezone
 
     async def run_turn(
         self, agent_id: str, tenant_id: str, call_id: str, session_id: str, history: list[ChatMessage],
@@ -138,7 +151,7 @@ class ToolCallOrchestrator:
                     yield ToolCallStartedEvent(tool_name=event.tool_name)
                     result = await self._execute_tool_call(
                         event, policies_by_name, tenant_id, agent_id, call_id, session_id, turn_id,
-                        iteration, caller_number, cancel_event, phone_number_confirmed,
+                        iteration, caller_number, cancel_event, phone_number_confirmed, history,
                     )
                 _fold_tool_result_into_history(history, event, result)
                 if result.deterministic_response is not None:
@@ -160,11 +173,16 @@ class ToolCallOrchestrator:
         self, event: ToolCallEvent, policies_by_name: dict, tenant_id: str, agent_id: str,
         call_id: str, session_id: str, turn_id: str, iteration: int, caller_number: str = "",
         cancel_event: "asyncio.Event | None" = None, phone_number_confirmed: bool = False,
+        history: "list[ChatMessage] | None" = None,
     ) -> ToolResult:
         policy = policies_by_name.get(event.tool_name)
         if policy is None:
             log.warning("ToolCallOrchestrator: LLM called unoffered tool_name=%r", event.tool_name)
             return ToolResult(status=ToolStatus.FAILED, error="unknown_tool")
+
+        date_check = self._check_requested_date(event, history)
+        if date_check is not None:
+            return date_check
 
         try:
             provider = await self._provider_manager.get(policy)
@@ -191,7 +209,9 @@ class ToolCallOrchestrator:
             return ToolResult(status=ToolStatus.FAILED, error="no_executor_registered")
 
         timeout_ms = policy.timeout_ms or DEFAULT_TOOL_TIMEOUT_MS
-        chain = build_default_chain(executor, timeout_ms=timeout_ms, metrics=self._metrics)
+        chain = build_default_chain(
+            executor, timeout_ms=timeout_ms, metrics=self._metrics, latency_store=self._latency_store,
+        )
 
         request = ToolExecutionRequest(
             tool_call_id=event.tool_call_id,
@@ -226,6 +246,108 @@ class ToolCallOrchestrator:
             cancel_task.cancel()
             if not execute_task.done():
                 execute_task.add_done_callback(_log_background_tool_result)
+
+    def _check_requested_date(
+        self, event: ToolCallEvent, history: "list[ChatMessage] | None",
+    ) -> ToolResult | None:
+        """Runs before the executor/middleware chain — an already-known-bad
+        date never spends a real calendar API call. Returns None (proceed
+        normally) unless a check fails, in which case it returns the
+        ToolResult the tool's own description (registry.py) already tells
+        the LLM how to react to. See date_sanity.py's module docstring for
+        why these three specific checks and why each is narrow-by-design."""
+        date_field = date_field_for_tool(event.tool_name)
+        if date_field is None:
+            return None
+        raw_value = event.arguments.get(date_field)
+        dt = parse_requested_date(raw_value)
+        if dt is None:
+            if raw_value:
+                # Confirmed live 2026-09-11: a genuinely present but
+                # unparseable value (e.g. the model emitting the literal
+                # placeholder "YYYY-09-14T14:00:00" instead of a real year)
+                # was silently passed straight to the executor, which has
+                # no format validation of its own — it reached Cal.com's
+                # real API and came back as an opaque calendar_error the
+                # model had no actionable way to react to, unlike
+                # date_in_past/date_not_confirmed/time_not_confirmed.
+                log.warning(
+                    "ToolCallOrchestrator: rejected %s — %s=%r is not a valid ISO 8601 "
+                    "date/time", event.tool_name, date_field, raw_value,
+                )
+                return ToolResult(status=ToolStatus.INVALID_ARGUMENT, payload={
+                    "missing_fields": [date_field], "reason": "invalid_date_format",
+                })
+            return None  # Genuinely absent — the executor's own presence check handles it.
+
+        if is_in_the_past(dt, self._calendar_timezone):
+            # Confirmed live 2026-09: this is reliably a wrong-YEAR
+            # computation, not a wrong day/month — the model gets the
+            # day-of-month right (already cross-checked below against what
+            # the caller said) but guesses an old year. Correct just the
+            # year and re-validate instead of rejecting outright; this
+            # turns a whole class of live-observed rejection loops into an
+            # instant, correct booking instead of another round-trip.
+            corrected = correct_year_if_wrong(dt, self._calendar_timezone)
+            if corrected is None:
+                log.warning(
+                    "ToolCallOrchestrator: rejected %s — %s=%r is in the past",
+                    event.tool_name, date_field, event.arguments.get(date_field),
+                )
+                return ToolResult(status=ToolStatus.INVALID_ARGUMENT, payload={
+                    "missing_fields": [date_field], "reason": "date_in_past",
+                })
+            log.info(
+                "ToolCallOrchestrator: corrected %s year %d -> %d (day/time unchanged) tool=%s",
+                date_field, dt.year, corrected.year, event.tool_name,
+            )
+            event.arguments[date_field] = corrected.isoformat()
+            dt = corrected
+
+        # Confirmed live 2026-09-12: checking only the single last
+        # utterance rejected an already-stated, correct date the moment
+        # the caller supplied the time in a separate follow-up turn (e.g.
+        # "14 September" one turn, "10:30 AM" the next) — the last
+        # utterance alone had no day-of-month digit to match against,
+        # even though the caller genuinely had stated one shortly before.
+        # Widening to the last few turns keeps the guardrail's real
+        # purpose (catching this model's own wrong day-of-month
+        # miscalculation) while no longer punishing a date/time split
+        # across turns, which is how people actually talk.
+        recent_user_text = _recent_user_text(history)
+        if recent_user_text and stated_day_mismatch(dt.day, recent_user_text):
+            log.warning(
+                "ToolCallOrchestrator: rejected %s — %s=%r day=%d not found in caller's recent "
+                "utterances=%r", event.tool_name, date_field, event.arguments.get(date_field),
+                dt.day, recent_user_text,
+            )
+            return ToolResult(status=ToolStatus.INVALID_ARGUMENT, payload={
+                "missing_fields": [date_field], "reason": "date_not_confirmed",
+            })
+
+        if no_time_stated(_all_user_messages(history)):
+            log.warning(
+                "ToolCallOrchestrator: rejected %s — %s=%r but no time-of-day was ever stated "
+                "by the caller this call", event.tool_name, date_field, event.arguments.get(date_field),
+            )
+            return ToolResult(status=ToolStatus.INVALID_ARGUMENT, payload={
+                "missing_fields": [date_field], "reason": "time_not_confirmed",
+            })
+        return None
+
+
+def _all_user_messages(history: "list[ChatMessage] | None") -> list[str]:
+    if not history:
+        return []
+    return [m.content for m in history if m.role == "user"]
+
+
+def _recent_user_text(history: "list[ChatMessage] | None", n: int = 3) -> str:
+    """Joins the caller's last n turns, not just the very last one — a
+    date is commonly stated in one turn with just the time confirmed in a
+    follow-up ("10:30 AM") that alone contains no day-of-month digit."""
+    user_texts = _all_user_messages(history)
+    return " ".join(user_texts[-n:])
 
 
 def _log_background_tool_result(task: "asyncio.Task[ToolResult]") -> None:
