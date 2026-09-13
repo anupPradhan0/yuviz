@@ -263,14 +263,12 @@ class ToolCallOrchestrator:
         dt = parse_requested_date(raw_value)
         if dt is None:
             if raw_value:
-                # Confirmed live 2026-09-11: a genuinely present but
-                # unparseable value (e.g. the model emitting the literal
-                # placeholder "YYYY-09-14T14:00:00" instead of a real year)
-                # was silently passed straight to the executor, which has
-                # no format validation of its own — it reached Cal.com's
-                # real API and came back as an opaque calendar_error the
-                # model had no actionable way to react to, unlike
-                # date_in_past/date_not_confirmed/time_not_confirmed.
+                # A present but unparseable value (e.g. a literal
+                # placeholder like "YYYY-09-14T14:00:00" instead of a real
+                # year) would otherwise reach the executor unvalidated,
+                # hit Cal.com's real API, and come back as an opaque
+                # calendar_error the model has no actionable way to react
+                # to, unlike date_in_past/date_not_confirmed/time_not_confirmed.
                 log.warning(
                     "ToolCallOrchestrator: rejected %s — %s=%r is not a valid ISO 8601 "
                     "date/time", event.tool_name, date_field, raw_value,
@@ -281,13 +279,12 @@ class ToolCallOrchestrator:
             return None  # Genuinely absent — the executor's own presence check handles it.
 
         if is_in_the_past(dt, self._calendar_timezone):
-            # Confirmed live 2026-09: this is reliably a wrong-YEAR
-            # computation, not a wrong day/month — the model gets the
-            # day-of-month right (already cross-checked below against what
-            # the caller said) but guesses an old year. Correct just the
-            # year and re-validate instead of rejecting outright; this
-            # turns a whole class of live-observed rejection loops into an
-            # instant, correct booking instead of another round-trip.
+            # Usually a wrong-YEAR computation, not a wrong day/month — the
+            # model gets the day-of-month right (already cross-checked
+            # below against what the caller said) but guesses an old year.
+            # Correct just the year and re-validate instead of rejecting
+            # outright, turning that rejection loop into an instant,
+            # correct booking.
             corrected = correct_year_if_wrong(dt, self._calendar_timezone)
             if corrected is None:
                 log.warning(
@@ -304,16 +301,14 @@ class ToolCallOrchestrator:
             event.arguments[date_field] = corrected.isoformat()
             dt = corrected
 
-        # Confirmed live 2026-09-12: checking only the single last
-        # utterance rejected an already-stated, correct date the moment
-        # the caller supplied the time in a separate follow-up turn (e.g.
-        # "14 September" one turn, "10:30 AM" the next) — the last
-        # utterance alone had no day-of-month digit to match against,
-        # even though the caller genuinely had stated one shortly before.
-        # Widening to the last few turns keeps the guardrail's real
-        # purpose (catching this model's own wrong day-of-month
-        # miscalculation) while no longer punishing a date/time split
-        # across turns, which is how people actually talk.
+        # Checking only the single last utterance rejects an already-stated,
+        # correct date when the caller supplies date and time in separate
+        # turns (e.g. "14 September" then "10:30 AM" next) — the last
+        # utterance alone has no day-of-month digit to match against even
+        # though the caller did state one shortly before. Widening to the
+        # last few turns keeps the guardrail's real purpose (catching a
+        # wrong day-of-month miscalculation) without punishing a date/time
+        # split across turns, which is how people actually talk.
         recent_user_text = _recent_user_text(history)
         if recent_user_text and stated_day_mismatch(dt.day, recent_user_text):
             log.warning(

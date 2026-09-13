@@ -93,26 +93,19 @@ _DATE_LOOKUP_DAYS = 8  # today + the next 7 — covers "tomorrow" through "next 
 
 
 def _build_current_date_context(calendar_timezone: str = "UTC") -> str:
-    """Nothing anywhere told the LLM what 'today' actually is — confirmed
-    live 2026-07-27: a caller asked to book 'tomorrow' and qwen2.5:7b
-    resolved it to a date 3 days in the past, because it had no grounding
-    for the current date at all and had to guess. A first fix just stated
-    today's date and asked the model to compute the offset itself — still
-    unreliable: confirmed live 2026-09-09 that gemma4:e2b also miscomputed
-    "tomorrow" (came out 3 days ahead instead of 1), so this is a
-    cross-model day-arithmetic weakness, not one provider's bug. Fixed by
-    doing the arithmetic in code and handing the model a lookup table for
-    the near term instead of asking it to add/subtract days itself.
+    """Nothing tells the LLM what "today" is by default, and models
+    reliably miscompute relative dates ("tomorrow") when asked to do the
+    arithmetic themselves — a cross-model weakness, not one provider's bug.
+    Fixed by computing dates in code and handing the model a lookup table
+    for the near term instead of asking it to add/subtract days.
 
     "Today" is computed in the booking calendar's own timezone
     (policy.extra["timezone"], same field _make_cal_com reads), not UTC —
-    confirmed live, separately, 2026-09-09: near midnight UTC (which is
-    already the next calendar day in IST), UTC's "today" was a full day
-    behind the caller's and business's real local day, so "tomorrow"
-    silently resolved to what was actually today for both of them. Falls
-    back to UTC only if the configured zone name doesn't exist. Computed
-    fresh per call (not baked into agent config) so it's always accurate
-    regardless of how long the process has been running."""
+    near midnight UTC can already be the next calendar day in a business's
+    local timezone, so UTC's "today" can lag the caller's and business's
+    real local day. Falls back to UTC only if the configured zone name
+    doesn't exist. Computed fresh per call (not baked into agent config)
+    so it's always accurate regardless of how long the process has run."""
     try:
         tz = ZoneInfo(calendar_timezone)
     except ZoneInfoNotFoundError:
@@ -262,21 +255,17 @@ _FALLBACK_LLM_ERROR = "Sorry, I'm having a little trouble right now. Could you s
 # _fillers/_latency_store fields.
 _TOOL_CALL_FILLER_MIN_GAP_S = 4.0
 
-# Phase 3 of AI-to-human transfer (see project memory): [[TRANSFER ...]] is
-# now detected the same streaming-safe way [[END_CALL]] always has been —
-# via StreamBuffer+DirectiveParser, buffered and stripped mid-stream so a
-# directive tag never reaches TTS (supersedes Phase 2's simpler post-hoc
-# regex, which only ran on the fully-assembled turn text and had no
-# defense against a live agent speaking the raw tag aloud).
+# [[TRANSFER ...]] is detected the same streaming-safe way [[END_CALL]] is
+# — via StreamBuffer+DirectiveParser, buffered and stripped mid-stream so a
+# directive tag never reaches TTS.
 #
-# Fully wired end-to-end (live-verified 2026-07-16): the instruction below
-# is auto-appended to the system prompt whenever the agent's policies
-# configure a transfer (see __init__) — operators only set transfer_type/
-# transfer_destination (Escalation tab in the admin UI), never prompt text,
-# so the destination has a single source of truth. servicer.py sends the
-# resulting TransferRequest to the gateway (held until the acknowledgment
-# turn's audio finishes playing), and the gateway executes it over ESL
-# (uuid_transfer).
+# The instruction below is auto-appended to the system prompt whenever the
+# agent's policies configure a transfer (see __init__) — operators only
+# set transfer_type/transfer_destination (Escalation tab in the admin
+# UI), never prompt text, so the destination has a single source of
+# truth. servicer.py sends the resulting TransferRequest to the gateway
+# (held until the acknowledgment turn's audio finishes playing), and the
+# gateway executes it over ESL (uuid_transfer).
 _TRANSFER_CONDITION = (
     "If the caller explicitly asks to speak to a human agent or "
     "representative"
@@ -533,14 +522,12 @@ class PipelineConversationHandler:
         text = self._workflow.greeting() or ""
         if not text:
             return []
-        # Confirmed live 2026-09-09: the greeting was spoken but never
-        # recorded anywhere the LLM could see — its very first real turn
-        # started with zero memory of having already introduced itself, so
-        # it would re-introduce itself again in different, garbled words.
-        # Recorded here regardless of whether playback is later interrupted
-        # by barge-in: this is scripted, not generated, so the intended
-        # line is what the LLM "said" — history needs the LLM's own record
-        # of the conversation, not a transcript of what audio actually
+        # Record the greeting in history so the LLM knows it already
+        # introduced itself, instead of re-introducing itself garbled on
+        # its real first turn. Recorded regardless of whether playback is
+        # later interrupted by barge-in: this is scripted, not generated,
+        # so the intended line is what the LLM "said" — history needs the
+        # LLM's own record, not a transcript of what audio actually
         # reached the caller's ear.
         self._get_history(session_id).append(ChatMessage(role="assistant", content=text))
         return [chunk async for chunk in self._synthesize_sentence_stream(text, session_id)]
@@ -723,11 +710,11 @@ class PipelineConversationHandler:
         self._refresh_node_prompt(history)
         history.append(ChatMessage(role="user", content=user_text))
 
-        # No filler on the caller's very first turn, ever — confirmed live
-        # that even a wording tied to the question ("Good question, one
-        # moment") reads as stilted before any rapport exists. Turn 1 stays
-        # silent through retrieval/LLM/TTS; fillers start from turn 2 (tool
-        # calls only) per fillers.py's select_tool_filler.
+        # No filler on the caller's very first turn — even a wording tied
+        # to the question ("Good question, one moment") reads as stilted
+        # before any rapport exists. Turn 1 stays silent through
+        # retrieval/LLM/TTS; fillers start from turn 2 (tool calls only)
+        # per fillers.py's select_tool_filler.
 
         # One retrieve per turn; splice into this turn only (not history).
         messages_for_llm = history
@@ -803,11 +790,9 @@ class PipelineConversationHandler:
         # The claim regex explicitly matches "rescheduled"/"moved" wording
         # too (see _BOOKING_CLAIM_RE's comment), so a genuine
         # reschedule_appointment call must clear this gate the same way a
-        # genuine book_appointment call does — confirmed live 2026-09-09: a
-        # real reschedule_appointment call (correctly reporting
-        # multiple_bookings_found and asking the caller to disambiguate)
-        # still got flagged, because this only ever checked for
-        # book_appointment.
+        # genuine book_appointment call does — checking only for
+        # book_appointment let a real reschedule (correctly reporting
+        # multiple_bookings_found) get flagged as fabricated.
         real_calendar_mutation = not _CALENDAR_MUTATION_TOOLS.isdisjoint(tool_calls_made)
         fabricated_booking_claim = (
             self._has_booking_tool

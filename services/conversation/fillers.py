@@ -2,8 +2,8 @@
 FillerSelector — owns all user-facing filler wording, out of pipeline.py.
 Answers one question for pipeline.py: which tool-call filler fits this
 tool's calibrated average and isn't the phrase we just said. No filler is
-ever spoken on the caller's first turn — confirmed live that even
-question-tied wording reads as stilted before any rapport exists.
+ever spoken on the caller's first turn — even question-tied wording reads
+as stilted before any rapport exists.
 
 The public method is total (never raises) — see its own docstring for
 its specific fallback.

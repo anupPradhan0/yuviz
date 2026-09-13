@@ -1,13 +1,12 @@
 """
-Date sanity checks — a cheap, code-level backstop for a live-confirmed LLM
-reliability gap: small local models keep miscalculating a caller-stated
-appointment date, sometimes during relative-date math ("tomorrow") and,
-worse, even when just transcribing an explicit day-of-month the caller
-literally just said. A prompt instruction alone ("restate the date and
-wait for a yes" — see registry.py) does not reliably stop it: confirmed
-live 2026-09-09, the model skipped straight to calling book_appointment
-with a wrong date despite that instruction being in its own tool
-description.
+Date sanity checks — a cheap, code-level backstop for an LLM reliability
+gap: small local models keep miscalculating a caller-stated appointment
+date, sometimes during relative-date math ("tomorrow") and, worse, even
+when just transcribing an explicit day-of-month the caller literally just
+said. A prompt instruction alone ("restate the date and wait for a yes" —
+see registry.py) does not reliably stop it — the model can still call
+book_appointment with a wrong date despite that instruction being in its
+own tool description.
 
 Three independent, side-effect-free checks, run in orchestrator.py before
 the executor/middleware chain — so an already-known-bad date never spends
@@ -22,14 +21,13 @@ a real calendar API call or burns the tool's timeout budget:
   2. is_in_the_past: the requested date must not be before "today" in the
      calendar's own configured timezone — catches a miscalculation that
      happens to land in the past regardless of what the caller said.
-  3. no_time_stated: confirmed live 2026-09-09, a caller who never once
-     mentioned a time at all still got a real booking, at a time the LLM
-     invented on its own ("Great, I'll book that for you" with zero
-     time gathered first) — a different failure mode than a wrong
-     computation, and one the other two checks can't catch (there is no
-     stated time to be wrong about). Scans every user turn in the call so
-     far, not just the last one, since the caller may have stated a time
-     several turns before the tool call finally fires.
+  3. no_time_stated: catches a caller who never mentioned a time at all
+     still getting a real booking, at a time the LLM invented on its own
+     — a different failure mode than a wrong computation, and one the
+     other two checks can't catch (there is no stated time to be wrong
+     about). Scans every user turn in the call so far, not just the last
+     one, since the caller may have stated a time several turns before
+     the tool call finally fires.
 
 All three are deliberately narrow, false-negative-tolerant backstops —
 same posture as pipeline.py's _claims_booking_without_tool_call — not a
@@ -54,11 +52,10 @@ DATE_ARG_BY_TOOL: dict[str, str] = {
 
 _DAY_NUMERAL_RE = re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)?\b")
 
-# Hour words alongside numerals — confirmed live 2026-09-11: Deepgram
-# transcribed a caller's spoken "two PM" as the word "two", not the digit
-# "2", so a numerals-only pattern missed a real, clearly-stated time and
-# no_time_stated() kept rejecting a call whose caller HAD stated a time —
-# just not in the one surface form this regex recognized.
+# Hour words alongside numerals — Deepgram can transcribe a spoken "two PM"
+# as the word "two", not the digit "2", so a numerals-only pattern misses
+# a clearly-stated time and no_time_stated() would wrongly reject a call
+# whose caller did state a time, just not in numeral form.
 _HOUR_WORD = r"(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
 
 # Deliberately specific constructs (am/pm, 24-hour HH:MM, "o'clock", named
@@ -108,11 +105,10 @@ def is_in_the_past(dt: datetime, calendar_timezone: str) -> bool:
     return dt.date() < today
 
 
-# How far off a guessed year can be and still count as the specific,
-# live-observed "small model can't compute the current year" failure mode
-# (2023/2024 instead of 2026 — a 2-3 year gap) rather than a genuinely
-# bogus date (e.g. 2020, or a typo) that deserves outright rejection
-# instead of being silently papered over.
+# How far off a guessed year can be and still count as the "small model
+# can't compute the current year" failure mode (a 2-3 year gap) rather
+# than a genuinely bogus date (e.g. a decade off, or a typo) that deserves
+# outright rejection instead of being silently papered over.
 _MAX_YEAR_CORRECTION_GAP = 5
 
 
@@ -120,14 +116,14 @@ def correct_year_if_wrong(dt: datetime, calendar_timezone: str) -> datetime | No
     """If dt is in the past purely because of its year, and that year is a
     plausible near-miss (not a wildly bogus date), try the real current
     year and, failing that, next year, keeping month/day/time unchanged.
-    Confirmed live, repeatedly (2026-09): small local models reliably get
-    the day-of-month and time right when the caller states them but
-    reliably get the YEAR wrong by a couple of years — day-of-month is
-    already cross-checked separately against what the caller actually
-    said (stated_day_mismatch), so silently replacing only the year and
-    re-validating is safe: it preserves the caller's actual stated intent
-    and only replaces a label the model was never going to get right by
-    computation anyway. Returns None if the guessed year is too far off
+    Small models reliably get the day-of-month and time right when the
+    caller states them but get the YEAR wrong by a couple of years —
+    day-of-month is already cross-checked separately against what the
+    caller actually said (stated_day_mismatch), so silently replacing only
+    the year and re-validating is safe: it preserves the caller's actual
+    stated intent and only replaces a label the model was never going to
+    get right by computation anyway. Returns None if the guessed year is
+    too far off
     to be that failure mode, or if neither candidate year lands on a
     non-past date (Feb 29 landing on a non-leap year also falls through
     to None here, same as any other malformed date)."""

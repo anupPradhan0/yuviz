@@ -30,15 +30,14 @@ def _to_e164(phone: str, caller_number: str | None) -> str:
     digit-by-digit from the caller, using the caller's own ANI as the
     source of the code — Cal.com's /v2/bookings requires E.164
     (attendee.phoneNumber), but a caller stating their number aloud never
-    includes one. Confirmed live 2026-09-12: a correctly-transcribed,
-    correctly-confirmed 10-digit number ("8971188211") still came back
-    invalid_number from Cal.com because it was sent with no country code
-    at all, while the ANI-fallback path (already full E.164) always
-    worked — this was silently treated as a phone-number-accuracy problem
-    when it was actually a formatting gap. If caller_number's own national
-    number is a different length than phone (an unrelated alternate
-    number was given), there's no reliable prefix to borrow, so the raw
-    value is returned unchanged rather than guessing wrong silently."""
+    includes one. A correctly-transcribed, correctly-confirmed national
+    number sent with no country code comes back invalid_number from
+    Cal.com even though nothing was wrong with the number itself — it was
+    a formatting gap, not a phone-number-accuracy problem. If
+    caller_number's own national number is a different length than phone
+    (an unrelated alternate number was given), there's no reliable prefix
+    to borrow, so the raw value is returned unchanged rather than guessing
+    wrong silently."""
     if not phone or phone.startswith("+"):
         return phone
     digits = "".join(c for c in phone if c.isdigit())
