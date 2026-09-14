@@ -710,11 +710,16 @@ class PipelineConversationHandler:
         self._refresh_node_prompt(history)
         history.append(ChatMessage(role="user", content=user_text))
 
-        # No filler on the caller's very first turn — even a wording tied
-        # to the question ("Good question, one moment") reads as stilted
-        # before any rapport exists. Turn 1 stays silent through
-        # retrieval/LLM/TTS; fillers start from turn 2 (tool calls only)
-        # per fillers.py's select_tool_filler.
+        # There's no filler for a plain conversational LLM response, on
+        # turn 1 or any other turn — nothing to mask latency-wise, and it
+        # would just be stilted small talk. A tool-call filler is different
+        # and applies from turn 1 onward: if the caller's very first
+        # utterance is a direct request that needs a tool call (e.g. "book
+        # me tomorrow at 2pm"), the tool call is real backend latency that
+        # needs masking regardless of how little rapport exists yet —
+        # silence right after the caller just spoke reads as a dropped
+        # call, not politeness. See fillers.py's select_tool_filler and
+        # the ToolCallStartedEvent handling below.
 
         # One retrieve per turn; splice into this turn only (not history).
         messages_for_llm = history
