@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from ..tools.date_sanity import (
+    correct_year_if_wrong,
     date_field_for_tool,
     is_in_the_past,
     no_time_stated,
@@ -92,3 +93,29 @@ def test_no_time_stated_checks_every_turn_not_just_the_last():
 
 def test_no_time_stated_true_for_empty_history():
     assert no_time_stated([]) is True
+
+
+def test_stated_day_mismatch_ignores_the_hour_in_a_stated_time():
+    # "tomorrow at 2 PM" states no day-of-month at all — treating the hour
+    # as one rejected a valid booking, and the widened window kept that
+    # turn in scope so the rejection repeated every retry.
+    assert stated_day_mismatch(15, "tomorrow at 2 PM works") is False
+    assert stated_day_mismatch(15, "tomorrow at 2:00 pm works") is False
+    assert stated_day_mismatch(15, "3 o'clock tomorrow is fine") is False
+
+
+def test_stated_day_mismatch_still_catches_a_wrong_day_stated_alongside_a_time():
+    assert stated_day_mismatch(15, "book it for the 20th at 2 PM") is True
+    assert stated_day_mismatch(15, "the 15th of March at 2 PM") is False
+
+
+def test_correct_year_leaves_a_past_date_that_already_has_the_current_year():
+    # The year isn't what's wrong here — rolling it forward would silently
+    # book a year out. Must reject (date_in_past) instead.
+    this_year = datetime.now().year
+    assert correct_year_if_wrong(datetime(this_year, 1, 1, 10, 0), "UTC") is None
+
+
+def test_correct_year_still_fixes_a_genuinely_wrong_past_year():
+    corrected = correct_year_if_wrong(datetime(datetime.now().year - 2, 12, 31, 10, 0), "UTC")
+    assert corrected is not None and corrected.year >= datetime.now().year

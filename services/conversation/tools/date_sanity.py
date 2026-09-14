@@ -80,8 +80,14 @@ def stated_day_mismatch(day: int, caller_utterance: str) -> bool:
     """True only when caller_utterance contains at least one 1-2 digit
     numeral that could plausibly be a day-of-month (1-31) and NONE of them
     equal day. An utterance with no such numeral at all (a relative phrase,
-    or a turn that's just a bare "yes") never trips this."""
-    candidates = [int(m) for m in _DAY_NUMERAL_RE.findall(caller_utterance) if 1 <= int(m) <= 31]
+    or a turn that's just a bare "yes") never trips this.
+
+    Time expressions are removed before scanning: the hour in "tomorrow at
+    2 PM" is not a day-of-month, and counting it as one rejected an
+    entirely valid booking (day 15 vs a "stated day" of 2) and then kept
+    rejecting it, since the widened window still sees that turn."""
+    text = _TIME_EXPRESSION_RE.sub(" ", caller_utterance)
+    candidates = [int(m) for m in _DAY_NUMERAL_RE.findall(text) if 1 <= int(m) <= 31]
     if not candidates:
         return False
     return day not in candidates
@@ -122,17 +128,19 @@ def correct_year_if_wrong(dt: datetime, calendar_timezone: str) -> datetime | No
     caller actually said (stated_day_mismatch), so silently replacing only
     the year and re-validating is safe: it preserves the caller's actual
     stated intent and only replaces a label the model was never going to
-    get right by computation anyway. Returns None if the guessed year is
-    too far off
-    to be that failure mode, or if neither candidate year lands on a
-    non-past date (Feb 29 landing on a non-leap year also falls through
-    to None here, same as any other malformed date)."""
+    get right by computation anyway. Returns None if the year is not
+    actually wrong (a past date already carrying the current year is a
+    wrong day/month, not a wrong year — rolling it forward would silently
+    book a year out), if the guessed year is too far off to be that
+    failure mode, or if neither candidate year lands on a non-past date
+    (Feb 29 landing on a non-leap year also falls through to None here,
+    same as any other malformed date)."""
     try:
         tz = ZoneInfo(calendar_timezone)
     except ZoneInfoNotFoundError:
         tz = ZoneInfo("UTC")
     current_year = datetime.now(tz).year
-    if current_year - dt.year > _MAX_YEAR_CORRECTION_GAP:
+    if not 0 < current_year - dt.year <= _MAX_YEAR_CORRECTION_GAP:
         return None
     for year in (current_year, current_year + 1):
         try:
