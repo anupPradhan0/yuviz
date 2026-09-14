@@ -33,11 +33,12 @@ def _to_e164(phone: str, caller_number: str | None) -> str:
     includes one. A correctly-transcribed, correctly-confirmed national
     number sent with no country code comes back invalid_number from
     Cal.com even though nothing was wrong with the number itself — it was
-    a formatting gap, not a phone-number-accuracy problem. If
-    caller_number's own national number is a different length than phone
-    (an unrelated alternate number was given), there's no reliable prefix
-    to borrow, so the raw value is returned unchanged rather than guessing
-    wrong silently."""
+    a formatting gap, not a phone-number-accuracy problem. The prefix is
+    only borrowed when the ANI actually ends with the digits the caller
+    stated — i.e. it is the same number, just spoken without its country
+    code. Any other number (an alternate contact, a mistranscription) has
+    no reliable prefix to borrow, so the raw value is returned unchanged
+    rather than guessing a country wrong silently."""
     if not phone or phone.startswith("+"):
         return phone
     digits = "".join(c for c in phone if c.isdigit())

@@ -1,9 +1,12 @@
 """
 FillerSelector — owns all user-facing filler wording, out of pipeline.py.
 Answers one question for pipeline.py: which tool-call filler fits this
-tool's calibrated average and isn't the phrase we just said. No filler is
-ever spoken on the caller's first turn — even question-tied wording reads
-as stilted before any rapport exists.
+tool's calibrated average and isn't the phrase we just said. Tool-call
+fillers apply from turn 1 onward — see pipeline.py's ToolCallStartedEvent
+handling for why silence during a real tool call reads as a dropped call
+no matter how early in the conversation it happens. This selector has no
+notion of turns at all; the only suppression is pipeline.py's
+_TOOL_CALL_FILLER_MIN_GAP_S burst gap.
 
 The public method is total (never raises) — see its own docstring for
 its specific fallback.
@@ -41,7 +44,7 @@ class FillerSelector:
 
     def select_tool_filler(
         self, tool_name: str, last_phrase: str | None, average_ms: float | None,
-    ) -> str | None:
+    ) -> str:
         """Never returns None — a tool call always gets a spoken filler.
         Returns _FALLBACK_FILLER if anything inside raises."""
         try:
