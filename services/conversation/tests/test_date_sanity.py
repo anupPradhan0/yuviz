@@ -49,6 +49,13 @@ def test_is_in_the_past_falls_back_to_utc_on_unknown_timezone():
     assert is_in_the_past(datetime(2020, 1, 1), "Not/AZone") is True
 
 
+def test_is_in_the_past_falls_back_to_utc_on_malformed_timezone_key():
+    # ZoneInfo raises ValueError (not ZoneInfoNotFoundError) for a
+    # malformed key like a trailing slash — a misconfigured agent must
+    # still degrade to UTC, not take every call for that agent down.
+    assert is_in_the_past(datetime(2020, 1, 1), "Asia/Kolkata/") is True
+
+
 def test_parse_requested_date_handles_malformed_input_without_raising():
     assert parse_requested_date("not-a-date") is None
     assert parse_requested_date(None) is None

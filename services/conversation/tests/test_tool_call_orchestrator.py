@@ -1223,3 +1223,32 @@ async def test_book_appointment_allowed_once_a_time_was_stated_several_turns_ear
     [e async for e in orchestrator.run_turn("agent1", "t1", "c1", "s1", history)]
 
     assert len(executor.calls) == 1
+
+
+async def test_book_appointment_allowed_when_agent_proposed_the_time_and_caller_agreed():
+    """An agent-proposed slot the caller accepts with a bare "yes" never
+    puts a time in the caller's own words — no_time_stated must also look
+    at what the agent said, not just the caller."""
+    llm = _ScriptedLLM([
+        [ToolCallEvent(tool_call_id="c1", tool_name="book_appointment",
+                       arguments={"requested_datetime": "2099-03-15T14:00:00"})],
+        [TokenEvent(text="ok")],
+    ])
+    executor = _FixedExecutor(ToolResult(status=ToolStatus.SUCCESS, payload={"booked": True}))
+    registry = ExecutorRegistry()
+    registry.register("book_appointment", lambda provider, companion=None: executor)
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([_policy()]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=registry,
+    )
+    history = [
+        ChatMessage(role="user", content="I'd like to book tomorrow"),
+        ChatMessage(role="assistant", content="How about 2 PM?"),
+        ChatMessage(role="user", content="yes"),
+    ]
+
+    [e async for e in orchestrator.run_turn("agent1", "t1", "c1", "s1", history)]
+
+    assert len(executor.calls) == 1

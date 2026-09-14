@@ -21,13 +21,14 @@ a real calendar API call or burns the tool's timeout budget:
   2. is_in_the_past: the requested date must not be before "today" in the
      calendar's own configured timezone — catches a miscalculation that
      happens to land in the past regardless of what the caller said.
-  3. no_time_stated: catches a caller who never mentioned a time at all
-     still getting a real booking, at a time the LLM invented on its own
-     — a different failure mode than a wrong computation, and one the
-     other two checks can't catch (there is no stated time to be wrong
-     about). Scans every user turn in the call so far, not just the last
-     one, since the caller may have stated a time several turns before
-     the tool call finally fires.
+  3. no_time_stated: catches a call where no time was ever stated by
+     either party still getting a real booking, at a time the LLM invented
+     on its own — a different failure mode than a wrong computation, and
+     one the other two checks can't catch (there is no stated time to be
+     wrong about). Scans every turn in the call so far, caller and agent
+     both — an agent-proposed slot the caller accepts with a bare "yes"
+     never appears in the caller's own words, but was genuinely stated
+     and agreed to.
 
 All three are deliberately narrow, false-negative-tolerant backstops —
 same posture as pipeline.py's _claims_booking_without_tool_call — not a
@@ -93,19 +94,21 @@ def stated_day_mismatch(day: int, caller_utterance: str) -> bool:
     return day not in candidates
 
 
-def no_time_stated(caller_utterances: list[str]) -> bool:
-    """True when NONE of the caller's turns so far contain a recognizable
-    time-of-day expression — the LLM has nothing to have grounded its
-    requested time in, regardless of what value it filled in. An empty
-    list (a local-tools-only turn with no user history passed) is treated
-    the same as "nothing stated" — fail closed, not open."""
-    return not any(_TIME_EXPRESSION_RE.search(u) for u in caller_utterances)
+def no_time_stated(conversation_texts: list[str]) -> bool:
+    """True when NONE of the turns so far (caller or agent) contain a
+    recognizable time-of-day expression. Both roles matter, not just the
+    caller's: an agent-proposed slot ("how about 2 PM?") the caller accepts
+    with a bare "yes" never puts a time in the caller's own words, but a
+    time was genuinely stated and agreed to. An empty list (a
+    local-tools-only turn with no history passed) is treated the same as
+    "nothing stated" — fail closed, not open."""
+    return not any(_TIME_EXPRESSION_RE.search(u) for u in conversation_texts)
 
 
 def is_in_the_past(dt: datetime, calendar_timezone: str) -> bool:
     try:
         tz = ZoneInfo(calendar_timezone)
-    except ZoneInfoNotFoundError:
+    except (ZoneInfoNotFoundError, ValueError):
         tz = ZoneInfo("UTC")
     today = datetime.now(tz).date()
     return dt.date() < today
@@ -137,7 +140,7 @@ def correct_year_if_wrong(dt: datetime, calendar_timezone: str) -> datetime | No
     same as any other malformed date)."""
     try:
         tz = ZoneInfo(calendar_timezone)
-    except ZoneInfoNotFoundError:
+    except (ZoneInfoNotFoundError, ValueError):
         tz = ZoneInfo("UTC")
     current_year = datetime.now(tz).year
     if not 0 < current_year - dt.year <= _MAX_YEAR_CORRECTION_GAP:

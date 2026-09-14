@@ -108,7 +108,7 @@ def _build_current_date_context(calendar_timezone: str = "UTC") -> str:
     so it's always accurate regardless of how long the process has run."""
     try:
         tz = ZoneInfo(calendar_timezone)
-    except ZoneInfoNotFoundError:
+    except (ZoneInfoNotFoundError, ValueError):
         log.warning("Unknown calendar_timezone=%r — falling back to UTC for date grounding", calendar_timezone)
         tz = timezone.utc
     now = datetime.now(tz)
@@ -449,7 +449,7 @@ class PipelineConversationHandler:
         # before this session's fix.
         try:
             _tz = ZoneInfo(calendar_timezone)
-        except ZoneInfoNotFoundError:
+        except (ZoneInfoNotFoundError, ValueError):
             _tz = timezone.utc
         now = datetime.now(_tz)
         self._extractor = VariableExtractor(self._llm, self._on_variables_extracted)

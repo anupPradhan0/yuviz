@@ -320,7 +320,7 @@ class ToolCallOrchestrator:
                 "missing_fields": [date_field], "reason": "date_not_confirmed",
             })
 
-        if no_time_stated(_all_user_messages(history)):
+        if no_time_stated(_all_message_texts(history)):
             log.warning(
                 "ToolCallOrchestrator: rejected %s — %s=%r but no time-of-day was ever stated "
                 "by the caller this call", event.tool_name, date_field, event.arguments.get(date_field),
@@ -335,6 +335,15 @@ def _all_user_messages(history: "list[ChatMessage] | None") -> list[str]:
     if not history:
         return []
     return [m.content for m in history if m.role == "user"]
+
+
+def _all_message_texts(history: "list[ChatMessage] | None") -> list[str]:
+    """Both roles — an agent-proposed time slot the caller accepts with a
+    bare "yes" never appears in the caller's own utterances, so
+    no_time_stated must see what the agent said too, not just the caller."""
+    if not history:
+        return []
+    return [m.content for m in history]
 
 
 def _recent_user_text(history: "list[ChatMessage] | None", n: int = 3) -> str:
