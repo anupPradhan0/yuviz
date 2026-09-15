@@ -106,6 +106,17 @@ const PLATFORM_ITEMS = [{ href: "/settings", label: "Settings", icon: "settings"
 
 const ALL_ITEMS = [...OVERVIEW_ITEMS, ...MANAGEMENT_ITEMS, USERS_ITEM, ...CALLING_ITEMS, ...PLATFORM_ITEMS];
 
+// Old product language still shows up in URLs and muscle memory ("agent").
+const NAV_SEARCH_ALIASES: Record<string, string[]> = {
+  "/workflows": ["agent", "agents"],
+};
+
+function navMatches(item: { href: string; label: string }, q: string): boolean {
+  if (!q) return true;
+  if (item.label.toLowerCase().includes(q)) return true;
+  return (NAV_SEARCH_ALIASES[item.href] ?? []).some((alias) => alias.includes(q) || q.includes(alias));
+}
+
 // Agent settings live under /workflows/.../settings — second crumb for that sub-route.
 const SETTINGS_CRUMBS = ["Workflows", "Settings"];
 
@@ -171,12 +182,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   if (!authChecked) return null;
 
   const canManageUsers = user?.role === "superadmin" || user?.role === "admin";
-  const matches = (label: string) => label.toLowerCase().includes(search.trim().toLowerCase());
-  const visibleOverview = OVERVIEW_ITEMS.filter((item) => matches(item.label));
-  const visibleManagement = MANAGEMENT_ITEMS.filter((item) => matches(item.label));
-  const visibleUsers = canManageUsers && matches(USERS_ITEM.label);
-  const visibleCalling = CALLING_ITEMS.filter((item) => matches(item.label));
-  const visiblePlatform = PLATFORM_ITEMS.filter((item) => matches(item.label));
+  const q = search.trim().toLowerCase();
+  const visibleOverview = OVERVIEW_ITEMS.filter((item) => navMatches(item, q));
+  const visibleManagement = MANAGEMENT_ITEMS.filter((item) => navMatches(item, q));
+  const visibleUsers = canManageUsers && navMatches(USERS_ITEM, q);
+  const visibleCalling = CALLING_ITEMS.filter((item) => navMatches(item, q));
+  const visiblePlatform = PLATFORM_ITEMS.filter((item) => navMatches(item, q));
 
   // Longest-prefix match, not first-match: /workflows/acme/reception must
   // resolve to "Workflows", not a shorter unrelated prefix.

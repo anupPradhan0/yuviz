@@ -97,6 +97,63 @@ def _dump_dir() -> str | None:
 _CONSOLE_ROLES = frozenset({"superadmin", "admin", "viewer"})
 
 
+def _max_sessions_per_user() -> int:
+    try:
+        return max(1, int(os.environ.get("WEBCALL_MAX_SESSIONS_PER_USER", "2")))
+    except ValueError:
+        return 2
+
+
+def _max_sessions_per_tenant() -> int:
+    try:
+        return max(1, int(os.environ.get("WEBCALL_MAX_SESSIONS_PER_TENANT", "10")))
+    except ValueError:
+        return 10
+
+
+class _SessionSlots:
+    """In-process concurrent webcall caps (per user and per tenant slug)."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._by_user: dict[str, int] = {}
+        self._by_tenant: dict[str, int] = {}
+
+    async def try_acquire(self, user_id: str, tenant_slug: str) -> str | None:
+        async with self._lock:
+            user_n = self._by_user.get(user_id, 0)
+            tenant_n = self._by_tenant.get(tenant_slug, 0)
+            if user_n >= _max_sessions_per_user():
+                return (
+                    f"too many concurrent test sessions for this user "
+                    f"(max {_max_sessions_per_user()}) — end one and try again"
+                )
+            if tenant_n >= _max_sessions_per_tenant():
+                return (
+                    f"too many concurrent test sessions for this account "
+                    f"(max {_max_sessions_per_tenant()}) — end one and try again"
+                )
+            self._by_user[user_id] = user_n + 1
+            self._by_tenant[tenant_slug] = tenant_n + 1
+            return None
+
+    async def release(self, user_id: str, tenant_slug: str) -> None:
+        async with self._lock:
+            user_n = self._by_user.get(user_id, 0)
+            if user_n <= 1:
+                self._by_user.pop(user_id, None)
+            else:
+                self._by_user[user_id] = user_n - 1
+            tenant_n = self._by_tenant.get(tenant_slug, 0)
+            if tenant_n <= 1:
+                self._by_tenant.pop(tenant_slug, None)
+            else:
+                self._by_tenant[tenant_slug] = tenant_n - 1
+
+
+_SESSION_SLOTS = _SessionSlots()
+
+
 async def _config_tenant_check(token: str, tenant_slug: str) -> str | None:
     """None if Config would allow GET /tenants/{slug}; else an operator message."""
     base = os.environ.get("CONFIG_SERVICE_URL", "http://localhost:8000").rstrip("/")
@@ -127,44 +184,56 @@ async def _config_tenant_check(token: str, tenant_slug: str) -> str | None:
     return "could not verify tenant access — is Config Service reachable?"
 
 
-async def _session_auth_problem(token: str | None, tenant_slug: str) -> str | None:
-    """Gate every webcall session: console role + Config tenant isolation."""
+async def _session_auth_problem(token: str | None, tenant_slug: str) -> tuple[str | None, str | None]:
+    """Gate every webcall session: console role + Config tenant isolation.
+
+    Returns ``(error, user_id)``. ``user_id`` is set only when auth succeeds.
+    """
     secret = os.environ.get("JWT_SECRET", "").strip()
     if not secret:
-        return "webcall auth is unavailable (JWT_SECRET not set on webcall)"
+        return "webcall auth is unavailable (JWT_SECRET not set on webcall)", None
     if not token:
-        return "webcall requires a signed-in session"
+        return "webcall requires a signed-in session", None
     try:
         import jwt
         payload = jwt.decode(token, secret, algorithms=["HS256"])
     except Exception:
-        return "webcall token is invalid or expired"
+        return "webcall token is invalid or expired", None
     if payload.get("is_service_account"):
-        return "webcall requires an interactive admin session"
+        return "webcall requires an interactive admin session", None
     if payload.get("role") not in _CONSOLE_ROLES:
-        return "webcall is not allowed for this account"
-    return await _config_tenant_check(token, tenant_slug)
+        return "webcall is not allowed for this account", None
+    user_id = str(payload.get("sub") or "").strip()
+    if not user_id:
+        return "webcall token is missing a user id", None
+    problem = await _config_tenant_check(token, tenant_slug)
+    if problem:
+        return problem, None
+    return None, user_id
 
 
-async def _await_session_auth(ws: ServerConnection, tenant_slug: str) -> str | None:
-    """First WS text frame must be {"type":"auth","token":...} — never put JWT in the URL."""
+async def _await_session_auth(ws: ServerConnection, tenant_slug: str) -> tuple[str | None, str | None]:
+    """First WS text frame must be {"type":"auth","token":...} — never put JWT in the URL.
+
+    Returns ``(error, user_id)``.
+    """
     try:
         raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
     except asyncio.TimeoutError:
-        return "webcall timed out waiting for auth"
+        return "webcall timed out waiting for auth", None
     if not isinstance(raw, str):
-        return "webcall expected an auth text frame"
+        return "webcall expected an auth text frame", None
     try:
         msg = json.loads(raw)
     except json.JSONDecodeError:
-        return "webcall auth frame was not JSON"
+        return "webcall auth frame was not JSON", None
     if msg.get("type") != "auth":
-        return "webcall requires an auth frame first"
-    problem = await _session_auth_problem(msg.get("token"), tenant_slug)
+        return "webcall requires an auth frame first", None
+    problem, user_id = await _session_auth_problem(msg.get("token"), tenant_slug)
     if problem:
-        return problem
+        return problem, None
     await ws.send(json.dumps({"type": "auth_ok"}))
-    return None
+    return None, user_id
 
 
 # Back-compat aliases (tests may still import the draft_* names).
@@ -418,16 +487,31 @@ async def _handle_connection(ws: ServerConnection) -> None:
 
     use_draft = params.get("draft") in ("1", "true")
     # Auth every session — draft=1 is only an extra capability on top.
-    problem = await _await_session_auth(ws, tenant_slug)
-    if problem:
+    problem, user_id = await _await_session_auth(ws, tenant_slug)
+    if problem or not user_id:
         log.warning("webcall: refusing session — %s", problem)
         try:
             await ws.send(json.dumps({
-                "type": "error", "message": problem, "fatal": True,
+                "type": "error", "message": problem or "webcall auth failed", "fatal": True,
             }))
         except Exception:
             pass
-        await ws.close(code=1008, reason=problem[:120])
+        await ws.close(code=1008, reason=(problem or "auth failed")[:120])
+        return
+
+    slot_problem = await _SESSION_SLOTS.try_acquire(user_id, tenant_slug)
+    if slot_problem:
+        log.warning(
+            "webcall: refusing session — %s user=%s tenant=%s",
+            slot_problem, user_id, tenant_slug,
+        )
+        try:
+            await ws.send(json.dumps({
+                "type": "error", "message": slot_problem, "fatal": True,
+            }))
+        except Exception:
+            pass
+        await ws.close(code=1008, reason=slot_problem[:120])
         return
 
     # Default to Envoy's gRPC proxy (config/gateway.yaml uses the same
@@ -437,43 +521,46 @@ async def _handle_connection(ws: ServerConnection) -> None:
     conv_target = os.environ.get("CONVERSATION_SVC_TARGET", "localhost:10000")
     session_id = str(uuid.uuid4())
     log.info(
-        "webcall: session=%s tenant=%s agent=%s draft=%s -> %s",
-        session_id, tenant_slug, agent_slug, use_draft, conv_target,
+        "webcall: session=%s tenant=%s agent=%s draft=%s user=%s -> %s",
+        session_id, tenant_slug, agent_slug, use_draft, user_id, conv_target,
     )
 
-    async with grpc.aio.insecure_channel(conv_target) as channel:
-        stub = pb_grpc.ConversationServiceStub(channel)
-        call = stub.Converse()
+    try:
+        async with grpc.aio.insecure_channel(conv_target) as channel:
+            stub = pb_grpc.ConversationServiceStub(channel)
+            call = stub.Converse()
 
-        await call.write(pb.GatewayMessage(session_open=pb.SessionOpenRequest(
-            protocol_version=PROTOCOL_VERSION,
-            session_id=session_id,
-            tenant_id=tenant_slug,   # semantically a slug — see agent_resolver.py
-            script_id=agent_slug,    # semantically a slug — see agent_resolver.py
-            codec=pb.AUDIO_CODEC_PCM_S16LE,
-            sample_rate=SAMPLE_RATE,
-            channels=1,
-            direction="test",
-            # ?draft=1 (+ first-frame admin JWT) — exercise an unpublished graph.
-            use_workflow_draft=use_draft,
-            # ?mode=text — type at the agent instead of talking to it. No
-            # audio flows in either direction; STT and TTS are skipped.
-            text_only=params.get("mode") == "text",
-        )))
+            await call.write(pb.GatewayMessage(session_open=pb.SessionOpenRequest(
+                protocol_version=PROTOCOL_VERSION,
+                session_id=session_id,
+                tenant_id=tenant_slug,   # semantically a slug — see agent_resolver.py
+                script_id=agent_slug,    # semantically a slug — see agent_resolver.py
+                codec=pb.AUDIO_CODEC_PCM_S16LE,
+                sample_rate=SAMPLE_RATE,
+                channels=1,
+                direction="test",
+                # ?draft=1 (+ first-frame admin JWT) — exercise an unpublished graph.
+                use_workflow_draft=use_draft,
+                # ?mode=text — type at the agent instead of talking to it. No
+                # audio flows in either direction; STT and TTS are skipped.
+                text_only=params.get("mode") == "text",
+            )))
 
-        response_watchdog = ResponseWatchdog(ws, text_mode=params.get("mode") == "text")
-        try:
-            await asyncio.gather(
-                _browser_to_grpc(ws, call, session_id, response_watchdog),
-                _grpc_to_browser(ws, call, response_watchdog),
-            )
-        except websockets.exceptions.ConnectionClosed:
-            log.info("webcall: browser closed session=%s", session_id)
-        except grpc.aio.AioRpcError as exc:
-            log.warning("webcall: grpc error session=%s detail=%s", session_id, exc)
-        finally:
-            response_watchdog.disarm()
-            call.cancel()
+            response_watchdog = ResponseWatchdog(ws, text_mode=params.get("mode") == "text")
+            try:
+                await asyncio.gather(
+                    _browser_to_grpc(ws, call, session_id, response_watchdog),
+                    _grpc_to_browser(ws, call, response_watchdog),
+                )
+            except websockets.exceptions.ConnectionClosed:
+                log.info("webcall: browser closed session=%s", session_id)
+            except grpc.aio.AioRpcError as exc:
+                log.warning("webcall: grpc error session=%s detail=%s", session_id, exc)
+            finally:
+                response_watchdog.disarm()
+                call.cancel()
+    finally:
+        await _SESSION_SLOTS.release(user_id, tenant_slug)
 
 
 async def main() -> None:

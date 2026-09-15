@@ -127,7 +127,11 @@ export default function WorkflowsPage() {
         <div className="agents-hero-copy">
           <h1 className="agents-hero-title">Workflows</h1>
           <p className="agents-hero-sub">
-            Open a flow to edit it, or create a new one.
+            Open a flow to edit it, or create a new one.{" "}
+            <span className="agents-hero-note">
+              A <strong>Single prompt</strong> badge means one instruction for the whole call —
+              no multi-step flow yet.
+            </span>
           </p>
         </div>
         <div className="agents-hero-actions">

@@ -557,7 +557,7 @@ function Panel({
           </button>
           <button
             className={`btn btn-sm ${testing ? "btn-primary" : "btn-ghost"}`}
-            title="Try this flow — talk (published agent) or type (draft chat). Chat lights up the active stage on the canvas."
+            title="Try this draft — voice or chat both run the unpublished flow on the canvas. Chat also lights up the active stage."
             onClick={() => { setTesting(testing ? null : "call"); setActiveNodeId(null); }}
           >
             Test Agent
@@ -754,9 +754,11 @@ function Panel({
               <TestAgentPanel
                 open
                 inline
+                useDraft
                 onClose={() => { setTesting(null); setActiveNodeId(null); }}
                 tenantSlug={tenantSlug}
                 agentSlug={agentSlug}
+                onNodeChanged={(node) => setActiveNodeId(node.id)}
               />
             ) : testing === "chat" ? (
               <TextChatPanel

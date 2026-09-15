@@ -120,7 +120,7 @@ function PromptField({
   );
 }
 
-function typeBadge(type: WorkflowNodeType | "connection"): string {
+function typeBadge(type: WorkflowNodeType): string {
   if (type === "start") return "badge green";
   if (type === "agent") return "badge indigo";
   if (type === "transfer") return "badge amber";
@@ -129,7 +129,7 @@ function typeBadge(type: WorkflowNodeType | "connection"): string {
   return "badge gray";
 }
 
-function typeLabel(type: WorkflowNodeType | "connection"): string {
+function typeLabel(type: WorkflowNodeType): string {
   if (type === "agent") return "stage";
   if (type === "global") return "always applies";
   return type;
@@ -165,7 +165,7 @@ export function Inspector({
       <div className="wf-inspector">
         <div className="wf-inspector-hdr">
           <span className="wf-inspector-title">{data.label || "connection"}</span>
-          <span className={typeBadge("connection")}>connection</span>
+          <span className="badge gray">connection</span>
         </div>
         <Problems items={mineErrors} kind="error" />
         <Problems items={mineWarnings} kind="warning" />

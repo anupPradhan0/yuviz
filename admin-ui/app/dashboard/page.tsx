@@ -270,7 +270,7 @@ export default function DashboardPage() {
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
         <StatCard icon="minutes" label="Total Minutes" value={statsLoading ? "—" : String(stats?.total_minutes ?? 0)} accent="var(--text)" />
-        <StatCard icon="agents" label="Active Agents" value={agents.length === 0 && tenants.length === 0 ? "—" : String(activeAgents)} accent="var(--cyan)" />
+        <StatCard icon="agents" label="Active Workflows" value={agents.length === 0 && tenants.length === 0 ? "—" : String(activeAgents)} accent="var(--cyan)" />
         <StatCard icon="live" label="Live Calls" value={statsLoading ? "—" : String(stats?.live_calls ?? 0)} accent="var(--amber)" live={(stats?.live_calls ?? 0) > 0} />
         <StatCard icon="success" label="Success Rate" value={successPct === null ? "—" : `${successPct}%`} accent="var(--green)" />
       </div>
