@@ -1,7 +1,7 @@
 "use client";
 
-// Agents list — create drops you on the canvas; voice/model/tools/number
-// live at ./[tenant]/[agent]/settings. URLs stay /workflows/*; labels say agent.
+// Workflows list — create drops you on the canvas; voice/model/tools/number
+// live at ./[tenant]/[agent]/settings.
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -43,6 +43,11 @@ function stepCount(a: AgentWithTenant): number | null {
 
 function slugify(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+function initial(name: string): string {
+  const trimmed = name.trim();
+  return trimmed ? trimmed[0]!.toUpperCase() : "?";
 }
 
 // Non-empty global prompt so pipeline date grounding / [[END_CALL]] attach.
@@ -87,7 +92,7 @@ export default function WorkflowsPage() {
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
     const matched = q
-      ? agents.filter((a) => `${a.name} ${a.tenantName}`.toLowerCase().includes(q))
+      ? agents.filter((a) => `${a.name} ${a.tenantName} ${a.slug}`.toLowerCase().includes(q))
       : agents;
     const rank: Record<FlowState, number> = { live: 0, unpublished: 1, draft: 2, none: 3 };
     return [...matched].sort(
@@ -117,72 +122,98 @@ export default function WorkflowsPage() {
   };
 
   return (
-    <>
-      <div className="card">
-        <div className="card-hdr">
-          <span className="card-title">Your Agents</span>
-          <input
-            className="form-input"
-            style={{ width: 200, marginLeft: "auto" }}
-            placeholder="Search agents…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-          <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
-            + New agent
+    <div className="agents-page">
+      <div className="agents-hero">
+        <div className="agents-hero-copy">
+          <h1 className="agents-hero-title">Workflows</h1>
+          <p className="agents-hero-sub">
+            Open a flow to edit it, or create a new one.{" "}
+            <span className="agents-hero-note">
+              A <strong>Single prompt</strong> badge means one instruction for the whole call —
+              no multi-step flow yet.
+            </span>
+          </p>
+        </div>
+        <div className="agents-hero-actions">
+          {agents.length > 0 && (
+            <div className="agents-search">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+                <circle cx="7" cy="7" r="4.5" />
+                <path d="M10.5 10.5L14 14" strokeLinecap="round" />
+              </svg>
+              <input
+                className="form-input"
+                placeholder="Search workflows…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                aria-label="Search workflows"
+              />
+            </div>
+          )}
+          <button className="btn btn-primary" onClick={() => setCreating(true)}>
+            + New workflow
           </button>
         </div>
+      </div>
 
+      <div className="card agents-card">
         {loading ? (
           <div className="empty-state">Loading…</div>
         ) : error ? (
           <div className="card-body"><div className="error-banner">{error}</div></div>
+        ) : agents.length === 0 ? (
+          <div className="agents-empty">
+            <div className="agents-empty-title">No workflows yet</div>
+            <p>Create one to draw its first conversation flow.</p>
+            <button className="btn btn-primary btn-sm" onClick={() => setCreating(true)}>
+              + New workflow
+            </button>
+          </div>
         ) : rows.length === 0 ? (
-          <div className="empty-state">
-            No agents yet. Create one to draw its first conversation flow.
+          <div className="agents-empty">
+            <div className="agents-empty-title">No matches</div>
+            <p>Nothing matches “{search.trim()}”.</p>
+            <button className="btn btn-ghost btn-sm" onClick={() => setSearch("")}>
+              Clear search
+            </button>
           </div>
         ) : (
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th>Agent</th><th>Account</th><th>Flow</th><th>Steps</th><th />
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((a) => {
-                const state = flowState(a);
-                const steps = stepCount(a);
-                return (
-                  <tr key={a.id} onClick={() => open(a)}>
-                    <td className="bold">{a.name}</td>
-                    <td>{a.tenantName}</td>
-                    <td>
-                      <span className={`badge ${STATE_BADGE[state]}`}>{STATE_LABEL[state]}</span>
-                    </td>
-                    <td className="mono">{steps === null ? "—" : steps}</td>
-                    <td style={{ textAlign: "right" }}>
-                      <button className="btn btn-ghost btn-sm" onClick={(e) => { e.stopPropagation(); open(a); }}>
-                        {state === "none" ? "Build a flow" : "Open"}
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <ul className="agents-list">
+            {rows.map((a) => {
+              const state = flowState(a);
+              const steps = stepCount(a);
+              return (
+                <li key={a.id}>
+                  <button type="button" className="agents-row" onClick={() => open(a)}>
+                    <span className="agents-avatar" aria-hidden>{initial(a.name)}</span>
+                    <span className="agents-row-main">
+                      <span className="agents-row-name">{a.name}</span>
+                      <span className="agents-row-meta">
+                        <span>{a.tenantName}</span>
+                        {steps !== null && (
+                          <>
+                            <span className="agents-dot" aria-hidden>·</span>
+                            <span>{steps} step{steps === 1 ? "" : "s"}</span>
+                          </>
+                        )}
+                      </span>
+                    </span>
+                    <span className={`badge ${STATE_BADGE[state]}`}>{STATE_LABEL[state]}</span>
+                    <span className="agents-row-action">
+                      {state === "none" ? "Build flow" : "Open"}
+                      <span aria-hidden>→</span>
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
         )}
-      </div>
-
-      <div className="form-hint" style={{ marginTop: 10 }}>
-        A flow splits a call into steps, each with its own instructions and its own tools, so the
-        agent can&apos;t book before it has verified. Agents marked <strong>Single prompt</strong> run
-        one instruction for the whole call — which is the right choice for simple agents. Voice,
-        model, tools and phone number are under <strong>Settings</strong> inside each agent.
       </div>
 
       <Modal
         open={creating}
-        title="New agent"
+        title="New workflow"
         onClose={() => { if (!busy) setCreating(false); }}
         footer={
           <>
@@ -227,11 +258,11 @@ export default function WorkflowsPage() {
             ))}
           </select>
           <div className="form-hint">
-            You land on the canvas with a starter flow drawn. Everything else — voice, model,
-            tools, number — is under Settings once it exists.
+            Opens on the canvas with a starter flow. Voice, model, tools and number are under
+            Settings after you create it.
           </div>
         </div>
       </Modal>
-    </>
+    </div>
   );
 }

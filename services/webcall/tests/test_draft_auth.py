@@ -11,6 +11,7 @@ import pytest
 
 from services.webcall.__main__ import (
     _CONSOLE_ROLES,
+    _SessionSlots,
     _await_session_auth,
     _config_tenant_check,
     _session_auth_problem,
@@ -45,10 +46,11 @@ async def test_console_roles_only():
     ) as check:
         check.return_value = None
         for role in ("admin", "viewer", "superadmin"):
-            assert await _session_auth_problem(_tok(role=role), "acme") is None
+            err, user_id = await _session_auth_problem(_tok(role=role), "acme")
+            assert err is None and user_id == "u1"
         for role in ("agent", "supervisor"):
-            err = await _session_auth_problem(_tok(role=role), "acme")
-            assert err and "not allowed" in err
+            err, user_id = await _session_auth_problem(_tok(role=role), "acme")
+            assert err and "not allowed" in err and user_id is None
 
 
 @pytest.mark.asyncio
@@ -58,15 +60,27 @@ async def test_rejects_when_config_denies_tenant():
         "services.webcall.__main__._config_tenant_check", new_callable=AsyncMock,
     ) as check:
         check.return_value = "session is not allowed for this tenant"
-        err = await _session_auth_problem(token, "other-tenant")
-        assert err and "tenant" in err
+        err, user_id = await _session_auth_problem(token, "other-tenant")
+        assert err and "tenant" in err and user_id is None
         check.assert_awaited_once_with(token, "other-tenant")
 
 
 @pytest.mark.asyncio
 async def test_rejects_missing_and_service_account():
-    assert await _session_auth_problem(None, "acme")
-    assert await _session_auth_problem(_tok(is_service_account=True), "acme")
+    err, user_id = await _session_auth_problem(None, "acme")
+    assert err and user_id is None
+    err, user_id = await _session_auth_problem(_tok(is_service_account=True), "acme")
+    assert err and user_id is None
+
+
+@pytest.mark.asyncio
+async def test_rejects_missing_sub():
+    with patch(
+        "services.webcall.__main__._config_tenant_check", new_callable=AsyncMock,
+    ) as check:
+        check.return_value = None
+        err, user_id = await _session_auth_problem(_tok(sub=""), "acme")
+        assert err and "user id" in err and user_id is None
 
 
 @pytest.mark.asyncio
@@ -112,7 +126,8 @@ async def test_await_session_auth_happy_path():
         "services.webcall.__main__._config_tenant_check", new_callable=AsyncMock,
     ) as check:
         check.return_value = None
-        assert await _await_session_auth(ws, "acme") is None
+        err, user_id = await _await_session_auth(ws, "acme")
+        assert err is None and user_id == "u1"
     assert json.loads(ws.sent[0]) == {"type": "auth_ok"}
 
 
@@ -125,17 +140,46 @@ async def test_await_session_auth_rejects_bad_frames():
         "services.webcall.__main__.asyncio.wait_for",
         side_effect=asyncio.TimeoutError,
     ):
-        err = await _await_session_auth(ws, "acme")
-        assert err and "timed out" in err
+        err, user_id = await _await_session_auth(ws, "acme")
+        assert err and "timed out" in err and user_id is None
 
     ws = _FakeWs([b"\x00\x01"])
-    err = await _await_session_auth(ws, "acme")
-    assert err and "text frame" in err
+    err, user_id = await _await_session_auth(ws, "acme")
+    assert err and "text frame" in err and user_id is None
 
     ws = _FakeWs(["not-json{"])
-    err = await _await_session_auth(ws, "acme")
-    assert err and "not JSON" in err
+    err, user_id = await _await_session_auth(ws, "acme")
+    assert err and "not JSON" in err and user_id is None
 
     ws = _FakeWs([json.dumps({"type": "text_input", "text": "hi"})])
-    err = await _await_session_auth(ws, "acme")
-    assert err and "auth frame first" in err
+    err, user_id = await _await_session_auth(ws, "acme")
+    assert err and "auth frame first" in err and user_id is None
+
+
+@pytest.mark.asyncio
+async def test_session_slots_cap_per_user(monkeypatch):
+    monkeypatch.setenv("WEBCALL_MAX_SESSIONS_PER_USER", "2")
+    monkeypatch.setenv("WEBCALL_MAX_SESSIONS_PER_TENANT", "10")
+    slots = _SessionSlots()
+    assert await slots.try_acquire("u1", "acme") is None
+    assert await slots.try_acquire("u1", "acme") is None
+    err = await slots.try_acquire("u1", "acme")
+    assert err and "user" in err
+    # Different user on same tenant still ok.
+    assert await slots.try_acquire("u2", "acme") is None
+    await slots.release("u1", "acme")
+    assert await slots.try_acquire("u1", "acme") is None
+
+
+@pytest.mark.asyncio
+async def test_session_slots_cap_per_tenant(monkeypatch):
+    monkeypatch.setenv("WEBCALL_MAX_SESSIONS_PER_USER", "10")
+    monkeypatch.setenv("WEBCALL_MAX_SESSIONS_PER_TENANT", "2")
+    slots = _SessionSlots()
+    assert await slots.try_acquire("u1", "acme") is None
+    assert await slots.try_acquire("u2", "acme") is None
+    err = await slots.try_acquire("u3", "acme")
+    assert err and "account" in err
+    assert await slots.try_acquire("u3", "other") is None
+    await slots.release("u1", "acme")
+    assert await slots.try_acquire("u3", "acme") is None

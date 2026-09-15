@@ -60,7 +60,7 @@ export default function TenantsPage() {
   };
 
   const handleDelete = async (t: Tenant) => {
-    if (!window.confirm(`Delete tenant "${t.name}"? Its agents, providers, and phone numbers remain in the database but will no longer resolve.`)) return;
+    if (!window.confirm(`Delete tenant "${t.name}"? Its workflows, providers, and phone numbers remain in the database but will no longer resolve.`)) return;
     try {
       await deleteTenant(t.id);
       refresh();
@@ -117,7 +117,7 @@ export default function TenantsPage() {
                 <th>Name</th>
                 <th>Slug</th>
                 <th>Region</th>
-                <th>Agents</th>
+                <th>Workflows</th>
                 <th>Config Version</th>
                 <th>Created</th>
                 <th>Actions</th>
