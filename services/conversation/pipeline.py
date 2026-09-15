@@ -106,11 +106,13 @@ def _build_current_date_context(calendar_timezone: str = "UTC") -> str:
     real local day. Falls back to UTC only if the configured zone name
     doesn't exist. Computed fresh per call (not baked into agent config)
     so it's always accurate regardless of how long the process has run."""
+    effective_timezone = calendar_timezone
     try:
         tz = ZoneInfo(calendar_timezone)
     except (ZoneInfoNotFoundError, ValueError):
         log.warning("Unknown calendar_timezone=%r — falling back to UTC for date grounding", calendar_timezone)
         tz = timezone.utc
+        effective_timezone = "UTC"
     now = datetime.now(tz)
     lookup = "\n".join(
         f"  {(now + timedelta(days=offset)).strftime('%Y-%m-%d')} = "
@@ -118,7 +120,12 @@ def _build_current_date_context(calendar_timezone: str = "UTC") -> str:
         for offset in range(_DATE_LOOKUP_DAYS)
     )
     return (
-        f"\n\nToday's date is {now.strftime('%Y-%m-%d')} ({now.strftime('%A')}), {calendar_timezone} time — "
+        # Label the timezone actually used, not the (possibly invalid)
+        # configured one — otherwise a misconfigured zone silently computed
+        # the lookup table in UTC while telling the model it was in the
+        # business's real timezone, which is a wrong label on every date
+        # in the table, not just a cosmetic mismatch.
+        f"\n\nToday's date is {now.strftime('%Y-%m-%d')} ({now.strftime('%A')}), {effective_timezone} time — "
         "the business's own local time, which is what matters for scheduling. "
         "Do not compute relative dates yourself — use this exact lookup table instead:\n"
         f"{lookup}\n"

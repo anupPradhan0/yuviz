@@ -40,6 +40,7 @@ from ..directives import (
 from .. import pipeline as pipeline_module
 from ..pipeline import (
     PipelineConversationHandler,
+    _build_current_date_context,
     _END_CALL_MARKER,
     _FALLBACK_GOODBYE,
     _TOOL_CALL_FILLER_MIN_GAP_S,
@@ -353,6 +354,17 @@ async def test_greeting_recorded_before_greeting_reaches_the_llm_on_the_first_re
 
     sent_contents = [m.content for m in seen_messages[0]]
     assert "Hi, this is Mia calling from Yuviz.ai." in sent_contents
+
+
+def test_date_context_labels_the_utc_fallback_as_utc_not_the_invalid_zone():
+    """A malformed timezone (e.g. a trailing slash, which raises ValueError
+    rather than ZoneInfoNotFoundError) makes the lookup table compute in
+    UTC — the prompt text must say "UTC", not echo the invalid configured
+    name back as if the table were actually in that timezone."""
+    text = _build_current_date_context("Asia/Kolkata/")
+    assert "UTC time" in text
+    assert "Asia/Kolkata/ time" not in text
+    assert "Asia/Kolkata" not in text
 
 
 def test_date_context_uses_real_timezone_even_without_booking_tool():
