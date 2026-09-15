@@ -753,6 +753,7 @@ function Panel({
             {testing === "call" ? (
               <TestAgentPanel
                 open
+                inline
                 onClose={() => { setTesting(null); setActiveNodeId(null); }}
                 tenantSlug={tenantSlug}
                 agentSlug={agentSlug}

@@ -87,7 +87,7 @@ const OVERVIEW_ITEMS = [{ href: "/dashboard", label: "Dashboard", icon: "dashboa
 
 const MANAGEMENT_ITEMS = [
   { href: "/tenants", label: "Accounts", icon: "accounts" },
-  { href: "/workflows", label: "Agents", icon: "workflows" },
+  { href: "/workflows", label: "Workflows", icon: "workflows" },
   { href: "/ai-voice", label: "AI & Voice", icon: "ai-voice" },
   { href: "/phone-numbers", label: "Phone Numbers", icon: "phone-numbers" },
 ];
@@ -107,7 +107,7 @@ const PLATFORM_ITEMS = [{ href: "/settings", label: "Settings", icon: "settings"
 const ALL_ITEMS = [...OVERVIEW_ITEMS, ...MANAGEMENT_ITEMS, USERS_ITEM, ...CALLING_ITEMS, ...PLATFORM_ITEMS];
 
 // Agent settings live under /workflows/.../settings — second crumb for that sub-route.
-const SETTINGS_CRUMBS = ["Agents", "Settings"];
+const SETTINGS_CRUMBS = ["Workflows", "Settings"];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -179,7 +179,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const visiblePlatform = PLATFORM_ITEMS.filter((item) => matches(item.label));
 
   // Longest-prefix match, not first-match: /workflows/acme/reception must
-  // resolve to "Agents", not a shorter unrelated prefix.
+  // resolve to "Workflows", not a shorter unrelated prefix.
   const activeItem = [...ALL_ITEMS]
     .sort((a, b) => b.href.length - a.href.length)
     .find((item) => pathname.startsWith(item.href));
