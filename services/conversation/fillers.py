@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import math
+import random
 
 log = logging.getLogger(__name__)
 
@@ -39,9 +40,6 @@ _FALLBACK_FILLER = "One moment."
 
 
 class FillerSelector:
-    def __init__(self) -> None:
-        self._tool_rotation = 0
-
     def select_tool_filler(
         self, tool_name: str, last_phrase: str | None, average_ms: float | None,
     ) -> str:
@@ -65,9 +63,13 @@ class FillerSelector:
                 shortest = min(p[1] for p in candidates)
                 tier = [p for p in candidates if p[1] == shortest]
 
-            phrase = tier[self._tool_rotation % len(tier)][0]
-            self._tool_rotation += 1
-            return phrase
+            # random, not a rotating counter: a counter on a FillerSelector
+            # shared by every concurrent call across every tenant (see
+            # __main__.py) isn't actually "this call's rotation" — two
+            # callers in flight interleave increments, so what looked like
+            # deterministic variety was really arbitrary anyway. Random
+            # selection is honest about that and needs no shared state.
+            return random.choice(tier)[0]
         except Exception:
             log.exception("FillerSelector.select_tool_filler failed tool=%r", tool_name)
             return _FALLBACK_FILLER

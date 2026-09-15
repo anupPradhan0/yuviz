@@ -296,6 +296,41 @@ async def test_greeting_is_recorded_in_history():
     assert [m for m in history if m.role == "assistant" and m.content == "Hi, this is Mia calling from Yuviz.ai."]
 
 
+async def test_greeting_not_recorded_when_tts_produces_no_audio():
+    """If TTS fails (or, same observable shape, synthesizes nothing), the
+    caller hears no greeting at all — recording it in history anyway would
+    make the model believe it had already introduced itself and answer
+    straight into the caller's next question with no introduction."""
+    stt = _make_stt("hi")
+    llm = _make_llm(["ok"])
+    tts = _make_tts(pcm=b"")  # falsy audio -> _synthesize_sentence_stream yields zero chunks
+    handler = _make_handler(stt, llm, tts, greeting="Hi, this is Mia calling from Yuviz.ai.")
+
+    chunks = await handler.greeting("s1")
+
+    assert chunks == []
+    history = handler._get_history("s1")
+    assert not [m for m in history if m.role == "assistant" and m.content == "Hi, this is Mia calling from Yuviz.ai."]
+
+
+async def test_greeting_still_recorded_in_text_only_mode_despite_zero_chunks():
+    """text_only never touches TTS at all (by design, not failure) — zero
+    chunks there must not be mistaken for a synthesis failure and skip
+    recording the greeting the chat UI is actively displaying."""
+    stt = _make_stt("hi")
+    llm = _make_llm(["ok"])
+    tts = _make_tts()
+    handler = _make_handler(
+        stt, llm, tts, greeting="Hi, this is Mia calling from Yuviz.ai.", text_only=True,
+    )
+
+    chunks = await handler.greeting("s1")
+
+    assert chunks == []
+    history = handler._get_history("s1")
+    assert [m for m in history if m.role == "assistant" and m.content == "Hi, this is Mia calling from Yuviz.ai."]
+
+
 @pytest.mark.asyncio
 async def test_greeting_recorded_before_greeting_reaches_the_llm_on_the_first_real_turn():
     """The seeded greeting message must actually reach generate() on the
@@ -318,6 +353,23 @@ async def test_greeting_recorded_before_greeting_reaches_the_llm_on_the_first_re
 
     sent_contents = [m.content for m in seen_messages[0]]
     assert "Hi, this is Mia calling from Yuviz.ai." in sent_contents
+
+
+def test_date_context_uses_real_timezone_even_without_booking_tool():
+    """A reschedule-only agent has has_booking_tool=False (that flag stays
+    booking-specific, gating only the caller-ID confirmation block) but
+    must still get its real calendar_timezone in the date-grounding prompt
+    — previously this silently fell back to UTC for any agent without
+    book_appointment specifically, including reschedule-only ones."""
+    stt = _make_stt("hi")
+    llm = _make_llm(["ok"])
+    tts = _make_tts()
+    handler = _make_handler(
+        stt, llm, tts, has_booking_tool=False, calendar_timezone="Asia/Kolkata",
+    )
+
+    assert "Asia/Kolkata" in handler._prompt_suffix
+    assert "UTC" not in handler._prompt_suffix.split("Do not compute")[0]
 
 
 def test_current_date_template_variable_uses_calendar_timezone_not_utc():

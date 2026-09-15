@@ -372,7 +372,13 @@ class PipelineConversationHandler:
         # Prompt suffix = date / optional ANI context / fixed directive tokens.
         self._has_booking_tool = has_booking_tool
         self._prompt_suffix = (
-            _build_current_date_context(calendar_timezone if has_booking_tool else "UTC")
+            # calendar_timezone is already sourced from whichever calendar
+            # tool is enabled (book_appointment or reschedule_appointment —
+            # see __main__.py) and defaults to "UTC" when neither is, so no
+            # has_booking_tool gate is needed here. The caller-number block
+            # stays booking-specific — a reschedule-only agent's flow
+            # doesn't need the caller-ID confirmation before booking.
+            _build_current_date_context(calendar_timezone)
             + (_build_caller_number_context(self._caller_number) if has_booking_tool else "")
             + _END_CALL_INSTRUCTION
         )
@@ -522,15 +528,24 @@ class PipelineConversationHandler:
         text = self._workflow.greeting() or ""
         if not text:
             return []
-        # Record the greeting in history so the LLM knows it already
-        # introduced itself, instead of re-introducing itself garbled on
-        # its real first turn. Recorded regardless of whether playback is
-        # later interrupted by barge-in: this is scripted, not generated,
-        # so the intended line is what the LLM "said" — history needs the
-        # LLM's own record, not a transcript of what audio actually
-        # reached the caller's ear.
-        self._get_history(session_id).append(ChatMessage(role="assistant", content=text))
-        return [chunk async for chunk in self._synthesize_sentence_stream(text, session_id)]
+        # Only record the greeting in history once synthesis actually
+        # produced audio — _synthesize_sentence_stream swallows a TTS
+        # failure internally (logs, then the generator just ends with zero
+        # chunks), so appending unconditionally beforehand let the model
+        # believe it had greeted the caller even when the caller heard
+        # nothing at all, and it would answer straight into the caller's
+        # next question with no introduction. Barge-in interrupting
+        # otherwise-successful playback is fine to still record — this is
+        # scripted, not generated, so the intended line is what the LLM
+        # "said," and history needs the LLM's own record, not a transcript
+        # of exactly how much audio reached the caller's ear.
+        # text_only always yields zero chunks by design (never touches
+        # TTS) — that's not a failure signal there, so it's exempted from
+        # the gate and always recorded, matching every other spoken line.
+        chunks = [chunk async for chunk in self._synthesize_sentence_stream(text, session_id)]
+        if chunks or self._text_only:
+            self._get_history(session_id).append(ChatMessage(role="assistant", content=text))
+        return chunks
 
     async def on_audio(self, session_id: str, payload: bytes) -> HandlerResponse:
         # Audio is also accumulated by ConversationSession (still the source
@@ -1336,6 +1351,13 @@ class PipelineConversationHandler:
                         state.tool_call_filler_last_phrase = phrase
                         any_filler_chunk = False
                         async for chunk in self._synthesize_sentence_stream(phrase, session_id):
+                            if cancel_event.is_set():
+                                # A barge-in during the filler itself must
+                                # interrupt it, same as any other spoken
+                                # text — without this check, the longest
+                                # filler phrase (~2.4s) was a window where
+                                # the caller's interruption went unheard.
+                                break
                             if not any_filler_chunk:
                                 any_filler_chunk = True
                                 log.info(

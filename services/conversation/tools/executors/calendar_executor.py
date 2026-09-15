@@ -42,12 +42,24 @@ def _to_e164(phone: str, caller_number: str | None) -> str:
     if not phone or phone.startswith("+"):
         return phone
     digits = "".join(c for c in phone if c.isdigit())
+    # A short or empty digit string matches almost any ANI by chance (an
+    # empty string is a suffix of everything) — that's not "the same
+    # number spoken without its country code," it's a coincidence. No real
+    # national number is shorter than this; below it, treat as unresolvable
+    # rather than splice a fragment onto someone else's country code.
+    if len(digits) < 7:
+        return phone
     if not caller_number or not caller_number.startswith("+"):
         return phone
     caller_digits = "".join(c for c in caller_number if c.isdigit())
-    if len(caller_digits) <= len(digits) or not caller_digits.endswith(digits):
+    # The borrowed prefix must actually look like a country code (1-3
+    # digits) — a same-length or near-length match isn't "no country code
+    # was given," it's a different number entirely, and a huge gap means
+    # `digits` is too short to be a real national number in the first place.
+    prefix_len = len(caller_digits) - len(digits)
+    if not 1 <= prefix_len <= 3 or not caller_digits.endswith(digits):
         return phone
-    country_code = caller_digits[: len(caller_digits) - len(digits)]
+    country_code = caller_digits[:prefix_len]
     return f"+{country_code}{digits}"
 
 # Holds references to in-flight fire-and-forget SMS sends — asyncio only

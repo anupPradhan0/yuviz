@@ -114,6 +114,26 @@ def is_in_the_past(dt: datetime, calendar_timezone: str) -> bool:
     return dt.date() < today
 
 
+# correct_year_if_wrong only ever rolls a past date forward — a model that
+# guesses a year too far in the FUTURE (2027 instead of 2026) produces a
+# date that is not in the past at all, so is_in_the_past never flags it and
+# no correction is ever consulted. day-of-month/time can be exactly what
+# the caller said and the booking still lands a year out with nothing to
+# catch it. One year out covers any legitimate real booking (this platform
+# has no scheduling-months-ahead use case today) while still catching the
+# same "small model, wrong year" failure mode in the other direction.
+_MAX_DAYS_IN_FUTURE = 365
+
+
+def is_too_far_out(dt: datetime, calendar_timezone: str, max_days: int = _MAX_DAYS_IN_FUTURE) -> bool:
+    try:
+        tz = ZoneInfo(calendar_timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = ZoneInfo("UTC")
+    today = datetime.now(tz).date()
+    return (dt.date() - today).days > max_days
+
+
 # How far off a guessed year can be and still count as the "small model
 # can't compute the current year" failure mode (a 2-3 year gap) rather
 # than a genuinely bogus date (e.g. a decade off, or a typo) that deserves

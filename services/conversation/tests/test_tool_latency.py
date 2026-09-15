@@ -4,6 +4,7 @@ from .. import tool_latency as tool_latency_module
 from ..tool_latency import (
     _MAX_AGE_S,
     _MAX_KEYS_PER_TENANT,
+    _MAX_TENANTS,
     _MIN_SAMPLES,
     _SWEEP_EVERY,
     _SWEEP_SCAN,
@@ -105,6 +106,20 @@ def test_tenant_dropped_from_outer_map_once_only_key_ages_out(monkeypatch):
     clock["t"] += _MAX_AGE_S + 1
     assert store.average_ms("t1", "a1", "tool") is None
     assert "t1" not in store._tenants
+
+
+def test_outer_tenant_map_is_bounded():
+    # A stream of unique tenant ids must not grow the outer map without
+    # bound — record()'s O(1) cap, independent of _sweep()'s scan window.
+    # Which specific tenant gets evicted can shift under _sweep()'s own
+    # move_to_end bookkeeping (it also touches LRU order); the property
+    # that must always hold is the size cap and that recent tenants survive.
+    store = ToolLatencyStore()
+    for i in range(_MAX_TENANTS + 5):
+        store.record(f"t{i}", "a1", "tool", 500.0)
+    assert len(store._tenants) == _MAX_TENANTS
+    assert f"t{_MAX_TENANTS + 4}" in store._tenants
+    assert f"t{_MAX_TENANTS + 3}" in store._tenants
 
 
 def test_cross_tenant_eviction_immunity():

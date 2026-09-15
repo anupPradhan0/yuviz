@@ -323,9 +323,19 @@ async def serve(port: int, args: argparse.Namespace) -> None:
             enabled_policies = await tool_policy_resolver.enabled_tools(runtime_config.agent.id)
             has_booking_tool = any(p.definition.name == "book_appointment" for p in enabled_policies)
             booking_policy = next((p for p in enabled_policies if p.definition.name == "book_appointment"), None)
+            reschedule_policy = next(
+                (p for p in enabled_policies if p.definition.name == "reschedule_appointment"), None,
+            )
             # Same field _make_cal_com reads (provider_manager.py) — not a
             # new timezone convention, just reused for date grounding too.
-            calendar_timezone = (booking_policy.extra.get("timezone") if booking_policy else None) or "UTC"
+            # Sourced from whichever calendar tool is actually enabled — a
+            # reschedule-only agent has no booking_policy, so gating this on
+            # has_booking_tool alone silently used UTC for its date
+            # grounding and requested-date validation. has_booking_tool
+            # itself stays booking-specific below (caller-ID confirmation
+            # prompt), which genuinely doesn't apply to reschedule.
+            calendar_policy = booking_policy or reschedule_policy
+            calendar_timezone = (calendar_policy.extra.get("timezone") if calendar_policy else None) or "UTC"
 
             tool_orchestrator = ToolCallOrchestrator(
                 llm_adapter=LLMAdapter(bundle.llm),

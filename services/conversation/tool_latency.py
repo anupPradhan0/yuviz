@@ -25,6 +25,13 @@ _MAX_AGE_S = 900.0       # samples older than 15 min are dropped on read
 _MAX_KEYS_PER_TENANT = 200   # distinct (agent, tool) keys per tenant; LRU beyond that
 _SWEEP_EVERY = 64        # run the reclaim sweep on every Nth accepted record()
 _SWEEP_SCAN = 32         # tenant entries examined per sweep, from the front of the outer map
+# _sweep() only reclaims up to _SWEEP_SCAN tenants per _SWEEP_EVERY accepted
+# records — sustained traffic from a stream of unique tenant ids (or tenant
+# aliases) could otherwise grow the outer map faster than the sweep reclaims
+# it, unbounded, for the life of the process. This is the same LRU-eviction
+# pattern as _MAX_KEYS_PER_TENANT, just applied one level up: an O(1) check
+# on the hot record() path, no scan of the whole map.
+_MAX_TENANTS = 2000
 
 TenantKey = str                    # tenant_id, outer partition
 AgentToolKey = tuple[str, str]     # (agent_id, tool_name), inner LRU key
@@ -46,6 +53,8 @@ class ToolLatencyStore:
         if tenant_map is None:
             tenant_map = OrderedDict()
             self._tenants[tenant_id] = tenant_map
+            if len(self._tenants) > _MAX_TENANTS:
+                self._tenants.popitem(last=False)
         self._tenants.move_to_end(tenant_id)
 
         samples = tenant_map.get(key)

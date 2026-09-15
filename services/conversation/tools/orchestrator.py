@@ -7,6 +7,7 @@ hardcoded here.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -19,6 +20,7 @@ from .date_sanity import (
     correct_year_if_wrong,
     date_field_for_tool,
     is_in_the_past,
+    is_too_far_out,
     no_time_stated,
     parse_requested_date,
     stated_day_mismatch,
@@ -147,12 +149,32 @@ class ToolCallOrchestrator:
                         status=ToolStatus.FAILED, error="local_tool_call_cap_exceeded",
                     )
                 else:
-                    iteration += 1  # remote only — locals must not burn this budget
-                    yield ToolCallStartedEvent(tool_name=event.tool_name)
-                    result = await self._execute_tool_call(
-                        event, policies_by_name, tenant_id, agent_id, call_id, session_id, turn_id,
-                        iteration, caller_number, cancel_event, phone_number_confirmed, history,
-                    )
+                    # Cheap, synchronous, sub-millisecond — runs before we
+                    # spend a remote iteration or announce a filler. A bad
+                    # date is a local rejection, not tool work: the caller
+                    # would otherwise hear a filler promising work that
+                    # never happens, and two rejections in one turn used to
+                    # exhaust DEFAULT_MAX_TOOL_ITERATIONS before the model
+                    # ever got a corrected retry.
+                    date_check = self._check_requested_date(event, history)
+                    if date_check is not None:
+                        result = date_check
+                    else:
+                        iteration += 1  # remote only — locals must not burn this budget
+                        # Start the real work before announcing it, not after:
+                        # yielding first (as this used to) suspends this
+                        # generator until the whole filler finishes
+                        # synthesizing, so the tool call didn't actually begin
+                        # until the filler was done speaking — the opposite of
+                        # "the filler covers the wait." Starting the task first
+                        # means the filler genuinely overlaps real work instead
+                        # of prepending to it.
+                        execute_task = asyncio.ensure_future(self._execute_tool_call(
+                            event, policies_by_name, tenant_id, agent_id, call_id, session_id, turn_id,
+                            iteration, caller_number, cancel_event, phone_number_confirmed,
+                        ))
+                        yield ToolCallStartedEvent(tool_name=event.tool_name)
+                        result = await execute_task
                 _fold_tool_result_into_history(history, event, result)
                 if result.deterministic_response is not None:
                     yield DeterministicSpokenEvent(
@@ -173,16 +195,11 @@ class ToolCallOrchestrator:
         self, event: ToolCallEvent, policies_by_name: dict, tenant_id: str, agent_id: str,
         call_id: str, session_id: str, turn_id: str, iteration: int, caller_number: str = "",
         cancel_event: "asyncio.Event | None" = None, phone_number_confirmed: bool = False,
-        history: "list[ChatMessage] | None" = None,
     ) -> ToolResult:
         policy = policies_by_name.get(event.tool_name)
         if policy is None:
             log.warning("ToolCallOrchestrator: LLM called unoffered tool_name=%r", event.tool_name)
             return ToolResult(status=ToolStatus.FAILED, error="unknown_tool")
-
-        date_check = self._check_requested_date(event, history)
-        if date_check is not None:
-            return date_check
 
         try:
             provider = await self._provider_manager.get(policy)
@@ -300,6 +317,32 @@ class ToolCallOrchestrator:
             )
             event.arguments[date_field] = corrected.isoformat()
             dt = corrected
+        elif is_too_far_out(dt, self._calendar_timezone):
+            # correct_year_if_wrong only ever rolls a past date forward — a
+            # wrong year in the FUTURE (2027 instead of 2026) produces a
+            # date that isn't in the past at all, so nothing above catches
+            # it, and day-of-month/time can be exactly what the caller said.
+            # Without this, that books a year out with no guardrail firing.
+            log.warning(
+                "ToolCallOrchestrator: rejected %s — %s=%r is too far in the future",
+                event.tool_name, date_field, event.arguments.get(date_field),
+            )
+            return ToolResult(status=ToolStatus.INVALID_ARGUMENT, payload={
+                "missing_fields": [date_field], "reason": "date_too_far_out",
+            })
+
+        # The day/time confirmation checks below are false-positive prone by
+        # nature (an unrelated numeral, a slot the agent proposed but the
+        # caller didn't literally repeat) — a real caller can get asked the
+        # same question a handful of times in unlucky phrasing. Past a small
+        # cap, keep asking is worse than the residual risk of a wrong date:
+        # let the call through rather than loop the caller forever.
+        if _recent_rejection_count(history) >= _MAX_DATE_CONFIRMATION_REJECTIONS:
+            log.warning(
+                "ToolCallOrchestrator: %s date-confirmation rejection cap reached — letting %s "
+                "through unconfirmed rather than loop the caller", event.tool_name, date_field,
+            )
+            return None
 
         # Checking only the single last utterance rejects an already-stated,
         # correct date when the caller supplies date and time in separate
@@ -311,16 +354,20 @@ class ToolCallOrchestrator:
         # split across turns, which is how people actually talk.
         recent_user_text = _recent_user_text(history)
         if recent_user_text and stated_day_mismatch(dt.day, recent_user_text):
+            # Caller utterances are never logged verbatim here — they
+            # routinely contain the phone number the agent just asked the
+            # caller to state digit by digit, plus names, on a path that
+            # fires during normal call recovery, not an edge case.
             log.warning(
-                "ToolCallOrchestrator: rejected %s — %s=%r day=%d not found in caller's recent "
-                "utterances=%r", event.tool_name, date_field, event.arguments.get(date_field),
-                dt.day, recent_user_text,
+                "ToolCallOrchestrator: rejected %s — %s=%r day=%d not found in the caller's "
+                "recent utterances (text not logged — caller PII)",
+                event.tool_name, date_field, event.arguments.get(date_field), dt.day,
             )
             return ToolResult(status=ToolStatus.INVALID_ARGUMENT, payload={
                 "missing_fields": [date_field], "reason": "date_not_confirmed",
             })
 
-        if no_time_stated(_all_message_texts(history)):
+        if no_time_stated(_time_confirmable_texts(history)):
             log.warning(
                 "ToolCallOrchestrator: rejected %s — %s=%r but no time-of-day was ever stated "
                 "by the caller this call", event.tool_name, date_field, event.arguments.get(date_field),
@@ -331,19 +378,58 @@ class ToolCallOrchestrator:
         return None
 
 
+# A real caller can plausibly get asked to reconfirm a date/time once; a
+# third ask in the same call is worse for the caller than the residual risk
+# of proceeding unconfirmed. See _check_requested_date's escape valve.
+_MAX_DATE_CONFIRMATION_REJECTIONS = 2
+_REJECTION_REASONS = frozenset({"date_not_confirmed", "time_not_confirmed"})
+
+
+def _recent_rejection_count(history: "list[ChatMessage] | None") -> int:
+    """Counts prior date/time-confirmation rejections this call by reading
+    the tool-result messages _fold_tool_result_into_history already writes
+    — no new state to thread through pipeline.py's per-session object."""
+    if not history:
+        return 0
+    count = 0
+    for m in history:
+        if m.role != "tool":
+            continue
+        try:
+            payload = json.loads(m.content)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(payload, dict) and payload.get("reason") in _REJECTION_REASONS:
+            count += 1
+    return count
+
+
 def _all_user_messages(history: "list[ChatMessage] | None") -> list[str]:
     if not history:
         return []
     return [m.content for m in history if m.role == "user"]
 
 
-def _all_message_texts(history: "list[ChatMessage] | None") -> list[str]:
-    """Both roles — an agent-proposed time slot the caller accepts with a
-    bare "yes" never appears in the caller's own utterances, so
-    no_time_stated must see what the agent said too, not just the caller."""
+def _time_confirmable_texts(history: "list[ChatMessage] | None") -> list[str]:
+    """Every caller turn, plus an assistant turn only when immediately
+    followed by a user turn — i.e. a time the agent proposed that the
+    caller then actually responded to. Never the agent's own open question
+    on its own: scanning any assistant text let the model's own remediation
+    line ("what time works — morning or afternoon?") permanently satisfy
+    this check the instant it was asked, disarming the guardrail on the one
+    retry it exists to police. Never system (the composed node prompt may
+    itself mention business hours) or tool role content (an available_slots
+    payload full of clock times) either — only text a human actually said
+    in the conversation counts."""
     if not history:
         return []
-    return [m.content for m in history]
+    out: list[str] = []
+    for i, m in enumerate(history):
+        if m.role == "user":
+            out.append(m.content)
+        elif m.role == "assistant" and i + 1 < len(history) and history[i + 1].role == "user":
+            out.append(m.content)
+    return out
 
 
 def _recent_user_text(history: "list[ChatMessage] | None", n: int = 3) -> str:
@@ -415,8 +501,6 @@ async def _execute_local_tool(
 
 def _fold_tool_result_into_history(history: list[ChatMessage], event: ToolCallEvent, result: ToolResult) -> None:
     """Append assistant tool_call + tool result in the generic ChatMessage shape."""
-    import json
-
     call_dict: dict[str, Any] = {"id": event.tool_call_id, "name": event.tool_name, "arguments": event.arguments}
     if event.provider_metadata:
         call_dict["provider_metadata"] = event.provider_metadata
