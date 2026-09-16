@@ -224,10 +224,37 @@ async def update_provider_config(
     return new
 
 
+# Tenant default / agent override columns per voice role. Embedding providers
+# are not tenant defaults — deleting one only clears agent overrides if any.
+_ROLE_TENANT_DEFAULT = {
+    "stt": "default_stt_config_id",
+    "llm": "default_llm_config_id",
+    "tts": "default_tts_config_id",
+}
+_ROLE_AGENT_OVERRIDE = {
+    "stt": "stt_config_id",
+    "llm": "llm_config_id",
+    "tts": "tts_config_id",
+}
+
+
 async def soft_delete_provider_config(
     provider_id: Any, *, user_id: Any | None = None, user_email: str | None = None,
 ) -> None:
+    """Soft-delete a provider and detach it from live routing.
+
+    Leaving tenant.default_*_config_id pointed at a deleted row makes
+    get_runtime_config() return None (provider 404), so Conversation falls
+    back to the legacy env Ollama URL — which fails hard under --no-llm.
+    Repoint the tenant default to another live provider of the same role
+    when one exists; otherwise clear it. Agent overrides are always cleared.
+    """
+    from . import agents as agents_service
+
     pool = await db.get_pool()
+    tenant_slugs: list[str] = []
+    agent_keys: list[tuple[str, str]] = []
+
     async with pool.acquire() as conn:
         async with conn.transaction():
             old_row = await conn.fetchrow(
@@ -250,7 +277,59 @@ async def soft_delete_provider_config(
                 old_value=old,
             )
 
-    await cache.invalidate(_cache_key(provider_id))
+            role = old["role"]
+            tenant_col = _ROLE_TENANT_DEFAULT.get(role)
+            agent_col = _ROLE_AGENT_OVERRIDE.get(role)
+
+            if agent_col is not None:
+                agent_rows = await conn.fetch(
+                    f"SELECT a.slug, t.slug AS tenant_slug FROM agents a "
+                    f"JOIN tenants t ON t.id = a.tenant_id "
+                    f"WHERE a.{agent_col} = $1 AND a.deleted_at IS NULL",
+                    provider_id,
+                )
+                agent_keys = [(r["tenant_slug"], r["slug"]) for r in agent_rows]
+                await conn.execute(
+                    f"UPDATE agents SET {agent_col} = NULL WHERE {agent_col} = $1",
+                    provider_id,
+                )
+
+            if tenant_col is not None:
+                tenants_using = await conn.fetch(
+                    f"SELECT id, slug FROM tenants "
+                    f"WHERE {tenant_col} = $1 AND deleted_at IS NULL",
+                    provider_id,
+                )
+                for t in tenants_using:
+                    replacement = await conn.fetchval(
+                        "SELECT id FROM provider_configs "
+                        "WHERE tenant_id = $1 AND role = $2 AND deleted_at IS NULL "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        t["id"], role,
+                    )
+                    await conn.execute(
+                        f"UPDATE tenants SET {tenant_col} = $2 WHERE id = $1",
+                        t["id"], replacement,
+                    )
+                    tenant_slugs.append(t["slug"])
+
+    keys = [_cache_key(provider_id)]
+    keys.extend(f"tenant:{s}" for s in tenant_slugs)
+    keys.extend(agents_service.cache_key(ts, slug) for ts, slug in agent_keys)
+    # Agents inherit the tenant default — invalidate every live agent in
+    # tenants whose default we just rewrote so cache-aside cannot serve a
+    # RuntimeConfig still holding the deleted provider id.
+    if tenant_slugs:
+        async with pool.acquire() as conn:
+            inherited = await conn.fetch(
+                "SELECT a.slug, t.slug AS tenant_slug FROM agents a "
+                "JOIN tenants t ON t.id = a.tenant_id "
+                "WHERE t.slug = ANY($1::text[]) AND a.deleted_at IS NULL",
+                tenant_slugs,
+            )
+        keys.extend(agents_service.cache_key(r["tenant_slug"], r["slug"]) for r in inherited)
+
+    await cache.invalidate(*keys)
     await cache.publish(PROVIDER_CONFIG_CHANGED_CHANNEL, str(provider_id))
 
 

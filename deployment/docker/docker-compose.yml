@@ -107,6 +107,8 @@ services:
     environment:
       POSTGRES_DSN: ${POSTGRES_DSN}
       REDIS_URL: ${REDIS_URL}
+      # Shared with config — knowledge imports services.config.auth for JWT.
+      JWT_SECRET: ${JWT_SECRET}
       KNOWLEDGE_STORAGE_ROOT: /app/data/knowledge_documents
       # Embedding providers resolve api_key_ref too (embedding_manager.py).
       SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
