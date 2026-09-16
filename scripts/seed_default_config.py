@@ -108,6 +108,18 @@ async def main() -> None:
         "default_llm_config_id": provider_ids["llm"],
         "default_tts_config_id": provider_ids["tts"],
     }
+    # Don't stomp a cloud LLM the admin already pointed the tenant at
+    # (common with ./dev.sh --no-llm: ollama is seeded but unused).
+    current_llm_id = tenant.get("default_llm_config_id")
+    if current_llm_id:
+        current_llm = await provider_configs.get_provider_config(current_llm_id)
+        if current_llm is not None and current_llm["engine"] != "ollama":
+            defaults_to_set.pop("default_llm_config_id")
+            print(
+                f"keeping tenant LLM default {current_llm['engine']}/"
+                f"{current_llm.get('model') or '?'} ({current_llm_id})"
+            )
+
     if any(tenant.get(k) != v for k, v in defaults_to_set.items()):
         tenant = await tenants.update_tenant(tenant["id"], **defaults_to_set)
         print(f"updated tenant {TENANT_SLUG!r} default providers")

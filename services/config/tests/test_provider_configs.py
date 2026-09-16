@@ -83,7 +83,48 @@ async def test_provider_config_role_check_constraint_rejects_bad_role(test_tenan
         )
 
 
+async def test_soft_delete_repoints_tenant_default_to_sibling(test_tenant, pool):
+    """Deleting the tenant's default LLM must not leave a dangling id —
+    Conversation would 404 the provider and fall back to env Ollama."""
+    from services.config import agents, tenants
+
+    primary = await provider_configs.create_provider_config(
+        tenant_id=test_tenant["id"], name="Ollama", role="llm", engine="ollama",
+        model="llama3.2",
+    )
+    backup = await provider_configs.create_provider_config(
+        tenant_id=test_tenant["id"], name="Gemini", role="llm", engine="gemini",
+        model="gemini-2.5-flash",
+    )
+    await tenants.update_tenant(
+        test_tenant["id"], default_llm_config_id=str(primary["id"]),
+    )
+    agent = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="chat-bot", name="Chat",
+        llm_config_id=str(primary["id"]),
+    )
+
+    await provider_configs.soft_delete_provider_config(primary["id"])
+
+    assert await provider_configs.get_provider_config(primary["id"]) is None
+    tenant = await tenants.get_tenant(test_tenant["slug"])
+    assert tenant is not None
+    assert str(tenant["default_llm_config_id"]) == str(backup["id"])
+    refreshed = await agents.get_agent_by_id(agent["id"])
+    assert refreshed is not None
+    assert refreshed["llm_config_id"] is None
+
+    # Fixture teardown hard-deletes provider_configs; clear FKs first.
+    await tenants.update_tenant(
+        test_tenant["id"],
+        default_llm_config_id=None,
+        default_stt_config_id=None,
+        default_tts_config_id=None,
+    )
+
+
 async def test_audit_log_redacts_api_key_ref(test_tenant, pool):
+
     created = await provider_configs.create_provider_config(
         tenant_id=test_tenant["id"], name="Deepgram", role="stt", engine="deepgram",
         api_key_ref="k8s:voiceai/deepgram-api-key",
