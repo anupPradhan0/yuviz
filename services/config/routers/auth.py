@@ -1,14 +1,24 @@
 from __future__ import annotations
 
-import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+import secrets
+from typing import Any
+from urllib.parse import urlencode
 
+import asyncpg
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
+
+from .. import google_oauth
 from .. import users as users_service
 from ..auth import CurrentUser, create_access_token
 from ..deps import get_authenticated_user, is_platform_scoped
+from ..google_oauth import GoogleOAuthError
 from ..schemas import BootstrapRequest, ChangePasswordRequest, LoginRequest
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+_GOOGLE_COOKIE = "yuviz_google_oauth"
+_GOOGLE_COOKIE_PATH = "/auth/oauth/google"
 
 
 def _token_response(user: dict) -> dict:
@@ -45,6 +55,61 @@ async def login(body: LoginRequest):
         # users.authenticate()'s docstring for why.
         raise HTTPException(status_code=401, detail="invalid email or password")
     return _token_response(user)
+
+
+def _to_login(**fragment: str) -> RedirectResponse:
+    # URL fragment, not query: the browser never sends it to any server or logs.
+    return RedirectResponse(f"{google_oauth.ADMIN_UI_URL}/login#{urlencode(fragment)}", status_code=302)
+
+
+async def _google_user(mode: str, email: str) -> dict[str, Any]:
+    if mode == "create":
+        try:
+            # Random unusable password: this account signs in with Google
+            # until the user sets one via change-password.
+            user = await users_service.bootstrap_first_superadmin(
+                email=email, password=secrets.token_urlsafe(32),
+            )
+        except asyncpg.UniqueViolationError:
+            raise GoogleOAuthError("That email is already registered — sign in instead.")
+        if user is None:
+            raise GoogleOAuthError("Setup has already been completed — sign in instead.")
+        return user
+    user = await users_service.get_user_by_email(email)
+    if user is None or user.get("is_service_account"):
+        raise GoogleOAuthError(f"No account exists for {email}. Ask an administrator for an invite.")
+    return user
+
+
+@router.get("/oauth/google/start")
+async def google_start(mode: google_oauth.Mode = "signin"):
+    if not google_oauth.enabled():
+        return _to_login(error="Google sign-in is not configured on this server.")
+    url, nonce = google_oauth.authorization_url(mode)
+    resp = RedirectResponse(url, status_code=302)
+    resp.set_cookie(
+        _GOOGLE_COOKIE, nonce, max_age=google_oauth.STATE_TTL_SECONDS, path=_GOOGLE_COOKIE_PATH,
+        httponly=True, samesite="lax", secure=google_oauth.REDIRECT_URI.startswith("https://"),
+    )
+    return resp
+
+
+@router.get("/oauth/google/callback")
+async def google_callback(
+    request: Request, code: str | None = None, state: str | None = None, error: str | None = None,
+):
+    try:
+        if error or not code or not state:
+            raise GoogleOAuthError("Google sign-in was cancelled.")
+        mode, nonce = google_oauth.read_state(state, request.cookies.get(_GOOGLE_COOKIE))
+        email = await google_oauth.verified_email(code, nonce)
+        user = await _google_user(mode, email)
+    except GoogleOAuthError as exc:
+        resp = _to_login(error=str(exc))
+    else:
+        resp = _to_login(token=create_access_token(user))
+    resp.delete_cookie(_GOOGLE_COOKIE, path=_GOOGLE_COOKIE_PATH)
+    return resp
 
 
 @router.get("/me")

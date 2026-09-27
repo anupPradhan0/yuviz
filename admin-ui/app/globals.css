@@ -374,6 +374,16 @@ body {
 }
 .login-btn:hover { background: #08423e; }
 .login-btn:disabled { opacity: .6; cursor: not-allowed; }
+.login-divider {
+  display: flex; align-items: center; gap: 10px; margin: 14px 0; font-size: .72rem; color: var(--text-3);
+}
+.login-divider::before, .login-divider::after { content: ""; flex: 1; height: 1px; background: var(--border-2); }
+.login-google {
+  display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 9px;
+  background: transparent; color: var(--text); border: 1px solid var(--border-2); border-radius: var(--rs);
+  font-size: .85rem; font-weight: 600; text-decoration: none; cursor: pointer;
+}
+.login-google:hover { background: var(--surf-2, rgba(255,255,255,.04)); }
 
 /* ── Knowledge Base tab — range slider (minimum_score) + toggle switch ──── */
 .form-range-row { display: flex; align-items: center; gap: 12px; }

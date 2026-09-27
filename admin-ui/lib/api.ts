@@ -1052,6 +1052,11 @@ export const bootstrap = (email: string, password: string) =>
 
 export const getCurrentUser = () => request<User>("/auth/me");
 
+// Full-page navigation, not fetch: the Config Service redirects to Google and
+// back to /login#token=… (or #error=…).
+export const googleSignInUrl = (mode: "signin" | "create") =>
+  `${BASE_URL}/auth/oauth/google/start?mode=${mode}`;
+
 export const changePassword = (currentPassword: string, newPassword: string) =>
   request<void>("/auth/change-password", {
     method: "POST",
