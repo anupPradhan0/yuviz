@@ -231,8 +231,9 @@ After the first successful push, in GHCR package settings for that bot-owned
 package: do not grant this repository’s Actions / `GITHUB_TOKEN` write access.
 Only the bot PAT should write.
 
-Publish tags: `$GHCR_IMAGE:<commit-sha>` and optionally `$GHCR_IMAGE:main`
-(convenience pointer only). Missing Environment / secrets / `GHCR_IMAGE` or a
+Publish tags: `$GHCR_IMAGE:<commit-sha>` always, and `$GHCR_IMAGE:main`
+(convenience pointer only) only when that SHA is still the tip of `main`, so
+re-running an older CI run cannot move `:main` backwards. Missing Environment / secrets / `GHCR_IMAGE` or a
 failed push fails the job loudly (no `continue-on-error`).
 
 ## Consume a published image (manual)

@@ -60,9 +60,12 @@ jobs:
         run: |
           : "${GHCR_IMAGE:?GHCR_IMAGE must be set}"
           : "${SHA:?SHA must be set}"
-          docker build -f deployment/docker/Dockerfile.python \
-            -t "${GHCR_IMAGE}:${SHA}" \
-            -t "${GHCR_IMAGE}:main" \
-            .
+          docker build -f deployment/docker/Dockerfile.python -t "${GHCR_IMAGE}:${SHA}" .
           docker push "${GHCR_IMAGE}:${SHA}"
-          docker push "${GHCR_IMAGE}:main"
+          # A re-run of an older CI run must not move :main backwards.
+          if [ "$(git rev-parse refs/remotes/origin/main)" = "$SHA" ]; then
+            docker tag "${GHCR_IMAGE}:${SHA}" "${GHCR_IMAGE}:main"
+            docker push "${GHCR_IMAGE}:main"
+          else
+            echo "$SHA is no longer the tip of main; pushed the SHA tag only"
+          fi
