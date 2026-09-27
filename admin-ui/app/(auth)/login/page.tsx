@@ -9,6 +9,51 @@ import {
 } from "@/lib/api";
 import { clearToken, setToken } from "@/lib/auth";
 
+// Only claims the product can back up — no invented usage numbers.
+const HERO = {
+  signin: {
+    eyebrow: "Voice AI platform",
+    title: "Voice agents that listen, think and talk back",
+    body: "Real-time speech-to-text, LLM reasoning and text-to-speech over phone lines or the browser — with tools, knowledge retrieval and live human handoff.",
+    facts: [
+      { value: "SIP + WebRTC", label: "Phone and browser calls" },
+      { value: "STT → LLM → TTS", label: "Streaming pipeline" },
+      { value: "Multi-tenant", label: "Isolated data per tenant" },
+    ],
+  },
+  create: {
+    eyebrow: "First-time setup",
+    title: "Set up your voice AI workspace",
+    body: "Create the administrator account, add your first tenant, invite your team and launch a voice agent — on your own infrastructure.",
+    facts: [
+      { value: "01", label: "Create the admin account" },
+      { value: "02", label: "Connect AI & voice providers" },
+      { value: "03", label: "Test your agent in the browser" },
+    ],
+  },
+};
+
+const PROVIDERS = ["OpenAI", "Anthropic", "Gemini", "Ollama", "Deepgram", "ElevenLabs", "Whisper", "Kokoro"];
+
+function Logo() {
+  return (
+    <div className="auth-logo">
+      <div className="login-logo-icon">
+        <svg width="20" height="18" viewBox="0 0 18 16" fill="none">
+          <rect x="0" y="6" width="2.5" height="4" rx="1.25" fill="currentColor" />
+          <rect x="3.75" y="3.5" width="2.5" height="9" rx="1.25" fill="currentColor" />
+          <rect x="7.5" y="0" width="3" height="16" rx="1.5" fill="currentColor" />
+          <rect x="11.75" y="3.5" width="2.5" height="9" rx="1.25" fill="currentColor" />
+          <rect x="15.5" y="5.5" width="2.5" height="5" rx="1.25" fill="currentColor" />
+        </svg>
+      </div>
+      <div className="login-logo-text">
+        Yuviz<span>.ai</span>
+      </div>
+    </div>
+  );
+}
+
 function GoogleIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 48 48" aria-hidden="true">
@@ -124,72 +169,70 @@ export default function LoginPage() {
 
   if (mode === null) return null;
 
+  const hero = HERO[mode];
+
   return (
-    <div className="login-screen">
-      <Link
-        href="/"
-        style={{
-          position: 'fixed',
-          top: '1.25rem',
-          left: '1.5rem',
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: '0.375rem',
-          fontSize: '0.8125rem',
-          color: 'var(--text-2, #888)',
-          textDecoration: 'none',
-          transition: 'color 0.15s',
-          zIndex: 10,
-        }}
-        onMouseEnter={e => (e.currentTarget.style.color = 'var(--text, #fff)')}
-        onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-2, #888)')}
-      >
-        ← Back to homepage
-      </Link>
-      <div className="login-card">
-        <div className="login-logo">
-          <div className="login-logo-icon">
-            <svg width="20" height="18" viewBox="0 0 18 16" fill="none">
-              <rect x="0" y="6" width="2.5" height="4" rx="1.25" fill="currentColor" />
-              <rect x="3.75" y="3.5" width="2.5" height="9" rx="1.25" fill="currentColor" />
-              <rect x="7.5" y="0" width="3" height="16" rx="1.5" fill="currentColor" />
-              <rect x="11.75" y="3.5" width="2.5" height="9" rx="1.25" fill="currentColor" />
-              <rect x="15.5" y="5.5" width="2.5" height="5" rx="1.25" fill="currentColor" />
-            </svg>
-          </div>
-          <div className="login-logo-text">
-            Yuviz<span>.ai</span>
+    <div className="auth-split">
+      <aside className="auth-hero">
+        <Logo />
+        <div className="auth-hero-main">
+          <div className="auth-eyebrow">{hero.eyebrow}</div>
+          <h1 className="auth-hero-title">{hero.title}</h1>
+          <p className="auth-hero-body">{hero.body}</p>
+          <div className="auth-providers">
+            <span className="auth-providers-label">Works with</span>
+            {PROVIDERS.map((p) => <span key={p} className="auth-chip">{p}</span>)}
           </div>
         </div>
-        <div className="login-box">
-          <div className="login-title">
-            {creating ? "Create your administrator account" : "Sign in to your console"}
-          </div>
-          <div className="login-sub">
+        <div className="auth-facts">
+          {hero.facts.map((f) => (
+            <div key={f.label}>
+              <div className="auth-fact-value">{f.value}</div>
+              <div className="auth-fact-label">{f.label}</div>
+            </div>
+          ))}
+        </div>
+      </aside>
+
+      <main className="auth-panel">
+        <Link href="/" className="auth-back">← Back to homepage</Link>
+        <div className="auth-form">
+          <div className="auth-mobile-logo"><Logo /></div>
+          <h2 className="auth-title">{creating ? "Create your administrator account" : "Sign in"}</h2>
+          <p className="auth-sub">
             {creating
               ? "This install has no users yet. The account you create here is the first superadmin — there are no default credentials."
-              : "Manage agents, providers, and calls."}
-          </div>
+              : "Welcome back. Enter your credentials to continue."}
+          </p>
           {error && <div className="error-banner">{error}</div>}
+          <a className="login-google" href={googleSignInUrl(creating ? "create" : "signin")}>
+            <GoogleIcon />
+            {creating ? "Sign up with Google" : "Continue with Google"}
+          </a>
+          <div className="login-divider">or</div>
           <form onSubmit={handleSubmit}>
             <div className="login-field">
-              <label className="login-label">Email</label>
+              <label className="login-label" htmlFor="login-email">Email</label>
               <input
+                id="login-email"
                 className="login-input"
                 type="email"
                 autoComplete="email"
+                placeholder="name@company.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
               />
             </div>
             <div className="login-field">
-              <label className="login-label">Password</label>
+              <label className="login-label" htmlFor="login-password">Password</label>
               <div className="login-input-wrap">
                 <input
+                  id="login-password"
                   className="login-input"
                   type={reveal ? "text" : "password"}
                   autoComplete={creating ? "new-password" : "current-password"}
+                  placeholder={creating ? "At least 8 characters" : "••••••••"}
                   minLength={creating ? 8 : undefined}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
@@ -209,8 +252,9 @@ export default function LoginPage() {
             </div>
             {creating && (
               <div className="login-field">
-                <label className="login-label">Confirm password</label>
+                <label className="login-label" htmlFor="login-confirm">Confirm password</label>
                 <input
+                  id="login-confirm"
                   className="login-input"
                   type={reveal ? "text" : "password"}
                   autoComplete="new-password"
@@ -220,17 +264,12 @@ export default function LoginPage() {
                 />
               </div>
             )}
-            <button className="login-btn" type="submit" disabled={submitting}>
+            <button className="login-btn auth-submit" type="submit" disabled={submitting}>
               {submitting
                 ? creating ? "Creating account…" : "Signing in…"
-                : creating ? "Create account" : "Sign In"}
+                : creating ? "Create account" : "Sign in"}
             </button>
           </form>
-          <div className="login-divider">or</div>
-          <a className="login-google" href={googleSignInUrl(creating ? "create" : "signin")}>
-            <GoogleIcon />
-            {creating ? "Sign up with Google" : "Continue with Google"}
-          </a>
           {setupRequired && (
             <div className="login-alt">
               {creating ? (
@@ -240,14 +279,14 @@ export default function LoginPage() {
                 </>
               ) : (
                 <>
-                  Don&apos;t have an account?{" "}
+                  New here?{" "}
                   <button type="button" onClick={() => switchMode("create")}>Create your account</button>
                 </>
               )}
             </div>
           )}
         </div>
-      </div>
+      </main>
     </div>
   );
 }

@@ -385,6 +385,50 @@ body {
 }
 .login-google:hover { background: var(--surf-2, rgba(255,255,255,.04)); }
 
+/* ── Split sign-in screen (/login) ─────────────────────────────────────── */
+.auth-split { min-height: 100vh; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); background: var(--bg); }
+.auth-hero {
+  position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between;
+  gap: 40px; padding: 40px 56px; color: #e9e5dc;
+  background:
+    radial-gradient(ellipse 70% 55% at 35% 45%, rgba(79, 179, 172, .16), transparent 70%),
+    radial-gradient(ellipse 50% 40% at 90% 100%, rgba(79, 179, 172, .08), transparent 70%),
+    #0d1917;
+}
+.auth-hero .login-logo-text { color: #e9e5dc; }
+.auth-hero .login-logo-text span, .auth-hero .login-logo-icon { color: #4fb3ac; }
+.auth-hero .login-logo-icon { background: rgba(79, 179, 172, .14); border-color: rgba(79, 179, 172, .35); }
+.auth-logo { display: flex; align-items: center; gap: 10px; }
+.auth-hero-main { max-width: 520px; }
+.auth-eyebrow { font-size: .72rem; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: #4fb3ac; margin-bottom: 16px; }
+.auth-hero-title { font-size: clamp(1.9rem, 3.2vw, 2.7rem); line-height: 1.12; font-weight: 700; letter-spacing: -.025em; margin: 0 0 18px; }
+.auth-hero-body { font-size: .95rem; line-height: 1.6; color: #a9b0ab; margin: 0 0 28px; }
+.auth-providers { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.auth-providers-label { font-size: .72rem; color: #7e8a85; margin-right: 4px; }
+.auth-chip {
+  font-size: .72rem; padding: 3px 9px; border-radius: 99px; color: #c9cfca;
+  background: rgba(255, 255, 255, .04); border: 1px solid rgba(255, 255, 255, .08);
+}
+.auth-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; max-width: 560px; }
+.auth-fact-value { font-size: 1.05rem; font-weight: 700; letter-spacing: -.01em; margin-bottom: 4px; }
+.auth-fact-label { font-size: .75rem; color: #7e8a85; }
+
+.auth-panel { position: relative; display: flex; align-items: center; justify-content: center; padding: 72px 24px 40px; }
+.auth-back { position: absolute; top: 20px; right: 24px; font-size: .8rem; color: var(--text-3); text-decoration: none; }
+.auth-back:hover { color: var(--text); }
+.auth-form { width: 100%; max-width: 360px; }
+.auth-mobile-logo { display: none; margin-bottom: 28px; }
+.auth-title { font-size: 1.35rem; font-weight: 700; letter-spacing: -.015em; color: var(--text); margin: 0 0 6px; }
+.auth-sub { font-size: .82rem; line-height: 1.5; color: var(--text-3); margin: 0 0 22px; }
+.auth-form .login-google { padding: 10px; }
+.auth-submit { margin-top: 10px; padding: 11px; }
+
+@media (max-width: 900px) {
+  .auth-split { grid-template-columns: 1fr; }
+  .auth-hero { display: none; }
+  .auth-mobile-logo { display: block; }
+}
+
 /* ── Knowledge Base tab — range slider (minimum_score) + toggle switch ──── */
 .form-range-row { display: flex; align-items: center; gap: 12px; }
 .form-range {
