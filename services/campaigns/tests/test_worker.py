@@ -3,8 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from services.campaigns import campaign_contacts, campaigns, dnc, originate
 from services.campaigns.worker import CampaignWorker, _within_calling_hours
+
+pytestmark = pytest.mark.integration
 
 
 async def _make_running_campaign(test_tenant, test_agent, **overrides):

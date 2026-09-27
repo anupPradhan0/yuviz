@@ -18,6 +18,8 @@ from libs.config_sdk.repositories.http_repository import HttpConfigRepository
 from services.config import agents, provider_configs, tenants, users
 from services.config.app import app
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 async def service_account():

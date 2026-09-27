@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  python-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Closed port: an unmarked DB/Redis test fails here instead of passing silently.
+    env:
+      POSTGRES_DSN: postgresql://ci-unit@127.0.0.1:1/unit-no-db
+      REDIS_URL: redis://127.0.0.1:1/0
+      JWT_SECRET: ci-only-insecure-secret-do-not-deploy-ci-only-insecure-secret-do-not-deploy-
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install CPU torch then requirements
+        run: |
+          pip install --no-cache-dir "torch==2.12.1" --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Provision Silero VAD model
+        run: |
+          mkdir -p models
+          src="$(python -c 'import faster_whisper, pathlib; print(pathlib.Path(faster_whisper.__file__).parent / "assets" / "silero_vad_v6.onnx")')"
+          test -f "$src"
+          cp "$src" models/silero_vad.onnx
+
+      - name: Run unit pytest
+        run: |
+          pytest -m "not integration" \
+            --deselect services/conversation/tests/test_ai_provider_manager.py::TestRealOllamaFactory::test_real_ollama_generates_a_token_stream \
+            --deselect services/conversation/tests/test_ai_provider_manager.py::TestRealMacosTtsFactory::test_get_tts_creates_real_macos_instance_and_synthesizes_audio
+
+  integration:
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/integration.yml
+
+  gateway:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            libspdlog-dev \
+            libyaml-cpp-dev \
+            nlohmann-json3-dev \
+            libwebsockets-dev \
+            libgtest-dev \
+            libhiredis-dev \
+            libgrpc++-dev \
+            protobuf-compiler-grpc \
+            libprotobuf-dev
+
+      # Pin: microsoft/onnxruntime v1.20.1 Linux x64 (matches CMakeLists PATHS under /usr/local).
+      - name: Install onnxruntime 1.20.1
+        run: |
+          curl -fsSL -o /tmp/onnxruntime.tgz \
+            https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
+          tar -xzf /tmp/onnxruntime.tgz -C /tmp
+          sudo mkdir -p /usr/local/include/onnxruntime /usr/local/lib
+          sudo cp -r /tmp/onnxruntime-linux-x64-1.20.1/include/* /usr/local/include/onnxruntime/
+          sudo cp -r /tmp/onnxruntime-linux-x64-1.20.1/lib/* /usr/local/lib/
+          sudo ldconfig
+
+      - name: Configure, build, and test
+        run: |
+          # Distro gRPC/protobuf cmake configs live under multiarch paths on Ubuntu.
+          export CMAKE_PREFIX_PATH="/usr/lib/x86_64-linux-gnu/cmake:${CMAKE_PREFIX_PATH:-}"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+          ctest --test-dir build --output-on-failure
+
+  admin-ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: admin-ui
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: admin-ui/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build service images (no push)
+        run: |
+          docker build -f deployment/docker/Dockerfile.python -t yuviz-python:ci .
+          docker build -f deployment/docker/Dockerfile.adminui -t yuviz-adminui:ci .
+
+  gate:
+    needs: [python-unit, gateway, admin-ui, docker-build, integration]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate required checks
+        run: |
+          echo "python-unit=${{ needs.python-unit.result }}"
+          echo "gateway=${{ needs.gateway.result }}"
+          echo "admin-ui=${{ needs.admin-ui.result }}"
+          echo "docker-build=${{ needs.docker-build.result }}"
+          echo "integration=${{ needs.integration.result }}"
+          test "${{ needs.python-unit.result }}" = "success"
+          test "${{ needs.gateway.result }}" = "success"
+          test "${{ needs.admin-ui.result }}" = "success"
+          test "${{ needs.docker-build.result }}" = "success"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            test "${{ needs.integration.result }}" = "success"
+          else
+            test "${{ needs.integration.result }}" = "skipped"
+          fi
