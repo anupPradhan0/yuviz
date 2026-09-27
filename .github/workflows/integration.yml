@@ -42,11 +42,11 @@ jobs:
           --health-timeout 3s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
           cache: pip
@@ -87,6 +87,7 @@ jobs:
     needs: [python-integration]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
       actions: read
@@ -100,6 +101,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           echo "event=$EVENT state=$STATE result=$RESULT"
           case "$EVENT" in
@@ -112,8 +114,10 @@ jobs:
                 test "$RESULT" = "success"
                 exit 0
               fi
+              [[ "$PR_NUMBER" =~ ^[0-9]+$ && "$HEAD_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo "Unexpected PR metadata"; exit 1; }
+              # Fork-headed runs have an empty pull_requests[]; match those by head repo instead.
               counts="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$HEAD_SHA&event=pull_request_review&status=success" \
-                --jq "[.workflow_runs[] | select(.name == \"Integration\" and any(.pull_requests[]; .number == $PR_NUMBER and .base.ref == \"main\"))] | length")"
+                --jq "[.workflow_runs[] | select(.name == \"Integration\" and (any(.pull_requests[]; .number == $PR_NUMBER and .base.ref == \"main\") or ((.pull_requests | length) == 0 and .head_repository.full_name == \"$HEAD_REPO\" and \"$HEAD_REPO\" != \"$GITHUB_REPOSITORY\")))] | length")"
               total=0
               for c in $counts; do
                 [[ "$c" =~ ^[0-9]+$ ]] || { echo "Unexpected gh output: $c"; exit 1; }

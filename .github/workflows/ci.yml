@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+# Supersede stale PR runs; every main push completes because publish keys off it.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   python-unit:
     runs-on: ubuntu-latest
@@ -19,11 +24,11 @@ jobs:
       REDIS_URL: redis://127.0.0.1:1/0
       JWT_SECRET: ci-only-insecure-secret-do-not-deploy-ci-only-insecure-secret-do-not-deploy-
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
           cache: pip
@@ -56,8 +61,9 @@ jobs:
 
   gateway:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
@@ -83,6 +89,7 @@ jobs:
         run: |
           curl -fsSL -o /tmp/onnxruntime.tgz \
             https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
+          echo "67db4dc1561f1e3fd42e619575c82c601ef89849afc7ea85a003abbac1a1a105  /tmp/onnxruntime.tgz" | sha256sum -c -
           tar -xzf /tmp/onnxruntime.tgz -C /tmp
           sudo mkdir -p /usr/local/include/onnxruntime /usr/local/lib
           sudo cp -r /tmp/onnxruntime-linux-x64-1.20.1/include/* /usr/local/include/onnxruntime/
@@ -99,15 +106,16 @@ jobs:
 
   admin-ui:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: admin-ui
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm
@@ -121,7 +129,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
@@ -130,10 +138,36 @@ jobs:
           docker build -f deployment/docker/Dockerfile.python -t yuviz-python:ci .
           docker build -f deployment/docker/Dockerfile.adminui -t yuviz-adminui:ci .
 
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.7
+          ACTIONLINT_SHA256: 023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
+
+      - name: Lint workflows
+        env:
+          SHELLCHECK_OPTS: -S warning
+        run: actionlint -color
+
   gate:
-    needs: [python-unit, gateway, admin-ui, docker-build, integration]
+    needs: [python-unit, gateway, admin-ui, docker-build, actionlint, integration]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Aggregate required checks
         run: |
@@ -141,11 +175,13 @@ jobs:
           echo "gateway=${{ needs.gateway.result }}"
           echo "admin-ui=${{ needs.admin-ui.result }}"
           echo "docker-build=${{ needs.docker-build.result }}"
+          echo "actionlint=${{ needs.actionlint.result }}"
           echo "integration=${{ needs.integration.result }}"
           test "${{ needs.python-unit.result }}" = "success"
           test "${{ needs.gateway.result }}" = "success"
           test "${{ needs.admin-ui.result }}" = "success"
           test "${{ needs.docker-build.result }}" = "success"
+          test "${{ needs.actionlint.result }}" = "success"
           if [ "${{ github.event_name }}" = "push" ]; then
             test "${{ needs.integration.result }}" = "success"
           else

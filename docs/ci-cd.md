@@ -6,6 +6,18 @@ PR has an approving review, and on every push to `main`. Publish of the Python
 image to GHCR runs only after a successful CI run on `main` (which includes
 integration), via a separate workflow loaded from the default branch.
 
+## Prerequisite: Actions enabled for fork PRs
+
+Contributors open PRs from forks. In **Settings → Actions → General** (repo or
+org admin):
+
+- Actions permissions: allow all actions, or at least GitHub-authored actions
+  plus `docker/login-action`.
+- Fork pull request workflows: run workflows from fork PRs of collaborators
+  without extra approval (or approve each run from the PR's Checks tab).
+
+If a PR shows no `CI` checks at all, this setting is the first thing to check.
+
 ## Branch protection
 
 All of the following are **required** on `main` — the fences below depend on them.
@@ -65,8 +77,16 @@ to `main`.
 | `gateway` | `cmake` Release build + `ctest --test-dir build --output-on-failure` |
 | `admin-ui` | `npm ci` / `npm run lint` / `npm run build` in `admin-ui/` (npm + `package-lock.json`, not pnpm) |
 | `docker-build` | Build `Dockerfile.python` and `Dockerfile.adminui` as `yuviz-*:ci` — **no push** |
+| `actionlint` | Lints every workflow (pinned, checksum-verified actionlint release; shellcheck at warning level) |
 | `integration` | Push only: calls `integration.yml` as a reusable workflow (no `secrets:`) |
-| `gate` | Requires `success` from the four leaf jobs; `integration` must be `success` on push and `skipped` on PRs |
+| `gate` | Requires `success` from the five leaf jobs; `integration` must be `success` on push and `skipped` on PRs |
+
+A new push to a PR cancels that PR's in-flight `CI` run. `main` pushes are never
+cancelled, because publish keys off each one.
+
+Third-party actions are pinned to commit SHAs (tag in a trailing comment), and
+the onnxruntime tarball is checked against a SHA-256. When bumping a version,
+update the SHA too.
 
 Workflow: `.github/workflows/integration.yml` (`name: Integration`).
 
@@ -114,9 +134,10 @@ the new head.
 comment-triggered gate turns green on re-run once an approval run has succeeded.
 
 **Forks:** fork PRs get a read-only token and no secrets, which integration does
-not need. The runs API leaves `pull_requests[]` empty for fork-headed runs, so a
-comment review on an approved fork PR turns the gate red until re-approved
-(fails closed).
+not need. The runs API leaves `pull_requests[]` empty for fork-headed runs, so
+for those the gate matches a prior approval run by head SHA **and** the PR's
+head repository instead. Without that, every bot or comment review (e.g.
+CodeRabbit) after approval would turn an approved fork PR red.
 
 ## Marking rule and tripwire
 
