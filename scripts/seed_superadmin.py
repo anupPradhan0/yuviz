@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
-Seeds the platform superadmin on every init run. A no-op once any superadmin
-exists, so restarts never duplicate it or undo credentials changed in
-Settings. Change the default password after first sign-in.
+Seeds the platform superadmin (run by init.sh); a no-op once one exists.
 
 Usage: python3 scripts/seed_superadmin.py
 Env:   SUPERADMIN_EMAIL / SUPERADMIN_PASSWORD override the defaults below.

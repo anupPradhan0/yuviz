@@ -132,8 +132,7 @@ async def _google_user(mode: str, identity: google_oauth.GoogleIdentity) -> dict
     if mode == "create":
         first_name = identity.given_name or email.split("@")[0]
         try:
-            # Random unusable password: this account signs in with Google
-            # until the user sets one via change-password.
+            # Random password nobody knows: this account signs in with Google only.
             user = await users_service.register_admin(
                 email=email,
                 password=secrets.token_urlsafe(32),

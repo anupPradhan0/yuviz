@@ -1,15 +1,7 @@
 """
-Emailed 6-digit codes for public signup (pending_registrations) and the
-signed-in change-email flow (email_change_requests).
-
-A signup has no users/tenants row until its code verifies, so an unverified
-address can never sign in or reach the console. Codes are stored as an HMAC
-keyed on JWT_SECRET, expire after CODE_TTL_MINUTES and die after
-MAX_ATTEMPTS wrong guesses. Wrong-guess counters are written in the same
-transaction and the error is raised only after it commits.
-
-Both tables are RLS-forced with no yuviz_app policy (rls.sql), so every
-access here goes through platform_conn.
+Emailed 6-digit codes for public signup and signed-in email change. No user
+row exists until a signup verifies; errors raise after commit so wrong-guess
+counters persist.
 """
 
 from __future__ import annotations
@@ -229,12 +221,14 @@ async def request_email_change(
     now = _now()
     pool = await db.get_pool()
     async with platform_conn(pool, reason="users-email-change", stamp_tenant=tenant_id) as conn:
-        password_hash = await conn.fetchval(
-            "SELECT password_hash FROM users WHERE id = $1 AND deleted_at IS NULL", user_id,
+        user = await conn.fetchrow(
+            "SELECT password_hash, password_set FROM users WHERE id = $1 AND deleted_at IS NULL", user_id,
         )
-        if password_hash is None:
+        if user is None:
             raise LookupError(f"user {user_id} not found")
-        if not await asyncio.to_thread(auth.verify_password, current_password, password_hash):
+        if user["password_set"] and not await asyncio.to_thread(
+            auth.verify_password, current_password, user["password_hash"],
+        ):
             return None
         if await _email_in_use(conn, new_email):
             raise EmailTaken()

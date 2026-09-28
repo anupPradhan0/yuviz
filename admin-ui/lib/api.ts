@@ -34,7 +34,9 @@ export async function request<T>(path: string, options?: RequestInit): Promise<T
     let body: Record<string, unknown> | undefined;
     try {
       body = await res.json();
-      detail = (body?.detail as string) || detail;
+      // FastAPI validation errors (422) send a list of {loc, msg}, not a string.
+      const raw = body?.detail;
+      detail = (Array.isArray(raw) ? raw[0]?.msg : (raw as string)) || detail;
     } catch {
       // response body wasn't JSON — fall back to statusText
     }
@@ -1031,6 +1033,7 @@ export interface User {
   tenant_id: string | null;
   email: string;
   role: UserRole;
+  password_set: boolean;
   created_at: string;
   updated_at: string;
 }

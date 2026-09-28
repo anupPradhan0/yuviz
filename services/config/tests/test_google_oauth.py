@@ -1,8 +1,5 @@
-"""Google OAuth sign-in: /auth/oauth/google/start + /auth/oauth/google/callback.
-
-Google itself is never called — verified_identity is patched, so these cover
-the state/cookie binding and the account rules, not Google's token endpoint.
-"""
+"""Google OAuth start/callback. verified_identity is patched, so these cover
+the state/cookie binding and account rules, not Google itself."""
 
 from __future__ import annotations
 
@@ -110,6 +107,34 @@ class TestCreateMode:
         assert auth.decode_access_token(_fragment(resp)["token"]).role == "admin"
         mailer.assert_not_called()
         assert await fresh_db.fetchval("SELECT count(*) FROM pending_registrations") == 0
+
+    async def test_can_set_a_password_without_a_current_one_only_once(self, anon_client):
+        state = await _start(anon_client, "create")
+        token = _fragment(await _callback(anon_client, state, "jane@example.com"))["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        me = await anon_client.get("/auth/me", headers=headers)
+        assert me.json()["password_set"] is False
+
+        resp = await anon_client.post(
+            "/auth/change-password", json={"new_password": "chosen-password"}, headers=headers,
+        )
+        assert resp.status_code == 204
+        login = await anon_client.post(
+            "/auth/login", json={"email": "jane@example.com", "password": "chosen-password"},
+        )
+        assert login.status_code == 200
+        resp = await anon_client.post(
+            "/auth/change-password", json={"new_password": "another-password"}, headers=headers,
+        )
+        assert resp.status_code == 400
+
+    async def test_can_change_email_without_a_current_password(self, anon_client, mailer):
+        state = await _start(anon_client, "create")
+        token = _fragment(await _callback(anon_client, state, "jane@example.com"))["token"]
+        resp = await anon_client.post(
+            "/auth/change-email", json={"new_email": "jane@new.com"}, headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 202
 
     async def test_existing_email_is_told_to_sign_in(self, fresh_db, anon_client):
         await users_service.seed_superadmin(email="admin@example.com", password="a-real-password")

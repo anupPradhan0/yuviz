@@ -1,11 +1,6 @@
 """
-Seeded superadmin, public admin signup with emailed-code verification
-(/auth/register, /auth/verify-email, /auth/resend-code) and /auth/change-email.
-
-These cannot use the shared 'voiceai' database — "no superadmin yet" is a
-property of the whole database, and conftest's fixtures put superadmins in
-it. Each test gets its own throwaway database instead, installed as db.py's
-process-wide pool so the code under test needs no changes.
+Seeded superadmin, public signup with code verification, and change-email.
+Each test gets a throwaway database: "no superadmin yet" is database-wide.
 """
 
 from __future__ import annotations
@@ -306,6 +301,13 @@ class TestChangeEmail:
             "/auth/change-email",
             json={"current_password": "wrong-password", "new_email": "new@acme.com"},
             headers=_bearer(body["access_token"]),
+        )
+        assert resp.status_code == 400
+
+    async def test_missing_password_is_rejected(self, anon_client):
+        body = await _register(anon_client)
+        resp = await anon_client.post(
+            "/auth/change-email", json={"new_email": "new@acme.com"}, headers=_bearer(body["access_token"]),
         )
         assert resp.status_code == 400
 

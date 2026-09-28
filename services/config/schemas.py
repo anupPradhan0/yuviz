@@ -391,12 +391,12 @@ class UserUpdate(BaseModel):
 
 
 class ChangePasswordRequest(BaseModel):
-    current_password: str
+    current_password: str = ""  # ignored until the account has set a password
     new_password:      str = Field(min_length=8)
 
 
 class ChangeEmailRequest(BaseModel):
-    current_password: str
+    current_password: str = ""
     new_email:        str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 

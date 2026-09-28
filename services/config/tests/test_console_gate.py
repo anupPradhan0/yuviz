@@ -228,13 +228,8 @@ class TestConsoleGateApp:
         assert (await anon_client.post("/auth/register", json={"email": "x@x.com"})).status_code != 401
 
     def test_only_allowlisted_routes_depend_on_get_authenticated_user(self):
-        # Named allowlist, not a bare literal: route name -> the gate beyond
-        # "decode-or-401" it's allowed to carry. None means unrestricted (any
-        # authenticated role) — /auth/me, /auth/change-password and the two
-        # /auth/change-email routes are deliberately reachable by every role,
-        # including supervisor/agent (see module docstring). Another route landing a bare
-        # Depends(get_authenticated_user) — bypassing both this allowlist and
-        # CONSOLE_ROLES entirely — must fail here rather than pass silently.
+        # Any other route on bare get_authenticated_user would bypass
+        # CONSOLE_ROLES; the allowlisted self-service routes serve every role.
         names = _route_names_depending_on(app, deps.get_authenticated_user)
         assert names == set(DIRECT_AUTHENTICATED_USER_ALLOWLIST), names
 

@@ -151,19 +151,18 @@ async def _insert_user(
     last_name: str | None = None,
     phone: str | None = None,
     signup_source: str | None = None,
+    password_set: bool = True,
 ) -> dict[str, Any]:
-    """Insert + audit on a caller-supplied connection, already inside a
-    transaction — so seed_superadmin()/register_admin() can share their
-    transaction, which create_user()'s own connection could not. Pass
-    exactly one of password / password_hash (an already-bcrypted value)."""
+    """Insert + audit on the caller's transaction. Pass exactly one of
+    password / password_hash (already bcrypted)."""
     if password_hash is None:
         password_hash = await asyncio.to_thread(auth.hash_password, password)
     row = await conn.fetchrow(
         "INSERT INTO users (email, password_hash, role, tenant_id, team, "
-        "first_name, last_name, phone, signup_source) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *",
+        "first_name, last_name, phone, signup_source, password_set) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *",
         email.lower(), password_hash, role, tenant_id, team,
-        first_name, last_name, phone, signup_source,
+        first_name, last_name, phone, signup_source, password_set,
     )
     result = dict(row)
     await audit.write_audit(
@@ -211,9 +210,8 @@ async def superadmin_exists() -> bool:
 
 
 async def seed_superadmin(*, email: str, password: str) -> dict[str, Any] | None:
-    """Creates the platform superadmin unless one already exists (returns
-    None), so restarts never duplicate it or reset changed credentials.
-    Advisory-locked so concurrent seeds can't both insert."""
+    """No-op (None) if any superadmin exists, so restarts never reset changed
+    credentials. Advisory-locked against concurrent seeds."""
     pool = await db.get_pool()
     async with platform_conn(pool, reason="pre-auth-bootstrap") as conn:
         await conn.execute("SELECT pg_advisory_xact_lock($1)", _BOOTSTRAP_LOCK_KEY)
@@ -253,6 +251,7 @@ async def register_admin(
             organization_name=organization_name,
             first_name=first_name,
             last_name=last_name,
+            password_set=False,
         )
 
 
@@ -266,6 +265,7 @@ async def register_admin_on(
     last_name: str | None,
     phone: str | None = None,
     signup_source: str | None = None,
+    password_set: bool = True,
 ) -> dict[str, Any]:
     """A new tenant plus its first admin on the caller's transaction. The
     role is fixed here — no caller input can make this a superadmin."""
@@ -291,6 +291,7 @@ async def register_admin_on(
         last_name=last_name,
         phone=phone,
         signup_source=signup_source,
+        password_set=password_set,
     )
 
 
@@ -400,12 +401,15 @@ async def change_password(
         if row is None:
             raise LookupError(f"user {user_id} not found")
         user = dict(row)
-        if not await asyncio.to_thread(auth.verify_password, current_password, user["password_hash"]):
+        # A Google-created account has no password to prove until it sets one.
+        if user["password_set"] and not await asyncio.to_thread(
+            auth.verify_password, current_password, user["password_hash"],
+        ):
             return False
 
         new_hash = await asyncio.to_thread(auth.hash_password, new_password)
         await conn.execute(
-            "UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1",
+            "UPDATE users SET password_hash = $2, password_set = true, updated_at = now() WHERE id = $1",
             user_id, new_hash,
         )
         # old_value/new_value both carry password_hash, but audit.py

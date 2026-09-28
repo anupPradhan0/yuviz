@@ -385,41 +385,41 @@ function AuditLogPanel() {
         ) : entries.length === 0 ? (
           <div className="empty-state">No matching audit entries.</div>
         ) : (
-            <table className="tbl">
-              <thead>
-                <tr>
-                  <th>When</th>
-                  <th>Entity</th>
-                  <th>Action</th>
-                  <th>By</th>
-                  <th></th>
+          <table className="tbl">
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Entity</th>
+                <th>Action</th>
+                <th>By</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((e) => (
+                <tr key={e.id}>
+                  <td style={{ fontSize: ".71rem", color: "var(--text-3)" }}>
+                    {new Date(e.changed_at).toLocaleString()}
+                  </td>
+                  <td>
+                    <span className="mono">{e.entity_type}</span>
+                    <span style={{ color: "var(--text-3)", fontSize: ".7rem", marginLeft: 6 }}>
+                      {e.entity_id.slice(0, 8)}…
+                    </span>
+                  </td>
+                  <td>
+                    <span className={`badge ${ACTION_BADGE[e.action] ?? "gray"}`}>{e.action}</span>
+                  </td>
+                  <td>{e.user_email ?? <span style={{ color: "var(--text-3)" }}>system</span>}</td>
+                  <td>
+                    <button className="btn btn-ghost btn-sm" onClick={() => setDetail(e)}>
+                      View
+                    </button>
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {entries.map((e) => (
-                  <tr key={e.id}>
-                    <td style={{ fontSize: ".71rem", color: "var(--text-3)" }}>
-                      {new Date(e.changed_at).toLocaleString()}
-                    </td>
-                    <td>
-                      <span className="mono">{e.entity_type}</span>
-                      <span style={{ color: "var(--text-3)", fontSize: ".7rem", marginLeft: 6 }}>
-                        {e.entity_id.slice(0, 8)}…
-                      </span>
-                    </td>
-                    <td>
-                      <span className={`badge ${ACTION_BADGE[e.action] ?? "gray"}`}>{e.action}</span>
-                    </td>
-                    <td>{e.user_email ?? <span style={{ color: "var(--text-3)" }}>system</span>}</td>
-                    <td>
-                      <button className="btn btn-ghost btn-sm" onClick={() => setDetail(e)}>
-                        View
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+              ))}
+            </tbody>
+          </table>
         )}
       </div>
 
@@ -471,7 +471,7 @@ function AuditLogPanel() {
   );
 }
 
-function ChangeEmailCard() {
+function ChangeEmailCard({ passwordSet }: { passwordSet: boolean }) {
   const [newEmail, setNewEmail] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -543,37 +543,39 @@ function ChangeEmailCard() {
             </div>
           </form>
         ) : (
-        <form onSubmit={handleSubmit}>
-          <div className="form-row">
-            <div className="form-group">
-              <label className="form-label">New Email</label>
-              <input
-                className="form-input"
-                type="email"
-                placeholder="name@company.com"
-                autoComplete="email"
-                value={newEmail}
-                onChange={(e) => setNewEmail(e.target.value)}
-                required
-              />
+          <form onSubmit={handleSubmit}>
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">New Email</label>
+                <input
+                  className="form-input"
+                  type="email"
+                  placeholder="name@company.com"
+                  autoComplete="email"
+                  value={newEmail}
+                  onChange={(e) => setNewEmail(e.target.value)}
+                  required
+                />
+              </div>
+              {passwordSet && (
+                <div className="form-group">
+                  <label className="form-label">Current Password</label>
+                  <input
+                    className="form-input"
+                    type="password"
+                    placeholder="Confirm it's you"
+                    autoComplete="current-password"
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    required
+                  />
+                </div>
+              )}
             </div>
-            <div className="form-group">
-              <label className="form-label">Current Password</label>
-              <input
-                className="form-input"
-                type="password"
-                placeholder="Confirm it's you"
-                autoComplete="current-password"
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                required
-              />
-            </div>
-          </div>
-          <button className="btn btn-primary btn-sm" type="submit" disabled={submitting}>
-            {submitting ? "Sending code…" : "Send Verification Code"}
-          </button>
-        </form>
+            <button className="btn btn-primary btn-sm" type="submit" disabled={submitting}>
+              {submitting ? "Sending code…" : "Send Verification Code"}
+            </button>
+          </form>
         )}
       </div>
     </div>
@@ -587,6 +589,12 @@ function SecurityPanel() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  // Google-created accounts start without a password they know.
+  const [passwordSet, setPasswordSet] = useState(true);
+
+  useEffect(() => {
+    getCurrentUser().then((u) => setPasswordSet(u.password_set)).catch(() => {});
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -604,6 +612,7 @@ function SecurityPanel() {
     try {
       await changePassword(currentPassword, newPassword);
       setSuccess(true);
+      setPasswordSet(true);
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
@@ -632,32 +641,36 @@ function SecurityPanel() {
           </label>
         </div>
       </div>
-      <ChangeEmailCard />
+      <ChangeEmailCard passwordSet={passwordSet} />
       <div className="card">
         <div className="card-hdr">
-          <div className="card-title">Change Password</div>
-          <div className="card-sub">Use at least 8 characters</div>
+          <div className="card-title">{passwordSet ? "Change Password" : "Set Password"}</div>
+          <div className="card-sub">
+            {passwordSet ? "Use at least 8 characters" : "You sign in with Google — add a password to sign in with email too"}
+          </div>
         </div>
         <div className="card-body">
           {error && <div className="error-banner">{error}</div>}
           {success && (
             <div className="form-hint" style={{ color: "var(--green)", marginBottom: 12 }}>
-              Password changed.
+              Password saved.
             </div>
           )}
           <form onSubmit={handleSubmit}>
-            <div className="form-group">
-              <label className="form-label">Current Password</label>
-              <input
-                className="form-input"
-                type="password"
-                placeholder="Your current password"
-                autoComplete="current-password"
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                required
-              />
-            </div>
+            {passwordSet && (
+              <div className="form-group">
+                <label className="form-label">Current Password</label>
+                <input
+                  className="form-input"
+                  type="password"
+                  placeholder="Your current password"
+                  autoComplete="current-password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  required
+                />
+              </div>
+            )}
             <div className="form-row">
               <div className="form-group">
                 <label className="form-label">New Password</label>
@@ -685,7 +698,7 @@ function SecurityPanel() {
               </div>
             </div>
             <button className="btn btn-primary btn-sm" type="submit" disabled={submitting}>
-              {submitting ? "Changing…" : "Change Password"}
+              {submitting ? "Saving…" : passwordSet ? "Change Password" : "Set Password"}
             </button>
           </form>
         </div>

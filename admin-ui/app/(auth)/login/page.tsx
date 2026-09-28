@@ -87,15 +87,8 @@ function EyeIcon({ off }: { off: boolean }) {
   );
 }
 
-// `agent` has zero Config API surface at all (deps.py's CONSOLE_ROLES)
-// — every admin page 403s for it, so it lands on the standalone "not
-// for your role" screen instead. `supervisor` is also outside
-// CONSOLE_ROLES but DOES hold a grant — LIVE_CALLS_ROLES, exactly
-// /live-calls and its POST route (services/config/deps.py) — so it
-// gets its own landing page rather than being lumped in with agent's
-// dead end (lesson 22: the role must land somewhere it can use).
-// /tenants is superadmin-only (AppShell.tsx), so everyone else lands on
-// Dashboard.
+// Each role lands on a page it can use: supervisor only has /live-calls,
+// agent has no console, and /tenants is superadmin-only.
 function landOn(router: ReturnType<typeof useRouter>, role: UserRole) {
   if (role === "supervisor") router.push("/live-calls");
   else if (!isConsoleRole(role)) router.push("/no-access");
@@ -208,6 +201,12 @@ export default function LoginPage() {
       setError("Password must be at least 8 characters.");
       return;
     }
+    const phoneDigits = signup.phone.replace(/\D/g, "");
+    // Mirrors RegisterRequest.phone: 6–14 digits after the country code.
+    if (creating && (phoneDigits.length < 6 || phoneDigits.length > 14)) {
+      setError("Enter a phone number of 6 to 14 digits.");
+      return;
+    }
     if (creating && !signup.signup_source) {
       setError("Please tell us how you heard about us.");
       return;
@@ -216,9 +215,9 @@ export default function LoginPage() {
     setError(null);
     try {
       if (creating) {
-        const { country, phone, ...profile } = signup;
+        const { country, ...profile } = signup;
         const result = await register({
-          ...profile, email, password, phone: `${DIAL_CODE[country]} ${phone.replace(/\D/g, "")}`,
+          ...profile, email, password, phone: `${DIAL_CODE[country]} ${phoneDigits}`,
         });
         startVerifying(result.email, `We sent a 6-digit code to ${result.email}.`);
       } else {
