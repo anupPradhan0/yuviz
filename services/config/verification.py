@@ -358,8 +358,8 @@ async def reset_password(email: str, code: str, new_password: str) -> dict[str, 
             await conn.execute("DELETE FROM password_reset_requests WHERE user_id = $1", user_id)
             new_hash = await asyncio.to_thread(auth.hash_password, new_password)
             updated = dict(await conn.fetchrow(
-                "UPDATE users SET password_hash = $2, password_set = true, updated_at = now() "
-                "WHERE id = $1 RETURNING *",
+                "UPDATE users SET password_hash = $2, password_set = true, "
+                "token_version = token_version + 1, updated_at = now() WHERE id = $1 RETURNING *",
                 user_id, new_hash,
             ))
             await audit.write_audit(

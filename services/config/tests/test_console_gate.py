@@ -206,7 +206,7 @@ class TestConsoleGateApp:
                     "/auth/change-password",
                     json={"current_password": password, "new_password": "a-new-real-password"},
                 )
-                assert change_resp.status_code == 204, change_resp.text
+                assert change_resp.status_code == 200, change_resp.text
         finally:
             await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])
 

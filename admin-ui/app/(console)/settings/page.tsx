@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ApiError,
   AuditLogEntry,
@@ -590,11 +590,18 @@ function SecurityPanel() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
   // Google-created accounts start without a password they know.
-  const [passwordSet, setPasswordSet] = useState(true);
+  const [passwordSet, setPasswordSet] = useState<boolean | null>(null);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+
+  const loadUser = useCallback(() => {
+    getCurrentUser()
+      .then((u) => setPasswordSet(u.password_set))
+      .catch((e) => setLookupError(e instanceof ApiError ? e.detail : String(e)));
+  }, []);
 
   useEffect(() => {
-    getCurrentUser().then((u) => setPasswordSet(u.password_set)).catch(() => {});
-  }, []);
+    loadUser();
+  }, [loadUser]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -610,7 +617,8 @@ function SecurityPanel() {
     }
     setSubmitting(true);
     try {
-      await changePassword(currentPassword, newPassword);
+      // Older tokens are now revoked, including this tab's — keep the fresh one.
+      setToken((await changePassword(currentPassword, newPassword)).access_token);
       setSuccess(true);
       setPasswordSet(true);
       setCurrentPassword("");
@@ -641,68 +649,85 @@ function SecurityPanel() {
           </label>
         </div>
       </div>
-      <ChangeEmailCard passwordSet={passwordSet} />
-      <div className="card">
-        <div className="card-hdr">
-          <div className="card-title">{passwordSet ? "Change Password" : "Set Password"}</div>
-          <div className="card-sub">
-            {passwordSet ? "Use at least 8 characters" : "You sign in with Google — add a password to sign in with email too"}
+      {passwordSet === null ? (
+        <div className="card">
+          <div className="card-body">
+            {lookupError ? (
+              <>
+                <div className="error-banner">Couldn&apos;t load your account: {lookupError}</div>
+                <button className="btn btn-ghost btn-sm" type="button" onClick={() => { setLookupError(null); loadUser(); }}>Retry</button>
+              </>
+            ) : (
+              <div className="form-hint">Loading…</div>
+            )}
           </div>
         </div>
-        <div className="card-body">
-          {error && <div className="error-banner">{error}</div>}
-          {success && (
-            <div className="form-hint" style={{ color: "var(--green)", marginBottom: 12 }}>
-              Password saved.
-            </div>
-          )}
-          <form onSubmit={handleSubmit}>
-            {passwordSet && (
-              <div className="form-group">
-                <label className="form-label">Current Password</label>
-                <input
-                  className="form-input"
-                  type="password"
-                  placeholder="Your current password"
-                  autoComplete="current-password"
-                  value={currentPassword}
-                  onChange={(e) => setCurrentPassword(e.target.value)}
-                  required
-                />
-              </div>
-            )}
-            <div className="form-row">
-              <div className="form-group">
-                <label className="form-label">New Password</label>
-                <input
-                  className="form-input"
-                  type="password"
-                  placeholder="At least 8 characters"
-                  autoComplete="new-password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Confirm New Password</label>
-                <input
-                  className="form-input"
-                  type="password"
-                  placeholder="Repeat new password"
-                  autoComplete="new-password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  required
-                />
+      ) : (
+        <>
+          <ChangeEmailCard passwordSet={passwordSet} />
+          <div className="card">
+            <div className="card-hdr">
+              <div className="card-title">{passwordSet ? "Change Password" : "Set Password"}</div>
+              <div className="card-sub">
+                {passwordSet ? "Use at least 8 characters" : "You sign in with Google — add a password to sign in with email too"}
               </div>
             </div>
-            <button className="btn btn-primary btn-sm" type="submit" disabled={submitting}>
-              {submitting ? "Saving…" : passwordSet ? "Change Password" : "Set Password"}
-            </button>
-          </form>
-        </div>
-      </div>
+            <div className="card-body">
+              {error && <div className="error-banner">{error}</div>}
+              {success && (
+                <div className="form-hint" style={{ color: "var(--green)", marginBottom: 12 }}>
+                  Password saved.
+                </div>
+              )}
+              <form onSubmit={handleSubmit}>
+                {passwordSet && (
+                  <div className="form-group">
+                    <label className="form-label">Current Password</label>
+                    <input
+                      className="form-input"
+                      type="password"
+                      placeholder="Your current password"
+                      autoComplete="current-password"
+                      value={currentPassword}
+                      onChange={(e) => setCurrentPassword(e.target.value)}
+                      required
+                    />
+                  </div>
+                )}
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">New Password</label>
+                    <input
+                      className="form-input"
+                      type="password"
+                      placeholder="At least 8 characters"
+                      autoComplete="new-password"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Confirm New Password</label>
+                    <input
+                      className="form-input"
+                      type="password"
+                      placeholder="Repeat new password"
+                      autoComplete="new-password"
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      required
+                    />
+                  </div>
+                </div>
+                <button className="btn btn-primary btn-sm" type="submit" disabled={submitting}>
+                  {submitting ? "Saving…" : passwordSet ? "Change Password" : "Set Password"}
+                </button>
+              </form>
+            </div>
+          </div>
+        </>
+      )}
     </>
   );
 }

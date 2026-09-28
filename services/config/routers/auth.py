@@ -12,7 +12,7 @@ from fastapi.responses import RedirectResponse
 from .. import email, google_oauth, verification
 from .. import users as users_service
 from ..auth import CurrentUser, create_access_token
-from ..deps import get_authenticated_user, is_platform_scoped
+from ..deps import fresh_console_authority, forget_user, get_authenticated_user, is_platform_scoped
 from ..google_oauth import GoogleOAuthError
 from ..schemas import (
     ChangeEmailRequest, ChangePasswordRequest, ConfirmEmailChangeRequest, ForgotPasswordRequest, LoginRequest,
@@ -63,18 +63,25 @@ async def _send_code(to_email: str, code: str) -> bool:
 
 @router.post("/register", status_code=202)
 async def register(body: RegisterRequest, request: Request):
-    """Emails a code; the account is created only by POST /auth/verify-email."""
+    """Emails a code; the account is created only by POST /auth/verify-email.
+    Same 202 for a taken email (which gets an "account exists" email instead) so this can't probe accounts."""
     request.app.state.register_throttle.check(_client(request))
+    accepted = {"verification_required": True, "email": body.email.lower()}
     try:
         code = await verification.start_registration(**body.model_dump())
     except EmailTaken:
-        raise HTTPException(status_code=409, detail="that email is already registered")
-    except ResendTooSoon as exc:
-        raise _too_soon(exc)
+        try:
+            await email.send_account_exists_email(to_email=body.email)
+        except Exception:
+            log.exception("account-exists email to %s failed", body.email)
+            raise HTTPException(status_code=503, detail=_SEND_FAILED)
+        return accepted
+    except ResendTooSoon:
+        return accepted
     if not await _send_code(body.email, code):
         await verification.discard_registration(body.email)
         raise HTTPException(status_code=503, detail=_SEND_FAILED)
-    return {"verification_required": True, "email": body.email.lower()}
+    return accepted
 
 
 @router.post("/verify-email")
@@ -142,6 +149,7 @@ async def reset_password(body: ResetPasswordRequest, request: Request):
         user = await verification.reset_password(body.email, body.code, body.new_password)
     except CodeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    forget_user(request.app.state, str(user["id"]))
     return _token_response(user)
 
 
@@ -213,33 +221,36 @@ async def me(current_user: CurrentUser = Depends(get_authenticated_user)):
         # the token was issued) — same posture as an expired token: 401, not
         # a 404 that would leak whether the id ever existed.
         raise HTTPException(status_code=401, detail="user no longer exists")
+    if user["token_version"] != current_user.token_version:
+        raise HTTPException(status_code=401, detail="session expired — please sign in again")
     return users_service.to_public_dict(user)
 
 
-@router.post("/change-password", status_code=204)
+@router.post("/change-password")
 async def change_password(
-    body: ChangePasswordRequest, current_user: CurrentUser = Depends(get_authenticated_user),
+    body: ChangePasswordRequest, request: Request, current_user: CurrentUser = Depends(get_authenticated_user),
 ):
-    # Always the caller's own password — there is no "change someone else's
-    # password" endpoint. An admin resetting another user's credentials is a
-    # different, not-yet-built operation (would need its own audit shape:
-    # "admin X reset user Y's password" is a materially different event from
-    # "user Y changed their own password").
-    ok = await users_service.change_password(
+    """Always the caller's own password. Signs out every other session and
+    returns a fresh token for this one."""
+    current_user = await fresh_console_authority(request.app.state, current_user)
+    user = await users_service.change_password(
         current_user.id,
         current_password=body.current_password,
         new_password=body.new_password,
         platform_scoped=is_platform_scoped(current_user),
     )
-    if not ok:
+    if user is None:
         raise HTTPException(status_code=400, detail="current password is incorrect")
+    forget_user(request.app.state, current_user.id)
+    return _token_response(user)
 
 
 @router.post("/change-email", status_code=202)
 async def change_email(
-    body: ChangeEmailRequest, current_user: CurrentUser = Depends(get_authenticated_user),
+    body: ChangeEmailRequest, request: Request, current_user: CurrentUser = Depends(get_authenticated_user),
 ):
     """Emails a code to the new address; POST /auth/change-email/confirm switches."""
+    current_user = await fresh_console_authority(request.app.state, current_user)
     try:
         code = await verification.request_email_change(
             user_id=current_user.id,
@@ -261,8 +272,9 @@ async def change_email(
 
 @router.post("/change-email/confirm")
 async def confirm_email_change(
-    body: ConfirmEmailChangeRequest, current_user: CurrentUser = Depends(get_authenticated_user),
+    body: ConfirmEmailChangeRequest, request: Request, current_user: CurrentUser = Depends(get_authenticated_user),
 ):
+    current_user = await fresh_console_authority(request.app.state, current_user)
     try:
         user = await verification.confirm_email_change(
             user_id=current_user.id, tenant_id=current_user.tenant_id, code=body.code,

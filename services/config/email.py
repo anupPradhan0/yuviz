@@ -87,6 +87,18 @@ async def send_verification_code_email(*, to_email: str, code: str, minutes_vali
     )
 
 
+async def send_account_exists_email(*, to_email: str) -> None:
+    await _send(
+        to_email=to_email,
+        subject="You already have a Yuviz account",
+        body=(
+            "Someone tried to create a Yuviz account with this email, but you already have one.\n\n"
+            "Sign in instead, or use \"Forgot password?\" on the Sign In page to set a new password. "
+            "If this wasn't you, ignore this email."
+        ),
+    )
+
+
 async def _send(*, to_email: str, subject: str, body: str) -> None:
     host = _env("SMTP_HOST")
     port = int(_env("SMTP_PORT"))

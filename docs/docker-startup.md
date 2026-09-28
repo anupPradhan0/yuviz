@@ -19,10 +19,10 @@ cd yuviz
 ```
 
 Then open <http://localhost:3000>. Startup seeds the platform superadmin
-(`superadmin@yuviz.ai` / `ChangeMe@123`, or `SUPERADMIN_EMAIL` /
-`SUPERADMIN_PASSWORD` from `deployment/.env`) only if none exists — change the
-email and password under **Settings → Security** after first sign-in; restarts
-never reset them.
+(`SUPERADMIN_EMAIL`, default `superadmin@yuviz.ai`) only if none exists. Its
+password is `SUPERADMIN_PASSWORD` from `deployment/.env`; if that is blank there
+is no default — set one with **Forgot password?** on the Sign In page (the code
+lands in Mailpit in dev). Restarts never reset the email or password.
 
 **Create account** on the login page is open to anyone: it creates a new
 organization with the registrant as its **admin**, never a superadmin. Email

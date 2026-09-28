@@ -118,7 +118,8 @@ class TestCreateMode:
         resp = await anon_client.post(
             "/auth/change-password", json={"new_password": "chosen-password"}, headers=headers,
         )
-        assert resp.status_code == 204
+        assert resp.status_code == 200
+        headers = {"Authorization": f"Bearer {resp.json()['access_token']}"}
         login = await anon_client.post(
             "/auth/login", json={"email": "jane@example.com", "password": "chosen-password"},
         )

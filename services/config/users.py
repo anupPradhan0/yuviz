@@ -358,6 +358,8 @@ async def update_user(
 
         columns = list(fields.keys())
         set_clause = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(columns))
+        if new_password is not None:
+            set_clause += ", token_version = token_version + 1"
         new_row = await conn.fetchrow(
             f"UPDATE users SET {set_clause}, updated_at = now() WHERE id = $1 RETURNING *",
             user_id, *(fields[col] for col in columns),
@@ -383,8 +385,9 @@ async def update_user(
 
 async def change_password(
     user_id: Any, *, current_password: str, new_password: str, platform_scoped: bool = False,
-) -> bool:
-    """Returns False (no write happens) if current_password doesn't match —
+) -> dict[str, Any] | None:
+    """Returns the updated row (with a bumped token_version, revoking older
+    sessions), or None (no write happens) if current_password doesn't match —
     the router turns that into a 400, distinct from update_user()'s
     role/tenant_id path since this always needs the caller to prove they
     still know the old password, not just be authenticated as someone with
@@ -405,13 +408,14 @@ async def change_password(
         if user["password_set"] and not await asyncio.to_thread(
             auth.verify_password, current_password, user["password_hash"],
         ):
-            return False
+            return None
 
         new_hash = await asyncio.to_thread(auth.hash_password, new_password)
-        await conn.execute(
-            "UPDATE users SET password_hash = $2, password_set = true, updated_at = now() WHERE id = $1",
+        updated = dict(await conn.fetchrow(
+            "UPDATE users SET password_hash = $2, password_set = true, token_version = token_version + 1, "
+            "updated_at = now() WHERE id = $1 RETURNING *",
             user_id, new_hash,
-        )
+        ))
         # old_value/new_value both carry password_hash, but audit.py
         # redacts that field before it ever reaches Postgres (see
         # audit.py's _SECRET_REF_FIELDS) — this row only records "a
@@ -426,7 +430,7 @@ async def change_password(
             old_value={"password_hash": user["password_hash"]},
             new_value={"password_hash": new_hash},
         )
-    return True
+    return updated
 
 
 async def soft_delete_user(

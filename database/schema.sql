@@ -271,6 +271,8 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS signup_source TEXT;
 -- False for Google-created accounts until they choose a password in Settings.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_set BOOLEAN NOT NULL DEFAULT true;
+-- Bumped on every password change; tokens carrying an older value are rejected.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INT NOT NULL DEFAULT 0;
 
 -- Signups awaiting their emailed code; no users/tenants row until verified.
 -- code_hash is an HMAC, never the code itself.

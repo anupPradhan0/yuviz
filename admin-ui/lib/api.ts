@@ -1099,7 +1099,7 @@ export const googleSignInUrl = (mode: "signin" | "create") =>
   `${BASE_URL}/auth/oauth/google/start?mode=${mode}`;
 
 export const changePassword = (currentPassword: string, newPassword: string) =>
-  request<void>("/auth/change-password", {
+  request<LoginResponse>("/auth/change-password", {
     method: "POST",
     body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
   });

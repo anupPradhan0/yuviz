@@ -93,6 +93,12 @@ def mailer():
         yield mock
 
 
+@pytest.fixture(autouse=True)
+def exists_mailer():
+    with patch("services.config.email.send_account_exists_email", AsyncMock()) as mock:
+        yield mock
+
+
 def _code(mailer, to: str | None = None) -> str:
     call = mailer.call_args
     if to is not None:
@@ -197,12 +203,24 @@ class TestRegister:
         slugs = await fresh_db.fetch("SELECT slug FROM tenants WHERE name = 'Acme Corp'")
         assert len({r["slug"] for r in slugs}) == 2
 
-    async def test_duplicate_email_is_rejected_and_writes_nothing(self, fresh_db, anon_client):
+    async def test_duplicate_email_gets_a_notice_not_a_code_and_writes_nothing(
+        self, fresh_db, anon_client, mailer, exists_mailer,
+    ):
         await _register(anon_client)
         resp = await anon_client.post("/auth/register", json=_signup("OWNER@acme.com", organization_name="Dup"))
-        assert resp.status_code == 409
+        assert resp.status_code == 202
+        mailer.assert_not_called()
+        assert exists_mailer.call_args.kwargs["to_email"] == "OWNER@acme.com"
         assert await fresh_db.fetchval("SELECT count(*) FROM tenants WHERE name = 'Dup'") == 0
+        assert await fresh_db.fetchval("SELECT count(*) FROM pending_registrations") == 0
         assert await fresh_db.fetchval("SELECT count(*) FROM users") == 1
+
+    async def test_taken_and_new_emails_get_the_same_responses(self, anon_client):
+        await _register(anon_client, "taken@acme.com")
+        taken = [(await anon_client.post("/auth/register", json=_signup("taken@acme.com"))) for _ in range(2)]
+        new = [(await anon_client.post("/auth/register", json=_signup("new@acme.com"))) for _ in range(2)]
+        assert [r.status_code for r in taken] == [r.status_code for r in new] == [202, 202]
+        assert [r.json()["verification_required"] for r in taken + new] == [True] * 4
 
     @pytest.mark.parametrize(
         "overrides",
@@ -593,6 +611,73 @@ class TestForgotPassword:
         await _register(anon_client)
         code = await self._request_code(anon_client, mailer)
         assert code not in await fresh_db.fetchval("SELECT code_hash FROM password_reset_requests")
+
+
+class TestSessionRevocation:
+    async def _login(self, client, password: str = "a-real-password") -> str:
+        resp = await client.post("/auth/login", json={"email": "owner@acme.com", "password": password})
+        assert resp.status_code == 200, resp.text
+        return resp.json()["access_token"]
+
+    async def _works(self, client, token: str) -> bool:
+        me = await client.get("/auth/me", headers=_bearer(token))
+        users = await client.get("/users", headers=_bearer(token))
+        assert me.status_code == users.status_code, (me.text, users.text)
+        return me.status_code == 200
+
+    async def test_reset_signs_out_existing_sessions(self, anon_client, mailer):
+        await _register(anon_client)
+        old = await self._login(anon_client)
+        assert await self._works(anon_client, old)
+        mailer.reset_mock()
+        await anon_client.post("/auth/forgot-password", json={"email": "owner@acme.com"})
+        resp = await anon_client.post(
+            "/auth/reset-password",
+            json={"email": "owner@acme.com", "code": _code(mailer), "new_password": "brand-new-password"},
+        )
+        assert not await self._works(anon_client, old)
+        assert await self._works(anon_client, resp.json()["access_token"])
+
+    async def test_password_change_signs_out_other_sessions_but_not_this_one(self, anon_client):
+        await _register(anon_client)
+        this, other = await self._login(anon_client), await self._login(anon_client)
+        assert await self._works(anon_client, other)
+        resp = await anon_client.post(
+            "/auth/change-password",
+            json={"current_password": "a-real-password", "new_password": "brand-new-password"},
+            headers=_bearer(this),
+        )
+        assert resp.status_code == 200
+        assert not await self._works(anon_client, other)
+        assert not await self._works(anon_client, this)
+        assert await self._works(anon_client, resp.json()["access_token"])
+
+    async def test_revoked_token_cannot_change_email(self, anon_client):
+        await _register(anon_client)
+        old = await self._login(anon_client)
+        await anon_client.post(
+            "/auth/change-password",
+            json={"current_password": "a-real-password", "new_password": "brand-new-password"},
+            headers=_bearer(old),
+        )
+        resp = await anon_client.post(
+            "/auth/change-email",
+            json={"current_password": "brand-new-password", "new_email": "attacker@evil.com"},
+            headers=_bearer(old),
+        )
+        assert resp.status_code == 401
+
+    async def test_superadmin_setting_a_password_signs_the_user_out(self, anon_client):
+        await users_service.seed_superadmin(**SUPERADMIN)
+        root = (await anon_client.post("/auth/login", json=SUPERADMIN)).json()["access_token"]
+        admin = await _register(anon_client)
+        assert await self._works(anon_client, admin["access_token"])
+        resp = await anon_client.patch(
+            f"/users/{admin['user']['id']}", json={"password": "brand-new-password"}, headers=_bearer(root),
+        )
+        assert resp.status_code == 200
+        assert not await self._works(anon_client, admin["access_token"])
+        assert await self._works(anon_client, await self._login(anon_client, "brand-new-password"))
 
 
 class TestLogin:
