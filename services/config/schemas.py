@@ -368,7 +368,7 @@ class LoginRequest(BaseModel):
 
 
 SignupSource = Literal[
-    "google_search", "youtube", "linkedin", "x", "facebook", "instagram", "friend", "event", "other",
+    "google_ad", "facebook_ad", "linkedin", "x", "friend", "youtube", "blog", "product_hunt", "other",
 ]
 
 

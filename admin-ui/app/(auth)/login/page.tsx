@@ -8,6 +8,8 @@ import {
   type UserRole,
 } from "@/lib/api";
 import { clearToken, setToken } from "@/lib/auth";
+import { COUNTRY_DIAL_CODES } from "@/lib/countries";
+import { SelectMenu } from "@/components/SelectMenu";
 
 // Only claims the product can back up — no invented usage numbers.
 const HERO = {
@@ -35,10 +37,11 @@ const HERO = {
 
 const PROVIDERS = ["OpenAI", "Anthropic", "Gemini", "Ollama", "Deepgram", "ElevenLabs", "Whisper", "Kokoro"];
 
-const COUNTRY_CODES = ["+1", "+44", "+91", "+61", "+49", "+33", "+971", "+65", "+81"];
+const DIAL_CODE = Object.fromEntries(COUNTRY_DIAL_CODES);
+const COUNTRY_OPTIONS = COUNTRY_DIAL_CODES.map(([iso, dial]) => ({ value: iso, label: `${iso} ${dial}` }));
 
 const EMPTY_SIGNUP = {
-  organization_name: "", first_name: "", last_name: "", countryCode: "+1", phone: "", signup_source: "",
+  organization_name: "", first_name: "", last_name: "", country: "IN", phone: "", signup_source: "",
 };
 
 function Logo() {
@@ -109,9 +112,10 @@ export default function LoginPage() {
   const [reveal, setReveal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const setValue = (field: keyof typeof EMPTY_SIGNUP) => (value: string) =>
+    setSignup((s) => ({ ...s, [field]: value }));
   const setField = (field: keyof typeof EMPTY_SIGNUP) =>
-    (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
-      setSignup((s) => ({ ...s, [field]: e.target.value }));
+    (e: React.ChangeEvent<HTMLInputElement>) => setValue(field)(e.target.value);
 
   useEffect(() => {
     const fragment = new URLSearchParams(window.location.hash.slice(1));
@@ -149,12 +153,16 @@ export default function LoginPage() {
       setError("Password must be at least 8 characters.");
       return;
     }
+    if (creating && !signup.signup_source) {
+      setError("Please tell us how you heard about us.");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
-      const { countryCode, phone, ...profile } = signup;
+      const { country, phone, ...profile } = signup;
       const result = creating
-        ? await register({ ...profile, email, password, phone: `${countryCode} ${phone.replace(/\D/g, "")}` })
+        ? await register({ ...profile, email, password, phone: `${DIAL_CODE[country]} ${phone.replace(/\D/g, "")}` })
         : await login(email, password);
       setToken(result.access_token);
       landOn(router, result.user.role);
@@ -271,14 +279,12 @@ export default function LoginPage() {
               <div className="login-field">
                 <label className="login-label" htmlFor="signup-phone">Phone Number</label>
                 <div className="login-phone">
-                  <select
-                    className="login-input"
-                    aria-label="Country code"
-                    value={signup.countryCode}
-                    onChange={setField("countryCode")}
-                  >
-                    {COUNTRY_CODES.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
+                  <SelectMenu
+                    ariaLabel="Country code"
+                    value={signup.country}
+                    options={COUNTRY_OPTIONS}
+                    onChange={setValue("country")}
+                  />
                   <input
                     id="signup-phone"
                     className="login-input"
@@ -322,16 +328,13 @@ export default function LoginPage() {
             {creating && (
               <div className="login-field">
                 <label className="login-label" htmlFor="signup-source">How did you hear about us?</label>
-                <select
+                <SelectMenu
                   id="signup-source"
-                  className="login-input"
                   value={signup.signup_source}
-                  onChange={setField("signup_source")}
-                  required
-                >
-                  <option value="" disabled>Select an option</option>
-                  {SIGNUP_SOURCES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
-                </select>
+                  options={SIGNUP_SOURCES}
+                  placeholder="Select an option"
+                  onChange={setValue("signup_source")}
+                />
               </div>
             )}
             <button className="login-btn auth-submit" type="submit" disabled={submitting}>

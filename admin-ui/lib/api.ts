@@ -1046,14 +1046,14 @@ export const login = (email: string, password: string) =>
 
 // Mirrors schemas.py's SignupSource.
 export const SIGNUP_SOURCES = [
-  { value: "google_search", label: "Google search" },
-  { value: "youtube", label: "YouTube" },
+  { value: "google_ad", label: "Google Ad" },
+  { value: "facebook_ad", label: "Facebook Ad" },
   { value: "linkedin", label: "LinkedIn" },
-  { value: "x", label: "X (Twitter)" },
-  { value: "facebook", label: "Facebook" },
-  { value: "instagram", label: "Instagram" },
-  { value: "friend", label: "Friend or colleague" },
-  { value: "event", label: "Event or conference" },
+  { value: "x", label: "Twitter / X" },
+  { value: "friend", label: "Friend / Colleague" },
+  { value: "youtube", label: "YouTube" },
+  { value: "blog", label: "Blog / Article" },
+  { value: "product_hunt", label: "Product Hunt" },
   { value: "other", label: "Other" },
 ] as const;
 
