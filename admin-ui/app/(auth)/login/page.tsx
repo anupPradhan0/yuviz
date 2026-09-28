@@ -93,15 +93,14 @@ function EyeIcon({ off }: { off: boolean }) {
 // CONSOLE_ROLES but DOES hold a grant — LIVE_CALLS_ROLES, exactly
 // /live-calls and its POST route (services/config/deps.py) — so it
 // gets its own landing page rather than being lumped in with agent's
-// dead end (lesson 22: the role must land somewhere it can use). A
-// `viewer` is a console role but can't create/edit tenants, so
-// /tenants (built around superadmin/admin actions) isn't a page they
-// can use either — Dashboard is read-only and works for them.
+// dead end (lesson 22: the role must land somewhere it can use).
+// /tenants is superadmin-only (AppShell.tsx), so everyone else lands on
+// Dashboard.
 function landOn(router: ReturnType<typeof useRouter>, role: UserRole) {
   if (role === "supervisor") router.push("/live-calls");
   else if (!isConsoleRole(role)) router.push("/no-access");
-  else if (role === "viewer") router.push("/dashboard");
-  else router.push("/tenants");
+  else if (role === "superadmin") router.push("/tenants");
+  else router.push("/dashboard");
 }
 
 // Sign-in and public signup on one screen. Signup always creates a new
