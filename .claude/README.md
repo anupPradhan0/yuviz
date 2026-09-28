@@ -36,6 +36,12 @@ early noise contaminating later work.
 Every critic starts cold and verifies claims against the real code — a design citing a file or
 function that does not exist is its highest-value finding.
 
+**Independent stages run in parallel.** Review and security read the same diff through
+different lenses and never overlap in practice, so they go out together; critics split by stack
+when a diff spans two; build batches split by file ownership. The rule and its four exceptions are
+in `sdlc/parallelism.md` — and so is the discipline that makes it safe: every parallel batch ends
+with one full verification on the *combined* tree, because each agent only ever saw its own slice.
+
 **Loops are capped.** Two rounds per stage, three for security. Anything still open is reported to
 you rather than ground on.
 

@@ -320,3 +320,19 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
     another-tenant's-DID caller_id dialed with zero ownership check. Fixed by splitting the query
     into two independent fields, `provider` and `caller_id_owned`, and gating dispatch on the latter
     before the provider branch runs at all.*
+
+40. [all] Independent agents dispatched in separate messages run one after another and buy nothing.
+    Parallelism only happens when every independent call goes out in a **single message with
+    multiple tool calls**. Work is independent unless it hits one of four blockers: two agents
+    editing the same file, two agents running the suite against the same database, two agents
+    holding the same port or browser, or a genuine data dependency (a critic needs the finished
+    artifact). Everything else is a list that was mistaken for a sequence.
+    *Earned: review-then-security run serially for weeks; run together on the same diff they found
+    entirely non-overlapping defects in roughly half the wall-clock time.*
+
+41. [all] Parallel work is only free if the join is real. Every agent verified its slice against a
+    tree that did not contain the others' changes — which is not the tree being shipped. After any
+    parallel batch, run the full verification once on the combined result and re-run the critic on
+    the merged state, not on each part. If you cannot do that join, you cannot run the batch in
+    parallel: the speed-up just relocates the integration failure to production.
+    *Earned: two independently-green fix batches whose combination had never been run together.*
