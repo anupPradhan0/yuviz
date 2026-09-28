@@ -15,8 +15,8 @@ from ..auth import CurrentUser, create_access_token
 from ..deps import get_authenticated_user, is_platform_scoped
 from ..google_oauth import GoogleOAuthError
 from ..schemas import (
-    ChangeEmailRequest, ChangePasswordRequest, ConfirmEmailChangeRequest, LoginRequest, RegisterRequest,
-    ResendCodeRequest, VerifyEmailRequest,
+    ChangeEmailRequest, ChangePasswordRequest, ConfirmEmailChangeRequest, ForgotPasswordRequest, LoginRequest,
+    RegisterRequest, ResendCodeRequest, ResetPasswordRequest, VerifyEmailRequest,
 )
 from ..verification import CodeError, EmailTaken, ResendTooSoon
 
@@ -120,6 +120,29 @@ async def login(body: LoginRequest):
     # Same 401 for "no such email" and "wrong password" — see
     # users.authenticate()'s docstring for why.
     raise HTTPException(status_code=401, detail="invalid email or password")
+
+
+@router.post("/forgot-password", status_code=202)
+async def forgot_password(body: ForgotPasswordRequest, request: Request):
+    # Same 202 for unknown emails, cooldowns and send failures, so this can't probe accounts.
+    request.app.state.verify_throttle.check(_client(request))
+    try:
+        code = await verification.start_password_reset(body.email)
+    except ResendTooSoon:
+        code = None
+    if code is not None and not await _send_code(body.email, code):
+        await verification.discard_password_reset(body.email)
+    return {"sent": True}
+
+
+@router.post("/reset-password")
+async def reset_password(body: ResetPasswordRequest, request: Request):
+    request.app.state.verify_throttle.check(_client(request))
+    try:
+        user = await verification.reset_password(body.email, body.code, body.new_password)
+    except CodeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _token_response(user)
 
 
 def _to_login(**fragment: str) -> RedirectResponse:

@@ -1082,6 +1082,15 @@ export const verifyEmail = (email: string, code: string) =>
 export const resendVerificationCode = (email: string) =>
   request<{ sent: boolean }>("/auth/resend-code", { method: "POST", body: JSON.stringify({ email }) });
 
+export const forgotPassword = (email: string) =>
+  request<{ sent: boolean }>("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) });
+
+export const resetPassword = (email: string, code: string, newPassword: string) =>
+  request<LoginResponse>("/auth/reset-password", {
+    method: "POST",
+    body: JSON.stringify({ email, code, new_password: newPassword }),
+  });
+
 export const getCurrentUser = () => request<User>("/auth/me");
 
 // Full-page navigation, not fetch: the Config Service redirects to Google and

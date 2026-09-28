@@ -4,8 +4,8 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
-  ApiError, getCurrentUser, googleSignInUrl, isConsoleRole, login, register, resendVerificationCode,
-  SIGNUP_SOURCES, verifyEmail, type UserRole,
+  ApiError, forgotPassword, getCurrentUser, googleSignInUrl, isConsoleRole, login, register,
+  resendVerificationCode, resetPassword, SIGNUP_SOURCES, verifyEmail, type UserRole,
 } from "@/lib/api";
 import { CodeInput } from "@/components/CodeInput";
 import { clearToken, setToken } from "@/lib/auth";
@@ -111,6 +111,8 @@ export default function LoginPage() {
   const [code, setCode] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [resendIn, setResendIn] = useState(0);
+  const [resetStep, setResetStep] = useState<"email" | "code" | null>(null);
+  const [newPassword, setNewPassword] = useState("");
   const setValue = (field: keyof typeof EMPTY_SIGNUP) => (value: string) =>
     setSignup((s) => ({ ...s, [field]: value }));
   const setField = (field: keyof typeof EMPTY_SIGNUP) =>
@@ -192,6 +194,58 @@ export default function LoginPage() {
         setResendIn(Number(e.detail.match(/(\d+) seconds/)?.[1]) || RESEND_SECONDS);
       }
       setError(e instanceof ApiError ? e.detail : String(e));
+    }
+  };
+
+  const openReset = (step: "email" | "code" | null) => {
+    setResetStep(step);
+    setError(null);
+    setCode("");
+    setNewPassword("");
+  };
+
+  // The server answers the same whether or not the email has an account.
+  const sendResetCode = async () => {
+    setError(null);
+    try {
+      await forgotPassword(email);
+      setNotice(`If an account exists for ${email}, we sent it a 6-digit code.`);
+      setResendIn(RESEND_SECONDS);
+      return true;
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : String(e));
+      return false;
+    }
+  };
+
+  const handleForgot = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+    if (await sendResetCode()) openReset("code");
+    setSubmitting(false);
+  };
+
+  const handleReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (code.length !== 6) {
+      setError("Enter the 6-digit code from your email.");
+      return;
+    }
+    if (newPassword.length < 8) {
+      setError("Password must be at least 8 characters.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await resetPassword(email, code, newPassword);
+      setToken(result.access_token);
+      landOn(router, result.user.role);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : String(e));
+      setCode("");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -292,6 +346,84 @@ export default function LoginPage() {
                 <button type="button" onClick={() => { setVerifyingEmail(null); setError(null); }}>
                   ← Use a different email
                 </button>
+              </div>
+            </>
+          ) : resetStep === "email" ? (
+            <>
+              <h2 className="auth-title">Reset your password</h2>
+              <p className="auth-sub">Enter your account email and we&apos;ll send you a 6-digit code.</p>
+              {error && <div className="error-banner">{error}</div>}
+              <form onSubmit={handleForgot}>
+                <div className="login-field">
+                  <label className="login-label" htmlFor="reset-email">Email</label>
+                  <input
+                    id="reset-email"
+                    className="login-input"
+                    type="email"
+                    autoComplete="email"
+                    placeholder="name@company.com"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                  />
+                </div>
+                <button className="login-btn auth-submit" type="submit" disabled={submitting}>
+                  {submitting ? "Sending…" : "Send code"}
+                </button>
+              </form>
+              <div className="login-alt">
+                <button type="button" onClick={() => openReset(null)}>← Back to sign in</button>
+              </div>
+            </>
+          ) : resetStep === "code" ? (
+            <>
+              <h2 className="auth-title">Choose a new password</h2>
+              <p className="auth-sub">{notice}</p>
+              {error && <div className="error-banner">{error}</div>}
+              <form onSubmit={handleReset}>
+                <CodeInput value={code} onChange={setCode} disabled={submitting} />
+                <div className="login-field">
+                  <label className="login-label" htmlFor="reset-password">New password</label>
+                  <div className="login-input-wrap">
+                    <input
+                      id="reset-password"
+                      className="login-input"
+                      type={reveal ? "text" : "password"}
+                      autoComplete="new-password"
+                      placeholder="At least 8 characters"
+                      minLength={8}
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      required
+                    />
+                    <button
+                      type="button"
+                      className="login-reveal"
+                      onClick={() => setReveal((r) => !r)}
+                      aria-label={reveal ? "Hide password" : "Show password"}
+                      aria-pressed={reveal}
+                      title={reveal ? "Hide password" : "Show password"}
+                    >
+                      <EyeIcon off={reveal} />
+                    </button>
+                  </div>
+                </div>
+                <button
+                  className="login-btn auth-submit"
+                  type="submit"
+                  disabled={submitting || code.length !== 6}
+                >
+                  {submitting ? "Resetting…" : "Reset password"}
+                </button>
+              </form>
+              <div className="login-alt">
+                Didn&apos;t get it?{" "}
+                <button type="button" onClick={sendResetCode} disabled={resendIn > 0}>
+                  {resendIn > 0 ? `Resend in ${resendIn}s` : "Resend code"}
+                </button>
+              </div>
+              <div className="login-alt">
+                <button type="button" onClick={() => openReset("email")}>← Use a different email</button>
               </div>
             </>
           ) : (
@@ -435,6 +567,11 @@ export default function LoginPage() {
                     : creating ? "Create account" : "Sign in"}
                 </button>
               </form>
+              {!creating && (
+                <div className="login-alt">
+                  <button type="button" onClick={() => openReset("email")}>Forgot password?</button>
+                </div>
+              )}
               <div className="login-alt">
                 {creating ? (
                   <>

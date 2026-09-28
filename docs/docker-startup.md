@@ -490,8 +490,10 @@ DNS64; test with `getent ahosts github.com`.
 `COPY . /app`. `dev.sh` always rebuilds, but a manual `docker compose up init`
 does not.
 
-**Forgot the admin password** — there is no reset flow and no default
-credential to fall back on. Create another superadmin from the host with
+**Forgot the admin password** — use **Forgot password?** on the Sign In page;
+it emails a 6-digit code (needs working SMTP — in dev, read it in Mailpit).
+Without SMTP there is no default credential to fall back on: create another
+superadmin from the host with
 `POSTGRES_DSN=postgresql://voiceai:voiceai@127.0.0.1:5432/voiceai python3
 scripts/create_superadmin.py <email> <password>` — from the host, use
 `127.0.0.1`, not the compose service name `postgres`. Or wipe and start over

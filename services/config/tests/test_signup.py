@@ -488,6 +488,113 @@ class TestUnverifiedLogin:
         assert resp.json()["detail"] == "invalid email or password"
 
 
+class TestForgotPassword:
+    async def _request_code(self, client, mailer, email: str = "owner@acme.com") -> str:
+        mailer.reset_mock()
+        resp = await client.post("/auth/forgot-password", json={"email": email})
+        assert resp.status_code == 202
+        return _code(mailer, email)
+
+    async def test_code_sets_a_new_password_and_signs_in(self, anon_client, mailer):
+        await _register(anon_client)
+        code = await self._request_code(anon_client, mailer, "OWNER@acme.com")
+        resp = await anon_client.post(
+            "/auth/reset-password",
+            json={"email": "owner@acme.com", "code": code, "new_password": "brand-new-password"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["user"]["email"] == "owner@acme.com"
+        old = await anon_client.post("/auth/login", json={"email": "owner@acme.com", "password": "a-real-password"})
+        new = await anon_client.post("/auth/login", json={"email": "owner@acme.com", "password": "brand-new-password"})
+        assert old.status_code == 401
+        assert new.status_code == 200
+
+    async def test_code_works_only_once(self, fresh_db, anon_client, mailer):
+        await _register(anon_client)
+        code = await self._request_code(anon_client, mailer)
+        body = {"email": "owner@acme.com", "code": code, "new_password": "brand-new-password"}
+        assert (await anon_client.post("/auth/reset-password", json=body)).status_code == 200
+        assert (await anon_client.post("/auth/reset-password", json=body)).status_code == 400
+        assert await fresh_db.fetchval("SELECT count(*) FROM password_reset_requests") == 0
+
+    async def test_seeded_superadmin_can_reset(self, anon_client, mailer):
+        await users_service.seed_superadmin(**SUPERADMIN)
+        code = await self._request_code(anon_client, mailer, SUPERADMIN["email"])
+        resp = await anon_client.post(
+            "/auth/reset-password",
+            json={"email": SUPERADMIN["email"], "code": code, "new_password": "brand-new-password"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["user"]["role"] == "superadmin"
+
+    async def test_wrong_code_keeps_the_old_password(self, anon_client, mailer):
+        await _register(anon_client)
+        code = await self._request_code(anon_client, mailer)
+        resp = await anon_client.post(
+            "/auth/reset-password",
+            json={"email": "owner@acme.com", "code": _wrong(code), "new_password": "brand-new-password"},
+        )
+        assert resp.status_code == 400
+        login = await anon_client.post("/auth/login", json={"email": "owner@acme.com", "password": "a-real-password"})
+        assert login.status_code == 200
+
+    async def test_code_dies_after_too_many_wrong_attempts(self, anon_client, mailer):
+        await _register(anon_client)
+        code = await self._request_code(anon_client, mailer)
+        body = {"email": "owner@acme.com", "new_password": "brand-new-password"}
+        for _ in range(5):
+            await anon_client.post("/auth/reset-password", json={**body, "code": _wrong(code)})
+        resp = await anon_client.post("/auth/reset-password", json={**body, "code": code})
+        assert resp.status_code == 400
+        assert "Too many" in resp.json()["detail"]
+
+    async def test_code_for_one_account_cannot_reset_another(self, anon_client, mailer):
+        await _register(anon_client, "a@acme.com", organization_name="Acme")
+        await _register(anon_client, "b@globex.com", organization_name="Globex")
+        await self._request_code(anon_client, mailer, "b@globex.com")
+        code = await self._request_code(anon_client, mailer, "a@acme.com")
+        resp = await anon_client.post(
+            "/auth/reset-password", json={"email": "b@globex.com", "code": code, "new_password": "brand-new-password"},
+        )
+        if resp.status_code == 200:  # both accounts drew the same 6 digits
+            return
+        assert resp.status_code == 400
+        login = await anon_client.post("/auth/login", json={"email": "b@globex.com", "password": "a-real-password"})
+        assert login.status_code == 200
+
+    async def test_short_password_is_rejected(self, anon_client, mailer):
+        await _register(anon_client)
+        code = await self._request_code(anon_client, mailer)
+        resp = await anon_client.post(
+            "/auth/reset-password", json={"email": "owner@acme.com", "code": code, "new_password": "short"},
+        )
+        assert resp.status_code == 422
+
+    async def test_unknown_email_cooldown_and_send_failure_all_look_the_same(self, anon_client, mailer):
+        await _register(anon_client)
+        mailer.reset_mock()
+        unknown = await anon_client.post("/auth/forgot-password", json={"email": "nobody@example.com"})
+        mailer.assert_not_called()
+        first = await anon_client.post("/auth/forgot-password", json={"email": "owner@acme.com"})
+        too_soon = await anon_client.post("/auth/forgot-password", json={"email": "owner@acme.com"})
+        assert mailer.call_count == 1
+        responses = [unknown, first, too_soon]
+        assert [r.status_code for r in responses] == [202] * 3
+        assert len({r.text for r in responses}) == 1
+
+    async def test_send_failure_leaves_no_open_request(self, fresh_db, anon_client, mailer):
+        await _register(anon_client)
+        mailer.side_effect = OSError("relay down")
+        resp = await anon_client.post("/auth/forgot-password", json={"email": "owner@acme.com"})
+        assert resp.status_code == 202
+        assert await fresh_db.fetchval("SELECT count(*) FROM password_reset_requests") == 0
+
+    async def test_code_is_stored_hashed(self, fresh_db, anon_client, mailer):
+        await _register(anon_client)
+        code = await self._request_code(anon_client, mailer)
+        assert code not in await fresh_db.fetchval("SELECT code_hash FROM password_reset_requests")
+
+
 class TestLogin:
     async def test_still_hides_whether_an_email_exists(self, anon_client):
         await _register(anon_client)

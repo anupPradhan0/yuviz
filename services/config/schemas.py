@@ -413,6 +413,16 @@ class ConfirmEmailChangeRequest(BaseModel):
     code: str = Field(pattern=r"^\d{6}$")
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    email:        str
+    code:         str = Field(pattern=r"^\d{6}$")
+    new_password: str = Field(min_length=8)
+
+
 class InviteCreate(BaseModel):
     email:     str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     role:      Literal["superadmin", "admin", "supervisor", "agent", "viewer"]

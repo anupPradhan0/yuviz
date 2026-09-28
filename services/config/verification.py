@@ -1,7 +1,7 @@
 """
-Emailed 6-digit codes for public signup and signed-in email change. No user
-row exists until a signup verifies; errors raise after commit so wrong-guess
-counters persist.
+Emailed 6-digit codes for public signup, signed-in email change and forgot
+password. No user row exists until a signup verifies; errors raise after
+commit so wrong-guess counters persist.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ RESEND_COOLDOWN_SECONDS = 60
 MAX_SENDS_PER_HOUR = 5
 
 _WRONG_CODE = "That code is incorrect."
+_NOT_PENDING = "No verification is pending for this email — please start again."
 
 
 class EmailTaken(Exception):
@@ -55,7 +56,7 @@ def _now() -> datetime:
 
 def _code_problem(row: Any, purpose: str, subject: str, code: str) -> str | None:
     if row is None:
-        return "No verification is pending for this email — please start again."
+        return _NOT_PENDING
     if row["attempts"] >= MAX_ATTEMPTS:
         return "Too many incorrect attempts — request a new code."
     if row["expires_at"] <= _now():
@@ -293,3 +294,84 @@ async def confirm_email_change(*, user_id: Any, tenant_id: Any, code: str) -> di
     if problem is not None:
         raise CodeError(problem)
     return new
+
+
+# ── Forgot password ──────────────────────────────────────────────────────────
+
+async def _reset_account(email: str) -> dict[str, Any] | None:
+    user = await users.get_user_by_email(email)
+    return None if user is None or user["is_service_account"] else user
+
+
+async def start_password_reset(email: str) -> str | None:
+    """Opens (or replaces) the account's reset request and returns the code to
+    email, or None if no account has this address. Raises ResendTooSoon."""
+    user = await _reset_account(email)
+    if user is None:
+        return None
+    code = _new_code()
+    now = _now()
+    pool = await db.get_pool()
+    async with platform_conn(pool, reason="pre-auth-password-reset") as conn:
+        existing = await conn.fetchrow(
+            "SELECT * FROM password_reset_requests WHERE user_id = $1 FOR UPDATE", user["id"],
+        )
+        window_start, send_count = _next_send(existing, now)
+        await conn.execute(
+            "INSERT INTO password_reset_requests (user_id, code_hash, expires_at, attempts, last_sent_at, "
+            "send_window_start, send_count) VALUES ($1, $2, $3, 0, $4, $5, $6) "
+            "ON CONFLICT (user_id) DO UPDATE SET code_hash = EXCLUDED.code_hash, "
+            "expires_at = EXCLUDED.expires_at, attempts = 0, last_sent_at = EXCLUDED.last_sent_at, "
+            "send_window_start = EXCLUDED.send_window_start, send_count = EXCLUDED.send_count",
+            user["id"], _hash("password-reset", str(user["id"]), code),
+            now + timedelta(minutes=CODE_TTL_MINUTES), now, window_start, send_count,
+        )
+    return code
+
+
+async def discard_password_reset(email: str) -> None:
+    user = await _reset_account(email)
+    if user is None:
+        return
+    pool = await db.get_pool()
+    async with platform_conn(pool, reason="pre-auth-password-reset") as conn:
+        await conn.execute("DELETE FROM password_reset_requests WHERE user_id = $1", user["id"])
+
+
+async def reset_password(email: str, code: str, new_password: str) -> dict[str, Any]:
+    """Sets a new password from a valid reset code and returns the user row.
+    Raises CodeError."""
+    user = await _reset_account(email)
+    if user is None:
+        raise CodeError(_NOT_PENDING)
+    user_id = user["id"]
+    updated = None
+    pool = await db.get_pool()
+    async with platform_conn(pool, reason="pre-auth-password-reset", stamp_tenant=user["tenant_id"]) as conn:
+        row = await conn.fetchrow("SELECT * FROM password_reset_requests WHERE user_id = $1 FOR UPDATE", user_id)
+        problem = _code_problem(row, "password-reset", str(user_id), code)
+        if problem == _WRONG_CODE:
+            await conn.execute(
+                "UPDATE password_reset_requests SET attempts = attempts + 1 WHERE user_id = $1", user_id,
+            )
+        elif problem is None:
+            await conn.execute("DELETE FROM password_reset_requests WHERE user_id = $1", user_id)
+            new_hash = await asyncio.to_thread(auth.hash_password, new_password)
+            updated = dict(await conn.fetchrow(
+                "UPDATE users SET password_hash = $2, password_set = true, updated_at = now() "
+                "WHERE id = $1 RETURNING *",
+                user_id, new_hash,
+            ))
+            await audit.write_audit(
+                conn,
+                entity_type="user",
+                entity_id=user_id,
+                action="updated",
+                user_id=user_id,
+                user_email=user["email"],
+                old_value={"password_hash": user["password_hash"]},
+                new_value={"password_hash": new_hash},
+            )
+    if problem is not None:
+        raise CodeError(problem)
+    return updated

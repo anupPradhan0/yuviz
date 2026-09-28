@@ -178,6 +178,8 @@ BEGIN
     ALTER TABLE pending_registrations FORCE  ROW LEVEL SECURITY;
     ALTER TABLE email_change_requests ENABLE ROW LEVEL SECURITY;
     ALTER TABLE email_change_requests FORCE  ROW LEVEL SECURITY;
+    ALTER TABLE password_reset_requests ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE password_reset_requests FORCE  ROW LEVEL SECURITY;
 END $$;
 
 DO $$

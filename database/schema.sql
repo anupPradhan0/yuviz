@@ -303,6 +303,18 @@ CREATE TABLE IF NOT EXISTS email_change_requests (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Forgot-password code emailed to the account's address. One open request per user.
+CREATE TABLE IF NOT EXISTS password_reset_requests (
+    user_id           UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    code_hash         TEXT NOT NULL,
+    expires_at        TIMESTAMPTZ NOT NULL,
+    attempts          INT NOT NULL DEFAULT 0,
+    last_sent_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    send_window_start TIMESTAMPTZ NOT NULL DEFAULT now(),
+    send_count        INT NOT NULL DEFAULT 1,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Email identity (findings 4, 5, 8). `psql -f` runs with no ON_ERROR_STOP,
 -- so a failing statement is logged and the script keeps going rather than
 -- aborting — meaning ordering two separate statements cannot protect the
