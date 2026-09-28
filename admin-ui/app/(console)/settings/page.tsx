@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
   ApiError,
   AuditLogEntry,
+  changeEmail,
   changePassword,
   getCurrentUser,
   listAuditLog,
@@ -13,6 +14,7 @@ import {
   UserRole,
 } from "@/lib/api";
 import { Modal } from "@/components/Modal";
+import { setToken } from "@/lib/auth";
 
 type SettingsSection = "profile" | "sessions" | "security" | "audit-log";
 
@@ -467,6 +469,80 @@ function AuditLogPanel() {
   );
 }
 
+function ChangeEmailCard() {
+  const [newEmail, setNewEmail] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [changedTo, setChangedTo] = useState<string | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setChangedTo(null);
+    setSubmitting(true);
+    try {
+      const result = await changeEmail(currentPassword, newEmail);
+      setToken(result.access_token);
+      setChangedTo(result.user.email);
+      setNewEmail("");
+      setCurrentPassword("");
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card-hdr">
+        <div className="card-title">Change Email</div>
+        <div className="card-sub">The address you sign in with</div>
+      </div>
+      <div className="card-body">
+        {error && <div className="error-banner">{error}</div>}
+        {changedTo && (
+          <div className="form-hint" style={{ color: "var(--green)", marginBottom: 12 }}>
+            Email changed to {changedTo}.
+          </div>
+        )}
+        <form onSubmit={handleSubmit}>
+          <div className="form-row">
+            <div className="form-group">
+              <label className="form-label">New Email</label>
+              <input
+                className="form-input"
+                type="email"
+                placeholder="name@company.com"
+                autoComplete="email"
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+                required
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Current Password</label>
+              <input
+                className="form-input"
+                type="password"
+                placeholder="Confirm it's you"
+                autoComplete="current-password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                required
+              />
+            </div>
+          </div>
+          <button className="btn btn-primary btn-sm" type="submit" disabled={submitting}>
+            {submitting ? "Changing…" : "Change Email"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function SecurityPanel() {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -519,6 +595,7 @@ function SecurityPanel() {
           </label>
         </div>
       </div>
+      <ChangeEmailCard />
       <div className="card">
         <div className="card-hdr">
           <div className="card-title">Change Password</div>

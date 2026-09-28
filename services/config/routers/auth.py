@@ -13,7 +13,7 @@ from .. import users as users_service
 from ..auth import CurrentUser, create_access_token
 from ..deps import get_authenticated_user, is_platform_scoped
 from ..google_oauth import GoogleOAuthError
-from ..schemas import BootstrapRequest, ChangePasswordRequest, LoginRequest
+from ..schemas import ChangeEmailRequest, ChangePasswordRequest, LoginRequest, RegisterRequest
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -29,21 +29,13 @@ def _token_response(user: dict) -> dict:
     }
 
 
-@router.get("/setup-status")
-async def setup_status():
-    return {"setup_required": not await users_service.superadmin_exists()}
-
-
-@router.post("/bootstrap", status_code=201)
-async def bootstrap(body: BootstrapRequest):
+@router.post("/register", status_code=201)
+async def register(body: RegisterRequest, request: Request):
+    request.app.state.register_throttle.check(request.client.host if request.client else "unknown")
     try:
-        user = await users_service.bootstrap_first_superadmin(
-            email=body.email, password=body.password,
-        )
+        user = await users_service.register_admin(**body.model_dump())
     except asyncpg.UniqueViolationError:
         raise HTTPException(status_code=409, detail="that email is already registered")
-    if user is None:
-        raise HTTPException(status_code=409, detail="setup has already been completed")
     return _token_response(user)
 
 
@@ -62,22 +54,25 @@ def _to_login(**fragment: str) -> RedirectResponse:
     return RedirectResponse(f"{google_oauth.ADMIN_UI_URL}/login#{urlencode(fragment)}", status_code=302)
 
 
-async def _google_user(mode: str, email: str) -> dict[str, Any]:
+async def _google_user(mode: str, identity: google_oauth.GoogleIdentity) -> dict[str, Any]:
+    email = identity.email
     if mode == "create":
+        first_name = identity.given_name or email.split("@")[0]
         try:
             # Random unusable password: this account signs in with Google
             # until the user sets one via change-password.
-            user = await users_service.bootstrap_first_superadmin(
-                email=email, password=secrets.token_urlsafe(32),
+            return await users_service.register_admin(
+                email=email,
+                password=secrets.token_urlsafe(32),
+                organization_name=f"{first_name}'s organization",
+                first_name=first_name,
+                last_name=identity.family_name,
             )
         except asyncpg.UniqueViolationError:
             raise GoogleOAuthError("That email is already registered — sign in instead.")
-        if user is None:
-            raise GoogleOAuthError("Setup has already been completed — sign in instead.")
-        return user
     user = await users_service.get_user_by_email(email)
     if user is None or user.get("is_service_account"):
-        raise GoogleOAuthError(f"No account exists for {email}. Ask an administrator for an invite.")
+        raise GoogleOAuthError(f"No account exists for {email}. Create an account first.")
     return user
 
 
@@ -102,8 +97,8 @@ async def google_callback(
         if error or not code or not state:
             raise GoogleOAuthError("Google sign-in was cancelled.")
         mode, nonce = google_oauth.read_state(state, request.cookies.get(_GOOGLE_COOKIE))
-        email = await google_oauth.verified_email(code, nonce)
-        user = await _google_user(mode, email)
+        identity = await google_oauth.verified_identity(code, nonce)
+        user = await _google_user(mode, identity)
     except GoogleOAuthError as exc:
         resp = _to_login(error=str(exc))
     else:
@@ -140,3 +135,22 @@ async def change_password(
     )
     if not ok:
         raise HTTPException(status_code=400, detail="current password is incorrect")
+
+
+@router.post("/change-email")
+async def change_email(
+    body: ChangeEmailRequest, current_user: CurrentUser = Depends(get_authenticated_user),
+):
+    try:
+        user = await users_service.change_email(
+            current_user.id,
+            current_password=body.current_password,
+            new_email=body.new_email,
+            platform_scoped=is_platform_scoped(current_user),
+        )
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(status_code=409, detail="that email is already registered")
+    if user is None:
+        raise HTTPException(status_code=400, detail="current password is incorrect")
+    # The JWT carries the email claim, so hand back a token with the new one.
+    return _token_response(user)

@@ -1,0 +1,312 @@
+"""
+Seeded superadmin + public admin signup (/auth/register) + /auth/change-email.
+
+These cannot use the shared 'voiceai' database — "no superadmin yet" is a
+property of the whole database, and conftest's fixtures put superadmins in
+it. Each test gets its own throwaway database instead, installed as db.py's
+process-wide pool so the code under test needs no changes.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import uuid
+from pathlib import Path
+from unittest.mock import patch
+from urllib.parse import urlsplit, urlunsplit
+
+import asyncpg
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+
+from services.config import auth, db
+from services.config import users as users_service
+from services.config.app import AcceptThrottle, app
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SCHEMA_SQL = (REPO_ROOT / "database" / "schema.sql").read_text()
+
+SUPERADMIN = {"email": "root@example.com", "password": "a-real-password"}
+
+
+def _signup(email: str = "owner@acme.com", **overrides) -> dict:
+    return {
+        "organization_name": "Acme Corp",
+        "first_name": "Jane",
+        "last_name": "Doe",
+        "email": email,
+        "phone": "+1 9876543210",
+        "password": "a-real-password",
+        "signup_source": "linkedin",
+        **overrides,
+    }
+
+
+def _bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def fresh_db():
+    """An empty, schema-applied database installed as db.py's process-wide
+    pool; the original pool is restored afterwards."""
+    base_dsn = os.environ["POSTGRES_DSN"]
+    name = f"yuviz_signup_test_{uuid.uuid4().hex[:12]}"
+
+    # CREATE DATABASE can't run in a transaction — standalone connection.
+    conn = await asyncpg.connect(base_dsn)
+    try:
+        await conn.execute(f'CREATE DATABASE "{name}"')
+    finally:
+        await conn.close()
+
+    test_dsn = urlunsplit(urlsplit(base_dsn)._replace(path=f"/{name}"))
+    test_pool = await asyncpg.create_pool(test_dsn, min_size=1, max_size=10)
+    async with test_pool.acquire() as c:
+        await c.execute(SCHEMA_SQL)
+
+    original = db._pool  # noqa: SLF001
+    db._pool = test_pool  # noqa: SLF001
+    try:
+        yield test_pool
+    finally:
+        db._pool = original  # noqa: SLF001
+        await test_pool.close()
+        conn = await asyncpg.connect(base_dsn)
+        try:
+            await conn.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
+        finally:
+            await conn.close()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def anon_client(fresh_db):
+    app.state.register_throttle = AcceptThrottle()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+async def _register(client, email: str = "owner@acme.com", **overrides) -> dict:
+    resp = await client.post("/auth/register", json=_signup(email, **overrides))
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+class TestSeedSuperadmin:
+    async def test_creates_a_platform_superadmin(self, anon_client):
+        user = await users_service.seed_superadmin(**SUPERADMIN)
+        assert user["role"] == "superadmin"
+        assert user["tenant_id"] is None
+        resp = await anon_client.post("/auth/login", json=SUPERADMIN)
+        assert resp.status_code == 200
+        assert resp.json()["user"]["role"] == "superadmin"
+
+    async def test_restart_never_duplicates_or_resets_it(self, fresh_db, anon_client):
+        await users_service.seed_superadmin(**SUPERADMIN)
+        again = await users_service.seed_superadmin(email="other@example.com", password="other-password")
+        assert again is None
+        assert await fresh_db.fetchval("SELECT count(*) FROM users WHERE role = 'superadmin'") == 1
+        assert (await anon_client.post("/auth/login", json=SUPERADMIN)).status_code == 200
+
+    async def test_changed_credentials_survive_a_reseed(self, anon_client):
+        await users_service.seed_superadmin(**SUPERADMIN)
+        token = (await anon_client.post("/auth/login", json=SUPERADMIN)).json()["access_token"]
+        resp = await anon_client.post(
+            "/auth/change-email",
+            json={"current_password": SUPERADMIN["password"], "new_email": "boss@example.com"},
+            headers=_bearer(token),
+        )
+        assert resp.status_code == 200
+        assert await users_service.seed_superadmin(**SUPERADMIN) is None
+        assert (await anon_client.post("/auth/login", json=SUPERADMIN)).status_code == 401
+        moved = {"email": "boss@example.com", "password": SUPERADMIN["password"]}
+        assert (await anon_client.post("/auth/login", json=moved)).status_code == 200
+
+    async def test_concurrent_seeds_create_exactly_one(self, fresh_db):
+        results = await asyncio.gather(*(
+            users_service.seed_superadmin(email=f"racer{i}@example.com", password="a-real-password")
+            for i in range(10)
+        ))
+        assert len([r for r in results if r is not None]) == 1
+        assert await fresh_db.fetchval("SELECT count(*) FROM users") == 1
+
+
+class TestRegister:
+    async def test_creates_an_admin_in_a_new_organization(self, fresh_db, anon_client):
+        body = await _register(anon_client)
+        user = body["user"]
+        assert user["role"] == "admin"
+        assert user["tenant_id"] is not None
+        assert (user["first_name"], user["last_name"]) == ("Jane", "Doe")
+        assert user["phone"] == "+1 9876543210"
+        assert user["signup_source"] == "linkedin"
+        assert "password_hash" not in user
+        tenant = await fresh_db.fetchrow("SELECT name, slug FROM tenants WHERE id = $1", uuid.UUID(user["tenant_id"]))
+        assert tenant["name"] == "Acme Corp"
+        assert tenant["slug"] == "acme-corp"
+
+        me = await anon_client.get("/auth/me", headers=_bearer(body["access_token"]))
+        assert me.status_code == 200
+        assert me.json()["email"] == "owner@acme.com"
+
+    async def test_open_while_a_superadmin_exists(self, anon_client):
+        await users_service.seed_superadmin(**SUPERADMIN)
+        assert (await _register(anon_client))["user"]["role"] == "admin"
+
+    async def test_client_cannot_choose_role_or_tenant(self, fresh_db, anon_client):
+        other = await fresh_db.fetchval("INSERT INTO tenants (name, slug) VALUES ('Other', 'other') RETURNING id")
+        body = await _register(anon_client, role="superadmin", tenant_id=str(other))
+        assert body["user"]["role"] == "admin"
+        assert body["user"]["tenant_id"] != str(other)
+        assert auth.decode_access_token(body["access_token"]).role == "admin"
+        assert await fresh_db.fetchval("SELECT count(*) FROM users WHERE role = 'superadmin'") == 0
+
+    async def test_same_organization_name_gets_a_distinct_tenant(self, fresh_db, anon_client):
+        first = await _register(anon_client, "a@acme.com")
+        second = await _register(anon_client, "b@acme.com")
+        assert first["user"]["tenant_id"] != second["user"]["tenant_id"]
+        slugs = await fresh_db.fetch("SELECT slug FROM tenants WHERE name = 'Acme Corp'")
+        assert len({r["slug"] for r in slugs}) == 2
+
+    async def test_duplicate_email_is_rejected_and_writes_nothing(self, fresh_db, anon_client):
+        await _register(anon_client)
+        resp = await anon_client.post("/auth/register", json=_signup("OWNER@acme.com", organization_name="Dup"))
+        assert resp.status_code == 409
+        assert await fresh_db.fetchval("SELECT count(*) FROM tenants WHERE name = 'Dup'") == 0
+        assert await fresh_db.fetchval("SELECT count(*) FROM users") == 1
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"organization_name": ""},
+            {"first_name": ""},
+            {"email": "not-an-email"},
+            {"phone": "12345"},
+            {"password": "short"},
+            {"signup_source": "carrier-pigeon"},
+        ],
+        ids=["no-org", "no-first-name", "bad-email", "bad-phone", "short-password", "unknown-source"],
+    )
+    async def test_rejects_invalid_input(self, fresh_db, anon_client, overrides):
+        resp = await anon_client.post("/auth/register", json=_signup(**overrides))
+        assert resp.status_code == 422
+        assert await fresh_db.fetchval("SELECT count(*) FROM users") == 0
+
+    async def test_is_rate_limited_per_client(self, anon_client):
+        codes = [
+            (await anon_client.post("/auth/register", json=_signup(f"u{i}@acme.com"))).status_code
+            for i in range(11)
+        ]
+        assert codes[:10] == [201] * 10
+        assert codes[10] == 429
+
+
+class TestRegisteredAdminPermissions:
+    async def test_sees_only_their_own_organization(self, anon_client):
+        a = await _register(anon_client, "a@acme.com", organization_name="Acme")
+        b = await _register(anon_client, "b@globex.com", organization_name="Globex")
+        headers = _bearer(a["access_token"])
+
+        users = await anon_client.get("/users", headers=headers)
+        assert {u["email"] for u in users.json()} == {"a@acme.com"}
+        tenants = await anon_client.get("/tenants", headers=headers)
+        assert [t["id"] for t in tenants.json()] == [a["user"]["tenant_id"]]
+        cross = await anon_client.get("/users", params={"tenant_id": b["user"]["tenant_id"]}, headers=headers)
+        assert "b@globex.com" not in {u["email"] for u in cross.json()}
+
+    async def test_invites_users_into_own_organization_only(self, anon_client):
+        a = await _register(anon_client, "a@acme.com", organization_name="Acme")
+        b = await _register(anon_client, "b@globex.com", organization_name="Globex")
+        headers = _bearer(a["access_token"])
+        own = a["user"]["tenant_id"]
+
+        with patch("services.config.email.send_invite_email") as mock_send:
+            ok = await anon_client.post(
+                "/invites", json={"email": "agent@acme.com", "role": "viewer", "tenant_id": own}, headers=headers,
+            )
+            cross = await anon_client.post(
+                "/invites", json={"email": "x@globex.com", "role": "viewer", "tenant_id": b["user"]["tenant_id"]},
+                headers=headers,
+            )
+            escalate = await anon_client.post(
+                "/invites", json={"email": "root2@acme.com", "role": "superadmin", "tenant_id": own},
+                headers=headers,
+            )
+        assert ok.status_code == 201
+        assert cross.status_code == 403
+        assert escalate.status_code == 403
+
+        accepted = await anon_client.post(
+            "/invites/accept", json={"password": "another-password"},
+            headers={"X-Invite-Token": mock_send.call_args_list[0].kwargs["raw_token"]},
+        )
+        assert accepted.status_code == 200
+        assert accepted.json()["role"] == "viewer"
+        assert accepted.json()["tenant_id"] == own
+
+
+class TestSuperadminIsSeedOnly:
+    async def test_superadmin_cannot_invite_another_superadmin(self, anon_client):
+        await users_service.seed_superadmin(**SUPERADMIN)
+        token = (await anon_client.post("/auth/login", json=SUPERADMIN)).json()["access_token"]
+        with patch("services.config.email.send_invite_email"):
+            resp = await anon_client.post(
+                "/invites", json={"email": "second@example.com", "role": "superadmin"}, headers=_bearer(token),
+            )
+        assert resp.status_code == 403
+
+    async def test_cannot_promote_a_user_to_superadmin(self, anon_client):
+        await users_service.seed_superadmin(**SUPERADMIN)
+        token = (await anon_client.post("/auth/login", json=SUPERADMIN)).json()["access_token"]
+        admin = await _register(anon_client)
+        resp = await anon_client.patch(
+            f"/users/{admin['user']['id']}", json={"role": "superadmin"}, headers=_bearer(token),
+        )
+        assert resp.status_code == 422
+
+
+class TestChangeEmail:
+    async def test_wrong_password_is_rejected(self, anon_client):
+        body = await _register(anon_client)
+        resp = await anon_client.post(
+            "/auth/change-email",
+            json={"current_password": "wrong-password", "new_email": "new@acme.com"},
+            headers=_bearer(body["access_token"]),
+        )
+        assert resp.status_code == 400
+
+    async def test_taken_email_is_rejected(self, anon_client):
+        await _register(anon_client, "taken@acme.com", organization_name="Taken")
+        body = await _register(anon_client)
+        resp = await anon_client.post(
+            "/auth/change-email",
+            json={"current_password": "a-real-password", "new_email": "Taken@acme.com"},
+            headers=_bearer(body["access_token"]),
+        )
+        assert resp.status_code == 409
+
+    async def test_returns_a_token_carrying_the_new_email(self, anon_client):
+        body = await _register(anon_client)
+        resp = await anon_client.post(
+            "/auth/change-email",
+            json={"current_password": "a-real-password", "new_email": "New@Acme.com"},
+            headers=_bearer(body["access_token"]),
+        )
+        assert resp.status_code == 200
+        assert auth.decode_access_token(resp.json()["access_token"]).email == "new@acme.com"
+
+
+class TestLogin:
+    async def test_still_hides_whether_an_email_exists(self, anon_client):
+        await _register(anon_client)
+        wrong_password = await anon_client.post(
+            "/auth/login", json={"email": "owner@acme.com", "password": "wrong-password"},
+        )
+        unknown_email = await anon_client.post(
+            "/auth/login", json={"email": "nobody@example.com", "password": "wrong-password"},
+        )
+        assert wrong_password.status_code == unknown_email.status_code == 401
+        assert wrong_password.json()["detail"] == unknown_email.json()["detail"]

@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
-  ApiError, bootstrap, getCurrentUser, getSetupStatus, googleSignInUrl, isConsoleRole, login,
+  ApiError, getCurrentUser, googleSignInUrl, isConsoleRole, login, register, SIGNUP_SOURCES,
   type UserRole,
 } from "@/lib/api";
 import { clearToken, setToken } from "@/lib/auth";
@@ -14,26 +14,32 @@ const HERO = {
   signin: {
     eyebrow: "Voice AI platform",
     title: "Voice agents that listen, think and talk back",
-    body: "Real-time speech-to-text, LLM reasoning and text-to-speech over phone lines or the browser — with tools, knowledge retrieval and live human handoff.",
+    body: "Your AI assistant answers calls on the phone or your website, understands what callers say, replies in a natural voice, finds answers in your documents, and passes the call to a real person when needed.",
     facts: [
-      { value: "SIP + WebRTC", label: "Phone and browser calls" },
-      { value: "STT → LLM → TTS", label: "Streaming pipeline" },
-      { value: "Multi-tenant", label: "Isolated data per tenant" },
+      { value: "Phone & web", label: "Answers calls from any phone or browser" },
+      { value: "Natural voice", label: "Listens and replies instantly" },
+      { value: "Private", label: "Each organization's data kept separate" },
     ],
   },
   create: {
-    eyebrow: "First-time setup",
+    eyebrow: "Get started",
     title: "Set up your voice AI workspace",
-    body: "Create the administrator account, add your first tenant, invite your team and launch a voice agent — on your own infrastructure.",
+    body: "Create your organization and admin account, invite your team and launch your first AI voice assistant.",
     facts: [
-      { value: "01", label: "Create the admin account" },
-      { value: "02", label: "Connect AI & voice providers" },
-      { value: "03", label: "Test your agent in the browser" },
+      { value: "01", label: "Create your organization" },
+      { value: "02", label: "Connect your AI and voice services" },
+      { value: "03", label: "Invite your team and go live" },
     ],
   },
 };
 
 const PROVIDERS = ["OpenAI", "Anthropic", "Gemini", "Ollama", "Deepgram", "ElevenLabs", "Whisper", "Kokoro"];
+
+const COUNTRY_CODES = ["+1", "+44", "+91", "+61", "+49", "+33", "+971", "+65", "+81"];
+
+const EMPTY_SIGNUP = {
+  organization_name: "", first_name: "", last_name: "", countryCode: "+1", phone: "", signup_source: "",
+};
 
 function Logo() {
   return (
@@ -92,22 +98,21 @@ function landOn(router: ReturnType<typeof useRouter>, role: UserRole) {
   else router.push("/tenants");
 }
 
-// Sign-in and first-run account creation on one screen. The "create your
-// account" link only appears while /auth/setup-status reports setup_required
-// — once a superadmin exists /auth/bootstrap 409s, so offering it would be a
-// dead end.
+// Sign-in and public signup on one screen. Signup always creates a new
+// organization with the registrant as its admin (POST /auth/register).
 export default function LoginPage() {
   const router = useRouter();
   const [mode, setMode] = useState<"signin" | "create" | null>(null);
-  const [setupRequired, setSetupRequired] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [confirm, setConfirm] = useState("");
+  const [signup, setSignup] = useState(EMPTY_SIGNUP);
   const [reveal, setReveal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Always lands on sign-in; the create form is one click away when the
-  // status says no superadmin exists yet. A failed check just means no link.
+  const setField = (field: keyof typeof EMPTY_SIGNUP) =>
+    (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+      setSignup((s) => ({ ...s, [field]: e.target.value }));
+
   useEffect(() => {
     const fragment = new URLSearchParams(window.location.hash.slice(1));
     const oauthToken = fragment.get("token");
@@ -124,13 +129,11 @@ export default function LoginPage() {
         });
       return;
     }
-    getSetupStatus()
-      .then(({ setup_required }) => setSetupRequired(setup_required))
-      .catch(() => {})
-      .finally(() => {
-        if (oauthError) setError(oauthError);
-        setMode("signin");
-      });
+    // Deferred so the state updates don't run synchronously inside the effect.
+    queueMicrotask(() => {
+      if (oauthError) setError(oauthError);
+      setMode("signin");
+    });
   }, [router]);
 
   const creating = mode === "create";
@@ -138,26 +141,21 @@ export default function LoginPage() {
   const switchMode = (next: "signin" | "create") => {
     setMode(next);
     setError(null);
-    setConfirm("");
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (creating) {
-      // Mirrors schemas.py's BootstrapRequest; the backend still decides.
-      if (password.length < 8) {
-        setError("Password must be at least 8 characters.");
-        return;
-      }
-      if (password !== confirm) {
-        setError("Passwords do not match.");
-        return;
-      }
+    if (creating && password.length < 8) {
+      setError("Password must be at least 8 characters.");
+      return;
     }
     setSubmitting(true);
     setError(null);
     try {
-      const result = creating ? await bootstrap(email, password) : await login(email, password);
+      const { countryCode, phone, ...profile } = signup;
+      const result = creating
+        ? await register({ ...profile, email, password, phone: `${countryCode} ${phone.replace(/\D/g, "")}` })
+        : await login(email, password);
       setToken(result.access_token);
       landOn(router, result.user.role);
     } catch (e) {
@@ -198,10 +196,10 @@ export default function LoginPage() {
         <Link href="/" className="auth-back">← Back to homepage</Link>
         <div className="auth-form">
           <div className="auth-mobile-logo"><Logo /></div>
-          <h2 className="auth-title">{creating ? "Create your administrator account" : "Sign in"}</h2>
+          <h2 className="auth-title">{creating ? "Create an account" : "Sign in"}</h2>
           <p className="auth-sub">
             {creating
-              ? "This install has no users yet. The account you create here is the first superadmin — there are no default credentials."
+              ? "Enter your details to get started. You'll be the admin of your new organization."
               : "Welcome back. Enter your credentials to continue."}
           </p>
           {error && <div className="error-banner">{error}</div>}
@@ -211,6 +209,51 @@ export default function LoginPage() {
           </a>
           <div className="login-divider">or</div>
           <form onSubmit={handleSubmit}>
+            {creating && (
+              <>
+                <div className="login-field">
+                  <label className="login-label" htmlFor="signup-org">Organization Name</label>
+                  <input
+                    id="signup-org"
+                    className="login-input"
+                    autoComplete="organization"
+                    placeholder="Acme Corp"
+                    maxLength={120}
+                    value={signup.organization_name}
+                    onChange={setField("organization_name")}
+                    required
+                  />
+                </div>
+                <div className="login-row">
+                  <div className="login-field">
+                    <label className="login-label" htmlFor="signup-first">First Name</label>
+                    <input
+                      id="signup-first"
+                      className="login-input"
+                      autoComplete="given-name"
+                      placeholder="John"
+                      maxLength={80}
+                      value={signup.first_name}
+                      onChange={setField("first_name")}
+                      required
+                    />
+                  </div>
+                  <div className="login-field">
+                    <label className="login-label" htmlFor="signup-last">Last Name</label>
+                    <input
+                      id="signup-last"
+                      className="login-input"
+                      autoComplete="family-name"
+                      placeholder="Doe"
+                      maxLength={80}
+                      value={signup.last_name}
+                      onChange={setField("last_name")}
+                      required
+                    />
+                  </div>
+                </div>
+              </>
+            )}
             <div className="login-field">
               <label className="login-label" htmlFor="login-email">Email</label>
               <input
@@ -224,6 +267,32 @@ export default function LoginPage() {
                 required
               />
             </div>
+            {creating && (
+              <div className="login-field">
+                <label className="login-label" htmlFor="signup-phone">Phone Number</label>
+                <div className="login-phone">
+                  <select
+                    className="login-input"
+                    aria-label="Country code"
+                    value={signup.countryCode}
+                    onChange={setField("countryCode")}
+                  >
+                    {COUNTRY_CODES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <input
+                    id="signup-phone"
+                    className="login-input"
+                    type="tel"
+                    autoComplete="tel-national"
+                    placeholder="9876543210"
+                    pattern="[0-9 ]{6,18}"
+                    value={signup.phone}
+                    onChange={setField("phone")}
+                    required
+                  />
+                </div>
+              </div>
+            )}
             <div className="login-field">
               <label className="login-label" htmlFor="login-password">Password</label>
               <div className="login-input-wrap">
@@ -252,16 +321,17 @@ export default function LoginPage() {
             </div>
             {creating && (
               <div className="login-field">
-                <label className="login-label" htmlFor="login-confirm">Confirm password</label>
-                <input
-                  id="login-confirm"
+                <label className="login-label" htmlFor="signup-source">How did you hear about us?</label>
+                <select
+                  id="signup-source"
                   className="login-input"
-                  type={reveal ? "text" : "password"}
-                  autoComplete="new-password"
-                  value={confirm}
-                  onChange={(e) => setConfirm(e.target.value)}
+                  value={signup.signup_source}
+                  onChange={setField("signup_source")}
                   required
-                />
+                >
+                  <option value="" disabled>Select an option</option>
+                  {SIGNUP_SOURCES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                </select>
               </div>
             )}
             <button className="login-btn auth-submit" type="submit" disabled={submitting}>
@@ -270,21 +340,19 @@ export default function LoginPage() {
                 : creating ? "Create account" : "Sign in"}
             </button>
           </form>
-          {setupRequired && (
-            <div className="login-alt">
-              {creating ? (
-                <>
-                  Already have an account?{" "}
-                  <button type="button" onClick={() => switchMode("signin")}>Sign in</button>
-                </>
-              ) : (
-                <>
-                  New here?{" "}
-                  <button type="button" onClick={() => switchMode("create")}>Create your account</button>
-                </>
-              )}
-            </div>
-          )}
+          <div className="login-alt">
+            {creating ? (
+              <>
+                Already have an account?{" "}
+                <button type="button" onClick={() => switchMode("signin")}>Sign in</button>
+              </>
+            ) : (
+              <>
+                New here?{" "}
+                <button type="button" onClick={() => switchMode("create")}>Create an account</button>
+              </>
+            )}
+          </div>
         </div>
       </main>
     </div>

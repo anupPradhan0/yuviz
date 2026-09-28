@@ -83,11 +83,12 @@ class TestMayInvite:
             target_role="admin", target_tenant_id=self.TENANT_B,
         ) is True
 
-    def test_superadmin_may_invite_superadmin(self):
+    def test_superadmin_cannot_invite_superadmin(self):
+        # superadmin is seeded only (scripts/seed_superadmin.py).
         assert invites.may_invite(
             actor_role="superadmin", actor_tenant_id=None,
             target_role="superadmin", target_tenant_id=None,
-        ) is True
+        ) is False
 
     @pytest.mark.parametrize("target_role", ["admin", "viewer"])
     @pytest.mark.parametrize("target_tenant_id", [None, TENANT_A])

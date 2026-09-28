@@ -114,17 +114,18 @@ class InviteContextGone(Exception):
 def may_invite(
     *, actor_role: str, actor_tenant_id: Any, target_role: str, target_tenant_id: Any,
 ) -> bool:
-    """The privilege-escalation matrix (AC2/AC3/AC4). superadmin may invite
-    anyone, anywhere. A tenant_admin (role="admin") may invite anyone except
-    a superadmin, and only within its own tenant. Every other actor role —
-    including supervisor/agent, which have no Config API surface at all —
-    is denied unconditionally; belt and braces, since the console gate in
-    deps.py already 403s them before any router body runs."""
+    """The privilege-escalation matrix (AC2/AC3/AC4). Nobody may invite a
+    superadmin — that role is seeded only (scripts/seed_superadmin.py).
+    superadmin may invite any other role, anywhere. A tenant_admin
+    (role="admin") may invite only within its own tenant. Every other actor
+    role — including supervisor/agent, which have no Config API surface at
+    all — is denied unconditionally; belt and braces, since the console gate
+    in deps.py already 403s them before any router body runs."""
+    if target_role == "superadmin":
+        return False
     if actor_role == "superadmin":
         return True
     if actor_role == "admin":
-        if target_role == "superadmin":
-            return False
         if actor_tenant_id is None:
             return False
         return _same_tenant(actor_tenant_id, target_tenant_id)

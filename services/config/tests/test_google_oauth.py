@@ -1,6 +1,6 @@
 """Google OAuth sign-in: /auth/oauth/google/start + /auth/oauth/google/callback.
 
-Google itself is never called — verified_email is patched, so these cover
+Google itself is never called — verified_identity is patched, so these cover
 the state/cookie binding and the account rules, not Google's token endpoint.
 """
 
@@ -13,8 +13,9 @@ import pytest
 
 from services.config import auth, google_oauth
 from services.config import users as users_service
+from services.config.google_oauth import GoogleIdentity
 from services.config.routers.auth import _GOOGLE_COOKIE
-from services.config.tests.test_bootstrap import anon_client, fresh_db  # noqa: F401
+from services.config.tests.test_signup import anon_client, fresh_db  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -37,8 +38,9 @@ async def _start(client, mode: str) -> str:
     return parse_qs(urlsplit(resp.headers["location"]).query)["state"][0]
 
 
-async def _callback(client, state: str, email: str):
-    with patch.object(google_oauth, "verified_email", AsyncMock(return_value=email)):
+async def _callback(client, state: str, email: str, **names: str):
+    identity = GoogleIdentity(email, names.get("given_name"), names.get("family_name"))
+    with patch.object(google_oauth, "verified_identity", AsyncMock(return_value=identity)):
         return await client.get(f"/auth/oauth/google/callback?code=c&state={state}")
 
 
@@ -61,14 +63,14 @@ class TestStart:
 
 
 class TestCallbackStateBinding:
-    async def test_state_without_the_matching_cookie_is_rejected(self, anon_client):
+    async def test_state_without_the_matching_cookie_is_rejected(self, fresh_db, anon_client):
         # Login CSRF: an attacker's state replayed in a victim browser that
         # never started the flow has no cookie.
         state = await _start(anon_client, "create")
         anon_client.cookies.clear()
         resp = await _callback(anon_client, state, "admin@example.com")
         assert "token" not in _fragment(resp)
-        assert await users_service.superadmin_exists() is False
+        assert await fresh_db.fetchval("SELECT count(*) FROM users") == 0
 
     async def test_forged_state_is_rejected(self, anon_client):
         await _start(anon_client, "create")
@@ -81,31 +83,42 @@ class TestCallbackStateBinding:
 
 
 class TestCreateMode:
-    async def test_bootstraps_the_first_superadmin(self, anon_client):
+    async def test_registers_an_admin_in_a_new_organization(self, fresh_db, anon_client):
+        state = await _start(anon_client, "create")
+        resp = await _callback(anon_client, state, "jane@example.com", given_name="Jane", family_name="Doe")
+        user = auth.decode_access_token(_fragment(resp)["token"])
+        assert user.email == "jane@example.com"
+        assert user.role == "admin"
+        assert user.tenant_id is not None
+        row = await fresh_db.fetchrow(
+            "SELECT u.first_name, u.last_name, t.name FROM users u JOIN tenants t ON t.id = u.tenant_id "
+            "WHERE u.email = 'jane@example.com'",
+        )
+        assert (row["first_name"], row["last_name"], row["name"]) == ("Jane", "Doe", "Jane's organization")
+
+    async def test_never_grants_superadmin_even_on_an_empty_install(self, fresh_db, anon_client):
         state = await _start(anon_client, "create")
         resp = await _callback(anon_client, state, "admin@example.com")
-        user = auth.decode_access_token(_fragment(resp)["token"])
-        assert user.email == "admin@example.com"
-        assert user.role == "superadmin"
-        assert user.tenant_id is None
+        assert auth.decode_access_token(_fragment(resp)["token"]).role == "admin"
+        assert await fresh_db.fetchval("SELECT count(*) FROM users WHERE role = 'superadmin'") == 0
 
-    async def test_rejected_once_setup_is_done(self, fresh_db, anon_client):
-        await users_service.bootstrap_first_superadmin(email="first@example.com", password="a-real-password")
+    async def test_existing_email_is_told_to_sign_in(self, fresh_db, anon_client):
+        await users_service.seed_superadmin(email="admin@example.com", password="a-real-password")
         state = await _start(anon_client, "create")
-        resp = await _callback(anon_client, state, "second@example.com")
-        assert "already been completed" in _fragment(resp)["error"]
+        resp = await _callback(anon_client, state, "admin@example.com")
+        assert "already registered" in _fragment(resp)["error"]
         assert await fresh_db.fetchval("SELECT count(*) FROM users") == 1
 
 
 class TestSigninMode:
     async def test_existing_user_gets_their_own_token(self, anon_client):
-        await users_service.bootstrap_first_superadmin(email="admin@example.com", password="a-real-password")
+        await users_service.seed_superadmin(email="admin@example.com", password="a-real-password")
         state = await _start(anon_client, "signin")
         resp = await _callback(anon_client, state, "Admin@Example.com")
         assert auth.decode_access_token(_fragment(resp)["token"]).email == "admin@example.com"
 
     async def test_unknown_email_never_creates_an_account(self, fresh_db, anon_client):
-        await users_service.bootstrap_first_superadmin(email="admin@example.com", password="a-real-password")
+        await users_service.seed_superadmin(email="admin@example.com", password="a-real-password")
         state = await _start(anon_client, "signin")
         resp = await _callback(anon_client, state, "stranger@example.com")
         assert "No account exists" in _fragment(resp)["error"]

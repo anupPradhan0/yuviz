@@ -367,13 +367,25 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class BootstrapRequest(BaseModel):
-    email:    str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-    password: str = Field(min_length=8)
+SignupSource = Literal[
+    "google_search", "youtube", "linkedin", "x", "facebook", "instagram", "friend", "event", "other",
+]
+
+
+class RegisterRequest(BaseModel):
+    """Public signup. Deliberately has no role/tenant field — see users.register_admin."""
+    organization_name: str = Field(min_length=1, max_length=120)
+    first_name:        str = Field(min_length=1, max_length=80)
+    last_name:         str = Field(min_length=1, max_length=80)
+    email:             str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    phone:             str = Field(pattern=r"^\+\d{1,4} ?\d{6,14}$")
+    password:          str = Field(min_length=8)
+    signup_source:     SignupSource
 
 
 class UserUpdate(BaseModel):
-    role:      Literal["superadmin", "admin", "supervisor", "agent", "viewer"] | None = None
+    # superadmin is seeded only — never granted through the API.
+    role:      Literal["admin", "supervisor", "agent", "viewer"] | None = None
     tenant_id: str | None = None
     password:  str | None = Field(default=None, min_length=8)
 
@@ -381,6 +393,11 @@ class UserUpdate(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password:      str = Field(min_length=8)
+
+
+class ChangeEmailRequest(BaseModel):
+    current_password: str
+    new_email:        str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class InviteCreate(BaseModel):

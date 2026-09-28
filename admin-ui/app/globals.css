@@ -352,6 +352,8 @@ body {
   border-radius: var(--rs); color: var(--text); font-family: var(--font); font-size: .83rem; outline: none;
 }
 .login-input:focus { border-color: var(--cyan); }
+.login-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.login-phone { display: grid; grid-template-columns: 96px 1fr; gap: 8px; }
 /* Reveal toggle sits inside the field; the input pads right so text can't
    run under it. */
 .login-input-wrap { position: relative; }

@@ -17,6 +17,8 @@ the whole loop, including /health.
 from __future__ import annotations
 
 import asyncio
+import re
+import secrets
 from typing import Any
 
 from libs.tenancy import platform_conn, tenant_conn
@@ -144,14 +146,20 @@ async def _insert_user(
     creator_user_id: Any | None,
     creator_user_email: str | None,
     team: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    phone: str | None = None,
+    signup_source: str | None = None,
 ) -> dict[str, Any]:
     """Insert + audit on a caller-supplied connection, already inside a
-    transaction — so bootstrap_first_superadmin() can share its lock-holding
+    transaction — so seed_superadmin()/register_admin() can share their
     transaction, which create_user()'s own connection could not."""
     row = await conn.fetchrow(
-        "INSERT INTO users (email, password_hash, role, tenant_id, team) "
-        "VALUES ($1, $2, $3, $4, $5) RETURNING *",
+        "INSERT INTO users (email, password_hash, role, tenant_id, team, "
+        "first_name, last_name, phone, signup_source) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *",
         email.lower(), await asyncio.to_thread(auth.hash_password, password), role, tenant_id, team,
+        first_name, last_name, phone, signup_source,
     )
     result = dict(row)
     await audit.write_audit(
@@ -193,30 +201,20 @@ async def create_user(
 
 
 async def superadmin_exists() -> bool:
-    """False == first-time setup, so /auth/bootstrap is open. Pre-auth: no
-    tenant, and the row(s) being checked for are NULL-tenant superadmins."""
     pool = await db.get_pool()
     async with platform_conn(pool, reason="pre-auth-bootstrap") as conn:
         return await conn.fetchval(_SUPERADMIN_EXISTS)
 
 
-async def bootstrap_first_superadmin(*, email: str, password: str) -> dict[str, Any] | None:
-    """Creates the very first superadmin. Returns None (no write) if one
-    already exists — the caller turns that into a 409.
-
-    Check and insert share one advisory-locked transaction, so two concurrent
-    requests can't both see "no superadmin" and both insert. A partial unique
-    index would do it too, but would also forbid the legal second superadmin
-    created later via the invite flow (POST /invites, then POST /invites/accept).
-
-    Pre-auth (there is no caller yet) and the row it creates is NULL-tenant
-    by definition — platform_conn bypass."""
+async def seed_superadmin(*, email: str, password: str) -> dict[str, Any] | None:
+    """Creates the platform superadmin unless one already exists (returns
+    None), so restarts never duplicate it or reset changed credentials.
+    Advisory-locked so concurrent seeds can't both insert."""
     pool = await db.get_pool()
     async with platform_conn(pool, reason="pre-auth-bootstrap") as conn:
         await conn.execute("SELECT pg_advisory_xact_lock($1)", _BOOTSTRAP_LOCK_KEY)
         if await conn.fetchval(_SUPERADMIN_EXISTS):
             return None
-        # creator_user_id NULL: no authenticated actor created this one.
         return await _insert_user(
             conn,
             email=email,
@@ -225,6 +223,50 @@ async def bootstrap_first_superadmin(*, email: str, password: str) -> dict[str, 
             tenant_id=None,
             creator_user_id=None,
             creator_user_email=email,
+        )
+
+
+def _slugify(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40].strip("-") or "org"
+
+
+async def register_admin(
+    *,
+    email: str,
+    password: str,
+    organization_name: str,
+    first_name: str | None,
+    last_name: str | None,
+    phone: str | None = None,
+    signup_source: str | None = None,
+) -> dict[str, Any]:
+    """Public signup: a new tenant plus its first admin, in one transaction.
+    The role is fixed here — no caller input can make this a superadmin.
+    Raises asyncpg.UniqueViolationError if the email is taken."""
+    pool = await db.get_pool()
+    async with platform_conn(pool, reason="pre-auth-register") as conn:
+        slug = _slugify(organization_name)
+        if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM tenants WHERE slug = $1)", slug):
+            slug = f"{slug}-{secrets.token_hex(3)}"
+        tenant = dict(await conn.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *", organization_name, slug,
+        ))
+        await audit.write_audit(
+            conn, entity_type="tenant", entity_id=tenant["id"], action="created",
+            user_id=None, user_email=email.lower(), new_value=tenant,
+        )
+        return await _insert_user(
+            conn,
+            email=email,
+            password=password,
+            role="admin",
+            tenant_id=tenant["id"],
+            creator_user_id=None,
+            creator_user_email=email.lower(),
+            first_name=first_name,
+            last_name=last_name,
+            phone=phone,
+            signup_source=signup_source,
         )
 
 
@@ -357,6 +399,38 @@ async def change_password(
             new_value={"password_hash": new_hash},
         )
     return True
+
+
+async def change_email(
+    user_id: Any, *, current_password: str, new_email: str, platform_scoped: bool = False,
+) -> dict[str, Any] | None:
+    """Caller's own email, gated on their current password like
+    change_password(). Returns None if the password is wrong; raises
+    asyncpg.UniqueViolationError if the address is taken."""
+    pool = await db.get_pool()
+    conn_cm = platform_conn(pool, reason="users-change-password") if platform_scoped else tenant_conn(pool)
+    async with conn_cm as conn:
+        row = await conn.fetchrow("SELECT * FROM users WHERE id = $1 FOR UPDATE", user_id)
+        if row is None:
+            raise LookupError(f"user {user_id} not found")
+        user = dict(row)
+        if not await asyncio.to_thread(auth.verify_password, current_password, user["password_hash"]):
+            return None
+        new_row = await conn.fetchrow(
+            "UPDATE users SET email = $2, updated_at = now() WHERE id = $1 RETURNING *",
+            user_id, new_email.lower(),
+        )
+        await audit.write_audit(
+            conn,
+            entity_type="user",
+            entity_id=user_id,
+            action="updated",
+            user_id=user_id,
+            user_email=user["email"],
+            old_value={"email": user["email"]},
+            new_value={"email": new_row["email"]},
+        )
+    return dict(new_row)
 
 
 async def soft_delete_user(

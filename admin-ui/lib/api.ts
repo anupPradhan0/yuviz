@@ -1044,11 +1044,31 @@ export interface LoginResponse {
 export const login = (email: string, password: string) =>
   request<LoginResponse>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
 
-export const getSetupStatus = () =>
-  request<{ setup_required: boolean }>("/auth/setup-status");
+// Mirrors schemas.py's SignupSource.
+export const SIGNUP_SOURCES = [
+  { value: "google_search", label: "Google search" },
+  { value: "youtube", label: "YouTube" },
+  { value: "linkedin", label: "LinkedIn" },
+  { value: "x", label: "X (Twitter)" },
+  { value: "facebook", label: "Facebook" },
+  { value: "instagram", label: "Instagram" },
+  { value: "friend", label: "Friend or colleague" },
+  { value: "event", label: "Event or conference" },
+  { value: "other", label: "Other" },
+] as const;
 
-export const bootstrap = (email: string, password: string) =>
-  request<LoginResponse>("/auth/bootstrap", { method: "POST", body: JSON.stringify({ email, password }) });
+export interface RegisterRequest {
+  organization_name: string;
+  first_name: string;
+  last_name: string;
+  email: string;
+  phone: string;
+  password: string;
+  signup_source: string;
+}
+
+export const register = (body: RegisterRequest) =>
+  request<LoginResponse>("/auth/register", { method: "POST", body: JSON.stringify(body) });
 
 export const getCurrentUser = () => request<User>("/auth/me");
 
@@ -1061,6 +1081,12 @@ export const changePassword = (currentPassword: string, newPassword: string) =>
   request<void>("/auth/change-password", {
     method: "POST",
     body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+
+export const changeEmail = (currentPassword: string, newEmail: string) =>
+  request<LoginResponse>("/auth/change-email", {
+    method: "POST",
+    body: JSON.stringify({ current_password: currentPassword, new_email: newEmail }),
   });
 
 // ── Users ────────────────────────────────────────────────────────────────

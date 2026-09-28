@@ -1,8 +1,8 @@
 """Google OAuth2 / OpenID Connect sign-in (authorization-code flow).
 
-Google only proves who the browser is; it never creates a tenant-scoped
-account. Sign-in maps a verified Google email onto an existing user, and
-account creation is limited to first-run bootstrap of the superadmin.
+Google only proves who the browser is. Sign-in maps a verified Google email
+onto an existing user; "create" registers a new organization admin, never a
+superadmin (see routers/auth.py).
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
 from urllib.parse import urlencode
@@ -39,6 +40,13 @@ class GoogleOAuthError(Exception):
     """Message is shown to the user on the login page."""
 
 
+@dataclass(frozen=True)
+class GoogleIdentity:
+    email: str
+    given_name: str | None = None
+    family_name: str | None = None
+
+
 def enabled() -> bool:
     return bool(CLIENT_ID and CLIENT_SECRET)
 
@@ -61,7 +69,7 @@ def authorization_url(mode: Mode) -> tuple[str, str]:
         "client_id": CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
         "response_type": "code",
-        "scope": "openid email",
+        "scope": "openid email profile",
         "state": state,
         "nonce": nonce,
         "prompt": "select_account",
@@ -86,8 +94,8 @@ def read_state(state: str, cookie_nonce: str | None) -> tuple[Mode, str]:
     return payload["mode"], nonce
 
 
-async def verified_email(code: str, nonce: str) -> str:
-    """Exchanges the code and returns the ID token's email, only if Google
+async def verified_identity(code: str, nonce: str) -> GoogleIdentity:
+    """Exchanges the code and returns the ID token's identity, only if Google
     signed it for this client and marked the address verified."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -115,4 +123,4 @@ async def verified_email(code: str, nonce: str) -> str:
     email = claims.get("email")
     if not email or claims.get("email_verified") is not True:
         raise GoogleOAuthError("Your Google account has no verified email address.")
-    return email
+    return GoogleIdentity(email, claims.get("given_name"), claims.get("family_name"))

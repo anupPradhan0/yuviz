@@ -263,6 +263,13 @@ DO $$ BEGIN
 END $$;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS team TEXT;
 
+-- Public signup profile (POST /auth/register). NULL for invited, seeded and
+-- Google-created accounts that never filled the signup form.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS signup_source TEXT;
+
 -- Email identity (findings 4, 5, 8). `psql -f` runs with no ON_ERROR_STOP,
 -- so a failing statement is logged and the script keeps going rather than
 -- aborting — meaning ordering two separate statements cannot protect the

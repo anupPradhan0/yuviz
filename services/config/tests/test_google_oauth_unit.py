@@ -1,4 +1,4 @@
-"""Unit tests for google_oauth.read_state / verified_email — no database, no
+"""Unit tests for google_oauth.read_state / verified_identity — no database, no
 network. Google's token endpoint is an httpx MockTransport and ID tokens are
 signed with a throwaway RSA key standing in for Google's JWKS."""
 
@@ -58,22 +58,23 @@ def _returns(token: str):
     return lambda request: httpx.Response(200, json={"id_token": token})
 
 
-class TestVerifiedEmail:
-    async def test_valid_token_returns_email_and_sends_the_code(self, google):
+class TestVerifiedIdentity:
+    async def test_valid_token_returns_identity_and_sends_the_code(self, google):
         seen = {}
 
         def respond(request):
             seen["body"] = request.content.decode()
-            return httpx.Response(200, json={"id_token": _id_token()})
+            return httpx.Response(200, json={"id_token": _id_token(given_name="Ada", family_name="Lovelace")})
 
         google.respond = respond
-        assert await google_oauth.verified_email("auth-code", NONCE) == "admin@example.com"
+        identity = await google_oauth.verified_identity("auth-code", NONCE)
+        assert identity == google_oauth.GoogleIdentity("admin@example.com", "Ada", "Lovelace")
         assert "code=auth-code" in seen["body"]
         assert "grant_type=authorization_code" in seen["body"]
 
     async def test_legacy_issuer_without_scheme_is_accepted(self, google):
         google.respond = _returns(_id_token(iss="accounts.google.com"))
-        assert await google_oauth.verified_email("c", NONCE) == "admin@example.com"
+        assert (await google_oauth.verified_identity("c", NONCE)).email == "admin@example.com"
 
     @pytest.mark.parametrize(
         "token",
@@ -98,7 +99,7 @@ class TestVerifiedEmail:
     async def test_rejects_untrustworthy_id_tokens(self, google, token):
         google.respond = _returns(token)
         with pytest.raises(GoogleOAuthError):
-            await google_oauth.verified_email("c", NONCE)
+            await google_oauth.verified_identity("c", NONCE)
 
     async def test_hs256_token_is_rejected(self, google):
         # Algorithm confusion: only RS256 may be accepted.
@@ -106,7 +107,7 @@ class TestVerifiedEmail:
             jwt.encode({"aud": CLIENT_ID}, "a-shared-secret-at-least-32-bytes-long", algorithm="HS256"),
         )
         with pytest.raises(GoogleOAuthError):
-            await google_oauth.verified_email("c", NONCE)
+            await google_oauth.verified_identity("c", NONCE)
 
     @pytest.mark.parametrize(
         "response",
@@ -121,7 +122,7 @@ class TestVerifiedEmail:
     async def test_bad_token_endpoint_responses_raise_user_facing_error(self, google, response):
         google.respond = lambda request: response
         with pytest.raises(GoogleOAuthError):
-            await google_oauth.verified_email("c", NONCE)
+            await google_oauth.verified_identity("c", NONCE)
 
     async def test_network_failure_raises_user_facing_error(self, google):
         def respond(request):
@@ -129,7 +130,7 @@ class TestVerifiedEmail:
 
         google.respond = respond
         with pytest.raises(GoogleOAuthError):
-            await google_oauth.verified_email("c", NONCE)
+            await google_oauth.verified_identity("c", NONCE)
 
 
 class TestReadState:

@@ -220,20 +220,19 @@ class TestConsoleGateApp:
 
     async def test_unauthenticated_routes_reach_their_handlers(self, anon_client):
         assert (await anon_client.get("/health")).status_code != 401
-        assert (await anon_client.get("/auth/setup-status")).status_code != 401
         # login's own 401 for bad credentials is a real business-logic
         # result, not the gate — so assert its detail is the login one, not
         # the gate's "missing or malformed Authorization header".
         login_resp = await anon_client.post("/auth/login", json={"email": "x", "password": "y"})
         assert login_resp.json()["detail"] == "invalid email or password"
-        assert (await anon_client.post("/auth/bootstrap", json={"email": "x@x.com", "password": "12345678"})).status_code != 401
+        assert (await anon_client.post("/auth/register", json={"email": "x@x.com"})).status_code != 401
 
-    def test_exactly_two_routes_depend_on_get_authenticated_user(self):
+    def test_exactly_three_routes_depend_on_get_authenticated_user(self):
         # Named allowlist, not a bare literal: route name -> the gate beyond
         # "decode-or-401" it's allowed to carry. None means unrestricted (any
-        # authenticated role) — /auth/me and /auth/change-password are
-        # deliberately reachable by every role, including supervisor/agent
-        # (see module docstring). A THIRD route landing a bare
+        # authenticated role) — /auth/me, /auth/change-password and
+        # /auth/change-email are deliberately reachable by every role,
+        # including supervisor/agent (see module docstring). A FOURTH route landing a bare
         # Depends(get_authenticated_user) — bypassing both this allowlist and
         # CONSOLE_ROLES entirely — must fail here rather than pass silently.
         names = _route_names_depending_on(app, deps.get_authenticated_user)
@@ -283,6 +282,7 @@ def _route_names_depending_on(fastapi_app: FastAPI, dep) -> set[str]:
 DIRECT_AUTHENTICATED_USER_ALLOWLIST: dict[str, frozenset[str] | None] = {
     "me": None,
     "change_password": None,
+    "change_email": None,
 }
 
 
