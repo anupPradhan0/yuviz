@@ -270,6 +270,38 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS signup_source TEXT;
 
+-- Signups awaiting their emailed code (services/config/verification.py). No
+-- users/tenants row exists until the code is verified. code_hash is an HMAC,
+-- never the code itself.
+CREATE TABLE IF NOT EXISTS pending_registrations (
+    email             TEXT PRIMARY KEY,  -- lower-cased
+    password_hash     TEXT NOT NULL,
+    organization_name TEXT NOT NULL,
+    first_name        TEXT NOT NULL,
+    last_name         TEXT NOT NULL,
+    phone             TEXT NOT NULL,
+    signup_source     TEXT NOT NULL,
+    code_hash         TEXT NOT NULL,
+    expires_at        TIMESTAMPTZ NOT NULL,
+    attempts          INT NOT NULL DEFAULT 0,
+    last_sent_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    send_window_start TIMESTAMPTZ NOT NULL DEFAULT now(),
+    send_count        INT NOT NULL DEFAULT 1,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- A signed-in user's pending switch to a new address, confirmed by a code
+-- sent to that address. One open request per user.
+CREATE TABLE IF NOT EXISTS email_change_requests (
+    user_id      UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    new_email    TEXT NOT NULL,
+    code_hash    TEXT NOT NULL,
+    expires_at   TIMESTAMPTZ NOT NULL,
+    attempts     INT NOT NULL DEFAULT 0,
+    last_sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Email identity (findings 4, 5, 8). `psql -f` runs with no ON_ERROR_STOP,
 -- so a failing statement is logged and the script keeps going rather than
 -- aborting — meaning ordering two separate statements cannot protect the

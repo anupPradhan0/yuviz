@@ -25,6 +25,7 @@ export function SelectMenu({ id, value, options, onChange, placeholder, ariaLabe
   const typed = useRef({ text: "", at: 0 });
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
+  const [dropUp, setDropUp] = useState(false);
   const selected = options.find((o) => o.value === value);
 
   useEffect(() => {
@@ -42,6 +43,9 @@ export function SelectMenu({ id, value, options, onChange, placeholder, ariaLabe
 
   const openMenu = () => {
     setActive(Math.max(0, options.findIndex((o) => o.value === value)));
+    const rect = rootRef.current?.getBoundingClientRect();
+    // 250px ≈ the list's max-height plus its gap.
+    setDropUp(!!rect && window.innerHeight - rect.bottom < 250 && rect.top > window.innerHeight - rect.bottom);
     setOpen(true);
   };
 
@@ -98,7 +102,7 @@ export function SelectMenu({ id, value, options, onChange, placeholder, ariaLabe
         </svg>
       </button>
       {open && (
-        <ul id={listId} ref={listRef} className="select-menu-list" role="listbox">
+        <ul id={listId} ref={listRef} className={`select-menu-list${dropUp ? " up" : ""}`} role="listbox">
           {options.map((o, i) => (
             <li
               key={o.value}

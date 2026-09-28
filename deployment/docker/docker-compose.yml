@@ -42,6 +42,15 @@ services:
       timeout: 3s
       retries: 20
 
+  # Dev mail catcher: every email the stack sends (verification codes,
+  # invites) lands in the inbox at http://localhost:8025. Set SMTP_HOST etc.
+  # in deployment/.env to send through a real provider instead.
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${MAILPIT_UI_PORT:-8025}:8025"
+
   ollama:
     image: ollama/ollama:latest
     restart: unless-stopped
@@ -95,6 +104,15 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-http://localhost:8000/auth/oauth/google/callback}
       ADMIN_UI_URL: ${ADMIN_UI_URL:-http://localhost:3000}
+      INVITE_BASE_URL: ${ADMIN_UI_URL:-http://localhost:3000}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD_REF: ${SMTP_PASSWORD_REF:-env:SMTP_PASSWORD}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@yuviz.local}
+      # Mailpit offers no TLS; set SMTP_STARTTLS=true for any real provider.
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${CONFIG_PORT:-8000}:8000"
     depends_on:

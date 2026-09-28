@@ -140,7 +140,8 @@ async def _insert_user(
     conn: Any,
     *,
     email: str,
-    password: str,
+    password: str | None = None,
+    password_hash: str | None = None,
     role: str,
     tenant_id: Any | None,
     creator_user_id: Any | None,
@@ -153,12 +154,15 @@ async def _insert_user(
 ) -> dict[str, Any]:
     """Insert + audit on a caller-supplied connection, already inside a
     transaction — so seed_superadmin()/register_admin() can share their
-    transaction, which create_user()'s own connection could not."""
+    transaction, which create_user()'s own connection could not. Pass
+    exactly one of password / password_hash (an already-bcrypted value)."""
+    if password_hash is None:
+        password_hash = await asyncio.to_thread(auth.hash_password, password)
     row = await conn.fetchrow(
         "INSERT INTO users (email, password_hash, role, tenant_id, team, "
         "first_name, last_name, phone, signup_source) "
         "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *",
-        email.lower(), await asyncio.to_thread(auth.hash_password, password), role, tenant_id, team,
+        email.lower(), password_hash, role, tenant_id, team,
         first_name, last_name, phone, signup_source,
     )
     result = dict(row)
@@ -237,37 +241,57 @@ async def register_admin(
     organization_name: str,
     first_name: str | None,
     last_name: str | None,
-    phone: str | None = None,
-    signup_source: str | None = None,
 ) -> dict[str, Any]:
-    """Public signup: a new tenant plus its first admin, in one transaction.
-    The role is fixed here — no caller input can make this a superadmin.
+    """Google signup (email already verified by Google) — see register_admin_on.
     Raises asyncpg.UniqueViolationError if the email is taken."""
     pool = await db.get_pool()
     async with platform_conn(pool, reason="pre-auth-register") as conn:
-        slug = _slugify(organization_name)
-        if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM tenants WHERE slug = $1)", slug):
-            slug = f"{slug}-{secrets.token_hex(3)}"
-        tenant = dict(await conn.fetchrow(
-            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *", organization_name, slug,
-        ))
-        await audit.write_audit(
-            conn, entity_type="tenant", entity_id=tenant["id"], action="created",
-            user_id=None, user_email=email.lower(), new_value=tenant,
-        )
-        return await _insert_user(
+        return await register_admin_on(
             conn,
             email=email,
-            password=password,
-            role="admin",
-            tenant_id=tenant["id"],
-            creator_user_id=None,
-            creator_user_email=email.lower(),
+            password_hash=await asyncio.to_thread(auth.hash_password, password),
+            organization_name=organization_name,
             first_name=first_name,
             last_name=last_name,
-            phone=phone,
-            signup_source=signup_source,
         )
+
+
+async def register_admin_on(
+    conn: Any,
+    *,
+    email: str,
+    password_hash: str,
+    organization_name: str,
+    first_name: str | None,
+    last_name: str | None,
+    phone: str | None = None,
+    signup_source: str | None = None,
+) -> dict[str, Any]:
+    """A new tenant plus its first admin on the caller's transaction. The
+    role is fixed here — no caller input can make this a superadmin."""
+    slug = _slugify(organization_name)
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM tenants WHERE slug = $1)", slug):
+        slug = f"{slug}-{secrets.token_hex(3)}"
+    tenant = dict(await conn.fetchrow(
+        "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *", organization_name, slug,
+    ))
+    await audit.write_audit(
+        conn, entity_type="tenant", entity_id=tenant["id"], action="created",
+        user_id=None, user_email=email.lower(), new_value=tenant,
+    )
+    return await _insert_user(
+        conn,
+        email=email,
+        password_hash=password_hash,
+        role="admin",
+        tenant_id=tenant["id"],
+        creator_user_id=None,
+        creator_user_email=email.lower(),
+        first_name=first_name,
+        last_name=last_name,
+        phone=phone,
+        signup_source=signup_source,
+    )
 
 
 async def authenticate(email: str, password: str) -> dict[str, Any] | None:
@@ -399,38 +423,6 @@ async def change_password(
             new_value={"password_hash": new_hash},
         )
     return True
-
-
-async def change_email(
-    user_id: Any, *, current_password: str, new_email: str, platform_scoped: bool = False,
-) -> dict[str, Any] | None:
-    """Caller's own email, gated on their current password like
-    change_password(). Returns None if the password is wrong; raises
-    asyncpg.UniqueViolationError if the address is taken."""
-    pool = await db.get_pool()
-    conn_cm = platform_conn(pool, reason="users-change-password") if platform_scoped else tenant_conn(pool)
-    async with conn_cm as conn:
-        row = await conn.fetchrow("SELECT * FROM users WHERE id = $1 FOR UPDATE", user_id)
-        if row is None:
-            raise LookupError(f"user {user_id} not found")
-        user = dict(row)
-        if not await asyncio.to_thread(auth.verify_password, current_password, user["password_hash"]):
-            return None
-        new_row = await conn.fetchrow(
-            "UPDATE users SET email = $2, updated_at = now() WHERE id = $1 RETURNING *",
-            user_id, new_email.lower(),
-        )
-        await audit.write_audit(
-            conn,
-            entity_type="user",
-            entity_id=user_id,
-            action="updated",
-            user_id=user_id,
-            user_email=user["email"],
-            old_value={"email": user["email"]},
-            new_value={"email": new_row["email"]},
-        )
-    return dict(new_row)
 
 
 async def soft_delete_user(

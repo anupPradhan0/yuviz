@@ -15,7 +15,7 @@ from services.config import auth, google_oauth
 from services.config import users as users_service
 from services.config.google_oauth import GoogleIdentity
 from services.config.routers.auth import _GOOGLE_COOKIE
-from services.config.tests.test_signup import anon_client, fresh_db  # noqa: F401
+from services.config.tests.test_signup import _signup, anon_client, fresh_db, mailer  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -101,6 +101,15 @@ class TestCreateMode:
         resp = await _callback(anon_client, state, "admin@example.com")
         assert auth.decode_access_token(_fragment(resp)["token"]).role == "admin"
         assert await fresh_db.fetchval("SELECT count(*) FROM users WHERE role = 'superadmin'") == 0
+
+    async def test_needs_no_code_and_clears_a_pending_code_signup(self, fresh_db, anon_client, mailer):
+        await anon_client.post("/auth/register", json=_signup("jane@example.com"))
+        mailer.reset_mock()
+        state = await _start(anon_client, "create")
+        resp = await _callback(anon_client, state, "jane@example.com", given_name="Jane")
+        assert auth.decode_access_token(_fragment(resp)["token"]).role == "admin"
+        mailer.assert_not_called()
+        assert await fresh_db.fetchval("SELECT count(*) FROM pending_registrations") == 0
 
     async def test_existing_email_is_told_to_sign_in(self, fresh_db, anon_client):
         await users_service.seed_superadmin(email="admin@example.com", password="a-real-password")

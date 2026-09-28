@@ -6,6 +6,7 @@ import {
   AuditLogEntry,
   changeEmail,
   changePassword,
+  confirmEmailChange,
   getCurrentUser,
   listAuditLog,
   listTenants,
@@ -13,6 +14,7 @@ import {
   User,
   UserRole,
 } from "@/lib/api";
+import { CodeInput } from "@/components/CodeInput";
 import { Modal } from "@/components/Modal";
 import { setToken } from "@/lib/auth";
 
@@ -383,41 +385,41 @@ function AuditLogPanel() {
         ) : entries.length === 0 ? (
           <div className="empty-state">No matching audit entries.</div>
         ) : (
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th>When</th>
-                <th>Entity</th>
-                <th>Action</th>
-                <th>By</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map((e) => (
-                <tr key={e.id}>
-                  <td style={{ fontSize: ".71rem", color: "var(--text-3)" }}>
-                    {new Date(e.changed_at).toLocaleString()}
-                  </td>
-                  <td>
-                    <span className="mono">{e.entity_type}</span>
-                    <span style={{ color: "var(--text-3)", fontSize: ".7rem", marginLeft: 6 }}>
-                      {e.entity_id.slice(0, 8)}…
-                    </span>
-                  </td>
-                  <td>
-                    <span className={`badge ${ACTION_BADGE[e.action] ?? "gray"}`}>{e.action}</span>
-                  </td>
-                  <td>{e.user_email ?? <span style={{ color: "var(--text-3)" }}>system</span>}</td>
-                  <td>
-                    <button className="btn btn-ghost btn-sm" onClick={() => setDetail(e)}>
-                      View
-                    </button>
-                  </td>
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>Entity</th>
+                  <th>Action</th>
+                  <th>By</th>
+                  <th></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {entries.map((e) => (
+                  <tr key={e.id}>
+                    <td style={{ fontSize: ".71rem", color: "var(--text-3)" }}>
+                      {new Date(e.changed_at).toLocaleString()}
+                    </td>
+                    <td>
+                      <span className="mono">{e.entity_type}</span>
+                      <span style={{ color: "var(--text-3)", fontSize: ".7rem", marginLeft: 6 }}>
+                        {e.entity_id.slice(0, 8)}…
+                      </span>
+                    </td>
+                    <td>
+                      <span className={`badge ${ACTION_BADGE[e.action] ?? "gray"}`}>{e.action}</span>
+                    </td>
+                    <td>{e.user_email ?? <span style={{ color: "var(--text-3)" }}>system</span>}</td>
+                    <td>
+                      <button className="btn btn-ghost btn-sm" onClick={() => setDetail(e)}>
+                        View
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
         )}
       </div>
 
@@ -475,23 +477,41 @@ function ChangeEmailCard() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [changedTo, setChangedTo] = useState<string | null>(null);
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null);
+  const [code, setCode] = useState("");
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const run = async (action: () => Promise<void>) => {
     setError(null);
-    setChangedTo(null);
     setSubmitting(true);
     try {
-      const result = await changeEmail(currentPassword, newEmail);
-      setToken(result.access_token);
-      setChangedTo(result.user.email);
-      setNewEmail("");
-      setCurrentPassword("");
+      await action();
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : String(e));
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setChangedTo(null);
+    run(async () => {
+      const result = await changeEmail(currentPassword, newEmail);
+      setPendingEmail(result.email);
+      setCode("");
+      setCurrentPassword("");
+    });
+  };
+
+  const handleConfirm = (e: React.FormEvent) => {
+    e.preventDefault();
+    run(async () => {
+      const result = await confirmEmailChange(code);
+      setToken(result.access_token);
+      setChangedTo(result.user.email);
+      setPendingEmail(null);
+      setNewEmail("");
+    });
   };
 
   return (
@@ -507,6 +527,22 @@ function ChangeEmailCard() {
             Email changed to {changedTo}.
           </div>
         )}
+        {pendingEmail ? (
+          <form onSubmit={handleConfirm} style={{ maxWidth: 380 }}>
+            <div className="form-hint" style={{ marginBottom: 8 }}>
+              Enter the 6-digit code we sent to <strong>{pendingEmail}</strong>. Your email changes only after this step.
+            </div>
+            <CodeInput value={code} onChange={setCode} disabled={submitting} />
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="btn btn-primary btn-sm" type="submit" disabled={submitting || code.length !== 6}>
+                {submitting ? "Verifying…" : "Confirm Email"}
+              </button>
+              <button className="btn btn-sm" type="button" onClick={() => { setPendingEmail(null); setError(null); }}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        ) : (
         <form onSubmit={handleSubmit}>
           <div className="form-row">
             <div className="form-group">
@@ -535,9 +571,10 @@ function ChangeEmailCard() {
             </div>
           </div>
           <button className="btn btn-primary btn-sm" type="submit" disabled={submitting}>
-            {submitting ? "Changing…" : "Change Email"}
+            {submitting ? "Sending code…" : "Send Verification Code"}
           </button>
         </form>
+        )}
       </div>
     </div>
   );

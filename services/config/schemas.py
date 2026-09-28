@@ -400,6 +400,19 @@ class ChangeEmailRequest(BaseModel):
     new_email:        str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
+class VerifyEmailRequest(BaseModel):
+    email: str
+    code:  str = Field(pattern=r"^\d{6}$")
+
+
+class ResendCodeRequest(BaseModel):
+    email: str
+
+
+class ConfirmEmailChangeRequest(BaseModel):
+    code: str = Field(pattern=r"^\d{6}$")
+
+
 class InviteCreate(BaseModel):
     email:     str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     role:      Literal["superadmin", "admin", "supervisor", "agent", "viewer"]

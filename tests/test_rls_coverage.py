@@ -311,7 +311,7 @@ _BYPASS_REASONS = {
     "pre-auth-login", "pre-auth-bootstrap", "pre-auth-register", "pre-auth-invite-accept",
     "invites-create-null-tenant", "invites-null-tenant-listing", "invites-by-id",
     "identity-resolution", "users-null-tenant-listing", "users-admin-by-id",
-    "users-create", "users-change-password",
+    "users-create", "users-change-password", "users-email-change",
     "tenants-out-of-rls-scope", "phone-numbers-prewarm",
     "agents-by-id", "call-flow-by-id", "carriers-by-id", "phone-numbers-by-id", "phone-numbers-did-lookup",
     "provider-configs-by-id", "telephony-configs-by-id", "tool-provider-configs-by-id",

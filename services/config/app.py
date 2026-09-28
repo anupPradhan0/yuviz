@@ -164,8 +164,10 @@ app.add_middleware(
 # constructs them, with no import cycle back from the router it mounts.
 app.state.invite_throttle = InviteThrottle()
 app.state.accept_throttle = AcceptThrottle()
-# Public signup is unauthenticated too — same per-IP limits, separate counters.
+# Public signup and code verify/resend are unauthenticated too — same per-IP
+# limits, separate counters.
 app.state.register_throttle = AcceptThrottle()
+app.state.verify_throttle = AcceptThrottle()
 app.state.live_calls_throttle = LiveCallsThrottle()
 
 app.include_router(auth.router)

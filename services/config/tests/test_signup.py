@@ -1,5 +1,6 @@
 """
-Seeded superadmin + public admin signup (/auth/register) + /auth/change-email.
+Seeded superadmin, public admin signup with emailed-code verification
+(/auth/register, /auth/verify-email, /auth/resend-code) and /auth/change-email.
 
 These cannot use the shared 'voiceai' database — "no superadmin yet" is a
 property of the whole database, and conftest's fixtures put superadmins in
@@ -13,7 +14,7 @@ import asyncio
 import os
 import uuid
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
@@ -84,15 +85,41 @@ async def fresh_db():
 @pytest_asyncio.fixture(loop_scope="session")
 async def anon_client(fresh_db):
     app.state.register_throttle = AcceptThrottle()
+    app.state.verify_throttle = AcceptThrottle()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
 
 
+@pytest.fixture(autouse=True)
+def mailer():
+    """Every verification email is captured here instead of sent."""
+    with patch("services.config.email.send_verification_code_email", AsyncMock()) as mock:
+        yield mock
+
+
+def _code(mailer, to: str | None = None) -> str:
+    call = mailer.call_args
+    if to is not None:
+        assert call.kwargs["to_email"].lower() == to.lower()
+    return call.kwargs["code"]
+
+
 async def _register(client, email: str = "owner@acme.com", **overrides) -> dict:
-    resp = await client.post("/auth/register", json=_signup(email, **overrides))
-    assert resp.status_code == 201, resp.text
-    return resp.json()
+    """Full signup: register, then verify with the emailed code."""
+    with patch("services.config.email.send_verification_code_email", AsyncMock()) as mock:
+        resp = await client.post("/auth/register", json=_signup(email, **overrides))
+        assert resp.status_code == 202, resp.text
+        verified = await client.post("/auth/verify-email", json={"email": email, "code": _code(mock, email)})
+    assert verified.status_code == 200, verified.text
+    return verified.json()
+
+
+async def _allow_resend(pool, email: str) -> None:
+    await pool.execute(
+        "UPDATE pending_registrations SET last_sent_at = now() - interval '2 minutes' WHERE email = $1",
+        email.lower(),
+    )
 
 
 class TestSeedSuperadmin:
@@ -111,13 +138,17 @@ class TestSeedSuperadmin:
         assert await fresh_db.fetchval("SELECT count(*) FROM users WHERE role = 'superadmin'") == 1
         assert (await anon_client.post("/auth/login", json=SUPERADMIN)).status_code == 200
 
-    async def test_changed_credentials_survive_a_reseed(self, anon_client):
+    async def test_changed_credentials_survive_a_reseed(self, anon_client, mailer):
         await users_service.seed_superadmin(**SUPERADMIN)
         token = (await anon_client.post("/auth/login", json=SUPERADMIN)).json()["access_token"]
         resp = await anon_client.post(
             "/auth/change-email",
             json={"current_password": SUPERADMIN["password"], "new_email": "boss@example.com"},
             headers=_bearer(token),
+        )
+        assert resp.status_code == 202
+        resp = await anon_client.post(
+            "/auth/change-email/confirm", json={"code": _code(mailer, "boss@example.com")}, headers=_bearer(token),
         )
         assert resp.status_code == 200
         assert await users_service.seed_superadmin(**SUPERADMIN) is None
@@ -200,7 +231,7 @@ class TestRegister:
             (await anon_client.post("/auth/register", json=_signup(f"u{i}@acme.com"))).status_code
             for i in range(11)
         ]
-        assert codes[:10] == [201] * 10
+        assert codes[:10] == [202] * 10
         assert codes[10] == 429
 
 
@@ -288,15 +319,171 @@ class TestChangeEmail:
         )
         assert resp.status_code == 409
 
-    async def test_returns_a_token_carrying_the_new_email(self, anon_client):
+    async def test_email_changes_only_after_the_code_sent_to_the_new_address(self, anon_client, mailer):
         body = await _register(anon_client)
+        headers = _bearer(body["access_token"])
         resp = await anon_client.post(
             "/auth/change-email",
             json={"current_password": "a-real-password", "new_email": "New@Acme.com"},
-            headers=_bearer(body["access_token"]),
+            headers=headers,
         )
+        assert resp.status_code == 202
+        code = _code(mailer, "new@acme.com")
+        me = await anon_client.get("/auth/me", headers=headers)
+        assert me.json()["email"] == "owner@acme.com"
+
+        resp = await anon_client.post("/auth/change-email/confirm", json={"code": code}, headers=headers)
         assert resp.status_code == 200
         assert auth.decode_access_token(resp.json()["access_token"]).email == "new@acme.com"
+
+    async def test_wrong_code_keeps_the_old_email(self, anon_client, mailer):
+        body = await _register(anon_client)
+        headers = _bearer(body["access_token"])
+        await anon_client.post(
+            "/auth/change-email",
+            json={"current_password": "a-real-password", "new_email": "new@acme.com"},
+            headers=headers,
+        )
+        resp = await anon_client.post(
+            "/auth/change-email/confirm", json={"code": _wrong(_code(mailer))}, headers=headers,
+        )
+        assert resp.status_code == 400
+        assert (await anon_client.get("/auth/me", headers=headers)).json()["email"] == "owner@acme.com"
+
+    async def test_send_failure_leaves_no_open_request(self, fresh_db, anon_client, mailer):
+        body = await _register(anon_client)
+        mailer.side_effect = OSError("relay down")
+        resp = await anon_client.post(
+            "/auth/change-email",
+            json={"current_password": "a-real-password", "new_email": "new@acme.com"},
+            headers=_bearer(body["access_token"]),
+        )
+        assert resp.status_code == 503
+        assert await fresh_db.fetchval("SELECT count(*) FROM email_change_requests") == 0
+
+
+def _wrong(code: str) -> str:
+    return "000000" if code != "000000" else "111111"
+
+
+class TestEmailVerification:
+    async def test_register_creates_nothing_until_verified(self, fresh_db, anon_client, mailer):
+        resp = await anon_client.post("/auth/register", json=_signup())
+        assert resp.status_code == 202
+        assert resp.json() == {"verification_required": True, "email": "owner@acme.com"}
+        assert "access_token" not in resp.json()
+        assert await fresh_db.fetchval("SELECT count(*) FROM users") == 0
+        assert await fresh_db.fetchval("SELECT count(*) FROM tenants WHERE name = 'Acme Corp'") == 0
+        code = _code(mailer, "owner@acme.com")
+        assert len(code) == 6 and code.isdigit()
+
+    async def test_code_is_stored_hashed(self, fresh_db, anon_client, mailer):
+        await anon_client.post("/auth/register", json=_signup())
+        stored = await fresh_db.fetchval("SELECT code_hash FROM pending_registrations")
+        assert _code(mailer) not in stored
+
+    async def test_smtp_failure_fails_signup_and_leaves_nothing(self, fresh_db, anon_client, mailer):
+        mailer.side_effect = OSError("relay down")
+        resp = await anon_client.post("/auth/register", json=_signup())
+        assert resp.status_code == 503
+        assert await fresh_db.fetchval("SELECT count(*) FROM pending_registrations") == 0
+        assert await fresh_db.fetchval("SELECT count(*) FROM users") == 0
+
+    async def test_wrong_code_is_rejected(self, anon_client, mailer):
+        await anon_client.post("/auth/register", json=_signup())
+        resp = await anon_client.post(
+            "/auth/verify-email", json={"email": "owner@acme.com", "code": _wrong(_code(mailer))},
+        )
+        assert resp.status_code == 400
+        assert "incorrect" in resp.json()["detail"]
+
+    async def test_expired_code_is_rejected(self, fresh_db, anon_client, mailer):
+        await anon_client.post("/auth/register", json=_signup())
+        await fresh_db.execute("UPDATE pending_registrations SET expires_at = now() - interval '1 second'")
+        resp = await anon_client.post("/auth/verify-email", json={"email": "owner@acme.com", "code": _code(mailer)})
+        assert resp.status_code == 400
+        assert "expired" in resp.json()["detail"]
+        assert await fresh_db.fetchval("SELECT count(*) FROM users") == 0
+
+    async def test_code_dies_after_too_many_wrong_attempts(self, fresh_db, anon_client, mailer):
+        await anon_client.post("/auth/register", json=_signup())
+        code = _code(mailer)
+        for _ in range(5):
+            await anon_client.post("/auth/verify-email", json={"email": "owner@acme.com", "code": _wrong(code)})
+        resp = await anon_client.post("/auth/verify-email", json={"email": "owner@acme.com", "code": code})
+        assert resp.status_code == 400
+        assert "Too many" in resp.json()["detail"]
+        assert await fresh_db.fetchval("SELECT count(*) FROM users") == 0
+
+    async def test_resend_issues_a_new_code_and_the_old_one_stops_working(self, fresh_db, anon_client, mailer):
+        await anon_client.post("/auth/register", json=_signup())
+        old = _code(mailer)
+        await _allow_resend(fresh_db, "owner@acme.com")
+        resp = await anon_client.post("/auth/resend-code", json={"email": "owner@acme.com"})
+        assert resp.status_code == 202
+        new = _code(mailer)
+        if old != new:
+            stale = await anon_client.post("/auth/verify-email", json={"email": "owner@acme.com", "code": old})
+            assert stale.status_code == 400
+        ok = await anon_client.post("/auth/verify-email", json={"email": "owner@acme.com", "code": new})
+        assert ok.status_code == 200
+
+    async def test_resend_has_a_cooldown(self, anon_client):
+        await anon_client.post("/auth/register", json=_signup())
+        resp = await anon_client.post("/auth/resend-code", json={"email": "owner@acme.com"})
+        assert resp.status_code == 429
+        assert int(resp.headers["retry-after"]) > 0
+
+    async def test_resend_is_capped_per_hour(self, fresh_db, anon_client):
+        await anon_client.post("/auth/register", json=_signup())
+        codes = []
+        for _ in range(5):
+            await _allow_resend(fresh_db, "owner@acme.com")
+            codes.append((await anon_client.post("/auth/resend-code", json={"email": "owner@acme.com"})).status_code)
+        assert codes == [202, 202, 202, 202, 429]
+
+    async def test_resend_for_unknown_email_looks_the_same(self, anon_client, mailer):
+        resp = await anon_client.post("/auth/resend-code", json={"email": "nobody@example.com"})
+        assert resp.status_code == 202
+        assert resp.json() == {"sent": True}
+        mailer.assert_not_called()
+
+    async def test_re_registering_replaces_the_pending_signup(self, fresh_db, anon_client, mailer):
+        await anon_client.post("/auth/register", json=_signup(organization_name="First Try"))
+        await _allow_resend(fresh_db, "owner@acme.com")
+        resp = await anon_client.post("/auth/register", json=_signup(organization_name="Second Try"))
+        assert resp.status_code == 202
+        assert await fresh_db.fetchval("SELECT count(*) FROM pending_registrations") == 1
+        verified = await anon_client.post(
+            "/auth/verify-email", json={"email": "owner@acme.com", "code": _code(mailer)},
+        )
+        tenant = await fresh_db.fetchval(
+            "SELECT name FROM tenants WHERE id = $1", uuid.UUID(verified.json()["user"]["tenant_id"]),
+        )
+        assert tenant == "Second Try"
+
+    async def test_verified_user_logs_in_normally_afterwards(self, anon_client):
+        await _register(anon_client)
+        resp = await anon_client.post("/auth/login", json={"email": "owner@acme.com", "password": "a-real-password"})
+        assert resp.status_code == 200
+        assert resp.json()["user"]["role"] == "admin"
+
+
+class TestUnverifiedLogin:
+    async def test_right_password_is_told_to_verify_and_gets_a_fresh_code(self, fresh_db, anon_client, mailer):
+        await anon_client.post("/auth/register", json=_signup())
+        await _allow_resend(fresh_db, "owner@acme.com")
+        mailer.reset_mock()
+        resp = await anon_client.post("/auth/login", json={"email": "owner@acme.com", "password": "a-real-password"})
+        assert resp.status_code == 403
+        assert "access_token" not in resp.json()
+        mailer.assert_called_once()
+
+    async def test_wrong_password_gets_the_normal_401(self, anon_client):
+        await anon_client.post("/auth/register", json=_signup())
+        resp = await anon_client.post("/auth/login", json={"email": "owner@acme.com", "password": "wrong-password"})
+        assert resp.status_code == 401
+        assert resp.json()["detail"] == "invalid email or password"
 
 
 class TestLogin:

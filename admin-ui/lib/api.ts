@@ -1068,7 +1068,16 @@ export interface RegisterRequest {
 }
 
 export const register = (body: RegisterRequest) =>
-  request<LoginResponse>("/auth/register", { method: "POST", body: JSON.stringify(body) });
+  request<{ verification_required: true; email: string }>("/auth/register", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const verifyEmail = (email: string, code: string) =>
+  request<LoginResponse>("/auth/verify-email", { method: "POST", body: JSON.stringify({ email, code }) });
+
+export const resendVerificationCode = (email: string) =>
+  request<{ sent: boolean }>("/auth/resend-code", { method: "POST", body: JSON.stringify({ email }) });
 
 export const getCurrentUser = () => request<User>("/auth/me");
 
@@ -1084,10 +1093,13 @@ export const changePassword = (currentPassword: string, newPassword: string) =>
   });
 
 export const changeEmail = (currentPassword: string, newEmail: string) =>
-  request<LoginResponse>("/auth/change-email", {
+  request<{ email: string }>("/auth/change-email", {
     method: "POST",
     body: JSON.stringify({ current_password: currentPassword, new_email: newEmail }),
   });
+
+export const confirmEmailChange = (code: string) =>
+  request<LoginResponse>("/auth/change-email/confirm", { method: "POST", body: JSON.stringify({ code }) });
 
 // ── Users ────────────────────────────────────────────────────────────────
 

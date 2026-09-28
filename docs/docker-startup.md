@@ -25,8 +25,16 @@ email and password under **Settings → Security** after first sign-in; restarts
 never reset them.
 
 **Create account** on the login page is open to anyone: it creates a new
-organization with the registrant as its **admin** (`POST /auth/register`),
-never a superadmin. Admins then invite their own users.
+organization with the registrant as its **admin**, never a superadmin. Email
+sign-up first emails a 6-digit code (`POST /auth/register`, then
+`POST /auth/verify-email`); nothing is created until the code is entered.
+Google sign-up skips the code — Google has already verified the address.
+Admins then invite their own users.
+
+Outgoing email goes to the bundled **Mailpit** container by default — open
+<http://localhost:8025> to read verification codes and invites. To send real
+mail, set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`
+and `SMTP_STARTTLS=true` in `deployment/.env`.
 
 Select the `default` agent → click **Test Agent** → allow microphone → talk.
 

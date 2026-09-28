@@ -227,12 +227,12 @@ class TestConsoleGateApp:
         assert login_resp.json()["detail"] == "invalid email or password"
         assert (await anon_client.post("/auth/register", json={"email": "x@x.com"})).status_code != 401
 
-    def test_exactly_three_routes_depend_on_get_authenticated_user(self):
+    def test_only_allowlisted_routes_depend_on_get_authenticated_user(self):
         # Named allowlist, not a bare literal: route name -> the gate beyond
         # "decode-or-401" it's allowed to carry. None means unrestricted (any
-        # authenticated role) — /auth/me, /auth/change-password and
-        # /auth/change-email are deliberately reachable by every role,
-        # including supervisor/agent (see module docstring). A FOURTH route landing a bare
+        # authenticated role) — /auth/me, /auth/change-password and the two
+        # /auth/change-email routes are deliberately reachable by every role,
+        # including supervisor/agent (see module docstring). Another route landing a bare
         # Depends(get_authenticated_user) — bypassing both this allowlist and
         # CONSOLE_ROLES entirely — must fail here rather than pass silently.
         names = _route_names_depending_on(app, deps.get_authenticated_user)
@@ -283,6 +283,7 @@ DIRECT_AUTHENTICATED_USER_ALLOWLIST: dict[str, frozenset[str] | None] = {
     "me": None,
     "change_password": None,
     "change_email": None,
+    "confirm_email_change": None,
 }
 
 

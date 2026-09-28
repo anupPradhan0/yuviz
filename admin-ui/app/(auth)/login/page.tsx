@@ -4,9 +4,10 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
-  ApiError, getCurrentUser, googleSignInUrl, isConsoleRole, login, register, SIGNUP_SOURCES,
-  type UserRole,
+  ApiError, getCurrentUser, googleSignInUrl, isConsoleRole, login, register, resendVerificationCode,
+  SIGNUP_SOURCES, verifyEmail, type UserRole,
 } from "@/lib/api";
+import { CodeInput } from "@/components/CodeInput";
 import { clearToken, setToken } from "@/lib/auth";
 import { COUNTRY_DIAL_CODES } from "@/lib/countries";
 import { SelectMenu } from "@/components/SelectMenu";
@@ -38,6 +39,8 @@ const HERO = {
 const PROVIDERS = ["OpenAI", "Anthropic", "Gemini", "Ollama", "Deepgram", "ElevenLabs", "Whisper", "Kokoro"];
 
 const DIAL_CODE = Object.fromEntries(COUNTRY_DIAL_CODES);
+// Mirrors verification.RESEND_COOLDOWN_SECONDS.
+const RESEND_SECONDS = 60;
 const COUNTRY_OPTIONS = COUNTRY_DIAL_CODES.map(([iso, dial]) => ({ value: iso, label: `${iso} ${dial}` }));
 
 const EMPTY_SIGNUP = {
@@ -112,6 +115,10 @@ export default function LoginPage() {
   const [reveal, setReveal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [verifyingEmail, setVerifyingEmail] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
+  const [resendIn, setResendIn] = useState(0);
   const setValue = (field: keyof typeof EMPTY_SIGNUP) => (value: string) =>
     setSignup((s) => ({ ...s, [field]: value }));
   const setField = (field: keyof typeof EMPTY_SIGNUP) =>
@@ -140,11 +147,60 @@ export default function LoginPage() {
     });
   }, [router]);
 
+  useEffect(() => {
+    if (resendIn <= 0) return;
+    const t = setTimeout(() => setResendIn((s) => s - 1), 1000);
+    return () => clearTimeout(t);
+  }, [resendIn]);
+
   const creating = mode === "create";
 
   const switchMode = (next: "signin" | "create") => {
     setMode(next);
     setError(null);
+  };
+
+  const startVerifying = (address: string, message: string) => {
+    setVerifyingEmail(address);
+    setCode("");
+    setError(null);
+    setNotice(message);
+    setResendIn(RESEND_SECONDS);
+  };
+
+  const handleVerify = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!verifyingEmail || code.length !== 6) {
+      setError("Enter the 6-digit code from your email.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await verifyEmail(verifyingEmail, code);
+      setToken(result.access_token);
+      landOn(router, result.user.role);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : String(e));
+      setCode("");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleResend = async () => {
+    if (!verifyingEmail) return;
+    setError(null);
+    try {
+      await resendVerificationCode(verifyingEmail);
+      setNotice(`We sent a new code to ${verifyingEmail}.`);
+      setResendIn(RESEND_SECONDS);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 429) {
+        setResendIn(Number(e.detail.match(/(\d+) seconds/)?.[1]) || RESEND_SECONDS);
+      }
+      setError(e instanceof ApiError ? e.detail : String(e));
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -160,14 +216,23 @@ export default function LoginPage() {
     setSubmitting(true);
     setError(null);
     try {
-      const { country, phone, ...profile } = signup;
-      const result = creating
-        ? await register({ ...profile, email, password, phone: `${DIAL_CODE[country]} ${phone.replace(/\D/g, "")}` })
-        : await login(email, password);
-      setToken(result.access_token);
-      landOn(router, result.user.role);
+      if (creating) {
+        const { country, phone, ...profile } = signup;
+        const result = await register({
+          ...profile, email, password, phone: `${DIAL_CODE[country]} ${phone.replace(/\D/g, "")}`,
+        });
+        startVerifying(result.email, `We sent a 6-digit code to ${result.email}.`);
+      } else {
+        const result = await login(email, password);
+        setToken(result.access_token);
+        landOn(router, result.user.role);
+      }
     } catch (e) {
-      setError(e instanceof ApiError ? e.detail : String(e));
+      if (!creating && e instanceof ApiError && e.status === 403) {
+        startVerifying(email.trim().toLowerCase(), e.detail);
+      } else {
+        setError(e instanceof ApiError ? e.detail : String(e));
+      }
     } finally {
       setSubmitting(false);
     }
@@ -204,158 +269,189 @@ export default function LoginPage() {
         <Link href="/" className="auth-back">← Back to homepage</Link>
         <div className="auth-form">
           <div className="auth-mobile-logo"><Logo /></div>
-          <h2 className="auth-title">{creating ? "Create an account" : "Sign in"}</h2>
-          <p className="auth-sub">
-            {creating
-              ? "Enter your details to get started. You'll be the admin of your new organization."
-              : "Welcome back. Enter your credentials to continue."}
-          </p>
-          {error && <div className="error-banner">{error}</div>}
-          <a className="login-google" href={googleSignInUrl(creating ? "create" : "signin")}>
-            <GoogleIcon />
-            {creating ? "Sign up with Google" : "Continue with Google"}
-          </a>
-          <div className="login-divider">or</div>
-          <form onSubmit={handleSubmit}>
-            {creating && (
-              <>
-                <div className="login-field">
-                  <label className="login-label" htmlFor="signup-org">Organization Name</label>
-                  <input
-                    id="signup-org"
-                    className="login-input"
-                    autoComplete="organization"
-                    placeholder="Acme Corp"
-                    maxLength={120}
-                    value={signup.organization_name}
-                    onChange={setField("organization_name")}
-                    required
-                  />
-                </div>
-                <div className="login-row">
-                  <div className="login-field">
-                    <label className="login-label" htmlFor="signup-first">First Name</label>
-                    <input
-                      id="signup-first"
-                      className="login-input"
-                      autoComplete="given-name"
-                      placeholder="John"
-                      maxLength={80}
-                      value={signup.first_name}
-                      onChange={setField("first_name")}
-                      required
-                    />
-                  </div>
-                  <div className="login-field">
-                    <label className="login-label" htmlFor="signup-last">Last Name</label>
-                    <input
-                      id="signup-last"
-                      className="login-input"
-                      autoComplete="family-name"
-                      placeholder="Doe"
-                      maxLength={80}
-                      value={signup.last_name}
-                      onChange={setField("last_name")}
-                      required
-                    />
-                  </div>
-                </div>
-              </>
-            )}
-            <div className="login-field">
-              <label className="login-label" htmlFor="login-email">Email</label>
-              <input
-                id="login-email"
-                className="login-input"
-                type="email"
-                autoComplete="email"
-                placeholder="name@company.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-              />
-            </div>
-            {creating && (
-              <div className="login-field">
-                <label className="login-label" htmlFor="signup-phone">Phone Number</label>
-                <div className="login-phone">
-                  <SelectMenu
-                    ariaLabel="Country code"
-                    value={signup.country}
-                    options={COUNTRY_OPTIONS}
-                    onChange={setValue("country")}
-                  />
-                  <input
-                    id="signup-phone"
-                    className="login-input"
-                    type="tel"
-                    autoComplete="tel-national"
-                    placeholder="9876543210"
-                    pattern="[0-9 ]{6,18}"
-                    value={signup.phone}
-                    onChange={setField("phone")}
-                    required
-                  />
-                </div>
-              </div>
-            )}
-            <div className="login-field">
-              <label className="login-label" htmlFor="login-password">Password</label>
-              <div className="login-input-wrap">
-                <input
-                  id="login-password"
-                  className="login-input"
-                  type={reveal ? "text" : "password"}
-                  autoComplete={creating ? "new-password" : "current-password"}
-                  placeholder={creating ? "At least 8 characters" : "••••••••"}
-                  minLength={creating ? 8 : undefined}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                />
+          {verifyingEmail ? (
+            <>
+              <h2 className="auth-title">Check your email</h2>
+              <p className="auth-sub">{notice}</p>
+              {error && <div className="error-banner">{error}</div>}
+              <form onSubmit={handleVerify}>
+                <CodeInput value={code} onChange={setCode} disabled={submitting} />
                 <button
-                  type="button"
-                  className="login-reveal"
-                  onClick={() => setReveal((r) => !r)}
-                  aria-label={reveal ? "Hide password" : "Show password"}
-                  aria-pressed={reveal}
-                  title={reveal ? "Hide password" : "Show password"}
+                  className="login-btn auth-submit"
+                  type="submit"
+                  disabled={submitting || code.length !== 6}
                 >
-                  <EyeIcon off={reveal} />
+                  {submitting ? "Verifying…" : "Verify email"}
+                </button>
+              </form>
+              <div className="login-alt">
+                Didn&apos;t get it?{" "}
+                <button type="button" onClick={handleResend} disabled={resendIn > 0}>
+                  {resendIn > 0 ? `Resend in ${resendIn}s` : "Resend code"}
                 </button>
               </div>
-            </div>
-            {creating && (
-              <div className="login-field">
-                <label className="login-label" htmlFor="signup-source">How did you hear about us?</label>
-                <SelectMenu
-                  id="signup-source"
-                  value={signup.signup_source}
-                  options={SIGNUP_SOURCES}
-                  placeholder="Select an option"
-                  onChange={setValue("signup_source")}
-                />
+              <div className="login-alt">
+                <button type="button" onClick={() => { setVerifyingEmail(null); setError(null); }}>
+                  ← Use a different email
+                </button>
               </div>
-            )}
-            <button className="login-btn auth-submit" type="submit" disabled={submitting}>
-              {submitting
-                ? creating ? "Creating account…" : "Signing in…"
-                : creating ? "Create account" : "Sign in"}
-            </button>
-          </form>
-          <div className="login-alt">
-            {creating ? (
-              <>
-                Already have an account?{" "}
-                <button type="button" onClick={() => switchMode("signin")}>Sign in</button>
-              </>
-            ) : (
-              <>
-                New here?{" "}
-                <button type="button" onClick={() => switchMode("create")}>Create an account</button>
-              </>
-            )}
-          </div>
+            </>
+          ) : (
+            <>
+              <h2 className="auth-title">{creating ? "Create an account" : "Sign in"}</h2>
+              <p className="auth-sub">
+                {creating
+                  ? "Enter your details to get started. You'll be the admin of your new organization."
+                  : "Welcome back. Enter your credentials to continue."}
+              </p>
+              {error && <div className="error-banner">{error}</div>}
+              <a className="login-google" href={googleSignInUrl(creating ? "create" : "signin")}>
+                <GoogleIcon />
+                {creating ? "Sign up with Google" : "Continue with Google"}
+              </a>
+              <div className="login-divider">or</div>
+              <form onSubmit={handleSubmit}>
+                {creating && (
+                  <>
+                    <div className="login-field">
+                      <label className="login-label" htmlFor="signup-org">Organization Name</label>
+                      <input
+                        id="signup-org"
+                        className="login-input"
+                        autoComplete="organization"
+                        placeholder="Acme Corp"
+                        maxLength={120}
+                        value={signup.organization_name}
+                        onChange={setField("organization_name")}
+                        required
+                      />
+                    </div>
+                    <div className="login-row">
+                      <div className="login-field">
+                        <label className="login-label" htmlFor="signup-first">First Name</label>
+                        <input
+                          id="signup-first"
+                          className="login-input"
+                          autoComplete="given-name"
+                          placeholder="John"
+                          maxLength={80}
+                          value={signup.first_name}
+                          onChange={setField("first_name")}
+                          required
+                        />
+                      </div>
+                      <div className="login-field">
+                        <label className="login-label" htmlFor="signup-last">Last Name</label>
+                        <input
+                          id="signup-last"
+                          className="login-input"
+                          autoComplete="family-name"
+                          placeholder="Doe"
+                          maxLength={80}
+                          value={signup.last_name}
+                          onChange={setField("last_name")}
+                          required
+                        />
+                      </div>
+                    </div>
+                  </>
+                )}
+                <div className="login-field">
+                  <label className="login-label" htmlFor="login-email">Email</label>
+                  <input
+                    id="login-email"
+                    className="login-input"
+                    type="email"
+                    autoComplete="email"
+                    placeholder="name@company.com"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                  />
+                </div>
+                {creating && (
+                  <div className="login-field">
+                    <label className="login-label" htmlFor="signup-phone">Phone Number</label>
+                    <div className="login-phone">
+                      <SelectMenu
+                        ariaLabel="Country code"
+                        value={signup.country}
+                        options={COUNTRY_OPTIONS}
+                        onChange={setValue("country")}
+                      />
+                      <input
+                        id="signup-phone"
+                        className="login-input"
+                        type="tel"
+                        autoComplete="tel-national"
+                        placeholder="9876543210"
+                        pattern="[0-9 ]{6,18}"
+                        value={signup.phone}
+                        onChange={setField("phone")}
+                        required
+                      />
+                    </div>
+                  </div>
+                )}
+                <div className="login-field">
+                  <label className="login-label" htmlFor="login-password">Password</label>
+                  <div className="login-input-wrap">
+                    <input
+                      id="login-password"
+                      className="login-input"
+                      type={reveal ? "text" : "password"}
+                      autoComplete={creating ? "new-password" : "current-password"}
+                      placeholder={creating ? "At least 8 characters" : "••••••••"}
+                      minLength={creating ? 8 : undefined}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      required
+                    />
+                    <button
+                      type="button"
+                      className="login-reveal"
+                      onClick={() => setReveal((r) => !r)}
+                      aria-label={reveal ? "Hide password" : "Show password"}
+                      aria-pressed={reveal}
+                      title={reveal ? "Hide password" : "Show password"}
+                    >
+                      <EyeIcon off={reveal} />
+                    </button>
+                  </div>
+                </div>
+                {creating && (
+                  <div className="login-field">
+                    <label className="login-label" htmlFor="signup-source">How did you hear about us?</label>
+                    <SelectMenu
+                      id="signup-source"
+                      value={signup.signup_source}
+                      options={SIGNUP_SOURCES}
+                      placeholder="Select an option"
+                      onChange={setValue("signup_source")}
+                    />
+                  </div>
+                )}
+                <button className="login-btn auth-submit" type="submit" disabled={submitting}>
+                  {submitting
+                    ? creating ? "Creating account…" : "Signing in…"
+                    : creating ? "Create account" : "Sign in"}
+                </button>
+              </form>
+              <div className="login-alt">
+                {creating ? (
+                  <>
+                    Already have an account?{" "}
+                    <button type="button" onClick={() => switchMode("signin")}>Sign in</button>
+                  </>
+                ) : (
+                  <>
+                    New here?{" "}
+                    <button type="button" onClick={() => switchMode("create")}>Create an account</button>
+                  </>
+                )}
+              </div>
+            </>
+          )}
         </div>
       </main>
     </div>

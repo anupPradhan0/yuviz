@@ -1,5 +1,5 @@
 """
-Invite email delivery — stdlib smtplib, no new dependency.
+Invite and verification-code email delivery — stdlib smtplib, no new dependency.
 
 Send is inline and non-fatal to the caller (see routers/invites.py): the
 invite row is already committed pending by the time this is called, so a
@@ -76,7 +76,7 @@ _SMTP_TIMEOUT_SECONDS = 10
 def _env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
-        raise RuntimeError(f"{name} is not set — cannot send invite email. See docs/setup.md.")
+        raise RuntimeError(f"{name} is not set — cannot send email. See docs/setup.md.")
     return value
 
 
@@ -158,24 +158,44 @@ async def send_invite_email(*, to_email: str, raw_token: str) -> None:
     the caller's non-fatal except Exception (routers/invites.py) its
     bounded time. It runs on _SMTP_EXECUTOR, not asyncio.to_thread's
     default pool — see that constant's comment for why."""
+    base_url = _env("INVITE_BASE_URL").rstrip("/")
+    link = f"{base_url}/invite#{raw_token}"
+    await _send(
+        to_email=to_email,
+        subject="You've been invited to Voice AI Platform",
+        body=(
+            "You've been invited to set up an account.\n\n"
+            f"Follow this link to accept and set your password: {link}\n\n"
+            "This link expires in 7 days."
+        ),
+    )
+
+
+async def send_verification_code_email(*, to_email: str, code: str, minutes_valid: int) -> None:
+    """Raises on any config or SMTP failure, like send_invite_email."""
+    await _send(
+        to_email=to_email,
+        subject=f"{code} is your Yuviz verification code",
+        body=(
+            f"Your verification code is: {code}\n\n"
+            f"It expires in {minutes_valid} minutes. If you didn't request this, ignore this email."
+        ),
+    )
+
+
+async def _send(*, to_email: str, subject: str, body: str) -> None:
     host = _env("SMTP_HOST")
     port = int(_env("SMTP_PORT"))
     user = os.environ.get("SMTP_USER", "").strip()
     from_addr = _env("SMTP_FROM")
-    base_url = _env("INVITE_BASE_URL").rstrip("/")
     starttls = _env_bool("SMTP_STARTTLS", default=True)
     password = await _resolver.resolve(_env("SMTP_PASSWORD_REF")) if user else None
 
-    link = f"{base_url}/invite#{raw_token}"
     message = EmailMessage()
-    message["Subject"] = "You've been invited to Voice AI Platform"
+    message["Subject"] = subject
     message["From"] = from_addr
     message["To"] = to_email
-    message.set_content(
-        "You've been invited to set up an account.\n\n"
-        f"Follow this link to accept and set your password: {link}\n\n"
-        "This link expires in 7 days.",
-    )
+    message.set_content(body)
 
     loop = asyncio.get_running_loop()
     await asyncio.wait_for(
