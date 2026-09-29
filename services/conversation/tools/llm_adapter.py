@@ -54,9 +54,7 @@ class ToolCallStartedEvent(TurnEvent):
     """Yielded the instant a tool call is about to execute (before its
     round-trip, which can be a slow external API call) — lets the caller
     speak a short acknowledgment filler instead of leaving dead air for
-    the whole tool duration. Confirmed as a real, unaddressed gap (Dograh's
-    own equivalent is opt-in per-tool, manually configured; this is
-    automatic, no per-tool setup needed)."""
+    the whole tool duration. Automatic, no per-tool setup needed."""
     tool_name: str
 
 

@@ -23,8 +23,7 @@ CREATE TABLE IF NOT EXISTS telephony_configs (
 );
 
 -- At most one default-outbound config per tenant, enforced by the database
--- itself (not just application logic) — mirrors Dograh's own partial unique
--- index for exactly this same field.
+-- itself (not just application logic).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_telephony_configs_default_outbound
     ON telephony_configs(tenant_id) WHERE is_default_outbound AND deleted_at IS NULL;
 

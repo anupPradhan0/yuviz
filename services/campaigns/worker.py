@@ -243,9 +243,8 @@ class CampaignWorker:
             return  # a BACKGROUND_JOB event for something this worker didn't originate — ignore
         campaign_id, contact_id, max_attempts, attempt_count = entry
         status = "completed" if succeeded else ("no_answer" if "NO_ANSWER" in detail else "failed")
-        # ESL's `detail` is "+OK <channel-uuid>" on success; Vobiz (now
-        # services/telephony, née services/vobiz before it was retired)
-        # passes call_session_id explicitly instead.
+        # ESL's `detail` is "+OK <channel-uuid>" on success; REST-based
+        # telephony providers pass call_session_id explicitly instead.
         if call_session_id is None and succeeded:
             call_session_id = detail.removeprefix("+OK").strip() or None
         elif not succeeded:

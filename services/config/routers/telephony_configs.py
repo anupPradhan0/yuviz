@@ -131,7 +131,7 @@ async def delete_telephony_config(
 
 @providers_router.get("/telephony-providers")
 async def list_supported_providers(current_user: CurrentUser = Depends(get_current_user)):
-    """Discovery endpoint (Dograh's "List Supported Providers" equivalent) —
-    name -> required credential fields, so an admin UI can render the right
-    form per provider without hardcoding field lists."""
+    """Discovery endpoint — name -> required credential fields, so an admin
+    UI can render the right form per provider without hardcoding field
+    lists."""
     return telephony_configs_service.list_supported_providers()

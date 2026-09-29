@@ -298,7 +298,7 @@ async def set_default_outbound(
     """Atomically makes config_id the tenant's default-outbound config,
     clearing any existing default in the same transaction — safe under the
     partial unique index on telephony_configs(tenant_id) WHERE
-    is_default_outbound (mirrors Dograh's own _clear_default_outbound)."""
+    is_default_outbound."""
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         row = await conn.fetchrow(

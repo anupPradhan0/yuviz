@@ -639,9 +639,7 @@ CREATE INDEX IF NOT EXISTS te_entities_idx ON transcript_entries USING GIN(entit
 CREATE INDEX IF NOT EXISTS te_tool_calls_idx ON transcript_entries USING GIN(tool_calls) WHERE tool_calls IS NOT NULL;
 
 -- ── campaigns / campaign_contacts — outbound calling (services/campaigns/) ──
--- Added 2026-07-28, informed by Dograh's real API shape (Create Campaign,
--- Upload Contacts CSV, Start/Pause/Resume, Get Progress) rather than
--- invented from scratch. caller_id is deliberately the tenant's OWN
+-- Added 2026-07-28. caller_id is deliberately the tenant's OWN
 -- inbound-facing agent DID, not a free-form string — see originate.py's
 -- module docstring for why: routing the outbound leg's destination_number
 -- to that same DID lets the existing Redis-based inbound tenant/agent
