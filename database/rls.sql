@@ -172,6 +172,18 @@ END $$;
 
 DO $$
 BEGIN
+    -- No policy on purpose: yuviz_app sees nothing; only platform_conn()
+    -- (verification.py) reads or writes these pre-auth / own-row tables.
+    ALTER TABLE pending_registrations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE pending_registrations FORCE  ROW LEVEL SECURITY;
+    ALTER TABLE email_change_requests ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE email_change_requests FORCE  ROW LEVEL SECURITY;
+    ALTER TABLE password_reset_requests ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE password_reset_requests FORCE  ROW LEVEL SECURITY;
+END $$;
+
+DO $$
+BEGIN
     DROP POLICY IF EXISTS carriers_tenant_isolation ON carriers;
     CREATE POLICY carriers_tenant_isolation ON carriers
         FOR ALL TO yuviz_app

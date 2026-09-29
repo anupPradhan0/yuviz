@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ApiError,
   AuditLogEntry,
+  changeEmail,
   changePassword,
+  confirmEmailChange,
   getCurrentUser,
   listAuditLog,
   listTenants,
@@ -12,7 +14,9 @@ import {
   User,
   UserRole,
 } from "@/lib/api";
+import { CodeInput } from "@/components/CodeInput";
 import { Modal } from "@/components/Modal";
+import { setToken } from "@/lib/auth";
 
 type SettingsSection = "profile" | "sessions" | "security" | "audit-log";
 
@@ -467,6 +471,117 @@ function AuditLogPanel() {
   );
 }
 
+function ChangeEmailCard({ passwordSet }: { passwordSet: boolean }) {
+  const [newEmail, setNewEmail] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [changedTo, setChangedTo] = useState<string | null>(null);
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+
+  const run = async (action: () => Promise<void>) => {
+    setError(null);
+    setSubmitting(true);
+    try {
+      await action();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setChangedTo(null);
+    run(async () => {
+      const result = await changeEmail(currentPassword, newEmail);
+      setPendingEmail(result.email);
+      setCode("");
+      setCurrentPassword("");
+    });
+  };
+
+  const handleConfirm = (e: React.FormEvent) => {
+    e.preventDefault();
+    run(async () => {
+      const result = await confirmEmailChange(code);
+      setToken(result.access_token);
+      setChangedTo(result.user.email);
+      setPendingEmail(null);
+      setNewEmail("");
+    });
+  };
+
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card-hdr">
+        <div className="card-title">Change Email</div>
+        <div className="card-sub">The address you sign in with</div>
+      </div>
+      <div className="card-body">
+        {error && <div className="error-banner">{error}</div>}
+        {changedTo && (
+          <div className="form-hint" style={{ color: "var(--green)", marginBottom: 12 }}>
+            Email changed to {changedTo}.
+          </div>
+        )}
+        {pendingEmail ? (
+          <form onSubmit={handleConfirm} style={{ maxWidth: 380 }}>
+            <div className="form-hint" style={{ marginBottom: 8 }}>
+              Enter the 6-digit code we sent to <strong>{pendingEmail}</strong>. Your email changes only after this step.
+            </div>
+            <CodeInput value={code} onChange={setCode} disabled={submitting} />
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="btn btn-primary btn-sm" type="submit" disabled={submitting || code.length !== 6}>
+                {submitting ? "Verifying…" : "Confirm Email"}
+              </button>
+              <button className="btn btn-sm" type="button" onClick={() => { setPendingEmail(null); setError(null); }}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        ) : (
+          <form onSubmit={handleSubmit}>
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">New Email</label>
+                <input
+                  className="form-input"
+                  type="email"
+                  placeholder="name@company.com"
+                  autoComplete="email"
+                  value={newEmail}
+                  onChange={(e) => setNewEmail(e.target.value)}
+                  required
+                />
+              </div>
+              {passwordSet && (
+                <div className="form-group">
+                  <label className="form-label">Current Password</label>
+                  <input
+                    className="form-input"
+                    type="password"
+                    placeholder="Confirm it's you"
+                    autoComplete="current-password"
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    required
+                  />
+                </div>
+              )}
+            </div>
+            <button className="btn btn-primary btn-sm" type="submit" disabled={submitting}>
+              {submitting ? "Sending code…" : "Send Verification Code"}
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SecurityPanel() {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -474,6 +589,19 @@ function SecurityPanel() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  // Google-created accounts start without a password they know.
+  const [passwordSet, setPasswordSet] = useState<boolean | null>(null);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+
+  const loadUser = useCallback(() => {
+    getCurrentUser()
+      .then((u) => setPasswordSet(u.password_set))
+      .catch((e) => setLookupError(e instanceof ApiError ? e.detail : String(e)));
+  }, []);
+
+  useEffect(() => {
+    loadUser();
+  }, [loadUser]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -489,8 +617,10 @@ function SecurityPanel() {
     }
     setSubmitting(true);
     try {
-      await changePassword(currentPassword, newPassword);
+      // Older tokens are now revoked, including this tab's — keep the fresh one.
+      setToken((await changePassword(currentPassword, newPassword)).access_token);
       setSuccess(true);
+      setPasswordSet(true);
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
@@ -519,63 +649,85 @@ function SecurityPanel() {
           </label>
         </div>
       </div>
-      <div className="card">
-        <div className="card-hdr">
-          <div className="card-title">Change Password</div>
-          <div className="card-sub">Use at least 8 characters</div>
+      {passwordSet === null ? (
+        <div className="card">
+          <div className="card-body">
+            {lookupError ? (
+              <>
+                <div className="error-banner">Couldn&apos;t load your account: {lookupError}</div>
+                <button className="btn btn-ghost btn-sm" type="button" onClick={() => { setLookupError(null); loadUser(); }}>Retry</button>
+              </>
+            ) : (
+              <div className="form-hint">Loading…</div>
+            )}
+          </div>
         </div>
-        <div className="card-body">
-          {error && <div className="error-banner">{error}</div>}
-          {success && (
-            <div className="form-hint" style={{ color: "var(--green)", marginBottom: 12 }}>
-              Password changed.
-            </div>
-          )}
-          <form onSubmit={handleSubmit}>
-            <div className="form-group">
-              <label className="form-label">Current Password</label>
-              <input
-                className="form-input"
-                type="password"
-                placeholder="Your current password"
-                autoComplete="current-password"
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                required
-              />
-            </div>
-            <div className="form-row">
-              <div className="form-group">
-                <label className="form-label">New Password</label>
-                <input
-                  className="form-input"
-                  type="password"
-                  placeholder="At least 8 characters"
-                  autoComplete="new-password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Confirm New Password</label>
-                <input
-                  className="form-input"
-                  type="password"
-                  placeholder="Repeat new password"
-                  autoComplete="new-password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  required
-                />
+      ) : (
+        <>
+          <ChangeEmailCard passwordSet={passwordSet} />
+          <div className="card">
+            <div className="card-hdr">
+              <div className="card-title">{passwordSet ? "Change Password" : "Set Password"}</div>
+              <div className="card-sub">
+                {passwordSet ? "Use at least 8 characters" : "You sign in with Google — add a password to sign in with email too"}
               </div>
             </div>
-            <button className="btn btn-primary btn-sm" type="submit" disabled={submitting}>
-              {submitting ? "Changing…" : "Change Password"}
-            </button>
-          </form>
-        </div>
-      </div>
+            <div className="card-body">
+              {error && <div className="error-banner">{error}</div>}
+              {success && (
+                <div className="form-hint" style={{ color: "var(--green)", marginBottom: 12 }}>
+                  Password saved.
+                </div>
+              )}
+              <form onSubmit={handleSubmit}>
+                {passwordSet && (
+                  <div className="form-group">
+                    <label className="form-label">Current Password</label>
+                    <input
+                      className="form-input"
+                      type="password"
+                      placeholder="Your current password"
+                      autoComplete="current-password"
+                      value={currentPassword}
+                      onChange={(e) => setCurrentPassword(e.target.value)}
+                      required
+                    />
+                  </div>
+                )}
+                <div className="form-row">
+                  <div className="form-group">
+                    <label className="form-label">New Password</label>
+                    <input
+                      className="form-input"
+                      type="password"
+                      placeholder="At least 8 characters"
+                      autoComplete="new-password"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Confirm New Password</label>
+                    <input
+                      className="form-input"
+                      type="password"
+                      placeholder="Repeat new password"
+                      autoComplete="new-password"
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      required
+                    />
+                  </div>
+                </div>
+                <button className="btn btn-primary btn-sm" type="submit" disabled={submitting}>
+                  {submitting ? "Saving…" : passwordSet ? "Change Password" : "Set Password"}
+                </button>
+              </form>
+            </div>
+          </div>
+        </>
+      )}
     </>
   );
 }

@@ -18,14 +18,23 @@ cd yuviz
 ./deployment/sh/dev.sh
 ```
 
-Then open <http://localhost:3000>. On a fresh database the login page opens on
-**Create your administrator account** — enter your own email and a password of
-at least 8 characters. That account becomes the first superadmin and you are
-signed in immediately; every run after that shows the normal sign-in form.
+Then open <http://localhost:3000>. Startup seeds the platform superadmin
+(`SUPERADMIN_EMAIL`, default `superadmin@yuviz.ai`) only if none exists. Its
+password is `SUPERADMIN_PASSWORD` from `deployment/.env`; if that is blank there
+is no default — set one with **Forgot password?** on the Sign In page (the code
+lands in Mailpit in dev). Restarts never reset the email or password.
 
-There is no default username or password. The account-creation form is offered
-only while the database has no superadmin: `POST /auth/bootstrap` rejects (409)
-once one exists, so it cannot be used a second time.
+**Create account** on the login page is open to anyone: it creates a new
+organization with the registrant as its **admin**, never a superadmin. Email
+sign-up first emails a 6-digit code (`POST /auth/register`, then
+`POST /auth/verify-email`); nothing is created until the code is entered.
+Google sign-up skips the code — Google has already verified the address.
+Admins then invite their own users.
+
+Outgoing email goes to the bundled **Mailpit** container by default — open
+<http://localhost:8025> to read verification codes and invites. To send real
+mail, set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`
+and `SMTP_STARTTLS=true` in `deployment/.env`.
 
 Select the `default` agent → click **Test Agent** → allow microphone → talk.
 
@@ -481,8 +490,10 @@ DNS64; test with `getent ahosts github.com`.
 `COPY . /app`. `dev.sh` always rebuilds, but a manual `docker compose up init`
 does not.
 
-**Forgot the admin password** — there is no reset flow and no default
-credential to fall back on. Create another superadmin from the host with
+**Forgot the admin password** — use **Forgot password?** on the Sign In page;
+it emails a 6-digit code (needs working SMTP — in dev, read it in Mailpit).
+Without SMTP there is no default credential to fall back on: create another
+superadmin from the host with
 `POSTGRES_DSN=postgresql://voiceai:voiceai@127.0.0.1:5432/voiceai python3
 scripts/create_superadmin.py <email> <password>` — from the host, use
 `127.0.0.1`, not the compose service name `postgres`. Or wipe and start over

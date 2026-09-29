@@ -175,13 +175,8 @@ export default function UsersPage() {
 
   const tenantName = (id: string | null) => (id ? allTenants.find((t) => t.id === id)?.name ?? id : "— platform —");
 
-  // Mirrors invites.may_invite: an admin actor may invite anyone except a
-  // superadmin, and only within their own tenant. The server enforces this
-  // regardless — these just keep the form from offering a request it knows
-  // will be refused.
-  const inviteRoleOptions: InviteRole[] = isSuperadmin
-    ? ["superadmin", "admin", "supervisor", "agent", "viewer"]
-    : ["admin", "supervisor", "agent", "viewer"];
+  // Mirrors invites.may_invite: superadmin is seeded only, never invited.
+  const inviteRoleOptions: InviteRole[] = ["admin", "supervisor", "agent", "viewer"];
 
   const openInvite = () => {
     setEmail("");

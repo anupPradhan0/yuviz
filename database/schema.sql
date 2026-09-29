@@ -263,6 +263,60 @@ DO $$ BEGIN
 END $$;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS team TEXT;
 
+-- Public signup profile (POST /auth/register). NULL for invited, seeded and
+-- Google-created accounts that never filled the signup form.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS signup_source TEXT;
+-- False for Google-created accounts until they choose a password in Settings.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_set BOOLEAN NOT NULL DEFAULT true;
+-- Bumped on every password change; tokens carrying an older value are rejected.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INT NOT NULL DEFAULT 0;
+
+-- Signups awaiting their emailed code; no users/tenants row until verified.
+-- code_hash is an HMAC, never the code itself.
+CREATE TABLE IF NOT EXISTS pending_registrations (
+    email             TEXT PRIMARY KEY,  -- lower-cased
+    password_hash     TEXT NOT NULL,
+    organization_name TEXT NOT NULL,
+    first_name        TEXT NOT NULL,
+    last_name         TEXT NOT NULL,
+    phone             TEXT NOT NULL,
+    signup_source     TEXT NOT NULL,
+    code_hash         TEXT NOT NULL,
+    expires_at        TIMESTAMPTZ NOT NULL,
+    attempts          INT NOT NULL DEFAULT 0,
+    last_sent_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    send_window_start TIMESTAMPTZ NOT NULL DEFAULT now(),
+    send_count        INT NOT NULL DEFAULT 1,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- A signed-in user's pending switch to a new address, confirmed by a code
+-- sent to that address. One open request per user.
+CREATE TABLE IF NOT EXISTS email_change_requests (
+    user_id      UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    new_email    TEXT NOT NULL,
+    code_hash    TEXT NOT NULL,
+    expires_at   TIMESTAMPTZ NOT NULL,
+    attempts     INT NOT NULL DEFAULT 0,
+    last_sent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Forgot-password code emailed to the account's address. One open request per user.
+CREATE TABLE IF NOT EXISTS password_reset_requests (
+    user_id           UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    code_hash         TEXT NOT NULL,
+    expires_at        TIMESTAMPTZ NOT NULL,
+    attempts          INT NOT NULL DEFAULT 0,
+    last_sent_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    send_window_start TIMESTAMPTZ NOT NULL DEFAULT now(),
+    send_count        INT NOT NULL DEFAULT 1,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Email identity (findings 4, 5, 8). `psql -f` runs with no ON_ERROR_STOP,
 -- so a failing statement is logged and the script keeps going rather than
 -- aborting — meaning ordering two separate statements cannot protect the

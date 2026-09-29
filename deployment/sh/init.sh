@@ -29,9 +29,8 @@ else
     exit 1
 fi
 
-# No admin user is seeded — the first superadmin is created from the Admin
-# UI's setup screen (POST /auth/bootstrap), so no clone ships with a known
-# password.
+echo "→ superadmin"
+python3 /app/scripts/seed_superadmin.py
 
 echo "→ seeding default agent (ollama at ${OLLAMA_BASE_URL})"
 python3 /app/scripts/seed_default_config.py

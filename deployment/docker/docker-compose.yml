@@ -42,6 +42,13 @@ services:
       timeout: 3s
       retries: 20
 
+  # Dev mail catcher (inbox at http://localhost:8025); set SMTP_* in .env for real mail.
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${MAILPIT_UI_PORT:-8025}:8025"
+
   ollama:
     image: ollama/ollama:latest
     restart: unless-stopped
@@ -69,6 +76,8 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       CONFIG_SERVICE_EMAIL: ${CONFIG_SERVICE_EMAIL}
       CONFIG_SERVICE_PASSWORD: ${CONFIG_SERVICE_PASSWORD}
+      SUPERADMIN_EMAIL: ${SUPERADMIN_EMAIL:-}
+      SUPERADMIN_PASSWORD: ${SUPERADMIN_PASSWORD:-}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
       VOICEAI_STT_MODEL: ${VOICEAI_STT_MODEL:-small.en}
       # dev.sh --llm-model. The seed writes it into the default agent's
@@ -89,6 +98,19 @@ services:
       REDIS_URL: ${REDIS_URL}
       JWT_SECRET: ${JWT_SECRET}
       SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-http://localhost:8000/auth/oauth/google/callback}
+      ADMIN_UI_URL: ${ADMIN_UI_URL:-http://localhost:3000}
+      INVITE_BASE_URL: ${ADMIN_UI_URL:-http://localhost:3000}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD_REF: ${SMTP_PASSWORD_REF:-env:SMTP_PASSWORD}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-no-reply@yuviz.local}
+      # Mailpit offers no TLS; set SMTP_STARTTLS=true for any real provider.
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${CONFIG_PORT:-8000}:8000"
     depends_on:
@@ -108,6 +130,7 @@ services:
     environment:
       POSTGRES_DSN: ${POSTGRES_DSN}
       REDIS_URL: ${REDIS_URL}
+      JWT_SECRET: ${JWT_SECRET}
       KNOWLEDGE_STORAGE_ROOT: /app/data/knowledge_documents
       # Embedding providers resolve api_key_ref too (embedding_manager.py).
       SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}

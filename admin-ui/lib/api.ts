@@ -34,7 +34,9 @@ export async function request<T>(path: string, options?: RequestInit): Promise<T
     let body: Record<string, unknown> | undefined;
     try {
       body = await res.json();
-      detail = (body?.detail as string) || detail;
+      // FastAPI validation errors (422) send a list of {loc, msg}, not a string.
+      const raw = body?.detail;
+      detail = (Array.isArray(raw) ? raw[0]?.msg : (raw as string)) || detail;
     } catch {
       // response body wasn't JSON — fall back to statusText
     }
@@ -1031,6 +1033,7 @@ export interface User {
   tenant_id: string | null;
   email: string;
   role: UserRole;
+  password_set: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -1044,19 +1047,71 @@ export interface LoginResponse {
 export const login = (email: string, password: string) =>
   request<LoginResponse>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
 
-export const getSetupStatus = () =>
-  request<{ setup_required: boolean }>("/auth/setup-status");
+// Mirrors schemas.py's SignupSource.
+export const SIGNUP_SOURCES = [
+  { value: "google_ad", label: "Google Ad" },
+  { value: "facebook_ad", label: "Facebook Ad" },
+  { value: "linkedin", label: "LinkedIn" },
+  { value: "x", label: "Twitter / X" },
+  { value: "friend", label: "Friend / Colleague" },
+  { value: "youtube", label: "YouTube" },
+  { value: "blog", label: "Blog / Article" },
+  { value: "product_hunt", label: "Product Hunt" },
+  { value: "other", label: "Other" },
+] as const;
 
-export const bootstrap = (email: string, password: string) =>
-  request<LoginResponse>("/auth/bootstrap", { method: "POST", body: JSON.stringify({ email, password }) });
+export interface RegisterRequest {
+  organization_name: string;
+  first_name: string;
+  last_name: string;
+  email: string;
+  phone: string;
+  password: string;
+  signup_source: string;
+}
+
+export const register = (body: RegisterRequest) =>
+  request<{ verification_required: true; email: string }>("/auth/register", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const verifyEmail = (email: string, code: string) =>
+  request<LoginResponse>("/auth/verify-email", { method: "POST", body: JSON.stringify({ email, code }) });
+
+export const resendVerificationCode = (email: string) =>
+  request<{ sent: boolean }>("/auth/resend-code", { method: "POST", body: JSON.stringify({ email }) });
+
+export const forgotPassword = (email: string) =>
+  request<{ sent: boolean }>("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) });
+
+export const resetPassword = (email: string, code: string, newPassword: string) =>
+  request<LoginResponse>("/auth/reset-password", {
+    method: "POST",
+    body: JSON.stringify({ email, code, new_password: newPassword }),
+  });
 
 export const getCurrentUser = () => request<User>("/auth/me");
 
+// Full-page navigation, not fetch: the Config Service redirects to Google and
+// back to /login#token=… (or #error=…).
+export const googleSignInUrl = (mode: "signin" | "create") =>
+  `${BASE_URL}/auth/oauth/google/start?mode=${mode}`;
+
 export const changePassword = (currentPassword: string, newPassword: string) =>
-  request<void>("/auth/change-password", {
+  request<LoginResponse>("/auth/change-password", {
     method: "POST",
     body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
   });
+
+export const changeEmail = (currentPassword: string, newEmail: string) =>
+  request<{ email: string }>("/auth/change-email", {
+    method: "POST",
+    body: JSON.stringify({ current_password: currentPassword, new_email: newEmail }),
+  });
+
+export const confirmEmailChange = (code: string) =>
+  request<LoginResponse>("/auth/change-email/confirm", { method: "POST", body: JSON.stringify({ code }) });
 
 // ── Users ────────────────────────────────────────────────────────────────
 

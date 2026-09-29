@@ -367,20 +367,60 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class BootstrapRequest(BaseModel):
-    email:    str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-    password: str = Field(min_length=8)
+SignupSource = Literal[
+    "google_ad", "facebook_ad", "linkedin", "x", "friend", "youtube", "blog", "product_hunt", "other",
+]
+
+
+class RegisterRequest(BaseModel):
+    """Public signup. Deliberately has no role/tenant field — see users.register_admin."""
+    organization_name: str = Field(min_length=1, max_length=120)
+    first_name:        str = Field(min_length=1, max_length=80)
+    last_name:         str = Field(min_length=1, max_length=80)
+    email:             str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    phone:             str = Field(pattern=r"^\+\d{1,4} ?\d{6,14}$")
+    password:          str = Field(min_length=8)
+    signup_source:     SignupSource
 
 
 class UserUpdate(BaseModel):
-    role:      Literal["superadmin", "admin", "supervisor", "agent", "viewer"] | None = None
+    # superadmin is seeded only — never granted through the API.
+    role:      Literal["admin", "supervisor", "agent", "viewer"] | None = None
     tenant_id: str | None = None
     password:  str | None = Field(default=None, min_length=8)
 
 
 class ChangePasswordRequest(BaseModel):
-    current_password: str
+    current_password: str = ""  # ignored until the account has set a password
     new_password:      str = Field(min_length=8)
+
+
+class ChangeEmailRequest(BaseModel):
+    current_password: str = ""
+    new_email:        str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class VerifyEmailRequest(BaseModel):
+    email: str
+    code:  str = Field(pattern=r"^\d{6}$")
+
+
+class ResendCodeRequest(BaseModel):
+    email: str
+
+
+class ConfirmEmailChangeRequest(BaseModel):
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    email:        str
+    code:         str = Field(pattern=r"^\d{6}$")
+    new_password: str = Field(min_length=8)
 
 
 class InviteCreate(BaseModel):

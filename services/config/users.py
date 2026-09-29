@@ -17,6 +17,8 @@ the whole loop, including /health.
 from __future__ import annotations
 
 import asyncio
+import re
+import secrets
 from typing import Any
 
 from libs.tenancy import platform_conn, tenant_conn
@@ -138,20 +140,29 @@ async def _insert_user(
     conn: Any,
     *,
     email: str,
-    password: str,
+    password: str | None = None,
+    password_hash: str | None = None,
     role: str,
     tenant_id: Any | None,
     creator_user_id: Any | None,
     creator_user_email: str | None,
     team: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    phone: str | None = None,
+    signup_source: str | None = None,
+    password_set: bool = True,
 ) -> dict[str, Any]:
-    """Insert + audit on a caller-supplied connection, already inside a
-    transaction — so bootstrap_first_superadmin() can share its lock-holding
-    transaction, which create_user()'s own connection could not."""
+    """Insert + audit on the caller's transaction. Pass exactly one of
+    password / password_hash (already bcrypted)."""
+    if password_hash is None:
+        password_hash = await asyncio.to_thread(auth.hash_password, password)
     row = await conn.fetchrow(
-        "INSERT INTO users (email, password_hash, role, tenant_id, team) "
-        "VALUES ($1, $2, $3, $4, $5) RETURNING *",
-        email.lower(), await asyncio.to_thread(auth.hash_password, password), role, tenant_id, team,
+        "INSERT INTO users (email, password_hash, role, tenant_id, team, "
+        "first_name, last_name, phone, signup_source, password_set) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *",
+        email.lower(), password_hash, role, tenant_id, team,
+        first_name, last_name, phone, signup_source, password_set,
     )
     result = dict(row)
     await audit.write_audit(
@@ -193,30 +204,19 @@ async def create_user(
 
 
 async def superadmin_exists() -> bool:
-    """False == first-time setup, so /auth/bootstrap is open. Pre-auth: no
-    tenant, and the row(s) being checked for are NULL-tenant superadmins."""
     pool = await db.get_pool()
     async with platform_conn(pool, reason="pre-auth-bootstrap") as conn:
         return await conn.fetchval(_SUPERADMIN_EXISTS)
 
 
-async def bootstrap_first_superadmin(*, email: str, password: str) -> dict[str, Any] | None:
-    """Creates the very first superadmin. Returns None (no write) if one
-    already exists — the caller turns that into a 409.
-
-    Check and insert share one advisory-locked transaction, so two concurrent
-    requests can't both see "no superadmin" and both insert. A partial unique
-    index would do it too, but would also forbid the legal second superadmin
-    created later via the invite flow (POST /invites, then POST /invites/accept).
-
-    Pre-auth (there is no caller yet) and the row it creates is NULL-tenant
-    by definition — platform_conn bypass."""
+async def seed_superadmin(*, email: str, password: str) -> dict[str, Any] | None:
+    """No-op (None) if any superadmin exists, so restarts never reset changed
+    credentials. Advisory-locked against concurrent seeds."""
     pool = await db.get_pool()
     async with platform_conn(pool, reason="pre-auth-bootstrap") as conn:
         await conn.execute("SELECT pg_advisory_xact_lock($1)", _BOOTSTRAP_LOCK_KEY)
         if await conn.fetchval(_SUPERADMIN_EXISTS):
             return None
-        # creator_user_id NULL: no authenticated actor created this one.
         return await _insert_user(
             conn,
             email=email,
@@ -226,6 +226,73 @@ async def bootstrap_first_superadmin(*, email: str, password: str) -> dict[str, 
             creator_user_id=None,
             creator_user_email=email,
         )
+
+
+def _slugify(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40].strip("-") or "org"
+
+
+async def register_admin(
+    *,
+    email: str,
+    password: str,
+    organization_name: str,
+    first_name: str | None,
+    last_name: str | None,
+) -> dict[str, Any]:
+    """Google signup (email already verified by Google) — see register_admin_on.
+    Raises asyncpg.UniqueViolationError if the email is taken."""
+    pool = await db.get_pool()
+    async with platform_conn(pool, reason="pre-auth-register") as conn:
+        return await register_admin_on(
+            conn,
+            email=email,
+            password_hash=await asyncio.to_thread(auth.hash_password, password),
+            organization_name=organization_name,
+            first_name=first_name,
+            last_name=last_name,
+            password_set=False,
+        )
+
+
+async def register_admin_on(
+    conn: Any,
+    *,
+    email: str,
+    password_hash: str,
+    organization_name: str,
+    first_name: str | None,
+    last_name: str | None,
+    phone: str | None = None,
+    signup_source: str | None = None,
+    password_set: bool = True,
+) -> dict[str, Any]:
+    """A new tenant plus its first admin on the caller's transaction. The
+    role is fixed here — no caller input can make this a superadmin."""
+    slug = _slugify(organization_name)
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM tenants WHERE slug = $1)", slug):
+        slug = f"{slug}-{secrets.token_hex(3)}"
+    tenant = dict(await conn.fetchrow(
+        "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *", organization_name, slug,
+    ))
+    await audit.write_audit(
+        conn, entity_type="tenant", entity_id=tenant["id"], action="created",
+        user_id=None, user_email=email.lower(), new_value=tenant,
+    )
+    return await _insert_user(
+        conn,
+        email=email,
+        password_hash=password_hash,
+        role="admin",
+        tenant_id=tenant["id"],
+        creator_user_id=None,
+        creator_user_email=email.lower(),
+        first_name=first_name,
+        last_name=last_name,
+        phone=phone,
+        signup_source=signup_source,
+        password_set=password_set,
+    )
 
 
 async def authenticate(email: str, password: str) -> dict[str, Any] | None:
@@ -291,6 +358,8 @@ async def update_user(
 
         columns = list(fields.keys())
         set_clause = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(columns))
+        if new_password is not None:
+            set_clause += ", token_version = token_version + 1"
         new_row = await conn.fetchrow(
             f"UPDATE users SET {set_clause}, updated_at = now() WHERE id = $1 RETURNING *",
             user_id, *(fields[col] for col in columns),
@@ -316,8 +385,9 @@ async def update_user(
 
 async def change_password(
     user_id: Any, *, current_password: str, new_password: str, platform_scoped: bool = False,
-) -> bool:
-    """Returns False (no write happens) if current_password doesn't match —
+) -> dict[str, Any] | None:
+    """Returns the updated row (with a bumped token_version, revoking older
+    sessions), or None (no write happens) if current_password doesn't match —
     the router turns that into a 400, distinct from update_user()'s
     role/tenant_id path since this always needs the caller to prove they
     still know the old password, not just be authenticated as someone with
@@ -334,14 +404,18 @@ async def change_password(
         if row is None:
             raise LookupError(f"user {user_id} not found")
         user = dict(row)
-        if not await asyncio.to_thread(auth.verify_password, current_password, user["password_hash"]):
-            return False
+        # A Google-created account has no password to prove until it sets one.
+        if user["password_set"] and not await asyncio.to_thread(
+            auth.verify_password, current_password, user["password_hash"],
+        ):
+            return None
 
         new_hash = await asyncio.to_thread(auth.hash_password, new_password)
-        await conn.execute(
-            "UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1",
+        updated = dict(await conn.fetchrow(
+            "UPDATE users SET password_hash = $2, password_set = true, token_version = token_version + 1, "
+            "updated_at = now() WHERE id = $1 RETURNING *",
             user_id, new_hash,
-        )
+        ))
         # old_value/new_value both carry password_hash, but audit.py
         # redacts that field before it ever reaches Postgres (see
         # audit.py's _SECRET_REF_FIELDS) — this row only records "a
@@ -356,7 +430,7 @@ async def change_password(
             old_value={"password_hash": user["password_hash"]},
             new_value={"password_hash": new_hash},
         )
-    return True
+    return updated
 
 
 async def soft_delete_user(

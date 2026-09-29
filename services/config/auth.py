@@ -30,6 +30,7 @@ class CurrentUser:
     role: Role
     tenant_id: str | None  # None == superadmin / service account, not a tenant
     is_service_account: bool = False
+    token_version: int = 0
 
 
 def hash_password(password: str) -> str:
@@ -48,6 +49,7 @@ def create_access_token(user: dict[str, Any]) -> str:
         "role": user["role"],
         "tenant_id": str(user["tenant_id"]) if user["tenant_id"] is not None else None,
         "is_service_account": bool(user.get("is_service_account", False)),
+        "ver": user.get("token_version", 0),
         "iat": now,
         "exp": now + ACCESS_TOKEN_TTL,
     }
@@ -69,4 +71,5 @@ def decode_access_token(token: str) -> CurrentUser:
         role=payload["role"],
         tenant_id=payload["tenant_id"],
         is_service_account=bool(payload.get("is_service_account", False)),
+        token_version=payload.get("ver", 0),
     )

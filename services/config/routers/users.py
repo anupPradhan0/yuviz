@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from libs.tenancy import set_target_tenant
 
 from .. import users as users_service
 from ..auth import CurrentUser
-from ..deps import assert_tenant_access, get_current_user, get_or_404, is_platform_scoped, require_role
+from ..deps import (
+    assert_tenant_access, forget_user, get_current_user, get_or_404, is_platform_scoped, require_role,
+)
 from ..schemas import UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -47,6 +49,7 @@ async def list_users(
 async def update_user(
     user_id: str,
     body: UserUpdate,
+    request: Request,
     current_user: CurrentUser = Depends(require_role("superadmin")),
 ):
     fields = body.model_dump(exclude_unset=True)
@@ -75,6 +78,8 @@ async def update_user(
         row_tenant_id=row["tenant_id"],
         **fields,
     )
+    if "password" in fields:
+        forget_user(request.app.state, str(user["id"]))
     return users_service.to_public_dict(user)
 
 

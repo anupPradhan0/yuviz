@@ -105,10 +105,10 @@ async def test_change_password_succeeds_and_new_password_works(pool):
     # platform_scoped=True: this user has tenant_id=None (a platform actor,
     # deps.is_platform_scoped's own definition), matching how the real
     # /auth/change-password route would call this for such a caller.
-    ok = await users.change_password(
+    updated = await users.change_password(
         created["id"], current_password="old-password", new_password="new-password", platform_scoped=True,
     )
-    assert ok is True
+    assert updated["token_version"] == created["token_version"] + 1
 
     assert await users.authenticate(email, "old-password") is None
     assert await users.authenticate(email, "new-password") is not None
@@ -120,10 +120,10 @@ async def test_change_password_fails_with_wrong_current_password(pool):
     email = f"test-user-{uuid.uuid4().hex[:8]}@example.com"
     created = await users.create_user(email=email, password="old-password", role="admin")
 
-    ok = await users.change_password(
+    updated = await users.change_password(
         created["id"], current_password="totally-wrong", new_password="new-password", platform_scoped=True,
     )
-    assert ok is False
+    assert updated is None
 
     # Old password still works — a failed attempt must not touch the hash.
     assert await users.authenticate(email, "old-password") is not None

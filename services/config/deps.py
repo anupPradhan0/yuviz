@@ -228,7 +228,33 @@ def _row_to_effective_user(row: dict[str, Any]) -> CurrentUser:
         role=row["role"],
         tenant_id=str(row["tenant_id"]) if row["tenant_id"] is not None else None,
         is_service_account=row["is_service_account"],
+        token_version=row["token_version"],
     )
+
+
+def _reject_revoked(token_user: CurrentUser, effective_user: CurrentUser) -> None:
+    if token_user.token_version != effective_user.token_version:
+        raise HTTPException(status_code=401, detail="session expired — please sign in again")
+
+
+def _fresh_hit(cached: Any, token_user: CurrentUser, now: float, ttl_s: float) -> bool:
+    # A token newer than the cached row means the memo predates a password change.
+    return (
+        cached is not None and now - cached[0] < ttl_s
+        and cached[1].token_version >= token_user.token_version
+    )
+
+
+def forget_user(app_state: Any, user_id: str) -> None:
+    """Drops every memoized authority for this user so a password change
+    revokes older tokens immediately in this process."""
+    console = getattr(app_state, "_console_authority_memo", None)
+    if console is not None:
+        console.pop(user_id, None)
+    live = getattr(app_state, "_live_calls_authority_memo", None)
+    if live is not None:
+        for key in [k for k in live if k[0] == user_id]:
+            del live[key]
 
 
 async def assert_current_authority(user: CurrentUser) -> CurrentUser:
@@ -246,7 +272,9 @@ async def assert_current_authority(user: CurrentUser) -> CurrentUser:
     fresh_tenant_id = str(row["tenant_id"]) if row["tenant_id"] is not None else None
     if fresh_tenant_id != user.tenant_id:
         raise HTTPException(status_code=403, detail="account tenant has changed; sign in again")
-    return _row_to_effective_user(row)
+    effective_user = _row_to_effective_user(row)
+    _reject_revoked(user, effective_user)
+    return effective_user
 
 
 async def fresh_console_authority(app_state: Any, user: CurrentUser) -> CurrentUser:
@@ -279,8 +307,9 @@ async def fresh_console_authority(app_state: Any, user: CurrentUser) -> CurrentU
 
     now = time.monotonic()
     cached = memo.get(user.id)
-    if cached is not None and now - cached[0] < CONSOLE_AUTHORITY_MEMO_TTL_S:
+    if _fresh_hit(cached, user, now, CONSOLE_AUTHORITY_MEMO_TTL_S):
         memo.move_to_end(user.id)
+        _reject_revoked(user, cached[1])
         return cached[1]
 
     row = await users_service.get_user_by_id(user.id)
@@ -295,6 +324,7 @@ async def fresh_console_authority(app_state: Any, user: CurrentUser) -> CurrentU
     memo.move_to_end(user.id)
     while len(memo) > AUTHORITY_MEMO_MAX_ENTRIES:
         memo.popitem(last=False)
+    _reject_revoked(user, effective_user)
     return effective_user
 
 
@@ -331,8 +361,9 @@ async def fresh_authority(
     key = (user.id, scope_key)
     now = time.monotonic()
     cached = memo.get(key)
-    if cached is not None and now - cached[0] < ttl_s:
+    if _fresh_hit(cached, user, now, ttl_s):
         memo.move_to_end(key)
+        _reject_revoked(user, cached[1])
         return cached[1]
 
     row = await users_service.get_user_by_id(user.id)
@@ -346,6 +377,7 @@ async def fresh_authority(
     memo.move_to_end(key)
     while len(memo) > AUTHORITY_MEMO_MAX_ENTRIES:
         memo.popitem(last=False)
+    _reject_revoked(user, effective_user)
     return effective_user
 
 
