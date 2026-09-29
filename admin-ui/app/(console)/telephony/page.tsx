@@ -712,10 +712,14 @@ function webhookUrlFor(config: ConfigRow): string | null {
     return `${base}/cloudonix/voice/${config.id}`;
   }
   if (config.provider === "vobiz") {
-    // Fixed per Vobiz account, not per-config — services/vobiz/app.py answers
-    // every inbound call on this one path and resolves the DID from Redis.
+    // Per-account, same unified-telephony route shape as Cloudonix above
+    // (docs/telephony.md's route table: /{provider}/voice/{account_ref}).
+    // The old standalone services/vobiz/app.py's fixed /vobiz/answer path
+    // is gone along with that service — this was left pointing at it after
+    // the unification and needs the same base URL wiring as Cloudonix once
+    // one exists for Vobiz.
     const base = process.env.NEXT_PUBLIC_VOBIZ_SERVICE_URL || "";
-    return `${base}/vobiz/answer`;
+    return `${base}/vobiz/voice/${config.id}`;
   }
   return null;
 }

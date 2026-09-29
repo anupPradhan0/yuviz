@@ -5,7 +5,7 @@ outbound account`, across every REST-capable provider instead of one.
 
 Cold-path preload + periodic refresh of every provider's telephony_configs
 rows from Config Service, using the same service-account login/401-retry
-helper services/vobiz/app.py:62-88 already uses. A failed refresh keeps the
+helper the now-retired services/vobiz/app.py:62-88 used. A failed refresh keeps the
 last-known-good map — a Config Service outage must not drop live inbound
 calls, nor stop outbound calls from resolving ownership on the last memo.
 

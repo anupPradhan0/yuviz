@@ -8,12 +8,14 @@ Service/Postgres here — see project memory "architecture_decisions_voiceai"
 and "phase5_coding_rules".
 
 Moved here from services/vobiz/redis_route.py so Cloudonix reads the same
-cache key the Gateway and Vobiz read, rather than a second DID reader
-(PRD constraint). `resolve_did_route()` is new: it distinguishes a miss
-from a hit, which `resolve_did()` (kept for Vobiz's existing "always fall
-back to the default tenant" behavior) cannot — and Cloudonix's tenant
-boundary needs that distinction, because a route to a tenant whose slug
-is literally "default" must not be confused with "no route at all" (see
+cache key the Gateway and (the now-retired) Vobiz read, rather than a
+second DID reader (PRD constraint). `resolve_did_route()` is new: it
+distinguishes a miss from a hit, which `resolve_did()` (kept for Vobiz's
+old "always fall back to the default tenant" behavior; no production
+caller remains now that services/vobiz is deleted — see its own docstring)
+cannot — and Cloudonix's tenant boundary needs that distinction, because a
+route to a tenant whose slug is literally "default" must not be confused
+with "no route at all" (see
 .sdlc/cloudonix-telephony-provider/02-design.md's Interfaces section).
 """
 
@@ -80,8 +82,9 @@ async def resolve_did(did: str) -> tuple[str, str]:
     """Returns (tenant_slug, agent_slug). An unrecognized DID (never
     provisioned, or Redis unreachable) resolves to the default tenant/agent
     — same "never a rejected call" posture as the Gateway, never an
-    exception on the call path. Back-compat wrapper services/vobiz/app.py
-    depends on; Cloudonix must call resolve_did_route directly instead —
-    this wrapper cannot distinguish a miss from a genuine route to a
-    tenant whose slug is literally "default"."""
+    exception on the call path. Back-compat wrapper the now-deleted
+    services/vobiz/app.py used to depend on — no known production caller
+    remains (candidate for removal). Cloudonix calls resolve_did_route
+    directly instead, since this wrapper cannot distinguish a miss from a
+    genuine route to a tenant whose slug is literally "default"."""
     return await resolve_did_route(did) or (DEFAULT_TENANT, DEFAULT_AGENT)

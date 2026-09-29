@@ -20,12 +20,12 @@ Data section, AC29-31):
    relabelled row, so the 60s cache-aside copy cannot keep serving the
    stale 'cloudonix' label.
 
-*** DO NOT RUN THIS AGAINST A LIVE DATABASE UNTIL services/vobiz IS FULLY
-REPOINTED AT services/telephony (unified-telephony cutover phase 1). ***
-Sealing a row's plaintext credential while the OLD services/vobiz is still
-reading it live would break that still-running service (see the design's
-Risks section) — this is a deliberate, explicit, separately-run step, not
-something a deploy pipeline should invoke automatically.
+services/vobiz has since been fully retired and deleted in favor of
+services/telephony (unified-telephony cutover phase 1 is complete), so the
+original "don't run until repointed" precondition is now satisfied. Kept as
+a deliberate, explicit, separately-run step rather than folding it into a
+deploy pipeline — see the design's Risks section for why sealing plaintext
+credentials in place needs a human running it, not automatic invocation.
 
 Usage:
   python3 scripts/migrate_telephony_providers.py [--dry-run]

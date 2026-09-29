@@ -24,8 +24,9 @@ reviews:
   path_instructions:
     - path: "services/**/*.py"
       instructions: >
-        This is the Python backend (Config/Knowledge/Conversation/webcall/vobiz
-        services). Flag any synchronous Postgres/Redis/HTTP call added to a
+        This is the Python backend (Config/Knowledge/Conversation/Telephony/
+        Campaigns/Webcall services — Telephony replaced the old per-vendor
+        vobiz/cloudonix services). Flag any synchronous Postgres/Redis/HTTP call added to a
         real-time call path (services/conversation/pipeline.py, servicer.py,
         the Gateway-facing gRPC handlers) — hot-path code must stay
         Redis-only or in-memory; cold-path config changes belong in

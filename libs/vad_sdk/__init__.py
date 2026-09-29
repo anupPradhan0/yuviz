@@ -15,7 +15,7 @@ picks directly. See each module's own docstring for why both exist.
 What deliberately stays OUT of this package: barge-in *reaction* (clearing
 a playback queue, sending CancelGeneration, pre-roll buffering) — that's
 transport-specific pipeline behavior, not detection, and belongs in each
-bridge (see services/vobiz/bridge.py) the same way pipecat's own
+bridge (see libs/media_stream_sdk/bridge.py) the same way pipecat's own
 InterruptionFrame reaction is transport-specific even though the frame
 itself is generic.
 """
