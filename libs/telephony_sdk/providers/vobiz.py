@@ -1,8 +1,8 @@
 """
 VobizTelephonyProvider — canonical home for Vobiz REST + webhook-signature
 logic, moved here from services/vobiz/client.py + signature.py (which
-originally held it before this SDK existed). Verified live 2026-07-30/31
-against the actual Vobiz API (X-Auth-ID/X-Auth-Token headers, JSON body,
+originally held it before this SDK existed). Verified live against the
+actual Vobiz API (X-Auth-ID/X-Auth-Token headers, JSON body,
 phone numbers E.164 WITHOUT a leading "+", call_uuid as the call
 identifier) and real Vobiz-signed webhooks (V2/V3 HMAC-SHA256 signature
 scheme).

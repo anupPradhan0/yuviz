@@ -7,7 +7,7 @@ simplification given campaign call volume on a single dev machine is
 nowhere near what would justify a separate scaled-out worker process;
 revisit if real usage needs it.
 
-*** UNVERIFIED END TO END, 2026-07-28 *** — see originate.py's module
+*** UNVERIFIED END TO END *** — see originate.py's module
 docstring. This module's own logic (pacing, concurrency, claiming
 contacts, retry-on-failure) is fully real and testable; what's unverified
 is specifically whether the ESL commands it issues actually produce a

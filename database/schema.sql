@@ -233,8 +233,8 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at    TIMESTAMPTZ
 );
--- password_hash added after the table's initial design (2026-07-14) — this
--- repo had zero real auth before now (see services/config/auth.py). Every
+-- password_hash added after the table's initial design — this repo had
+-- zero real auth before now (see services/config/auth.py). Every
 -- existing users row predates this column, so it has no default: a fresh
 -- CREATE TABLE gets NOT NULL immediately, but re-running this file against a
 -- DB with pre-auth user rows needs those rows fixed up (re-created via
@@ -492,7 +492,7 @@ DO $$ BEGIN
     ALTER TABLE phone_numbers ADD CONSTRAINT phone_numbers_status_check CHECK (status IN ('active', 'inactive', 'suspended'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
--- carrier_account_ref (2026-07-23, DID Management platform): the carrier's
+-- carrier_account_ref (DID Management platform): the carrier's
 -- own account identifier (e.g. Plivo Auth ID / Twilio Account SID) needed
 -- alongside auth_token_ref to make authenticated Numbers API calls — not
 -- secret itself, but kept beside auth_token_ref rather than reusing auth_id
@@ -549,7 +549,7 @@ CREATE TABLE IF NOT EXISTS calls (
 -- decision, not required to unblock Phase 5.
 
 -- ── conversation_node_heartbeats — dead-node detection ───────────────────
--- Added 2026-07-29. Each Conversation Service process UPSERTs its own row
+-- Each Conversation Service process UPSERTs its own row
 -- every HEARTBEAT_INTERVAL_S (see transcript_builder.py). Lets
 -- reconcile_dead_nodes() close out calls owned by an instance that's gone
 -- silent (crashed, never coming back under the same node_id) WITHOUT
@@ -571,14 +571,14 @@ CREATE TABLE IF NOT EXISTS conversation_node_heartbeats (
 -- Default 'inbound' matches the Gateway's own CallMetadata default and the
 -- only path that exists today (no outbound/campaign calling yet).
 ALTER TABLE calls ADD COLUMN IF NOT EXISTS direction TEXT NOT NULL DEFAULT 'inbound';
--- 'test' added 2026-07-27 for the webcall bridge (services/webcall/) — a
+-- 'test' added for the webcall bridge (services/webcall/) — a
 -- browser-mic test session against a specific agent, no telephony
 -- involved at all. Distinct from inbound/outbound so call history/
 -- analytics never mistake a test session for a real call.
 ALTER TABLE calls DROP CONSTRAINT IF EXISTS calls_direction_check;
 ALTER TABLE calls ADD CONSTRAINT calls_direction_check CHECK (direction IN ('inbound', 'outbound', 'test'));
 
--- ── Call sentiment (added 2026-09-20) ────────────────────────────────────
+-- ── Call sentiment ────────────────────────────────────────────────────────
 -- How the CALLER sounded over the call as a whole, scored once from the
 -- finished transcript by SentimentScorer (services/conversation/sentiment.py)
 -- inside TranscriptBuilder's end_call() background write — never on the
@@ -639,7 +639,7 @@ CREATE INDEX IF NOT EXISTS te_entities_idx ON transcript_entries USING GIN(entit
 CREATE INDEX IF NOT EXISTS te_tool_calls_idx ON transcript_entries USING GIN(tool_calls) WHERE tool_calls IS NOT NULL;
 
 -- ── campaigns / campaign_contacts — outbound calling (services/campaigns/) ──
--- Added 2026-07-28. caller_id is deliberately the tenant's OWN
+-- caller_id is deliberately the tenant's OWN
 -- inbound-facing agent DID, not a free-form string — see originate.py's
 -- module docstring for why: routing the outbound leg's destination_number
 -- to that same DID lets the existing Redis-based inbound tenant/agent
@@ -657,10 +657,10 @@ CREATE TABLE IF NOT EXISTS campaigns (
     max_concurrent_calls   INT NOT NULL DEFAULT 1,
     pacing_seconds         INT NOT NULL DEFAULT 5,  -- min gap between originate attempts
     max_attempts           INT NOT NULL DEFAULT 1,  -- retries for no_answer/failed, per contact
-    -- Calling-hours guardrail, added 2026-07-28: NULL/NULL means "no
-    -- restriction" (preserves existing campaigns' behavior). "HH:MM" text,
-    -- not TIME, to sidestep timezone-vs-TIME type conversion entirely —
-    -- the worker parses these against calling_hours_timezone itself.
+    -- Calling-hours guardrail: NULL/NULL means "no restriction" (preserves
+    -- existing campaigns' behavior). "HH:MM" text, not TIME, to sidestep
+    -- timezone-vs-TIME type conversion entirely — the worker parses these
+    -- against calling_hours_timezone itself.
     calling_hours_start    TEXT,
     calling_hours_end      TEXT,
     calling_hours_timezone TEXT NOT NULL DEFAULT 'UTC',
@@ -676,9 +676,9 @@ CREATE TABLE IF NOT EXISTS campaign_contacts (
     campaign_id       UUID NOT NULL REFERENCES campaigns(id),
     phone_number      TEXT NOT NULL,
     name              TEXT,
-    -- 'blocked' added 2026-07-28 for the do-not-call guardrail — kept
-    -- distinct from 'failed' so "we legally couldn't call this" never
-    -- looks like "the call attempt failed" in reporting.
+    -- 'blocked' is for the do-not-call guardrail — kept distinct from
+    -- 'failed' so "we legally couldn't call this" never looks like "the
+    -- call attempt failed" in reporting.
     status            TEXT NOT NULL DEFAULT 'pending'
                       CHECK (status IN ('pending', 'calling', 'completed', 'failed', 'no_answer', 'blocked')),
     attempt_count     INT NOT NULL DEFAULT 0,
@@ -692,7 +692,7 @@ CREATE INDEX IF NOT EXISTS idx_campaign_contacts_pending
     ON campaign_contacts(campaign_id, status) WHERE status = 'pending';
 
 -- ── dnc_numbers — per-tenant do-not-call list (services/campaigns/) ────────
--- Added 2026-07-28. phone_number stored as given at insert time; matching
+-- phone_number stored as given at insert time; matching
 -- is by last-10-digits (see dnc.py's _normalize_phone, same tolerance-for-
 -- formatting approach as tools/providers/calendar/cal_com.py's attendee
 -- phone matching) so "+1 415-555-0100" and "4155550100" are recognized as

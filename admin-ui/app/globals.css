@@ -269,7 +269,7 @@ body {
 /* Status <select> is colored by its OWN current value — the selected
    option is the status, so the control doubles as the indicator instead of
    needing a separate badge next to it (which read as a redundant second
-   control — see project memory 2026-07-13). */
+   control). */
 .status-select { font-weight: 700; border-width: 1px; }
 .status-select.active { background: var(--green-dim); color: var(--green); border-color: var(--green-border); }
 .status-select.inactive { background: var(--surf-3); color: var(--text-3); border-color: var(--border-2); }

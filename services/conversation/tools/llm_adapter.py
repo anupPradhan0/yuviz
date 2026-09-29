@@ -1,7 +1,6 @@
 """
 LLMAdapter — the seam that keeps ILLM.generate() completely untouched while
-still supporting tool-calling (see Tool Execution Framework design, review
-point 1, 2026-07-22).
+still supporting tool-calling.
 
 ILLM's formal contract never changes: generate(messages) -> AsyncGenerator[str].
 A concrete provider MAY additionally implement IToolAwareLLM — a narrow,
