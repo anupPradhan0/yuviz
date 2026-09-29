@@ -1,0 +1,58 @@
+name: No AI co-author trailers
+
+# Blocks any PR whose commits carry an AI-tool co-author trailer (Claude,
+# GitHub Copilot, Cursor, ChatGPT/GPT, etc.) or a "Generated with <AI tool>"
+# line. This is a merge-time check, not a local git hook — a local hook is
+# advisory (bypassable with --no-verify or just not installed); this runs
+# on GitHub's side regardless of what any contributor has set up locally,
+# and blocks the merge button when wired as a required status check.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  check-commit-trailers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan PR commits for AI co-author trailers
+        run: |
+          set -euo pipefail
+
+          # Matches "Co-Authored-By: <anything>" lines naming a known AI
+          # tool/vendor, an anthropic.com/openai.com email, or a
+          # "Generated with <AI tool>" footer line some tools add.
+          PATTERN='(Co-Authored-By:.*(claude|anthropic|copilot|cursor|chatgpt|openai|gpt-[0-9]|gemini|codeium)|Generated (with|by) .*(Claude|Copilot|Cursor|ChatGPT|Codeium|Gemini))'
+
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+
+          bad_commits=""
+          for sha in $(git log "$BASE..$HEAD" --format='%H'); do
+            msg=$(git log -1 --format='%B' "$sha")
+            if echo "$msg" | grep -iE "$PATTERN" > /dev/null; then
+              bad_commits="$bad_commits $sha"
+            fi
+          done
+
+          if [ -n "$bad_commits" ]; then
+            echo "::error::Commit(s) with an AI co-author trailer found:$bad_commits"
+            echo ""
+            echo "The following commits reference an AI coding tool as a co-author"
+            echo "(e.g. 'Co-Authored-By: Claude ... <noreply@anthropic.com>' or a"
+            echo "'Generated with <tool>' footer). Please amend/rebase to remove"
+            echo "these lines before merging."
+            echo ""
+            for sha in $bad_commits; do
+              echo "── $sha ──────────────────────────"
+              git log -1 --format='%B' "$sha"
+              echo ""
+            done
+            exit 1
+          fi
+
+          echo "No AI co-author trailers found in this PR's commits."
