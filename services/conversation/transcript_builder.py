@@ -61,7 +61,7 @@ class TranscriptBuilder:
         # stamped onto every call this instance begins, and used to scope
         # reconcile_stale_calls() so restarting one instance can never
         # touch a call another still-running instance is legitimately
-        # serving (see project history, 2026-07-29: an earlier version of
+        # serving (see project history: an earlier version of
         # reconcile_stale_calls() closed out EVERY live call platform-wide,
         # which is only safe with exactly one Conversation Service process
         # — this project runs two, :50051 and :50052, behind Envoy).
@@ -132,7 +132,7 @@ class TranscriptBuilder:
         this instance's own id — never touches another instance's rows,
         which may be genuinely live right now. Left unreconciled, stale
         rows show up as permanently live in the Admin UI forever (see
-        project history, 2026-07-29). Closed with a distinct close_reason
+        project history). Closed with a distinct close_reason
         so this is never confused with a call that ended normally;
         duration_ms is deliberately left NULL rather than computed from
         "now" — we don't actually know when it really ended, and a
@@ -163,8 +163,8 @@ class TranscriptBuilder:
         this instance is still alive to reconcile_dead_nodes(), running on
         every OTHER instance. Deliberately its own tiny UPSERT, sharing no
         lock or state with the per-call pipeline — this must never be able
-        to add latency to a live call (see project history, 2026-07-29:
-        this was explicitly checked before building it, not assumed)."""
+        to add latency to a live call (see project history — this was
+        explicitly checked before building it, not assumed)."""
         if self._pool is None or not self._node_id:
             return
         try:
@@ -217,7 +217,7 @@ class TranscriptBuilder:
         its owning process keeps running perfectly normally. WebSocket/TCP
         close events aren't guaranteed to ever reach the server in that
         case, so nothing else notices; the row would otherwise stay "live"
-        in the Admin UI forever (confirmed live 2026-08-02: a webcall test
+        in the Admin UI forever (confirmed live: a webcall test
         session's browser vanished mid-farewell, the process never
         restarted, and the row sat with ended_at IS NULL indefinitely even
         though lsof showed zero actual open connections).

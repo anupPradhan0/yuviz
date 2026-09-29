@@ -1,7 +1,7 @@
 """
 LLMAdapter tests — pure unit tests against fake ILLM/IToolAwareLLM stand-ins,
 no network at all. The behavior under test is the feature-detection/fallback
-logic itself (review point 1, 2026-07-22): does the adapter call
+logic itself: does the adapter call
 generate_with_tools() when both tools are offered AND the provider supports
 it, and fall back to plain generate() (wrapped in TokenEvent) otherwise.
 """

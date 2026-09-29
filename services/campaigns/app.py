@@ -30,7 +30,7 @@ from .worker import CampaignWorker
 # dropped: uvicorn only configures its own uvicorn.* loggers, so the root
 # logger stays at its default WARNING level and this module's INFO-level
 # origination/job-resolution traces never appear anywhere — confirmed the
-# hard way debugging a real outbound call live (2026-07-28).
+# hard way debugging a real outbound call live.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 log = logging.getLogger(__name__)

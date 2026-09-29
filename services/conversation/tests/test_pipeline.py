@@ -1954,7 +1954,7 @@ async def test_transfer_requested_bookkeeping_cleared_on_session_end():
 
 # ---------------------------------------------------------------------------
 # Phase 6 bug fix: duplicate-suppression must release on cancellation/failure
-# (found live 2026-07-18 — a barge-in-dropped transfer permanently blocked
+# (found live — a barge-in-dropped transfer permanently blocked
 # all further attempts for that session without this)
 # ---------------------------------------------------------------------------
 

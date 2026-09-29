@@ -4,7 +4,7 @@ Pub/Sub channel (services/config/provider_configs.py's
 PROVIDER_CONFIG_CHANGED_CHANNEL) so editing a provider_config evicts that
 one cached instance in THIS process's AIProviderManager instantly, instead
 of needing a full process restart (which drops every live call on that
-instance — see project history, 2026-07-29).
+instance — see project history).
 
 Runs as its own background asyncio task (see __main__.py) — shares no
 lock/state with the per-call pipeline, so a slow or unreachable Redis can

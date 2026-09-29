@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 _UPDATABLE_FIELDS = {"did", "agent_id", "fallback_agent_id", "carrier_id", "telephony_config_id", "region", "status"}
 
 # DID -> tenant/agent routing has NO TTL at all — deliberately, per canonical
-# design (project memory 2026-07-14). Two TTL-based designs were tried and
+# design (project memory). Two TTL-based designs were tried and
 # rejected here before landing on this one:
 #   - cache.DEFAULT_TTL_SECONDS (60s): far too short, expires mid-session.
 #   - A custom longer TTL (tried: 600s, then 86400s): still wrong in kind,
@@ -40,7 +40,7 @@ _UPDATABLE_FIELDS = {"did", "agent_id", "fallback_agent_id", "carrier_id", "tele
 #     cold, and every subsequent real call silently and PERMANENTLY
 #     misroutes to tenant=default/agent=default until something unrelated
 #     happens to re-read that exact DID. This bit for real, twice, at two
-#     different TTL values (see project memory 2026-07-13/14).
+#     different TTL values (see project memory).
 #
 # The actual fix is to stop expiring this data at all: DID->tenant/agent
 # assignment changes at provisioning time, not mid-session, so Redis can

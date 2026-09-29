@@ -67,7 +67,7 @@ class DeepgramTTS:
         return resp.content
 
     async def synthesize_stream(self, text: str, sample_rate: int) -> AsyncGenerator[bytes, None]:
-        # Confirmed live 2026-08-01: Deepgram's /v1/speak response body
+        # Confirmed live: Deepgram's /v1/speak response body
         # arrives progressively (first byte ~800ms, last byte ~1600ms for a
         # single sentence) — client.stream()+aiter_bytes() forwards each
         # chunk the moment it lands instead of blocking on resp.content

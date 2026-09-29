@@ -4,7 +4,7 @@ DeepgramSTT — cloud transcription via Deepgram.
 transcribe() calls the pre-recorded /v1/listen REST endpoint (kept for
 callers that still want one-shot batch transcription). feed_stream()/
 finalize_stream()/cancel_stream() use Deepgram's real live-streaming
-WebSocket API instead — found live 2026-08-02 that the batch-only path
+WebSocket API instead — found live that the batch-only path
 throws away Deepgram's actual latency advantage: it transcribes
 continuously while the caller is still talking, so by the time
 speech_ended fires, the final transcript is already (mostly) computed

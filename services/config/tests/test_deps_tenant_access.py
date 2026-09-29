@@ -2,7 +2,7 @@
 
 assert_tenant_access's 403 (UUID mismatch) / 404 (slug mismatch or
 unknown) shapes must match the two existing precedents verbatim: the UUID
-403 is toolexec/routers/custom_apis.py:38's `_require_tenant_access`
+403 is toolexec/routers/custom_apis.py's `_require_tenant_access`
 ("tenant_id does not match the caller's tenant"); the slug 404 is
 agents.py's `_resolve_tenant` (f"tenant {slug!r} not found"). bind_path_tenant
 must never raise, for any input — it is unauthenticated and order-

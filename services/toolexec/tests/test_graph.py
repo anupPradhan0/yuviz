@@ -61,7 +61,7 @@ def test_depth_limit_exceeded_at_per_agent_override_of_two():
 
 
 def test_depth_limit_enforced_through_a_shared_upstream_on_unequal_branches():
-    """DEFECT REPRODUCTION (security audit finding 3, graph.py:54-55): the
+    """DEFECT REPRODUCTION (security audit finding 3): the
     `if node_id in resolved_ids: return` dedupe fires before the walk into
     that node's own subtree, so a node first resolved on a SHALLOW branch is
     never re-examined — nor is anything beneath it — when reached again via

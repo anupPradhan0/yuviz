@@ -117,7 +117,7 @@ class SentimentConfig:
     fine where a live turn needs 300ms), it wants temperature 0, and it
     needs a model that can actually follow an output contract.
 
-    Measured 2026-09-20 against the default local llama3.2:3b on six real
+    Measured against the default local llama3.2:3b on six real
     transcripts: the LABEL was usually right, but the one-line reason was
     confidently fabricated — on a ThinkPad/MacBook pricing call it reported
     a caller "asking for order status despite the agent asking for email

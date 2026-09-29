@@ -64,7 +64,7 @@ async def test_get_by_did_unknown_number_returns_none(test_tenant, scoped):
 async def test_create_phone_number_warms_cache_immediately(test_tenant, scoped, pool):
     # create_phone_number() warms did:{did} itself now — a brand-new DID
     # must not sit cold until its first real call (or some unrelated read)
-    # happens to populate it; see project memory 2026-07-13 for the real
+    # happens to populate it; see project memory for the real
     # misrouted call this exact gap caused before this fix.
     did = f"test-did-{uuid.uuid4().hex[:8]}"
     await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
@@ -228,7 +228,7 @@ async def test_prewarm_populates_cache_for_active_dids_only(test_tenant, scoped,
 
 
 async def test_did_cache_has_no_ttl(test_tenant, scoped, pool):
-    """Canonical design (project memory 2026-07-14): DID routing entries
+    """Canonical design (project memory): DID routing entries
     never expire — the Gateway's Redis-only hot path has no fallback query,
     so any TTL is a live landmine, not just a tuning knob. Every write path
     keeps Redis in lockstep with Postgres instead (see this module's

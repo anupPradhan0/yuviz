@@ -338,8 +338,8 @@ BEGIN
   END IF;
   -- Drop the case-sensitive column UNIQUE only once the guard above has
   -- passed. If it survived, it would keep a soft-deleted address permanently
-  -- un-reinvitable — the exact mismatch with get_user_by_email()'s
-  -- `deleted_at IS NULL` filter (users.py:33) that would 500 the accept path
+  -- un-reinvitable — the exact mismatch with get_user_by_email()'s own
+  -- `deleted_at IS NULL` filter that would 500 the accept path
   -- when someone re-invites a departed employee. DDL needs EXECUTE inside
   -- plpgsql.
   EXECUTE 'ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key';
@@ -1078,7 +1078,7 @@ ALTER TABLE agent_tool_policies ADD COLUMN IF NOT EXISTS max_chain_depth INT;
 
 -- ── Live Calls Monitoring ────────────────────────────────────────────────────
 -- Per-tenant channel cap — the only source for the Live Calls utilization KPI.
--- INT + CHECK mirror campaigns.max_concurrent_calls (schema.sql:555), but the
+-- INT + CHECK mirror campaigns.max_concurrent_calls's own column, but the
 -- column is NULLABLE with NO DEFAULT, deliberately unlike campaigns': a
 -- platform-wide DEFAULT 1 would BE the inferred global cap AC13 forbids, just
 -- moved from the query into the column. NULL means "not configured yet" and is

@@ -3,8 +3,8 @@ originate.py — commands FreeSWITCH to place a real outbound PSTN call and
 route it into the existing AI pipeline, entirely via a raw ESL (Event
 Socket) connection.
 
-CORRECTED 2026-07-28, against a real Kamailio + FreeSWITCH + Zoiper
-end-to-end test — the original design here (routing the answered leg by
+CORRECTED against a real Kamailio + FreeSWITCH + Zoiper end-to-end test —
+the original design here (routing the answered leg by
 locally executing the agent's DID as a dialplan extension, via
 `<caller_id> XML default`) was WRONG and is kept only in git history.
 Read on for what was actually found and why the fix below works.
@@ -162,7 +162,7 @@ class EslJobEventListener:
     connection, since a command connection isn't listening for
     asynchronous events at all.
 
-    VERIFIED 2026-07-28 against a real local FreeSWITCH (`bgapi status` while
+    VERIFIED against a real local FreeSWITCH (`bgapi status` while
     subscribed to `event plain BACKGROUND_JOB`): the outer ESL envelope read
     by `_read_until_blank_line()` only ever has Content-Type/Content-Length —
     it does NOT carry Job-UUID. The envelope's `Content-Length` bytes are

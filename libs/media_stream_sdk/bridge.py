@@ -298,7 +298,7 @@ class MediaStreamBridge:
         # Default to Envoy's gRPC proxy (config/gateway.yaml uses the same
         # target) so this bridge load-balances across both ConvSvc
         # instances like the C++ Gateway does, instead of pinning every
-        # call to :50051 — found live 2026-08-04 during a deployment audit.
+        # call to :50051 — found live during a deployment audit.
         conv_target = os.environ.get("CONVERSATION_SVC_TARGET", "localhost:10000")
         session_id = str(uuid.uuid4())
         self.log.info(

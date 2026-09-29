@@ -102,7 +102,7 @@ class ToolCallOrchestrator:
         local, policies_by_name, schemas, local_schemas = await resolve()
 
         # One line per turn naming exactly what the model was offered. Added
-        # 2026-09-19 after an "it isn't calling the API" report cost an hour:
+        # after an "it isn't calling the API" report cost an hour:
         # every layer (policy row, provider config, node allow-list, the
         # api_name enum) had to be checked by hand because nothing recorded
         # what actually reached the LLM. A turn that offered tools and got

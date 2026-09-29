@@ -3,7 +3,7 @@ DeepgramTTS tests use httpx.MockTransport — no real network call, no cost.
 synthesize_stream() is the one that matters: it must forward each chunk of
 the response body as it arrives rather than buffering the whole thing (see
 DeepgramTTS.synthesize_stream's docstring — this is the actual latency fix
-found live 2026-08-01, not just an alternate way to get the same bytes).
+found live, not just an alternate way to get the same bytes).
 """
 
 from __future__ import annotations

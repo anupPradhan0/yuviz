@@ -1,7 +1,7 @@
 """
 Core Tool Execution Framework types — see the architecture design (Tool
-Execution Framework doc, 2026-07-22) for the full reasoning behind each of
-these shapes. Deliberately no dependency on anything in providers/ or
+Execution Framework doc) for the full reasoning behind each of these
+shapes. Deliberately no dependency on anything in providers/ or
 pipeline.py: this module is the seam every other tools/ module and every
 executor imports, and it must stay importable on its own.
 

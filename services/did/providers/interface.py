@@ -9,7 +9,7 @@ See project memory did-management-platform-architecture principle #11 —
 this mirrors ai_provider_manager.py's registry-of-factories pattern, not a
 growing if/elif chain.
 
-No concrete provider is implemented yet (2026-07-23): the first one
+No concrete provider is implemented yet: the first one
 (Plivo) is deliberately not written until real trial-account credentials
 exist to confirm live behavior against, the same discipline already
 applied to Cal.com and Gemini in this project — never guess a vendor API

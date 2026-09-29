@@ -1,5 +1,5 @@
 -- Retire the Cal.com / Twilio-SMS tool configuration left behind when the
--- calendar and SMS built-ins were removed (2026-09-18).
+-- calendar and SMS built-ins were removed.
 --
 -- Background: the agent now has exactly two tools — search_knowledge (RAG,
 -- an in-process local tool) and execute_api (every tenant-registered custom

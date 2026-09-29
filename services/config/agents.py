@@ -298,7 +298,7 @@ async def create_agent(
         # first real call to populate lazily — same reasoning, and the same
         # real live-call failure this exact gap already caused, as
         # phone_numbers.create_phone_number()'s identical fix (see project
-        # memory 2026-07-13). Optional (not required) because most existing
+        # memory). Optional (not required) because most existing
         # callers only have tenant_id on hand; the REST router (the actual
         # live-usage path) does have tenant_slug and passes it.
         await get_agent(tenant_slug, slug)

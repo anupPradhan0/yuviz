@@ -38,8 +38,8 @@ _KEEP_ALIVE = "30m"
 def _to_ollama_message(m: dict[str, Any]) -> dict[str, Any]:
     """build_chat_messages() yields a generic {role, content, tool_calls?,
     tool_call_id?} shape — bridge it to Ollama's native wire format here
-    (nesting name/arguments under "function", per call, confirmed live
-    2026-07-22), same as ToolDefinition.to_generic_schema() already gets
+    (nesting name/arguments under "function", per call, confirmed live),
+    same as ToolDefinition.to_generic_schema() already gets
     bridged for the tools list. A "tool"-role message (tool_call_id set)
     passes through content as-is — Ollama expects a plain string there,
     unlike Gemini's structured functionResponse (see gemini.py)."""
@@ -187,7 +187,7 @@ class OllamaLLM:
         tool_choice: str | dict[str, Any] | None = None,
     ) -> AsyncGenerator[TurnEvent, None]:
         """IToolAwareLLM companion to generate() — same client, same auth,
-        additive method. Confirmed live 2026-07-22: with stream=true, a tool
+        additive method. Confirmed live: with stream=true, a tool
         call arrives as ONE chunk carrying the complete message.tool_calls
         array (never built up token-by-token the way content is) — plain
         text content still streams incrementally either way, so a turn that

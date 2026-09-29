@@ -3,8 +3,8 @@ ToolPolicyResolver._narrow tests — pure in-memory logic, no Postgres
 needed (it never touches self._pool). Covers workflow per-node tool
 scoping.
 
-The auto-derived-companion tests that used to live here went away on
-2026-09-18 with the mechanism itself: book_appointment silently granting
+The auto-derived-companion tests that used to live here went away with
+the mechanism itself: book_appointment silently granting
 cancel_appointment/reschedule_appointment only made sense while those
 were built-in tools sharing one Cal.com provider config. execute_api is
 now the only DB-gated tool, and one custom API never implies another —

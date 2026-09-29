@@ -1,7 +1,7 @@
 """
 PlivoProvider — IDidProvider backed by Plivo's REST API.
 
-*** UNVERIFIED, 2026-07-23 — READ BEFORE TRUSTING THIS FILE ***
+*** UNVERIFIED — READ BEFORE TRUSTING THIS FILE ***
 Every endpoint, field name, and response shape below is built from Plivo's
 public API documentation as captured in training data, NOT confirmed
 against a real account (no trial credentials existed yet when this was

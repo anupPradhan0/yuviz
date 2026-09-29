@@ -49,7 +49,7 @@ def test_chain_step_report_status_matches_api_chain_steps_check_constraint():
     """Verified by mutation: this test passes today ONLY if every DDL value
     is also a Literal member. Confirmed it fails as expected against the
     shipped code — schemas.ChainStepReport.status's Literal is missing
-    'claimed' (schemas.py:82), while the DDL CHECK (database/schema.sql,
+    'claimed', while the DDL CHECK (database/schema.sql,
     api_chain_steps) permits it. A chain-history read over an in-flight or
     crash-abandoned run would serialize a 'claimed' step and raise a
     ValidationError. This is a genuine source defect, reported as such —

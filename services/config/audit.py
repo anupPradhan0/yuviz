@@ -71,8 +71,8 @@ async def list_audit_log(
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """`tenant_id` + `platform_scoped` follow the `users.py:55 list_users`
-    convention: the route derives both from `deps.is_platform_scoped(current_user)`
+    """`tenant_id` + `platform_scoped` follow the `list_users` convention
+    (users.py): the route derives both from `deps.is_platform_scoped(current_user)`
     (lesson 24) — a tenant-scoped superadmin gets an explicit
     `AND tenant_id = $n` predicate on top of tenant_conn()'s own RLS scope
     (app layer and RLS both, never RLS alone); a platform-scoped caller gets

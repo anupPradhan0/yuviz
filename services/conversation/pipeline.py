@@ -121,7 +121,7 @@ _END_CALL_CONDITION_DEFAULT = (
 
 def _build_current_date_context() -> str:
     """Nothing anywhere told the LLM what 'today' actually is — confirmed
-    live 2026-07-27: a caller asked to book 'tomorrow' and qwen2.5:7b
+    live: a caller asked to book 'tomorrow' and qwen2.5:7b
     resolved it to a date 3 days in the past, because it had no grounding
     for the current date at all and had to guess. Computed fresh per call
     (not baked into agent config) so it's always accurate regardless of how
@@ -295,7 +295,7 @@ _FIRST_TURN_FILLER = "Mm-hmm, one moment."
 # regex, which only ran on the fully-assembled turn text and had no
 # defense against a live agent speaking the raw tag aloud).
 #
-# Fully wired end-to-end (live-verified 2026-07-16): the instruction below
+# Fully wired end-to-end (live-verified): the instruction below
 # is auto-appended to the system prompt whenever the agent's policies
 # configure a transfer (see __init__) — operators only set transfer_type/
 # transfer_destination (Escalation tab in the admin UI), never prompt text,
@@ -864,7 +864,7 @@ class PipelineConversationHandler:
         # to generation. Prefixing the retrieved context onto the user
         # turn is the standard, safe RAG prompting pattern and leaves
         # exactly one system message in the conversation, always.
-        # Knowledge retrieval is NO LONGER unconditional (2026-09-18). It
+        # Knowledge retrieval is NO LONGER unconditional. It
         # used to run exactly once per turn here and get prefixed onto the
         # user message; it is now the `search_knowledge` local tool the
         # model calls when it decides the question needs the business's
@@ -959,7 +959,7 @@ class PipelineConversationHandler:
             _confirmed_slot is not None
             and _claim_matches_confirmed_slot(assistant_text, _confirmed_slot)
         )
-        # Generalized 2026-09-18: was "book_appointment not in
+        # Generalized: was "book_appointment not in
         # tool_calls_made" when booking was a built-in tool. Booking is
         # now an ordinary custom API reached through execute_api, whose
         # name is per tenant and unknowable here, so the condition is

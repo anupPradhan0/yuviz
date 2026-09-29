@@ -16,8 +16,8 @@ const SILENCE_MS_TO_END = 700; // hangover before declaring end-of-utterance
 const NOISE_FLOOR_ADAPT_RATE = 0.02;
 const ONSET_MARGIN_DB = 9;
 // Without headphones, the agent's own TTS leaks from the speakers back into
-// the mic and can be misread as a barge-in — found live 2026-08-01 testing
-// a standalone version of this same logic: the agent's farewell kept
+// the mic and can be misread as a barge-in — found live testing a
+// standalone version of this same logic: the agent's farewell kept
 // "interrupting itself" the instant it started talking, so the call never
 // actually disconnected. A real barge-in from a person at the mic is much
 // louder/closer than reflected speaker output, so demand a stricter bar
@@ -80,7 +80,7 @@ export function TestAgentPanel({
   const onsetStreakRef = useRef<number>(0);
   const silenceMsAccumRef = useRef<number>(0);
   // A hardcoded -50dB starting guess for the ambient noise floor was found
-  // live 2026-08-02 to be badly wrong for a typical laptop mic/room (fan
+  // live to be badly wrong for a typical laptop mic/room (fan
   // noise, room tone) — every frame, including real silence, read as
   // "speech," so recording never released and a single utterance ran for
   // 57 seconds straight before anything happened. Calibrate against the
@@ -263,10 +263,10 @@ export function TestAgentPanel({
             setState((s) => (s === "talking" ? s : "ready"));
             break;
           case "end_call": {
-            // Found live 2026-08-02: this only updated the status label —
-            // the mic and WebSocket stayed open indefinitely after the
-            // server had already tried to hang up. Fixed by tearing down
-            // here — but found live 2026-08-04: the server sends end_call
+            // Found live: this only updated the status label — the mic
+            // and WebSocket stayed open indefinitely after the server had
+            // already tried to hang up. Fixed by tearing down here — but
+            // then found live that the server sends end_call
             // right after the final tts_chunk, not after it's actually
             // played, so an immediate teardown() cut the farewell audio
             // off mid-sentence (stopAgentPlayback() kills queued Web Audio

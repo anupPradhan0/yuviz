@@ -8,8 +8,7 @@ nothing else.
 `VobizSerializer` freezes today's exact Vobiz wire bytes
 (services/vobiz/bridge.py before the extraction). `CloudonixSerializer`
 speaks Twilio Media Streams' shape, which Cloudonix's wire protocol
-clones (see .sdlc/cloudonix-telephony-provider/02-design.md's Approach).
-Field lookups are case-tolerant, mirroring services/vobiz/app.py:139's
+clones. Field lookups are case-tolerant, mirroring the Vobiz provider's
 `form.get("CallUUID") or form.get("call_uuid")` habit — exact casing is
 unverified until the trial call (OQ2/OQ3).
 """

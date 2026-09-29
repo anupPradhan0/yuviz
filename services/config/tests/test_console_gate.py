@@ -86,7 +86,7 @@ class TestConsoleGateModule:
                 await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])
 
     async def test_get_current_user_allows_service_account_viewer_with_no_tenant(self, pool):
-        # scripts/create_service_account.py:33's exact shape — Conversation
+        # scripts/create_service_account.py's exact shape — Conversation
         # and Knowledge must not be locked out by this gate. is_service_account
         # isn't settable via create_user() (see users.py), so this inserts the
         # row directly, matching that script's own shape.

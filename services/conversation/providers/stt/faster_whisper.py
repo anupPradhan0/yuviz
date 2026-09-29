@@ -60,8 +60,8 @@ class FasterWhisperSTT:
                 compute_type=self._compute_type,
                 # Once cached locally, nothing about a revision check needs
                 # the network — but ctranslate2/huggingface_hub does one by
-                # default on every load regardless (confirmed live 2026-07-21:
-                # a real GET to huggingface.co on every single call that
+                # default on every load regardless (confirmed live: a real
+                # GET to huggingface.co on every single call that
                 # doesn't hit AIProviderManager's cache). That's both
                 # needless per-load latency and a hard dependency on internet
                 # reachability for a hot-path model load, which would hang or

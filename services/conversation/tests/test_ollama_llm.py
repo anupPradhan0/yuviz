@@ -1,8 +1,7 @@
 """
 OllamaLLM tests use httpx.MockTransport — no real network call, no cost.
 generate_with_tools() shapes mirror what was actually captured live against
-a running Ollama server on 2026-07-22 (see project history), not a guessed
-schema.
+a running Ollama server (see project history), not a guessed schema.
 """
 
 from __future__ import annotations

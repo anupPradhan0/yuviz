@@ -5,7 +5,7 @@ Streaming is Server-Sent Events (SSE): lines prefixed "data: ", terminated by
 a literal "data: [DONE]" line — different wire format from OllamaLLM's
 newline-delimited JSON, same token-yielding contract.
 
-Also backs Groq (2026-07-24): Groq's API is OpenAI-compatible by design —
+Also backs Groq: Groq's API is OpenAI-compatible by design —
 same request/response shape, same SSE framing — confirmed live against the
 real API before this was assumed. The only difference is base_url and
 which models exist; see ai_provider_manager.py's _make_groq_llm, which
@@ -42,7 +42,7 @@ _DEFAULT_BASE_URL = "https://api.openai.com"
 def _to_openai_message(m: dict[str, Any]) -> dict[str, Any]:
     """build_chat_messages() yields a generic {role, content, tool_calls?,
     tool_call_id?} shape — bridge it to OpenAI's actual wire format here.
-    Confirmed live 2026-07-24 (Groq, OpenAI-compatible): passing the
+    Confirmed live (Groq, OpenAI-compatible): passing the
     generic flat tool_calls dicts straight through 400s with 'tool_calls.0.
     type is missing' — OpenAI requires each entry nested under
     {"id", "type": "function", "function": {"name", "arguments"}}, and

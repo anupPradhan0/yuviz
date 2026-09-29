@@ -256,7 +256,7 @@ export default function CallsPage() {
                   {/* turn_count is a summary counter written once at clean
                       call-end — it stays 0 for a call reconciled after a
                       server restart even though its real per-turn data still
-                      exists in transcript_entries (found live 2026-08-02).
+                      exists in transcript_entries (found live).
                       The row is always clickable; the detail page's
                       getTranscript() fetch is the source of truth. */}
                   <td className="cell-num" style={{ textAlign: "right" }}>
