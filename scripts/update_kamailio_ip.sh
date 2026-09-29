@@ -17,9 +17,11 @@
 #      that's been running since before the network change stays bound to the
 #      old IP until it's restarted.
 #
-# Everything else in the stack (Gateway, Envoy, Postgres/Redis DSNs, admin-ui,
-# the FreeSWITCH Lua dialplan script) is already 127.0.0.1/localhost/0.0.0.0
-# and needs no changes.
+# Most of the rest of the stack (Envoy, Postgres/Redis DSNs, admin-ui, the
+# FreeSWITCH Lua dialplan script) is 127.0.0.1/localhost/0.0.0.0. Not
+# rewritten here: config/gateway.yaml esl.sip_proxy_host and SIP_PROXY_HOST
+# for the campaigns service — warm transfer and outbound need those set to
+# the same LAN IP.
 #
 # Idempotent: safe to run any time, even if the IP hasn't changed. Each of the
 # three steps independently detects "already correct" and skips.
@@ -40,8 +42,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TPL_DIR="$REPO_ROOT/scripts/kamailio"
 KAMAILIO_ETC="/usr/local/etc/kamailio"
 KAMAILIO_CFG="$KAMAILIO_ETC/kamailio.cfg"
-FS_CLI="/usr/local/freeswitch/bin/fs_cli"
-FS_BIN="/usr/local/freeswitch/bin/freeswitch"
+# Homebrew FreeSWITCH (scripts/freeswitch/setup_macos.sh) when present, else
+# the old source-install prefix. Both overridable via env.
+FS_PREFIX="$(brew --prefix freeswitch 2>/dev/null || echo /usr/local/freeswitch)"
+FS_CLI="${FS_CLI:-$FS_PREFIX/bin/fs_cli}"
+FS_BIN="${FS_BIN:-$FS_PREFIX/bin/freeswitch}"
+FS_HOME="${FS_HOME:-$HOME/.yuviz/freeswitch}"
 FS_ESL_PORT=8022
 FS_ESL_PASSWORD=ClueCon
 
@@ -67,12 +73,21 @@ fs_cli() {
   "$FS_CLI" -H 127.0.0.1 -P "$FS_ESL_PORT" -p "$FS_ESL_PASSWORD" -x "$1" 2>/dev/null
 }
 
-LAN_IP="$(detect_lan_ip)"
-if [[ -z "$LAN_IP" || "$LAN_IP" == "127.0.0.1" ]]; then
-  echo "ERROR: could not detect a real LAN IP (got '$LAN_IP') — is Wi-Fi/Ethernet connected?" >&2
-  exit 1
+# SIP_IP overrides detection. Use SIP_IP=127.0.0.1 when the softphone runs on
+# this Mac: it never changes, and detection picks the default-route
+# interface, which on a VPN (utun) can silently drop traffic to its own
+# address — the softphone then just times out.
+if [[ -n "${SIP_IP:-}" ]]; then
+  LAN_IP="$SIP_IP"
+  echo "Using SIP_IP: $LAN_IP"
+else
+  LAN_IP="$(detect_lan_ip)"
+  if [[ -z "$LAN_IP" || "$LAN_IP" == "127.0.0.1" ]]; then
+    echo "ERROR: could not detect a real LAN IP (got '$LAN_IP') — is Wi-Fi/Ethernet connected?" >&2
+    exit 1
+  fi
+  echo "Detected LAN IP: $LAN_IP"
 fi
-echo "Detected LAN IP: $LAN_IP"
 echo ""
 
 # ── Step 1: regenerate Kamailio config from templates ───────────────────────
@@ -199,7 +214,13 @@ else
     pgrep -x freeswitch > /dev/null 2>&1 || break
     sleep 0.5
   done
-  ( cd /usr/local/freeswitch && "$FS_BIN" -nc )
+  if [[ -d "$FS_HOME/conf" ]]; then
+    # Same flags as start_freeswitch in scripts/start_local.sh.
+    "$FS_BIN" -nc -nonat -conf "$FS_HOME/conf" -log "$FS_HOME/log" -db "$FS_HOME/db" \
+      -run "$FS_HOME/run" -scripts "$REPO_ROOT/scripts/freeswitch"
+  else
+    ( cd /usr/local/freeswitch && "$FS_BIN" -nc )
+  fi
   sleep 2
   new_ip="$(fs_cli 'eval ${local_ip_v4}' || true)"
   if [[ "$new_ip" == "$LAN_IP" ]]; then

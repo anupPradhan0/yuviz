@@ -1,0 +1,12 @@
+<!--
+  Public-context route for AI agent DIDs. Kamailio forwards 788 and
+  5000-5009 to the `external` profile (:5080), which lands in `public`.
+  Installed into dialplan/public/ by scripts/freeswitch/setup_macos.sh.
+-->
+<include>
+  <extension name="voice_ai">
+    <condition field="destination_number" expression="^(788|500\d)$">
+      <action application="lua" data="start_voice_ai.lua"/>
+    </condition>
+  </extension>
+</include>

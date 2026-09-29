@@ -21,7 +21,10 @@ start_mysql() {
 
 # ── Block 2: Kamailio — SIP proxy, must be up before FreeSWITCH registers ───
 start_kamailio() {
-  kamailio -f /usr/local/etc/kamailio/kamailio.cfg -D -E
+  # -Y: a user-owned runtime dir, so this runs without sudo (the default
+  # /var/run/kamailio is root-only).
+  mkdir -p "$HOME/.yuviz/kamailio/run"
+  kamailio -f /usr/local/etc/kamailio/kamailio.cfg -D -E -Y "$HOME/.yuviz/kamailio/run"
 }
 
 # ── Block 3: Data layer (Postgres/Redis; run once, may already be running) ──
@@ -177,8 +180,12 @@ start_gateway() {
 
 # ── Block 13: FreeSWITCH (registers with Kamailio from Block 2) ──────────────
 start_freeswitch() {
-  cd "$REPO"
-  ./freeswitch
+  # Homebrew FreeSWITCH, configured by scripts/freeswitch/setup_macos.sh.
+  # -scripts points at the repo so start_voice_ai.lua is never a stale copy.
+  local fs_home="${FS_HOME:-$HOME/.yuviz/freeswitch}"
+  "$(brew --prefix freeswitch)/bin/freeswitch" -nonat \
+    -conf "$fs_home/conf" -log "$fs_home/log" -db "$fs_home/db" -run "$fs_home/run" \
+    -scripts "$REPO/scripts/freeswitch"
 }
 
 # ── Block 14: Admin UI (Next.js, port 3000) ───────────────────────────────────

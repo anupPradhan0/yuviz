@@ -3,6 +3,15 @@
 The browser path (`./deployment/sh/dev.sh`) needs none of this. This doc is
 only for making a real phone ring.
 
+**Try the native setup first:** [telephony-local-setup.md](telephony-local-setup.md)
+runs everything on macOS or Linux with no VM. This doc is the fallback.
+
+Whichever route you take, the Gateway only plays the agent's voice if
+`mod_audio_fork` carries `scripts/freeswitch/mod_audio_fork-playback.patch`
+(upstream discards the audio), and the Lua script must play
+`silence_stream://-1` rather than sleep. Use the repo's
+`scripts/freeswitch/start_voice_ai.lua` instead of the copy in section 7.
+
 ## Why a VM
 
 Both daemons are source/apt installs whose config has never been in version

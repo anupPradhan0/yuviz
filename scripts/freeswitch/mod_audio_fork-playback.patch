@@ -1,0 +1,215 @@
+diff --git a/modules/mod_audio_fork/audio_pipe.cpp b/modules/mod_audio_fork/audio_pipe.cpp
+index 329c327..b62bafb 100644
+--- a/modules/mod_audio_fork/audio_pipe.cpp
++++ b/modules/mod_audio_fork/audio_pipe.cpp
+@@ -139,7 +139,11 @@ int AudioPipe::lws_callback(struct lws *wsi,
+         }
+ 
+         if (lws_frame_is_binary(wsi)) {
+-          lwsl_err("AudioPipe::lws_service_thread LWS_CALLBACK_CLIENT_RECEIVE received binary frame, discarding.\n");
++          // Fragments are just more bytes of the same PCM stream, so each
++          // one is handed over as it arrives — no reassembly needed.
++          if (binaryHandler && len > 0) {
++            binaryHandler(ap->m_uuid.c_str(), ap->m_bugname.c_str(), (const uint8_t*) in, len);
++          }
+           return 0;
+         }
+ 
+@@ -280,6 +284,7 @@ std::list<AudioPipe*> AudioPipe::pendingConnects;
+ std::list<AudioPipe*> AudioPipe::pendingDisconnects;
+ std::list<AudioPipe*> AudioPipe::pendingWrites;
+ AudioPipe::log_emit_function AudioPipe::logger;
++AudioPipe::binaryHandler_t AudioPipe::binaryHandler = nullptr;
+ std::mutex AudioPipe::mapMutex;
+ std::unordered_map<std::thread::id, bool> AudioPipe::stopFlags;
+ std::queue<std::thread::id> AudioPipe::threadIds;
+diff --git a/modules/mod_audio_fork/audio_pipe.hpp b/modules/mod_audio_fork/audio_pipe.hpp
+index 52f1dd6..2fe02c8 100644
+--- a/modules/mod_audio_fork/audio_pipe.hpp
++++ b/modules/mod_audio_fork/audio_pipe.hpp
+@@ -29,6 +29,10 @@ public:
+   };
+   typedef void (*log_emit_function)(int level, const char *line);
+   typedef void (*notifyHandler_t)(const char *sessionId, const char* bugname, NotifyEvent_t event, const char* message);
++  // Binary frames from the far end are raw L16 mono audio at the fork's
++  // sampling rate, to be played into the call (bidirectional audio).
++  typedef void (*binaryHandler_t)(const char *sessionId, const char* bugname, const uint8_t* data, size_t len);
++  static binaryHandler_t binaryHandler;
+ 
+   struct lws_per_vhost_data {
+     struct lws_context *context;
+diff --git a/modules/mod_audio_fork/lws_glue.cpp b/modules/mod_audio_fork/lws_glue.cpp
+index d0da9f5..de3827d 100644
+--- a/modules/mod_audio_fork/lws_glue.cpp
++++ b/modules/mod_audio_fork/lws_glue.cpp
+@@ -204,6 +204,27 @@ namespace {
+       switch_core_session_rwunlock(session);
+     }
+   }
++  static void binaryCallback(const char* sessionId, const char* bugname, const uint8_t* data, size_t len) {
++    switch_core_session_t* session = switch_core_session_locate(sessionId);
++    if (!session) return;
++    switch_channel_t *channel = switch_core_session_get_channel(session);
++    switch_media_bug_t *bug = (switch_media_bug_t*) switch_channel_get_private(channel, bugname);
++    if (bug) {
++      private_t* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
++      if (tech_pvt && tech_pvt->mutex && tech_pvt->playback_buffer) {
++        switch_mutex_lock(tech_pvt->mutex);
++        if (switch_buffer_freespace(tech_pvt->playback_buffer) >= len) {
++          switch_buffer_write(tech_pvt->playback_buffer, data, len);
++        }
++        else {
++          switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "(%u) playback buffer full, dropping %zu bytes\n", tech_pvt->id, len);
++        }
++        switch_mutex_unlock(tech_pvt->mutex);
++      }
++    }
++    switch_core_session_rwunlock(session);
++  }
++
+   switch_status_t fork_data_init(private_t *tech_pvt, switch_core_session_t *session, char * host, 
+     unsigned int port, char* path, int sslFlags, int sampling, int desiredSampling, int channels, 
+     char *bugname, char* metadata, responseHandler_t responseHandler) {
+@@ -249,6 +270,9 @@ namespace {
+     tech_pvt->pAudioPipe = static_cast<void *>(ap);
+ 
+     switch_mutex_init(&tech_pvt->mutex, SWITCH_MUTEX_NESTED, switch_core_session_get_pool(session));
++    // 10s of audio; the far end paces playout in real time, so this only
++    // ever holds a small lead.
++    switch_buffer_create(switch_core_session_get_pool(session), &tech_pvt->playback_buffer, desiredSampling * 2 * 10);
+ 
+     if (desiredSampling != sampling) {
+       switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%u) resampling from %u to %u\n", tech_pvt->id, sampling, desiredSampling);
+@@ -273,6 +297,11 @@ namespace {
+       speex_resampler_destroy(tech_pvt->resampler);
+       tech_pvt->resampler = nullptr;
+     }
++    if (tech_pvt->playback_resampler) {
++      speex_resampler_destroy(tech_pvt->playback_resampler);
++      tech_pvt->playback_resampler = nullptr;
++    }
++    tech_pvt->playback_buffer = nullptr;  // session-pool memory, freed with the session
+     if (tech_pvt->mutex) {
+       switch_mutex_destroy(tech_pvt->mutex);
+       tech_pvt->mutex = nullptr;
+@@ -375,6 +404,7 @@ extern "C" {
+  
+     int logs = LLL_ERR | LLL_WARN | LLL_NOTICE ;
+      //LLL_INFO | LLL_PARSER | LLL_HEADER | LLL_EXT | LLL_CLIENT  | LLL_LATENCY | LLL_DEBUG ;
++    AudioPipe::binaryHandler = binaryCallback;
+     AudioPipe::initialize(mySubProtocolName, nServiceThreads, logs, lws_logger);
+    return SWITCH_STATUS_SUCCESS;
+   }
+@@ -616,5 +646,61 @@ extern "C" {
+     return SWITCH_TRUE;
+   }
+ 
+-}
+ 
++  switch_bool_t fork_playback_frame(switch_core_session_t *session, switch_media_bug_t *bug) {
++    private_t* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
++    if (!tech_pvt || !tech_pvt->mutex || !tech_pvt->playback_buffer) return SWITCH_TRUE;
++
++    switch_frame_t *frame = switch_core_media_bug_get_write_replace_frame(bug);
++    if (!frame || !frame->data || frame->samples == 0) return SWITCH_TRUE;
++
++    switch_codec_implementation_t write_impl;
++    switch_core_session_get_write_impl(session, &write_impl);
++    const uint32_t out_rate = write_impl.actual_samples_per_second;
++    const uint32_t in_rate = tech_pvt->sampling;
++    const uint32_t out_samples = frame->samples;
++    int16_t *out = (int16_t *) frame->data;
++
++    switch_mutex_lock(tech_pvt->mutex);
++    const size_t avail = switch_buffer_inuse(tech_pvt->playback_buffer) & ~((size_t) 1);
++    if (avail == 0) {
++      // Nothing queued: leave the channel's own audio (silence while parked).
++      switch_mutex_unlock(tech_pvt->mutex);
++      return SWITCH_TRUE;
++    }
++
++    if (in_rate == out_rate) {
++      const size_t want = out_samples * sizeof(int16_t);
++      const size_t n = avail < want ? avail : want;
++      switch_buffer_read(tech_pvt->playback_buffer, out, n);
++      if (n < want) memset((uint8_t *) out + n, 0, want - n);
++    }
++    else {
++      if (!tech_pvt->playback_resampler || tech_pvt->playback_rate != out_rate) {
++        int err = 0;
++        if (tech_pvt->playback_resampler) speex_resampler_destroy(tech_pvt->playback_resampler);
++        tech_pvt->playback_resampler = speex_resampler_init(1, in_rate, out_rate, SWITCH_RESAMPLE_QUALITY, &err);
++        tech_pvt->playback_rate = out_rate;
++        if (0 != err) {
++          tech_pvt->playback_resampler = nullptr;
++          switch_mutex_unlock(tech_pvt->mutex);
++          return SWITCH_TRUE;
++        }
++      }
++      int16_t in[SWITCH_RECOMMENDED_BUFFER_SIZE / sizeof(int16_t)];
++      spx_uint32_t in_len = (spx_uint32_t) (((uint64_t) out_samples * in_rate) / out_rate);
++      if (in_len > sizeof(in) / sizeof(int16_t)) in_len = sizeof(in) / sizeof(int16_t);
++      const size_t want = in_len * sizeof(int16_t);
++      const size_t n = avail < want ? avail : want;
++      switch_buffer_read(tech_pvt->playback_buffer, in, n);
++      if (n < want) memset((uint8_t *) in + n, 0, want - n);
++      spx_uint32_t out_len = out_samples;
++      speex_resampler_process_int(tech_pvt->playback_resampler, 0, in, &in_len, out, &out_len);
++      if (out_len < out_samples) memset(out + out_len, 0, (out_samples - out_len) * sizeof(int16_t));
++    }
++    switch_mutex_unlock(tech_pvt->mutex);
++
++    switch_core_media_bug_set_write_replace_frame(bug, frame);
++    return SWITCH_TRUE;
++  }
++}
+diff --git a/modules/mod_audio_fork/lws_glue.h b/modules/mod_audio_fork/lws_glue.h
+index b95897a..2227797 100644
+--- a/modules/mod_audio_fork/lws_glue.h
++++ b/modules/mod_audio_fork/lws_glue.h
+@@ -15,6 +15,7 @@ switch_status_t fork_session_pauseresume(switch_core_session_t *session, char *b
+ switch_status_t fork_session_graceful_shutdown(switch_core_session_t *session, char *bugname);
+ switch_status_t fork_session_send_text(switch_core_session_t *session, char *bugname, char* text);
+ switch_bool_t fork_frame(switch_core_session_t *session, switch_media_bug_t *bug);
++switch_bool_t fork_playback_frame(switch_core_session_t *session, switch_media_bug_t *bug);
+ switch_status_t fork_service_threads();
+ switch_status_t fork_session_connect(void **ppUserData);
+ #endif
+diff --git a/modules/mod_audio_fork/mod_audio_fork.c b/modules/mod_audio_fork/mod_audio_fork.c
+index 326ec16..5627fe5 100644
+--- a/modules/mod_audio_fork/mod_audio_fork.c
++++ b/modules/mod_audio_fork/mod_audio_fork.c
+@@ -44,6 +44,10 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data,
+ 		return fork_frame(session, bug);
+ 		break;
+ 
++	case SWITCH_ABC_TYPE_WRITE_REPLACE:
++		return fork_playback_frame(session, bug);
++		break;
++
+ 	case SWITCH_ABC_TYPE_WRITE:
+ 	default:
+ 		break;
+@@ -231,7 +235,7 @@ SWITCH_STANDARD_API(fork_function)
+         unsigned int port;
+         int sslFlags;
+         int sampling = 8000;
+-      	switch_media_bug_flag_t flags = SMBF_READ_STREAM ;
++      	switch_media_bug_flag_t flags = SMBF_READ_STREAM | SMBF_WRITE_REPLACE ;
+         char *metadata = NULL;
+         if( argc > 6) {
+           bugname = argv[5];
+diff --git a/modules/mod_audio_fork/mod_audio_fork.h b/modules/mod_audio_fork/mod_audio_fork.h
+index 6e356ce..171cbbd 100644
+--- a/modules/mod_audio_fork/mod_audio_fork.h
++++ b/modules/mod_audio_fork/mod_audio_fork.h
+@@ -52,6 +52,9 @@ struct private_data {
+   int audio_paused:1;
+   int graceful_shutdown:1;
+   char initialMetadata[8192];
++  switch_buffer_t *playback_buffer;         // L16 at `sampling`, written by the lws thread
++  SpeexResamplerState *playback_resampler;  // sampling -> channel write rate, when they differ
++  uint32_t playback_rate;                   // output rate playback_resampler was built for
+ };
+ 
+ typedef struct private_data private_t;
