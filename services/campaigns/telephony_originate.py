@@ -1,11 +1,9 @@
 """Places an outbound call via services.telephony's POST /{provider}/call
 (HTTP, not ESL) — replaces vobiz_originate.py now that Vobiz/Cloudonix are
 served by the unified telephony service. Every request carries
-`Authorization: Bearer <service-account JWT>`, obtained with the same
-login/401-retry-once helper pattern the now-retired services/vobiz/app.py:62-88
-and services/cloudonix/accounts.py:60-90 used to share; a 401 is retried once
-with a fresh token and then raises (not a transient condition worth the
-backoff loop)."""
+`Authorization: Bearer <service-account JWT>`; a 401 is retried once with a
+fresh token and then raises (not a transient condition worth a backoff
+loop)."""
 
 from __future__ import annotations
 

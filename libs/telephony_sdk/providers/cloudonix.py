@@ -4,8 +4,7 @@ Cloudonix integration (see .sdlc/cloudonix-telephony-provider/02-design.md).
 Outbound call control is out of scope: this provider only exists so
 Cloudonix's per-account credentials fit the same `telephony_configs`
 convention the Vobiz provider adapter uses (libs/telephony_sdk/providers/
-vobiz.py; originally services/vobiz/app.py:90-114 before that service was
-retired), which gives the Admin UI a credential form for free.
+vobiz.py), which gives the Admin UI a credential form for free.
 
 No `app_id` field: R2-3 found that a tenant-writable free-form account
 identifier could shadow another tenant's. The account's identity is its
