@@ -16,11 +16,7 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
    roles — but `get_current_user` 401s on a missing header before any exemption logic runs, so it
    would have broken `/auth/login`, `/auth/bootstrap`, the public invite-accept routes and
    `/health` (which docker-compose healthchecks curl). The obvious field repair — make auth
-   optional in the guard — creates an unauthenticated passthrough on 28 routes. Same class: a
-   GitHub Actions “read-only default” for `GITHUB_TOKEN` was treated as blocking `packages: write`
-   — workflows can still elevate via a job `permissions:` key; publish must use a secret/Environment
-   PR workflows never receive. And `workflow_run.head_branch == 'main'` is a name, not provenance:
-   a pushed tag named `main` (or `origin/main`, shadowing the short ref) satisfied it.*
+   optional in the guard — creates an unauthenticated passthrough on 28 routes.*
 
 2. [architect][critic][security] Any response that differs across a tenant boundary is an
    information leak. This includes status codes (403 vs 404), error text, and latency — not just
@@ -195,3 +191,9 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
 28. [tester][qa] The suite and the reviewers test what someone thought to test. Running the merged
     app against edge cases found 17 defects after three review rounds, a green security audit and 330
     passing tests — including a high. Budget QA as its own stage, not as confirmation.
+
+29. [architect][implementer][critic][security] PR-run workflow YAML can grant itself any `GITHUB_TOKEN`
+    scope, and ref names are not provenance. Fence publish with credentials PR runs never receive.
+    *Earned: a read-only token default was assumed to block `packages: write`, and publish trusted
+    `workflow_run.head_branch == 'main'`, which a pushed tag named `main` (or `origin/main`) satisfied;
+    provenance now checks first-parent history of fully-qualified `refs/remotes/origin/main`.*

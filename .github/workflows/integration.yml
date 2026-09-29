@@ -57,7 +57,9 @@ jobs:
 
       - name: Install CPU torch then requirements
         run: |
-          pip install --no-cache-dir "torch==2.12.1" --index-url https://download.pytorch.org/whl/cpu
+          torch_version="$(sed -n 's/^torch==//p' requirements.txt)"
+          test -n "$torch_version"
+          pip install --no-cache-dir "torch==${torch_version}" --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
 
       - name: Provision Silero VAD model

@@ -74,7 +74,7 @@ to `main`.
 | Job | What |
 |-----|------|
 | `python-unit` | `pytest -m "not integration"` with **no** Postgres/Redis; `POSTGRES_DSN`/`REDIS_URL` point at closed port 1 (tripwire) |
-| `gateway` | `cmake` Release build + `ctest --test-dir build --output-on-failure` |
+| `gateway` | `cmake` Release build + `ctest --test-dir build --output-on-failure`; provisions `build/models/silero_vad.onnx` from the pinned faster-whisper wheel and **fails if any test is skipped** (the Silero VAD tests `GTEST_SKIP` without the model) |
 | `admin-ui` | `npm ci` / `npm run lint` / `npm run build` in `admin-ui/` (npm + `package-lock.json`, not pnpm) |
 | `docker-build` | Build `Dockerfile.python` and `Dockerfile.adminui` as `yuviz-*:ci` — **no push** |
 | `actionlint` | Lints every workflow (pinned, checksum-verified actionlint release; shellcheck at warning level) |
@@ -87,6 +87,10 @@ cancelled, because publish keys off each one.
 Third-party actions are pinned to commit SHAs (tag in a trailing comment), and
 the onnxruntime tarball is checked against a SHA-256. When bumping a version,
 update the SHA too.
+
+The torch and faster-whisper versions come from `requirements.txt` (the CPU
+torch wheel is installed first, and passed to `Dockerfile.python` as
+`TORCH_VERSION`), so bumping them there is enough.
 
 Workflow: `.github/workflows/integration.yml` (`name: Integration`).
 
@@ -232,8 +236,9 @@ package: do not grant this repository’s Actions / `GITHUB_TOKEN` write access.
 Only the bot PAT should write.
 
 Publish tags: `$GHCR_IMAGE:<commit-sha>` always, and `$GHCR_IMAGE:main`
-(convenience pointer only) only when that SHA is still the tip of `main`, so
-re-running an older CI run cannot move `:main` backwards. Missing Environment / secrets / `GHCR_IMAGE` or a
+(convenience pointer only) only when that SHA is still the tip of `main`,
+re-fetched right before the push. A re-run of an older CI run, or an older
+publish that finishes after a newer one, cannot move `:main` backwards. Missing Environment / secrets / `GHCR_IMAGE` or a
 failed push fails the job loudly (no `continue-on-error`).
 
 ## Consume a published image (manual)

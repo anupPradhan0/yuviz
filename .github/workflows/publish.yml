@@ -60,9 +60,13 @@ jobs:
         run: |
           : "${GHCR_IMAGE:?GHCR_IMAGE must be set}"
           : "${SHA:?SHA must be set}"
-          docker build -f deployment/docker/Dockerfile.python -t "${GHCR_IMAGE}:${SHA}" .
+          torch_version="$(sed -n 's/^torch==//p' requirements.txt)"
+          test -n "$torch_version"
+          docker build -f deployment/docker/Dockerfile.python --build-arg TORCH_VERSION="$torch_version" -t "${GHCR_IMAGE}:${SHA}" .
           docker push "${GHCR_IMAGE}:${SHA}"
-          # A re-run of an older CI run must not move :main backwards.
+          # Refetch: the checkout-time ref is stale after a long build, and a re-run or
+          # slower older publish must not move :main backwards.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           if [ "$(git rev-parse refs/remotes/origin/main)" = "$SHA" ]; then
             docker tag "${GHCR_IMAGE}:${SHA}" "${GHCR_IMAGE}:main"
             docker push "${GHCR_IMAGE}:main"
