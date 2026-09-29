@@ -1,5 +1,6 @@
 """Golden frames for both serializers — freezes today's exact Vobiz wire
-bytes across the extraction (see bridge.py:377,463-471 before the move)."""
+bytes across the extraction (see bridge.py's serializer methods before the
+move)."""
 
 from __future__ import annotations
 

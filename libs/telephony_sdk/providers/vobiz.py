@@ -1,12 +1,11 @@
 """
 VobizTelephonyProvider — canonical home for Vobiz REST + webhook-signature
 logic, moved here from services/vobiz/client.py + signature.py (which
-originally held it before this SDK existed). Confirmed against Dograh's
-real, working implementation (api/services/telephony/providers/vobiz/
-provider.py) and verified live 2026-07-30/31 against the actual Vobiz API
-(X-Auth-ID/X-Auth-Token headers, JSON body, phone numbers E.164 WITHOUT a
-leading "+", call_uuid as the call identifier) and real Vobiz-signed
-webhooks (V2/V3 HMAC-SHA256 signature scheme).
+originally held it before this SDK existed). Verified live against the
+actual Vobiz API (X-Auth-ID/X-Auth-Token headers, JSON body,
+phone numbers E.164 WITHOUT a leading "+", call_uuid as the call
+identifier) and real Vobiz-signed webhooks (V2/V3 HMAC-SHA256 signature
+scheme).
 """
 
 from __future__ import annotations
@@ -65,8 +64,7 @@ class VobizTelephonyProvider(ITelephonyProvider, ISmsProvider):
         answer_url: str, hangup_url: str | None = None, ring_url: str | None = None,
     ) -> str:
         """Numbers must be E.164 WITHOUT a leading "+" — Vobiz's own
-        convention, confirmed in Dograh's implementation
-        (`to_number.lstrip("+")`)."""
+        convention (`to_number.lstrip("+")`)."""
         body: dict[str, Any] = {
             "from": from_number.lstrip("+"),
             "to": to_number.lstrip("+"),

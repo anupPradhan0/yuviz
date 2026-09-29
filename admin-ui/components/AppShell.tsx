@@ -25,8 +25,8 @@ function tenantInitial(name: string): string {
 // single Settings page (its own internal "Your Account" secondary nav —
 // see app/settings/page.tsx). Speech Services/Language Model/Embeddings
 // were promoted OUT of Settings into their own top-level "AI & Voice" page
-// (2026-07-30) — same standing as Agents/Phone Numbers, not buried in a
-// secondary settings nav.
+// — same standing as Agents/Phone Numbers, not buried in a secondary
+// settings nav.
 const ICONS: Record<string, React.ReactNode> = {
   dashboard: (
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">

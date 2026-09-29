@@ -60,10 +60,10 @@ vendor onboarded the same way):
 1. **Build `services/telephony/` and repoint the Vobiz webhook.** Vobiz's
    DID webhook URLs move to `{TELEPHONY_PUBLIC_BASE_URL}/vobiz/voice/{account_ref}`
    (`account_ref` is that tenant's `telephony_configs.id`). Verify with a
-   real inbound call, then run `scripts/migrate_telephony_providers.py`
-   (see its own docstring) to seal any pre-existing plaintext Vobiz
-   `auth_token` — **only after** the webhook is fully repointed, never
-   before (a row sealed while the old per-vendor process was still
+   real inbound call, then run a one-off relabel + credential-sealing pass
+   to seal any pre-existing plaintext Vobiz `auth_token` — **only after**
+   the webhook is fully repointed, never before (a row sealed while the
+   old per-vendor process was still
    reading it live would have broken that still-running process).
 2. **Repoint the Cloudonix Voice Application and generalize Campaigns.**
    Update each Voice Application's webhook URL to

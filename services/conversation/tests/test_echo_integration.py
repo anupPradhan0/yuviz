@@ -489,8 +489,8 @@ async def test_transfer_completed_sends_conversation_finalized_over_the_wire():
 
 
 # ---------------------------------------------------------------------------
-# TransferRequest over the wire (the gap live-testing found on 2026-07-16:
-# the servicer detected/logged/published transfers but never sent the gRPC
+# TransferRequest over the wire (the gap live-testing found: the servicer
+# detected/logged/published transfers but never sent the gRPC
 # message, so the gateway never executed uuid_transfer)
 # ---------------------------------------------------------------------------
 

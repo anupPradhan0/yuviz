@@ -10,7 +10,7 @@ because Config Service and Conversation Service are deliberately separate
 deployables with no shared import today (see architecture_decisions:
 Gateway/ConvSvc/Config Service responsibility boundaries).
 
-ONE ENTRY, and that is the design (2026-09-18). The agent has exactly two
+ONE ENTRY, and that is the design. The agent has exactly two
 tools — search_knowledge and execute_api — and only execute_api is
 configured here:
 

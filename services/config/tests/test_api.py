@@ -1165,7 +1165,7 @@ class TestProviderConfigTenantScoping:
 
 
 class TestToolProviderConfigEndpoints:
-    """Regression coverage for the blank api_key_ref gap (2026-07-23): a
+    """Regression coverage for the blank api_key_ref gap: a
     tool_provider_config with no key silently passed creation and only
     failed at call time (provider_manager.py's _make_cal_com), which broke
     a live call. Now caught here instead."""
@@ -1311,7 +1311,7 @@ class TestAgentToolPolicyMaxChainDepth:
 
 
 class TestCarrierEndpoints:
-    """DID Management platform (2026-07-23): carriers previously had no
+    """DID Management platform: carriers previously had no
     CRUD/router at all, only an existence-check helper used by
     phone_numbers' own validation."""
 

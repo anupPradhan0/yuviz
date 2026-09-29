@@ -7,7 +7,7 @@ simplification given campaign call volume on a single dev machine is
 nowhere near what would justify a separate scaled-out worker process;
 revisit if real usage needs it.
 
-*** UNVERIFIED END TO END, 2026-07-28 *** — see originate.py's module
+*** UNVERIFIED END TO END *** — see originate.py's module
 docstring. This module's own logic (pacing, concurrency, claiming
 contacts, retry-on-failure) is fully real and testable; what's unverified
 is specifically whether the ESL commands it issues actually produce a
@@ -243,8 +243,8 @@ class CampaignWorker:
             return  # a BACKGROUND_JOB event for something this worker didn't originate — ignore
         campaign_id, contact_id, max_attempts, attempt_count = entry
         status = "completed" if succeeded else ("no_answer" if "NO_ANSWER" in detail else "failed")
-        # ESL's `detail` is "+OK <channel-uuid>" on success; Vobiz passes
-        # call_session_id explicitly instead (see services/vobiz/app.py).
+        # ESL's `detail` is "+OK <channel-uuid>" on success; REST-based
+        # telephony providers pass call_session_id explicitly instead.
         if call_session_id is None and succeeded:
             call_session_id = detail.removeprefix("+OK").strip() or None
         elif not succeeded:

@@ -1,8 +1,8 @@
 """
 TwilioProvider — IDidProvider backed by Twilio's REST API.
 
-Added 2026-07-26. search_available_numbers() is LIVE-VERIFIED (2026-07-26)
-against a real Twilio account (Live credentials, not Test credentials —
+search_available_numbers() is LIVE-VERIFIED against a real Twilio account
+(Live credentials, not Test credentials —
 Test credentials 403 on this endpoint with code 20008, "Resource not
 accessible with Test Account Credentials", a real gotcha hit while
 verifying this) — request shape, response envelope key

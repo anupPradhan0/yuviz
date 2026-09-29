@@ -4,13 +4,12 @@
 //
 // React Flow's built-in `label` draws SVG text with an opaque white box
 // behind it, which on a dark canvas reads as a sticker stuck over the wire.
-// Dograh renders the label as HTML through EdgeLabelRenderer instead
-// (ui/src/components/flow/edges/CustomEdge.tsx) — a pill that can be
-// coloured by state, which is what the label needs to do here: an amber
-// "unfinished" pill is the editor's loudest warning.
+// This renders the label as HTML through EdgeLabelRenderer instead — a
+// pill that can be coloured by state, which is what the label needs to do
+// here: an amber "unfinished" pill is the editor's loudest warning.
 //
-// Smooth-step rather than bezier for the same reason Dograh uses it —
-// elbows read as a state machine, curves read as a mind map.
+// Smooth-step rather than bezier — elbows read as a state machine, curves
+// read as a mind map.
 
 import { BaseEdge, EdgeLabelRenderer, getSmoothStepPath, type EdgeProps } from "@xyflow/react";
 import type { WorkflowEdgeData } from "@/lib/workflowApi";

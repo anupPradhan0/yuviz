@@ -7,7 +7,7 @@ Whether a given agent may actually USE a registered tool is
 ToolPolicyResolver's job (policy_resolver.py), not this class's — see the
 Tool Execution Framework design's review point 7 for why that split exists.
 
-THE AGENT HAS EXACTLY TWO TOOLS (2026-09-18). Both are defined in this
+THE AGENT HAS EXACTLY TWO TOOLS. Both are defined in this
 file, and the LLM's whole job is to pick between them from what the caller
 just said:
 

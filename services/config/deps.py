@@ -157,7 +157,7 @@ async def assert_tenant_access(tenant: "str | uuid.UUID | None", current_user: C
     """The one predicate, shared by Tier 2 (a path segment),
     Tier 3 (a fetched row's tenant_id) and Tier 4 (a request body field), so
     the three tiers cannot drift apart. Lifted from
-    toolexec/routers/custom_apis.py:38 (`_require_tenant_access`) for the
+    toolexec/routers/custom_apis.py's `_require_tenant_access` for the
     UUID case — same predicate, same 403, same detail string:
 
         is_platform_scoped(current_user) -> allowed (tenant_id IS NULL only)
@@ -335,7 +335,7 @@ async def fresh_authority(
     CurrentUser built from the ROW's current role/tenant_id rather than the
     token's claims — memoized per (user.id, scope_key) for ttl_s in an
     in-process dict on app_state (same placement convention as
-    app.state.invite_throttle, services/config/app.py:250).
+    app.state.invite_throttle in services/config/app.py).
 
     Unlike assert_current_authority(), this does NOT reject a tenant_id that
     no longer matches the token's claim — _resolve_scope's branch selection

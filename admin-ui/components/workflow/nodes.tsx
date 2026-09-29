@@ -4,11 +4,10 @@
 // renderer (docs/workflow.md §2.2) — a registry to avoid writing four small
 // components would be more framework than form.
 //
-// Card anatomy follows the Dograh editor (ui/src/components/flow/nodes/
-// common/NodeContent.tsx): a coloured type pill straddling the top-left
-// corner, a titled header rule, then a labelled prompt block. The type is
-// then readable at a glance from across the canvas instead of being a
-// 9px uppercase word in a corner.
+// Card anatomy: a coloured type pill straddling the top-left corner, a
+// titled header rule, then a labelled prompt block. The type is then
+// readable at a glance from across the canvas instead of being a 9px
+// uppercase word in a corner.
 //
 // Every badge here answers "what does this stage do" without clicking into
 // it: how many tools it can reach, whether it has a knowledge base, whether

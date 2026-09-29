@@ -156,7 +156,7 @@ async def test_resolve_tenant_ref_reexamines_namespace_at_resolution(monkeypatch
     than raise/fail-loud. This is the case finding 1 identified as missing:
     every other rejection test in this file calls validate_tenant_ref
     directly, so deleting the `validate_tenant_ref(tenant_id, ref)` line
-    inside resolve_tenant_ref (auth_schemes.py:96) left all prior tests
+    inside resolve_tenant_ref (auth_schemes.py) left all prior tests
     green. Here, that deletion makes the sentinel come back as the
     'resolved' value instead of the call raising — so this test fails
     under that mutation.

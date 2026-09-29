@@ -110,7 +110,7 @@ async def test_originate_call_no_server_listening_raises(monkeypatch):
 
 
 def test_parse_job_event_success():
-    # Real shape confirmed live against FreeSWITCH 2026-07-28 (see
+    # Real shape confirmed live against FreeSWITCH (see
     # originate.py's EslJobEventListener docstring): the outer envelope
     # (first arg here) never carries Job-UUID — it lives inside the body,
     # itself a header block + blank line + the bgapi command's reply text.

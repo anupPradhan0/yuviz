@@ -1,7 +1,7 @@
 """
 ToolRegistry tests.
 
-The agent has exactly two tools (2026-09-18): search_knowledge and
+The agent has exactly two tools: search_knowledge and
 execute_api. Only execute_api is DB-gated and therefore in the registry's
 _DEFAULT_TOOLS; SEARCH_KNOWLEDGE is defined in the same module but
 supplied as an in-process local tool by pipeline.py, so it is

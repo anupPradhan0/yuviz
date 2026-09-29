@@ -45,7 +45,7 @@ _FRUSTRATION_PHRASES = [
     r"sick of this",
     r"fed up",
     r"stop repeating",
-    # Added 2026-07-18 from live-call misses (a caller expressed clear
+    # Added from live-call misses (a caller expressed clear
     # dissatisfaction that v1 didn't catch — see project memory):
     r"not satisfied",
     r"not helpful",

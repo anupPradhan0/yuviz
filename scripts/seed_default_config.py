@@ -59,7 +59,7 @@ PROVIDER_DEFAULTS = [
      "model": STT_MODEL, "extra": {"device": "cpu", "compute_type": "int8"}},
     {"role": "llm", "engine": "ollama", "name": f"Ollama {LLM_MODEL} (default)",
      "model": LLM_MODEL, "extra": {"temperature": 0.7, "base_url": OLLAMA_BASE_URL}},
-    # Kokoro, not macOS's `say` — found live 2026-08-04 while auditing
+    # Kokoro, not macOS's `say` — found live while auditing
     # fork-reproducibility: `engine="macos"` shells out to a macOS-only
     # binary and silently can't work at all on Linux (or even reliably as
     # a "default" on a fresh Mac). Kokoro is the local, cross-platform

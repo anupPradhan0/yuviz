@@ -1,8 +1,6 @@
 """
 Campaigns router — CRUD + contact CSV upload + start/pause/resume +
-progress. API shape informed by Dograh's real, published campaign API
-(Create/Get/List/Update Campaign, Upload Contacts CSV, Start/Pause/Resume,
-Get Progress) rather than invented from scratch — see project history.
+progress.
 """
 
 from __future__ import annotations

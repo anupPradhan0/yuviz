@@ -23,7 +23,7 @@ SELECT id, email, role, tenant_id
 -- Step 2 — for each row above, the operator picks exactly one disposition:
 --
 --   (a) Genuine platform actor whose tenant_id is a leftover artifact of how
---       the account was created (provider_configs.py:81 documents this as an
+--       the account was created (provider_configs.py documents this as an
 --       existing, known shape). Fix it:
 --
 --         UPDATE users SET tenant_id = NULL WHERE id = '<row id>';

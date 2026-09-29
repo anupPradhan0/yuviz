@@ -667,7 +667,7 @@ function Panel({
               </Controls>
 
               {/* Adding a node belongs on the canvas you're adding it to,
-                  not in a page toolbar — same placement as Dograh's. */}
+                  not in a page toolbar. */}
               <FlowPanel position="top-right" className="wf-canvas-panel">
                 <div className="wf-menu-wrap">
                   <button

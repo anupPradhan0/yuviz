@@ -889,7 +889,7 @@ export const listAllTodaysActivity = async (tenants: Tenant[]): Promise<TodaysAc
 // ToolPolicyResolver, not read through this API — this is cold-path admin
 // CRUD only.
 //
-// Since 2026-09-18 there is exactly one configurable tool, execute_api on
+// There is exactly one configurable tool, execute_api on
 // engine "toolexec" — the individual integrations behind it are custom
 // APIs (see the APIs tab), not tools. The agent's other tool,
 // search_knowledge, is enabled by linking a knowledge base to the agent

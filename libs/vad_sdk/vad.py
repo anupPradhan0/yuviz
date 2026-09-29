@@ -3,7 +3,7 @@ Energy-based VAD — a faithful Python port of the Gateway's own
 EnergyVAD/EnergyVADConfig (gateway/include/media/EnergyVAD.{h,cpp}), not a
 fresh invention.
 
-Moved here from services/vobiz/ (2026-08-02) — this class has no
+Moved here from services/vobiz/ — this class has no
 Vobiz-specific knowledge at all, it only ever consumed raw PCM16 and
 returned VADEvent, so it belongs in a shared package any future telephony
 bridge can import directly. See libs/vad_sdk's own __init__.py for why.

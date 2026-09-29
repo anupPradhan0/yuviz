@@ -2,19 +2,12 @@
 ITelephonyProvider — the shared interface every telephony provider
 (Vobiz today; Twilio/Telnyx additively later) implements.
 
-Scope deliberately kept to exactly what a REST+webhook telephony provider's
-own already-built, tested code needs (grounded in services/vobiz/'s real
-client.py + signature.py, not a speculative superset copied from a richer
-reference implementation): outbound call control, inbound webhook
-verification, and the provider-specific "how do I tell you to start
-streaming audio" response shape. It does NOT cover the long-lived
-WebSocket/media-bridging side (that stays in services/vobiz/bridge.py,
-vad.py, audio.py) — those are protocol/media concerns, not provider-config
-concerns, exactly the same split Dograh's own ARI (direct-SIP) integration
-draws between its request/response provider interface and its separate
-long-lived channel-event process. Our own Gateway/Kamailio/FreeSWITCH path
-is the equivalent of that separate process here and is deliberately never
-made to implement this interface.
+Covers only outbound call control, inbound webhook verification, and the
+provider-specific answer-response shape. It does NOT cover the long-lived
+WebSocket/media-bridging side (libs/media_stream_sdk/bridge.py,
+libs/vad_sdk/) — that's a protocol/media concern, not a provider-config
+one. The native Gateway/Kamailio/FreeSWITCH call path never implements
+this interface.
 """
 
 from __future__ import annotations

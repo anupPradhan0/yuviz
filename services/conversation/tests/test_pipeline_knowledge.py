@@ -1,7 +1,7 @@
 """
 Knowledge retrieval integration in PipelineConversationHandler.
 
-REWRITTEN 2026-09-18. Retrieval used to be unconditional: exactly one
+REWRITTEN. Retrieval used to be unconditional: exactly one
 retrieve() call per turn, folded into that turn's user message. It is now
 the `search_knowledge` local tool, offered to the model alongside
 execute_api and called only when the model decides the question needs the

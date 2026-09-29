@@ -1,7 +1,7 @@
 """
 ToolProviderManager tests.
 
-Only one engine remains (2026-09-18): 'toolexec'. The cal_com and twilio
+Only one engine remains: 'toolexec'. The cal_com and twilio
 engines were removed with the calendar/SMS built-ins, and search_knowledge
 — the agent's other tool — is an in-process local tool that never reaches
 this manager at all (see registry.py's SEARCH_KNOWLEDGE).

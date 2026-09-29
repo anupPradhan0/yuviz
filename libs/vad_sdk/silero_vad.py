@@ -3,12 +3,12 @@ SileroVAD — faithful Python port of the Gateway's own SileroVAD
 (gateway/include/media/SileroVAD.h, gateway/src/media/SileroVAD.cpp), not a
 fresh reimplementation.
 
-Moved here from services/vobiz/ (2026-08-02) so a future telephony bridge
+Moved here from services/vobiz/ so a future telephony bridge
 can reuse this detector instead of duplicating it or reaching into
 Vobiz's own package — this class has no Vobiz-specific knowledge at all,
 it only ever consumed raw PCM16 and returned VADEvent. See libs/vad_sdk's
 own __init__.py for the architectural reasoning (informed by analyzing
-Dograh/pipecat's transport-agnostic VADAnalyzer).
+pipecat's transport-agnostic VADAnalyzer).
 
 Why this exists at all: EnergyVAD (vad.py) is a pure amplitude threshold —
 it cannot distinguish loud noise/echo from real speech. Confirmed live on a

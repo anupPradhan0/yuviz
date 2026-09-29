@@ -326,8 +326,8 @@ class _SlowExecutor:
 
 
 async def test_cancel_event_stops_waiting_on_an_in_flight_tool_call():
-    """Adopted from pipecat's cancellation-on-interruption pattern
-    (2026-08-02): a barge-in during a slow tool call must not be silently
+    """Adopted from pipecat's cancellation-on-interruption pattern: a
+    barge-in during a slow tool call must not be silently
     swallowed until the call finally times out or completes — run_turn()
     should stop waiting on it the moment cancel_event is set, not before,
     not after."""

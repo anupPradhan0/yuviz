@@ -1,7 +1,7 @@
 "use client";
 
 // Full-page call-flow editor for one agent. An agent no longer *is* its
-// flow (that was the 2026-08-30 model): opening an agent now shows its
+// flow (that was an earlier model): opening an agent now shows its
 // configuration under /agents, and this canvas is the separate, optional
 // surface for splitting a call into steps. The flow graph is still stored
 // on the agent row (agents.workflow), so this route stays keyed by agent.

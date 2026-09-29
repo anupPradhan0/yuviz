@@ -269,7 +269,7 @@ body {
 /* Status <select> is colored by its OWN current value — the selected
    option is the status, so the control doubles as the indicator instead of
    needing a separate badge next to it (which read as a redundant second
-   control — see project memory 2026-07-13). */
+   control). */
 .status-select { font-weight: 700; border-width: 1px; }
 .status-select.active { background: var(--green-dim); color: var(--green); border-color: var(--green-border); }
 .status-select.inactive { background: var(--surf-3); color: var(--text-3); border-color: var(--border-2); }
@@ -660,9 +660,9 @@ body {
 .wf-history { margin-top: 12px; }
 
 /* ── Node cards ───────────────────────────────────────────────────────── */
-/* Anatomy from the Dograh editor: a coloured type pill straddling the top
-   edge, a titled header rule, then a labelled prompt block. Wide enough
-   (300px) that a prompt is readable without opening the inspector. */
+/* Node card anatomy: a coloured type pill straddling the top edge, a
+   titled header rule, then a labelled prompt block. Wide enough (300px)
+   that a prompt is readable without opening the inspector. */
 .wf-node {
   width: 300px; min-height: 108px; background: var(--surf-2);
   border: 1px solid var(--border-2); border-radius: 12px;
@@ -711,8 +711,8 @@ body {
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-/* Handles: a fat circle to drag out of, a small tab to drop onto. Sized
-   from Dograh's BaseHandle — the source is the one you aim at. */
+/* Handles: a fat circle to drag out of, a small tab to drop onto — the
+   source is the one you aim at. */
 .wf-node .react-flow__handle {
   background: var(--text-3); border: none; transition: background .14s ease;
 }
@@ -814,7 +814,7 @@ body {
 /* React Flow ships these hard-coded light (#fefefe buttons, a vertical
    stack, its own shadow) and imports its stylesheet from the component, so
    it lands after this file — hence !important, not a specificity war.
-   Horizontal row bottom-left, matching the Dograh editor. */
+   Horizontal row bottom-left. */
 .wf-canvas .react-flow__controls {
   display: flex !important; flex-direction: row !important; gap: 6px;
   box-shadow: none !important; background: none !important; border: none !important;

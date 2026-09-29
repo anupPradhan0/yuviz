@@ -256,7 +256,7 @@ async def _handle_connection(ws: ServerConnection) -> None:
     # Default to Envoy's gRPC proxy (config/gateway.yaml uses the same
     # target) so this bridge load-balances across both ConvSvc instances
     # like the C++ Gateway does, instead of pinning every call to :50051 —
-    # found live 2026-08-04 during a deployment audit.
+    # found live during a deployment audit.
     conv_target = os.environ.get("CONVERSATION_SVC_TARGET", "localhost:10000")
     session_id = str(uuid.uuid4())
     log.info("webcall: session=%s tenant=%s agent=%s -> %s", session_id, tenant_slug, agent_slug, conv_target)

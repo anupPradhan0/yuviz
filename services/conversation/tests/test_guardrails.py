@@ -105,7 +105,7 @@ def test_counter_forget_clears_like_reset():
 
 
 def test_expanded_lexicon_from_live_call_misses():
-    # Real phrases from 2026-07-18 live calls that v1 missed.
+    # Real phrases from live calls that v1 missed.
     assert GuardrailDetector.check("because I am not satisfied with this idea.") is not None
     assert GuardrailDetector.check("This just isn't working for me.") is not None
     assert GuardrailDetector.check("That doesn't help at all.") is not None

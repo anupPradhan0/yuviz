@@ -17,7 +17,7 @@ async def _insert_live_call(pool, session_id: str, *, conv_node: str | None) -> 
 
 
 # ── full begin/turn/end lifecycle ─────────────────────────────────────────
-# A regression test for a real bug found live 2026-07-29: _round_or_none()
+# A regression test for a real bug found live: _round_or_none()
 # was defined at module level in between _record_turn() and _end_call(),
 # which silently dedented _end_call() OUT of the class body and nested it
 # inside _round_or_none()'s own function scope instead — TranscriptBuilder
@@ -71,8 +71,7 @@ async def test_reconcile_stale_calls_closes_only_this_node_ids_rows():
 async def test_reconcile_stale_calls_never_touches_another_instances_live_call():
     """The exact bug this scoping fixes: restarting one Conversation
     Service instance (:50051) must never close out a call genuinely still
-    live on a DIFFERENT running instance (:50052) — see project history,
-    2026-07-29."""
+    live on a DIFFERENT running instance (:50052) — see project history."""
     this_node = f"test-host:50051-{uuid.uuid4().hex[:8]}"
     other_node = f"test-host:50052-{uuid.uuid4().hex[:8]}"
     builder = await TranscriptBuilder.connect(os.environ["POSTGRES_DSN"], node_id=this_node)

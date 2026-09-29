@@ -106,7 +106,7 @@ async def test_generate_ignores_reasoning_only_deltas():
 
 
 # ── generate_with_tools() — also exercised live via Groq (OpenAI-compatible,
-# confirmed 2026-07-24, see module docstring) ──────────────────────────────
+# confirmed live, see module docstring) ────────────────────────────────────
 
 def _tool_call_chunk_sse(*chunks: str) -> bytes:
     lines = [c if c.startswith("data: ") else f"data: {c}" for c in chunks]

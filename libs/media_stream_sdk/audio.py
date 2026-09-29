@@ -1,8 +1,7 @@
 """
 Mulaw 8kHz <-> PCM16 16kHz conversion, shared by every provider's Media
 Stream bridge (Vobiz's Media Streams protocol, Plivo/Twilio-compatible,
-confirmed live against the real Vobiz API and Dograh's own working
-pipecat.serializers.vobiz.VobizFrameSerializer; Cloudonix speaks the same
+confirmed live against the real Vobiz API; Cloudonix speaks the same
 Twilio Media Streams wire shape). Both speak base64-encoded mu-law audio
 at 8kHz; Conversation Service's gRPC contract requires 16-bit signed PCM
 at 16000 Hz (AUDIO_CODEC_PCM_S16LE — see conversation.proto and

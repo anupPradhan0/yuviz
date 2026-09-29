@@ -7,7 +7,7 @@
 > install, which is useful for debugging a service directly against your own
 > Python environment but has more moving parts and was only verified on macOS.
 
-Status: **built and verified** (2026-08-04). Covers the subset of this
+Status: **built and verified**. Covers the subset of this
 platform that a fresh fork can actually run: the Config Service, Knowledge
 Service, Conversation Service (STT/LLM/TTS pipeline), the webcall bridge,
 and admin-ui's "Test Agent" browser panel. This deliberately excludes

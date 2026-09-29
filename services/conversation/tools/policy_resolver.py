@@ -13,7 +13,7 @@ same way agent config changes do) is the natural v2 hardening step, not
 done here to avoid an invasive change to shared libs/config_sdk for a
 single small table.
 
-KNOWN CONFLICT, found while building this (2026-07-22), not resolved here:
+KNOWN CONFLICT, found while building this, not resolved here:
 libs/config_sdk/models.py already has RuntimeConfig.tools: list[ToolSpec],
 fed by IConfigProvider.get_tools() — an earlier, pre-existing stub
 explicitly labeled "Phase 6b concept, not built yet," always returning []
@@ -50,7 +50,7 @@ _DEFAULT_CACHE_TTL_S = 30.0
 
 # The auto-derived-companion machinery (book_appointment silently granting
 # cancel_appointment/reschedule_appointment on the same Cal.com config)
-# was removed on 2026-09-18 along with the calendar built-ins themselves.
+# was removed along with the calendar built-ins themselves.
 # Nothing replaces it: execute_api is the only DB-gated tool left, and a
 # custom API never implies another custom API — if two of them are related,
 # that relationship is an upstream edge in custom_api_params, resolved by
@@ -192,7 +192,7 @@ class ToolPolicyResolver:
         independent of the write-time check in services/toolexec.
 
         TWO THINGS THIS GETS RIGHT THAT THE FLAT PER-API QUERY DID NOT
-        (fixed 2026-09-18 after the model kept picking the wrong API):
+        (fixed after the model kept picking the wrong API):
 
         1. An API that is another enabled API's upstream is NOT offered.
            services/toolexec calls it automatically as a chain step, so

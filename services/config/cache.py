@@ -90,7 +90,7 @@ async def invalidate(*keys: str) -> None:
 async def publish(channel: str, message: str) -> None:
     """Instant invalidation via Pub/Sub — the thing this module's own
     docstring flagged as "deferred to Phase 7" back when TTL-based cache-
-    aside was built. Built 2026-07-29: Conversation Service subscribes to
+    aside was built. Conversation Service subscribes to
     provider_config_changed so a config edit evicts that one cached
     provider client immediately, instead of requiring a full process
     restart (which drops every live call on that instance — see project

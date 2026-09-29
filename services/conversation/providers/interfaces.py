@@ -55,8 +55,8 @@ class ISTT(Protocol):
     async def feed_stream(self, session_id: str, chunk: bytes, sample_rate: int) -> None:
         """Forward one audio chunk the instant it arrives, before the
         utterance boundary (speech_ended) is even known — see pipeline.py's
-        on_audio(), called on every inbound AudioChunk. Real, measured
-        2026-08-02: batch-only STT (Deepgram's own pre-recorded /v1/listen,
+        on_audio(), called on every inbound AudioChunk. Real, measured:
+        batch-only STT (Deepgram's own pre-recorded /v1/listen,
         called only after speech_ended, same as local Whisper) throws away
         Deepgram's actual advantage — transcribing continuously while the
         caller is still talking — so finalize_stream() ends up doing a full
@@ -106,7 +106,7 @@ class ITTS(Protocol):
         """Yield raw L16 PCM chunks at sample_rate Hz as they become
         available, instead of waiting for the complete utterance (see
         pipeline.py's _llm_to_tts, which forwards each yielded chunk to the
-        caller immediately — real, measured 2026-08-01: Deepgram's own
+        caller immediately — real, measured: Deepgram's own
         /v1/speak response streams progressively server-side (first byte at
         ~800ms, last byte at ~1600ms for one sentence), but our old
         synthesize()-only path threw that away by blocking on the full

@@ -7,8 +7,8 @@ factories keyed by carriers.provider, not a growing if/elif chain — adding
 Bandwidth or a regional SIP carrier means writing one new class and
 registering it here, never touching this manager's own logic.
 
-_DEFAULT_REGISTRY has two entries — Plivo (2026-07-23) and Twilio
-(2026-07-26) — both added at the user's explicit request, ahead of having
+_DEFAULT_REGISTRY has two entries — Plivo and Twilio — both added at the
+user's explicit request, ahead of having
 real trial-account credentials to confirm live API behavior against.
 providers/plivo.py and providers/twilio.py are both built from
 documentation only and say so loudly in their own module docstrings; do

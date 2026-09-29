@@ -82,7 +82,7 @@ digests with the domain baked in, and a stale domain surfaces as a generic
     kamailio -f /usr/local/etc/kamailio/kamailio.cfg -D -E
 
 Dialable numbers are fixed by the cfg: `788` and `5000`-`5009` route to
-FreeSWITCH; `1000`-`1002` are registered softphones (kamailio.cfg.tpl:665).
+FreeSWITCH; `1000`-`1002` are registered softphones (kamailio.cfg.tpl).
 
 ## 4. FreeSWITCH (apt, needs a free SignalWire token)
 
@@ -140,14 +140,14 @@ pin it to the host with an ACL and change the password:
 and define `gateway_host` in autoload_configs/acl.conf.xml as HOST_IP/32.
 
 **sip_profiles/external.xml** — `sip-port 5080`. Do not rename the profile:
-`external` is baked into the ESL dial strings at
-gateway/src/telephony/EslClient.cpp:318 and services/campaigns/originate.py.
+`external` is baked into the ESL dial strings in
+gateway/src/telephony/EslClient.cpp and services/campaigns/originate.py.
 
 **dialplan** — match `^(788|500\d)$`, answer, run the Lua below.
 
 ## 7. The Lua dialplan script
 
-Referenced at gateway/src/core/Application.cpp:204 as start_voice_ai.lua but
+Referenced in gateway/src/core/Application.cpp as start_voice_ai.lua but
 never committed. It has exactly three jobs: answer, start the fork, park.
 
     local uuid = session:get_uuid()
@@ -167,11 +167,11 @@ Three details are load-bearing:
     PK. It replaced a per-process counter that collided across Gateway
     restarts and silently appended one call's transcript onto another's.
   - The metadata JSON keys are exactly `did`/`ani`/`direction`
-    (gateway/src/config/Config.cpp:209). Malformed or late JSON degrades
+    (gateway/src/config/Config.cpp). Malformed or late JSON degrades
     silently to tenant/agent `{"default","default"}` — a wrong-agent call
     that looks like a working one, not an error.
   - The frame must arrive within `metadata_wait_ms` (1500ms,
-    config/gateway.yaml:11). It was raised from 300ms after two live
+    config/gateway.yaml). It was raised from 300ms after two live
     warm-transfer calls landed right on that boundary.
 
 ## 8. Host-side config changes
@@ -192,7 +192,7 @@ connection with no change.
 
 A DID with no phone_numbers row resolves to `{"default","default"}` rather
 than being rejected. Add it via Config Service so `did:5006` lands in Redis
-in the shape services/config/phone_numbers.py:59-103 writes.
+in the shape services/config/phone_numbers.py writes.
 
 ## 10. Start order and first call
 
@@ -215,9 +215,9 @@ Triage order when it fails:
     at /usr/bin, so step 3/3 silently prints "fs_cli not found — skipping"
     and never restarts FreeSWITCH after an IP change. Worth making
     overridable via env.
-  - The same script's header (line 21) claims everything outside Kamailio is
-    already 127.0.0.1/localhost. Not true: config/gateway.yaml:47 and
-    services/campaigns/originate.py:72 both carry a literal 192.168.0.116,
+  - The same script's header claims everything outside Kamailio is
+    already 127.0.0.1/localhost. Not true: config/gateway.yaml and
+    services/campaigns/originate.py both carry a literal 192.168.0.116,
     and neither is rewritten. Inbound keeps working while warm transfer and
     outbound campaigns break — an asymmetric failure that is annoying to
     diagnose.
@@ -228,11 +228,11 @@ Triage order when it fails:
 
 | What | Value | Fixed at |
 |---|---|---|
-| Kamailio SIP | udp:VM_IP:5060 | kamailio.cfg.tpl:221 |
-| FreeSWITCH SIP | VM_IP:5080, profile `external` | dispatcher.list.tpl, EslClient.cpp:318 |
-| Agent DIDs | 788, 5000-5009 | kamailio.cfg.tpl:665 |
-| Softphones | 1000-1002 (MySQL subscriber) | kamailio.cfg.tpl:687 |
-| ESL | 8022 (not 8021) | gateway.yaml:41-44, originate.py:71 |
-| Gateway WS | ws://HOST_IP:8080/voice/<uuid> | Application.cpp:202-211 |
-| Metadata | {"did","ani","direction"} | Config.cpp:209-228 |
-| Audio | 16 kHz mono, 20 ms | gateway.yaml:26-29 |
+| Kamailio SIP | udp:VM_IP:5060 | kamailio.cfg.tpl |
+| FreeSWITCH SIP | VM_IP:5080, profile `external` | dispatcher.list.tpl, EslClient.cpp |
+| Agent DIDs | 788, 5000-5009 | kamailio.cfg.tpl |
+| Softphones | 1000-1002 (MySQL subscriber) | kamailio.cfg.tpl |
+| ESL | 8022 (not 8021) | gateway.yaml, originate.py |
+| Gateway WS | ws://HOST_IP:8080/voice/<uuid> | Application.cpp |
+| Metadata | {"did","ani","direction"} | Config.cpp |
+| Audio | 16 kHz mono, 20 ms | gateway.yaml |
