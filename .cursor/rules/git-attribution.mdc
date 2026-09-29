@@ -1,0 +1,14 @@
+---
+description: No AI co-author trailers in commits or PR descriptions
+alwaysApply: true
+---
+
+# Git attribution
+
+Do not add a `Co-Authored-By:` trailer naming an AI tool (Cursor, Claude,
+Copilot, Codex, ChatGPT, etc.) to any commit message. Do not add a
+"Generated with <tool>" footer to any commit message or PR description.
+
+This repo's CI (`no-ai-coauthor` check, required on `main` and `redesign`)
+rejects any PR containing such a trailer — write commits as if authored
+by the human running this session.
