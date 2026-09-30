@@ -119,6 +119,12 @@ const ICONS: Record<string, React.ReactNode> = {
       <path d="M8 1.5v2M8 12.5v2M14.5 8h-2M3.5 8h-2M12.4 3.6l-1.4 1.4M5 11l-1.4 1.4M12.4 12.4L11 11M5 5L3.6 3.6" />
     </svg>
   ),
+  docs: (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M3 2.5h6.5L13 6v7.5H3z" />
+      <path d="M9.5 2.5V6H13M5.5 8.5h5M5.5 11h3.5" />
+    </svg>
+  ),
 };
 
 const OVERVIEW_ITEMS = [{ href: "/dashboard", label: "Dashboard", icon: "dashboard" }];
@@ -151,7 +157,14 @@ const CALLING_ITEMS = [
   { href: "/live-calls", label: "Live Calls", icon: "live-calls" },
 ];
 
-const PLATFORM_ITEMS = [{ href: "/settings", label: "Settings", icon: "settings" }];
+// Guide sits beside Settings rather than in Management: it is read while
+// something is being configured or has gone wrong, and it is the one page
+// that must stay useful when every other page is failing (it fetches
+// nothing).
+const PLATFORM_ITEMS = [
+  { href: "/docs", label: "Guide", icon: "docs" },
+  { href: "/settings", label: "Settings", icon: "settings" },
+];
 
 // Spend is an owner's view, not an operator's: gated to the same roles that
 // may manage users (superadmin/admin) rather than every console role. The
