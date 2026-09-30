@@ -44,6 +44,24 @@ def test_parse_contacts_csv_strips_bom():
     assert contacts == [{"phone_number": "+14155551111", "name": ""}]
 
 
+def test_parse_contacts_csv_strips_common_separators():
+    content = b'phone_number\n"+1 (415) 555-1111"\n415.555.2222\n'
+    contacts = campaign_contacts.parse_contacts_csv(content)
+    assert [c["phone_number"] for c in contacts] == ["+14155551111", "4155552222"]
+
+
+def test_parse_contacts_csv_rejects_multiline_injection():
+    content = b'phone_number,name\n+14155551111,Alice\n"5551234\n\napi hupall",Mallory\n'
+    with pytest.raises(ValueError, match=r"line\(s\) 5"):
+        campaign_contacts.parse_contacts_csv(content)
+
+
+def test_parse_contacts_csv_rejects_any_non_digit_and_names_every_line():
+    content = b"phone_number\n+14155551111\n555@evil\n+14155552222\nabc\n"
+    with pytest.raises(ValueError, match=r"line\(s\) 3, 5"):
+        campaign_contacts.parse_contacts_csv(content)
+
+
 async def _make_campaign(test_tenant, test_agent):
     return await campaigns.create_campaign(
         test_tenant["id"], agent_id=test_agent["id"], name="Contacts test",

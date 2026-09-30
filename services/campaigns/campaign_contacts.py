@@ -12,7 +12,9 @@ from typing import Any
 
 from libs.tenancy import platform_conn, tenant_conn
 
-from . import db
+from . import db, originate
+
+_PHONE_SEPARATORS = str.maketrans("", "", " -().")
 
 
 def parse_contacts_csv(content: bytes) -> list[dict[str, str]]:
@@ -20,7 +22,8 @@ def parse_contacts_csv(content: bytes) -> list[dict[str, str]]:
     optional 'name' column — column order doesn't matter, extra columns
     are ignored. Blank phone_number rows are skipped rather than raising,
     since a hand-edited CSV exported from a spreadsheet often has trailing
-    blank rows."""
+    blank rows. Common separators are stripped; any other non-digit makes
+    the whole upload fail, naming the offending lines."""
     text = content.decode("utf-8-sig")  # -sig: strips a BOM Excel-exported CSVs commonly carry
     reader = csv.DictReader(io.StringIO(text))
     if reader.fieldnames is None or "phone_number" not in [f.strip().lower() for f in reader.fieldnames]:
@@ -33,11 +36,20 @@ def parse_contacts_csv(content: bytes) -> list[dict[str, str]]:
     name_col = field_map.get("name")
 
     contacts = []
+    invalid_lines = []
     for row in reader:
         phone = (row.get(phone_col) or "").strip()
         if not phone:
             continue
+        phone = phone.translate(_PHONE_SEPARATORS)
+        if not originate.is_valid_dial_number(phone):
+            invalid_lines.append(reader.line_num)
+            continue
         contacts.append({"phone_number": phone, "name": (row.get(name_col) or "").strip() if name_col else ""})
+    if invalid_lines:
+        shown = ", ".join(str(n) for n in invalid_lines[:10])
+        more = f" (and {len(invalid_lines) - 10} more)" if len(invalid_lines) > 10 else ""
+        raise ValueError(f"invalid phone_number on line(s) {shown}{more}: use digits with an optional leading +")
     return contacts
 
 
