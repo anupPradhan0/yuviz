@@ -850,6 +850,78 @@ class TestProviderConfigEndpoints:
         assert resp.status_code == 409
         assert resp.json()["resource_names"] == ["Idle"]
 
+    async def test_delete_provider_that_is_the_account_default_is_409(self, client, test_tenant):
+        llm = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Groq", "role": "llm", "engine": "groq"},
+        )
+        provider_id = llm.json()["id"]
+        set_default = await client.patch(f"/tenants/{test_tenant['id']}", json={"default_llm_config_id": provider_id})
+        assert set_default.status_code == 200, set_default.text
+
+        resp = await client.delete(f"/providers/{provider_id}")
+        assert resp.status_code == 409
+        assert resp.json()["resource_type"] == "tenant_default"
+        assert resp.json()["resource_names"] == [test_tenant["name"]]
+        assert (await client.get(f"/providers/{provider_id}")).status_code == 200
+
+    async def test_a_deleted_provider_cannot_be_assigned_to_an_agent(self, client, test_tenant):
+        stt = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+        )
+        provider_id = stt.json()["id"]
+        assert (await client.delete(f"/providers/{provider_id}")).status_code == 204
+
+        resp = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "late-agent", "name": "Late", "stt_config_id": provider_id},
+        )
+        assert resp.status_code == 400
+
+    async def test_account_default_must_be_the_accounts_own_live_provider_of_that_role(self, client, test_tenant, pool):
+        stt = (await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+        )).json()["id"]
+        wrong_role = await client.patch(f"/tenants/{test_tenant['id']}", json={"default_llm_config_id": stt})
+        assert wrong_role.status_code == 400
+
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (slug, name) VALUES ($1, 'Other') RETURNING id",
+            f"other-{test_tenant['slug']}",
+        )
+        foreign = await pool.fetchval(
+            "INSERT INTO provider_configs (tenant_id, name, role, engine) VALUES ($1, 'Theirs', 'stt', 'deepgram') RETURNING id",
+            other["id"],
+        )
+        try:
+            cross = await client.patch(f"/tenants/{test_tenant['id']}", json={"default_stt_config_id": str(foreign)})
+            assert cross.status_code == 400
+
+            assert (await client.delete(f"/providers/{stt}")).status_code == 204
+            deleted = await client.patch(f"/tenants/{test_tenant['id']}", json={"default_stt_config_id": stt})
+            assert deleted.status_code == 400
+        finally:
+            await pool.execute("DELETE FROM provider_configs WHERE id = $1", foreign)
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_raw_sql_cannot_point_an_account_default_at_another_tenants_provider(self, test_tenant, pool):
+        import asyncpg
+        other = await pool.fetchval(
+            "INSERT INTO tenants (slug, name) VALUES ($1, 'Other') RETURNING id", f"other2-{test_tenant['slug']}",
+        )
+        foreign = await pool.fetchval(
+            "INSERT INTO provider_configs (tenant_id, name, role, engine) VALUES ($1, 'Theirs', 'tts', 'kokoro') RETURNING id",
+            other,
+        )
+        try:
+            with pytest.raises(asyncpg.ForeignKeyViolationError):
+                await pool.execute("UPDATE tenants SET default_tts_config_id = $1 WHERE id = $2", foreign, test_tenant["id"])
+        finally:
+            await pool.execute("DELETE FROM provider_configs WHERE id = $1", foreign)
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other)
+
     async def test_voices_requires_elevenlabs_engine(self, client, test_tenant):
         create = await client.post(
             f"/tenants/{test_tenant['id']}/providers",

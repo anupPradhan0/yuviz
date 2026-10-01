@@ -43,7 +43,7 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
 
   const [deleteTarget, setDeleteTarget] = useState<ProviderConfig | null>(null);
   // null = still checking; stt/llm/tts are used by agents, embedding by knowledge bases.
-  const [deleteResourceType, setDeleteResourceType] = useState<"agent" | "knowledge_base" | null>(null);
+  const [deleteResourceType, setDeleteResourceType] = useState<"agent" | "knowledge_base" | "tenant_default" | null>(null);
   const [deleteResourceNames, setDeleteResourceNames] = useState<string[] | null>(null);
   const [deleteChecking, setDeleteChecking] = useState(false);
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
@@ -154,16 +154,19 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
         const kbs = await listKnowledgeBases(p.tenant_id);
         setDeleteResourceType("knowledge_base");
         setDeleteResourceNames(
-          kbs.filter((k) => k.status === "active" && k.embedding_config_id === p.id).map((k) => k.name),
+          kbs.filter((k) => k.embedding_config_id === p.id).map((k) => k.name),
         );
       } else if (p.role === "stt" || p.role === "llm" || p.role === "tts") {
-        const tenantSlug = activeTenant?.id === p.tenant_id ? activeTenant.slug : undefined;
-        const agents: Agent[] = tenantSlug ? await listAgents(tenantSlug) : [];
+        const owner = activeTenant?.id === p.tenant_id ? activeTenant : undefined;
+        if (owner && owner[`default_${p.role}_config_id`] === p.id) {
+          setDeleteResourceType("tenant_default");
+          setDeleteResourceNames([owner.name]);
+          return;
+        }
+        const agents: Agent[] = owner ? await listAgents(owner.slug) : [];
         const column = `${p.role}_config_id` as "stt_config_id" | "llm_config_id" | "tts_config_id";
         setDeleteResourceType("agent");
-        setDeleteResourceNames(
-          agents.filter((a) => a.status === "active" && a[column] === p.id).map((a) => a.name),
-        );
+        setDeleteResourceNames(agents.filter((a) => a[column] === p.id).map((a) => a.name));
       } else {
         setDeleteResourceNames([]);
       }
@@ -185,7 +188,7 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
     } catch (e) {
       // 409 carries resource names — switch to the blocked variant.
       if (e instanceof ApiError && e.status === 409 && e.body?.resource_names) {
-        setDeleteResourceType(e.body.resource_type as "agent" | "knowledge_base");
+        setDeleteResourceType(e.body.resource_type as "agent" | "knowledge_base" | "tenant_default");
         setDeleteResourceNames(e.body.resource_names as string[]);
       } else {
         setDeleteError(e instanceof ApiError ? e.detail : String(e));
@@ -439,7 +442,8 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
 
       {(() => {
         const isBlocked = deleteResourceNames !== null && deleteResourceNames.length > 0;
-        const resourceLabel = deleteResourceType === "knowledge_base" ? "Knowledge bases" : "Agents";
+        const resourceLabel = deleteResourceType === "knowledge_base" ? "Knowledge bases"
+          : deleteResourceType === "tenant_default" ? "Accounts with this as their default" : "Agents";
         return (
           <Modal
             open={deleteTarget !== null}
@@ -483,7 +487,13 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
                   fontSize: ".78rem", color: "var(--text-2)", lineHeight: 1.5,
                   borderLeft: "2px solid var(--red-border)", padding: "6px 0 6px 10px", margin: 0,
                 }}>
-                  {(() => {
+                  {deleteResourceType === "tenant_default" ? (
+                    <>
+                      This is <b>{deleteResourceNames[0]}</b>&apos;s default {deleteTarget?.role.toUpperCase()} provider: every
+                      agent without its own {deleteTarget?.role.toUpperCase()} provider runs on it. Change the account&apos;s
+                      default first.
+                    </>
+                  ) : (() => {
                     const many = deleteResourceNames.length > 1;
                     const consequence = deleteResourceType === "knowledge_base"
                       ? `the next document it ingests, or query it answers, would fail to resolve its embedding provider the moment this provider is gone. Reassign ${many ? "them" : "it"} to a different embedding provider first`
@@ -503,8 +513,8 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
                 borderLeft: "2px solid var(--green-border)", padding: "6px 0 6px 10px", margin: 0,
               }}>
                 {deleteResourceType === "knowledge_base"
-                  ? "No active knowledge bases use this provider."
-                  : "No active agents use this provider."} This cannot be undone.
+                  ? "No knowledge bases use this provider."
+                  : "No agents use this provider, and it isn't the account default."} This cannot be undone.
               </p>
             )}
           </Modal>

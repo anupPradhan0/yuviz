@@ -69,6 +69,10 @@ async def test_tenant(pool):
     await pool.execute("DELETE FROM phone_numbers WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM agents WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM tool_provider_configs WHERE tenant_id = $1", tenant["id"])
+    await pool.execute(
+        "UPDATE tenants SET default_stt_config_id = NULL, default_llm_config_id = NULL, "
+        "default_tts_config_id = NULL WHERE id = $1", tenant["id"],
+    )
     await pool.execute("DELETE FROM provider_configs WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM carriers WHERE tenant_id = $1", tenant["id"])
     # test_admin (soft-deleted, not hard-deleted, by its own teardown — see

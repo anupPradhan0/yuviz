@@ -209,8 +209,10 @@ async def _validate_provider_assignments(conn: Any, tenant_id: Any, fields: dict
             uuid.UUID(config_id)
         except (ValueError, TypeError):
             raise ValueError(f"{field}={config_id!r} is not a valid id") from None
+        # FOR SHARE: serializes with a concurrent delete's FOR UPDATE.
         row = await conn.fetchrow(
-            "SELECT tenant_id, role, engine, voice FROM provider_configs WHERE id = $1", config_id,
+            "SELECT tenant_id, role, engine, voice FROM provider_configs "
+            "WHERE id = $1 AND deleted_at IS NULL FOR SHARE", config_id,
         )
         if row is None:
             raise ValueError(f"{field}={config_id!r} does not exist")

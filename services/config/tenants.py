@@ -10,6 +10,7 @@ lives.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from libs.tenancy import platform_conn
@@ -27,6 +28,29 @@ _UPDATABLE_FIELDS = {
     "default_stt_config_id", "default_llm_config_id", "default_tts_config_id",
     "max_concurrent_calls",
 }
+
+
+async def _validate_default_providers(conn: Any, tenant_id: Any, fields: dict[str, Any]) -> None:
+    """An account default must be this account's own live provider of that
+    role; agents without their own provider run on it."""
+    for role in ("stt", "llm", "tts"):
+        field = f"default_{role}_config_id"
+        config_id = fields.get(field)
+        if config_id is None:
+            continue
+        try:
+            uuid.UUID(str(config_id))
+        except ValueError:
+            raise ValueError(f"{field}={config_id!r} is not a valid id") from None
+        # FOR SHARE: serializes with a concurrent delete's FOR UPDATE.
+        row = await conn.fetchrow(
+            "SELECT tenant_id, role FROM provider_configs WHERE id = $1 AND deleted_at IS NULL FOR SHARE",
+            config_id,
+        )
+        if row is None or str(row["tenant_id"]) != str(tenant_id):
+            raise ValueError(f"{field}={config_id!r} is not one of this account's providers")
+        if row["role"] != role:
+            raise ValueError(f"{field}={config_id!r} is a {row['role']} provider, not {role}")
 
 
 def _cache_key(slug: str) -> str:
@@ -137,6 +161,7 @@ async def update_tenant(
         if old_row is None:
             raise LookupError(f"tenant {tenant_id} not found")
         old = dict(old_row)
+        await _validate_default_providers(conn, tenant_id, fields)
 
         columns = list(fields.keys())
         set_clause = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(columns))

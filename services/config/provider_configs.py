@@ -250,10 +250,12 @@ class ProviderConfigInUse(Exception):
         self.resource_type = resource_type
         self.resource_count = resource_count
         self.resource_names = resource_names
-        noun = "agent" if resource_type == "agent" else "knowledge base"
-        super().__init__(
-            f"{resource_count} {noun}(s) use this provider — reassign them before deleting it"
-        )
+        if resource_type == "tenant_default":
+            message = "this provider is the account's default; choose another default before deleting it"
+        else:
+            noun = "agent" if resource_type == "agent" else "knowledge base"
+            message = f"{resource_count} {noun}(s) use this provider — reassign them before deleting it"
+        super().__init__(message)
 
 
 # role -> (table to check, its tenant-scope FK column, the column pointing
@@ -273,7 +275,8 @@ _ROLE_TO_USAGE_CHECK = {
 async def soft_delete_provider_config(
     provider_id: Any, *, user_id: Any | None = None, user_email: str | None = None,
 ) -> None:
-    """Refuses while any non-deleted agent/KB references it, active or not.
+    """Refuses while it is the account default or any non-deleted agent/KB
+    references it, active or not.
     There is no force: a deleted provider leaves its agents silently falling
     back to the built-in default script at call time."""
     pool = await db.get_pool()
@@ -285,6 +288,15 @@ async def soft_delete_provider_config(
             raise LookupError(f"provider_config {provider_id} not found")
         old = dict(old_row)
         old["extra"] = db.json_col(old["extra"])
+
+        # Agents with no provider of their own fall back to the account default.
+        if old["role"] in ("stt", "llm", "tts"):
+            tenant_name = await conn.fetchval(
+                f"SELECT name FROM tenants WHERE id = $1 AND default_{old['role']}_config_id = $2",
+                old["tenant_id"], provider_id,
+            )
+            if tenant_name is not None:
+                raise ProviderConfigInUse("tenant_default", 1, [tenant_name])
 
         check = _ROLE_TO_USAGE_CHECK.get(old["role"])
         if check is not None:
