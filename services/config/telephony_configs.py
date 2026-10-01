@@ -140,6 +140,13 @@ async def get_telephony_config(config_id: Any, *, platform_scoped: bool = False)
     return result
 
 
+async def get_provider_kind(config_id: Any) -> str | None:
+    """The config's provider even after a soft delete; None only if no such row."""
+    pool = await db.get_pool()
+    async with platform_conn(pool, reason="telephony-config-kind") as conn:
+        return await conn.fetchval("SELECT provider FROM telephony_configs WHERE id = $1", config_id)
+
+
 async def get_default_outbound_config(tenant_id: Any) -> dict[str, Any] | None:
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
