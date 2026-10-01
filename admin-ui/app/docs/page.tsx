@@ -60,7 +60,7 @@ function Note({ children }: { children: React.ReactNode }) {
   return (
     <div
       style={{
-        borderLeft: "3px solid var(--accent)", background: "var(--surface-2)",
+        borderLeft: "3px solid var(--cyan)", background: "var(--surf-2)",
         padding: "11px 14px", margin: "14px 0", fontSize: ".88rem",
         color: "var(--text-2)", maxWidth: "72ch",
       }}
