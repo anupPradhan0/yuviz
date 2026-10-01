@@ -120,6 +120,14 @@ async def test_tenant_admin_can_route_but_not_move_a_native_number(
             did_change = await admin.patch(f"/phone-numbers/{number_id}", json={"did": f"{did}-x"})
             detach = await admin.patch(f"/phone-numbers/{number_id}", json={"telephony_config_id": None})
         assert (status_change.status_code, did_change.status_code, detach.status_code) == (200, 403, 403)
+
+        async with _client(test_admin["token"]) as admin:
+            admin_delete = await admin.delete(f"/phone-numbers/{number_id}")
+        assert admin_delete.status_code == 403
+        assert await pool.fetchval("SELECT deleted_at FROM phone_numbers WHERE id = $1", number_id) is None
+        async with _client(test_superadmin["token"]) as su:
+            su_delete = await su.delete(f"/phone-numbers/{number_id}")
+        assert su_delete.status_code == 204
     finally:
         await pool.execute("DELETE FROM phone_numbers WHERE did LIKE $1", f"{did}%")
         await cache.invalidate(f"did:{did}")

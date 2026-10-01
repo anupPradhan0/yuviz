@@ -168,6 +168,11 @@ async def delete_phone_number(
         f"phone_number {phone_number_id!r} not found",
     )
     await assert_tenant_access(phone_number["tenant_id"], current_user)
+    # Releasing a local number is as platform-owned as assigning one: a tenant
+    # admin who deleted it could never add it back. They can set it inactive.
+    await _require_superadmin_for_local_number(
+        current_user, phone_number.get("telephony_config_id"), phone_number.get("carrier_id"),
+    )
     set_target_tenant(phone_number["tenant_id"])
     await phone_numbers_service.soft_delete_phone_number(
         phone_number_id, user_id=current_user.id, user_email=current_user.email,

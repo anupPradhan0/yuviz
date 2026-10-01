@@ -8,6 +8,7 @@ import {
   Carrier,
   CarrierProvider,
   deletePhoneNumber,
+  getCurrentUser,
   listAllAgents,
   listAllPhoneNumbers,
   listCarriers,
@@ -61,6 +62,12 @@ export default function PhoneNumbersPage() {
   const [telephonyConfigs, setTelephonyConfigs] = useState<TelephonyConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Local numbers are assigned and released by the platform; the server
+  // enforces this either way, this only hides a control that would 403.
+  const [isSuperadmin, setIsSuperadmin] = useState(false);
+  useEffect(() => {
+    getCurrentUser().then((me) => setIsSuperadmin(me.role === "superadmin")).catch(() => setIsSuperadmin(false));
+  }, []);
 
   const refresh = () => {
     if (tenantLoading || targetTenants.length === 0) return;
@@ -108,8 +115,15 @@ export default function PhoneNumbersPage() {
     }
   };
 
+  const isLocalNumber = (n: PhoneNumberWithTenant) => {
+    if (n.carrier_id) return false;
+    if (!n.telephony_config_id) return true;
+    return telephonyConfigs.find((tc) => tc.id === n.telephony_config_id)?.provider === "native";
+  };
+
   const handleRemove = async (n: PhoneNumberWithTenant) => {
-    if (!confirm(`Remove DID ${n.did}?`)) return;
+    const note = isLocalNumber(n) ? " It can be added back under Telephony → Native." : "";
+    if (!confirm(`Remove DID ${n.did}?${note}`)) return;
     try {
       await deletePhoneNumber(n.id);
       refresh();
@@ -181,14 +195,23 @@ export default function PhoneNumbersPage() {
                       )}
                     </td>
                     <td onClick={(e) => e.stopPropagation()}>
-                      <button
-                        className="btn-icon"
-                        style={{ color: "var(--text-2)", cursor: "pointer" }}
-                        onClick={() => handleRemove(n)}
-                        title="Remove DID"
-                      >
-                        ✕
-                      </button>
+                      {isLocalNumber(n) && !isSuperadmin ? (
+                        <span
+                          style={{ color: "var(--text-3)", fontSize: ".7rem" }}
+                          title="Local numbers are released by the platform. Set it inactive to stop calls."
+                        >
+                          —
+                        </span>
+                      ) : (
+                        <button
+                          className="btn-icon"
+                          style={{ color: "var(--text-2)", cursor: "pointer" }}
+                          onClick={() => handleRemove(n)}
+                          title="Remove DID"
+                        >
+                          ✕
+                        </button>
+                      )}
                     </td>
                   </tr>
                 );
