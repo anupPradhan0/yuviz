@@ -27,7 +27,7 @@ const CARRIER_PROVIDER_LABEL: Record<CarrierProvider, string> = {
   plivo: "Plivo",
   vonage: "Vonage",
 };
-const TELEPHONY_PROVIDER_LABEL: Record<string, string> = { cloudonix: "Cloudonix", vobiz: "Vobiz" };
+const TELEPHONY_PROVIDER_LABEL: Record<string, string> = { cloudonix: "Cloudonix", vobiz: "Vobiz", native: "Native" };
 
 interface ProviderInfo {
   label: string;

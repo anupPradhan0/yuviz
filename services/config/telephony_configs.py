@@ -18,6 +18,8 @@ from __future__ import annotations
 import json as _json
 from typing import Any
 
+import asyncpg
+
 from libs.config_sdk.secrets import encrypt_secret, is_encrypted
 from libs.telephony_sdk.exceptions import TelephonyProviderError
 from libs.telephony_sdk import providers as _providers  # noqa: F401 — registers every built-in provider
@@ -32,7 +34,13 @@ _UPDATABLE_FIELDS = {"name", "credentials", "is_default_outbound"}
 # migration (T23) — the REST plane never serves them, so there is no
 # ITelephonyProvider to validate/normalize credentials against and no
 # health to probe. Every other registered provider name is REST-capable.
-_NON_REST_PROVIDERS = frozenset({"native"})
+NATIVE_PROVIDER = "native"
+_NON_REST_PROVIDERS = frozenset({NATIVE_PROVIDER})
+
+
+class NativeConfigExists(Exception):
+    def __init__(self) -> None:
+        super().__init__("this account already has a Native (local SIP) configuration")
 
 
 def _cache_key(config_id: Any) -> str:
@@ -98,14 +106,18 @@ def list_supported_providers() -> dict[str, dict[str, list[str]]]:
     """Backs the discovery endpoint ("List Supported Providers") — name ->
     {required, sensitive} credential fields, so an admin UI can render the
     right form without hardcoding per-provider fields. Built from
-    TelephonyProviderRegistry.visible() so "fake" never appears (AC4)."""
-    return {
+    TelephonyProviderRegistry.visible() so "fake" never appears (AC4).
+    Native has no ITelephonyProvider (and must not get one: Campaigns treats
+    any registered provider as REST-dialable), so it is listed explicitly."""
+    supported = {
         name: {
             "required": provider_cls.required_credential_fields(),
             "sensitive": provider_cls.sensitive_credential_fields(),
         }
         for name, provider_cls in TelephonyProviderRegistry.visible().items()
     }
+    supported[NATIVE_PROVIDER] = {"required": [], "sensitive": []}
+    return supported
 
 
 async def get_telephony_config(config_id: Any, *, platform_scoped: bool = False) -> dict[str, Any] | None:
@@ -202,12 +214,17 @@ async def create_telephony_config(
         if is_default_outbound:
             await _clear_default_outbound(conn, tenant_id)
 
-        row = await conn.fetchrow(
-            "INSERT INTO telephony_configs "
-            "(tenant_id, name, provider, credentials, is_default_outbound) "
-            "VALUES ($1, $2, $3, $4::jsonb, $5) RETURNING *",
-            tenant_id, name, provider, _json.dumps(credentials), is_default_outbound,
-        )
+        try:
+            row = await conn.fetchrow(
+                "INSERT INTO telephony_configs "
+                "(tenant_id, name, provider, credentials, is_default_outbound) "
+                "VALUES ($1, $2, $3, $4::jsonb, $5) RETURNING *",
+                tenant_id, name, provider, _json.dumps(credentials), is_default_outbound,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name == "telephony_configs_one_native_per_tenant":
+                raise NativeConfigExists() from None
+            raise
         result = dict(row)
         result["credentials"] = db.json_col(result["credentials"])
         await audit.write_audit(

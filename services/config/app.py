@@ -26,6 +26,7 @@ from . import cache, db, email, invites
 from . import agents as agents_service
 from . import phone_numbers as phone_numbers_service
 from . import provider_configs as provider_configs_service
+from . import telephony_configs as telephony_configs_service
 from . import tenants as tenants_service
 from .routers import (
     agent_tool_policies, agents, audit_log, auth, call_flows, calls, carriers,
@@ -262,6 +263,11 @@ async def _agent_has_live_calls(request: Request, exc: agents_service.AgentHasLi
         status_code=409,
         content={"detail": str(exc), "live_call_count": exc.live_call_count},
     )
+
+
+@app.exception_handler(telephony_configs_service.NativeConfigExists)
+async def _native_config_exists(request: Request, exc: telephony_configs_service.NativeConfigExists) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
 @app.exception_handler(phone_numbers_service.DidAlreadyAssigned)

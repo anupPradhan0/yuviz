@@ -36,3 +36,21 @@ CREATE INDEX IF NOT EXISTS idx_telephony_configs_tenant ON telephony_configs(ten
 -- table (phone_numbers already owns DID->agent routing and its Redis
 -- write-through cache-aside pattern) — extend, don't duplicate.
 ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS telephony_config_id UUID REFERENCES telephony_configs(id);
+
+-- Native (local SIP: the platform's own Kamailio + FreeSWITCH) needs no
+-- credentials, so a tenant never needs more than one; a second would only
+-- split its local numbers across identical configs. Guard and index in one
+-- DO block (lesson 13).
+DO $$
+DECLARE dupes int;
+BEGIN
+  SELECT count(*) INTO dupes FROM (
+    SELECT tenant_id FROM telephony_configs
+     WHERE provider = 'native' AND deleted_at IS NULL GROUP BY tenant_id HAVING count(*) > 1
+  ) d;
+  IF dupes > 0 THEN
+    RAISE EXCEPTION '% tenant(s) have more than one live native telephony_config; merge them before applying telephony_schema.sql', dupes;
+  END IF;
+  EXECUTE $sql$CREATE UNIQUE INDEX IF NOT EXISTS telephony_configs_one_native_per_tenant
+    ON telephony_configs (tenant_id) WHERE provider = 'native' AND deleted_at IS NULL$sql$;
+END $$;
