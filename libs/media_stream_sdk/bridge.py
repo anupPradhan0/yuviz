@@ -504,6 +504,19 @@ class MediaStreamBridge:
                 self._resolve_turn()
                 if msg.error.fatal:
                     return
+            elif which == "transfer_request":
+                # No provider call-control path for transfers yet: fail at
+                # once so the caller hears the failed-transfer fallback
+                # instead of silence until the pipeline's transfer timeout.
+                tr = msg.transfer_request
+                self.log.warning("transfer_request unsupported on provider calls call=%s "
+                                 "transfer_id=%s", self.call_id, tr.transfer_id)
+                self._grpc_write_queue.put_nowait(pb.GatewayMessage(transfer_failed=pb.TransferFailed(
+                    session_id=tr.session_id,
+                    destination=tr.destination,
+                    reason="unsupported_provider",
+                    transfer_id=tr.transfer_id,
+                )))
             elif which == "end_call":
                 self.log.info("end_call reason=%s call=%s", msg.end_call.reason, self.call_id)
                 return
