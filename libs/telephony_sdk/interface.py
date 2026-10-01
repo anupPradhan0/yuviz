@@ -140,11 +140,19 @@ class ITelephonyProvider(ABC):
         can't silently skip ownership checks."""
         raise NotImplementedError(f"{self.PROVIDER_NAME}: owns_number must be implemented")
 
-    async def attach_inbound(self, number: str, urls: InboundUrls, *, label: str) -> InboundSyncResult:
+    async def attach_inbound(
+        self, number: str, urls: InboundUrls, *, label: str, refresh_app: bool = True,
+    ) -> InboundSyncResult:
         """Point `number`'s inbound calls at `urls`, creating whatever the
         provider needs. Never raises for a provider rejection: returns ok=False
-        with a message the admin can act on."""
+        with a message the admin can act on. refresh_app=False skips re-pushing
+        `urls` to an existing shared resource (a bulk sync does that once)."""
         raise NotImplementedError(f"{self.PROVIDER_NAME}: attach_inbound must be implemented")
+
+    async def discard_inbound_resources(self, credentials_update: dict[str, Any]) -> None:
+        """Delete what an attach created when another sync's copy was stored
+        first. Best effort; default has nothing to delete."""
+        return None
 
     async def detach_inbound(self, number: str) -> InboundSyncResult:
         """Stop sending `number`'s inbound calls here. A number already

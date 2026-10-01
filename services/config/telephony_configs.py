@@ -39,6 +39,15 @@ NATIVE_PROVIDER = "native"
 _NON_REST_PROVIDERS = frozenset({NATIVE_PROVIDER})
 
 
+class TelephonyConfigHasNumbers(Exception):
+    def __init__(self, count: int) -> None:
+        self.count = count
+        super().__init__(
+            f"{count} number(s) still use this configuration; remove or move them first, "
+            "so none is left routing calls to a configuration that no longer exists"
+        )
+
+
 class NativeConfigExists(Exception):
     def __init__(self) -> None:
         super().__init__("this account already has a Native (local SIP) configuration")
@@ -240,6 +249,16 @@ async def create_telephony_config(
     return result
 
 
+def _account_identity(provider: str, credentials: dict[str, Any]) -> tuple:
+    """The non-secret required fields name the provider account (Vobiz
+    auth_id, Cloudonix domain)."""
+    if provider not in TelephonyProviderRegistry.all():
+        return ()
+    cls = TelephonyProviderRegistry.get(provider)
+    secret = set(cls.sensitive_credential_fields())
+    return tuple(credentials.get(f) for f in cls.required_credential_fields() if f not in secret)
+
+
 async def update_telephony_config(
     config_id: Any,
     *,
@@ -267,10 +286,12 @@ async def update_telephony_config(
             validate_credentials(old["provider"], new_credentials)
             # Ids the platform created at the provider (number_sync.py) aren't
             # in the admin's form; dropping them would orphan that resource.
+            # Only within the same provider account: another account can't use them.
             old_credentials = db.json_col(old["credentials"]) or {}
-            for key in _PLATFORM_MANAGED_CREDENTIAL_FIELDS:
-                if key in old_credentials and key not in new_credentials:
-                    new_credentials[key] = old_credentials[key]
+            if _account_identity(old["provider"], old_credentials) == _account_identity(old["provider"], new_credentials):
+                for key in _PLATFORM_MANAGED_CREDENTIAL_FIELDS:
+                    if key in old_credentials and key not in new_credentials:
+                        new_credentials[key] = old_credentials[key]
             fields = {**fields, "credentials": _json.dumps(new_credentials)}
 
         if fields.get("is_default_outbound") is True:
@@ -382,6 +403,11 @@ async def soft_delete_telephony_config(
         )
         if old_row is None:
             raise LookupError(f"telephony_config {config_id} not found")
+        numbers = await conn.fetchval(
+            "SELECT count(*) FROM phone_numbers WHERE telephony_config_id = $1 AND deleted_at IS NULL", config_id,
+        )
+        if numbers:
+            raise TelephonyConfigHasNumbers(numbers)
 
         await conn.execute(
             "UPDATE telephony_configs SET deleted_at = now() WHERE id = $1", config_id,

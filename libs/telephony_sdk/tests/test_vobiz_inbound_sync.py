@@ -42,6 +42,13 @@ class _Vobiz:
             app_id = f"app{len(self.apps) + 1}"
             self.apps[app_id] = body
             return httpx.Response(201, json={"app_id": app_id, "message": "created"})
+        if request.method in ("GET", "DELETE") and path.startswith(f"{ACCOUNT}/Application/"):
+            app_id = path.rstrip("/").rsplit("/", 1)[1]
+            if app_id not in self.apps:
+                return httpx.Response(404, json={})
+            if request.method == "DELETE":
+                del self.apps[app_id]
+            return httpx.Response(200, json={"app_id": app_id})
         if request.method == "POST" and path.startswith(f"{ACCOUNT}/Application/"):
             app_id = path.rstrip("/").rsplit("/", 1)[1]
             if app_id not in self.apps:
@@ -135,3 +142,40 @@ async def test_unreachable_vobiz_reports_instead_of_raising():
 
     result = await _provider(boom).attach_inbound("+918065354620", URLS, label="x")
     assert not result.ok and "couldn't reach Vobiz" in result.message
+
+
+async def test_a_number_missing_from_the_account_does_not_create_another_application():
+    vobiz = _Vobiz(numbers=(), existing_apps=("app7",))
+    result = await _provider(vobiz, inbound_application_id="app7").attach_inbound("+918065354620", URLS, label="x")
+
+    assert not result.ok and "can't find" in result.message
+    assert result.credentials_update is None
+    assert list(vobiz.apps) == ["app7"]
+
+
+async def test_a_refused_application_create_reports_vobizs_status_and_reason():
+    def handler(request):
+        if request.method == "POST" and request.url.path == f"{ACCOUNT}/Application/":
+            return httpx.Response(403, json={"error": "permission denied"})
+        return httpx.Response(500, json={})
+
+    result = await _provider(handler).attach_inbound("+918065354620", URLS, label="x")
+
+    assert not result.ok
+    assert "HTTP 403" in result.message and "permission denied" in result.message
+
+
+async def test_refresh_app_false_attaches_without_rewriting_the_application():
+    vobiz = _Vobiz(existing_apps=("app7",))
+    result = await _provider(vobiz, inbound_application_id="app7").attach_inbound(
+        "+918065354620", URLS, label="x", refresh_app=False,
+    )
+
+    assert result.ok and vobiz.attached == {"+918065354620": "app7"}
+    assert ("POST", f"{ACCOUNT}/Application/app7/") not in vobiz.calls
+
+
+async def test_discard_deletes_the_unused_application():
+    vobiz = _Vobiz(existing_apps=("app7", "app8"))
+    await _provider(vobiz).discard_inbound_resources({"inbound_application_id": "app8"})
+    assert list(vobiz.apps) == ["app7"]

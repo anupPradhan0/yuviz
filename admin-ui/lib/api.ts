@@ -429,8 +429,8 @@ export const createPhoneNumber = (tenantId: string, body: PhoneNumberCreate) =>
   request<PhoneNumber>(`/tenants/${tenantId}/phone-numbers`, { method: "POST", body: JSON.stringify(body) });
 export const updatePhoneNumber = (phoneNumberId: string, body: PhoneNumberUpdate) =>
   request<PhoneNumber>(`/phone-numbers/${phoneNumberId}`, { method: "PATCH", body: JSON.stringify(body) });
-export const deletePhoneNumber = (phoneNumberId: string) =>
-  request<void>(`/phone-numbers/${phoneNumberId}`, { method: "DELETE" });
+export const deletePhoneNumber = (phoneNumberId: string, opts: { force?: boolean } = {}) =>
+  request<void>(`/phone-numbers/${phoneNumberId}${opts.force ? "?force=true" : ""}`, { method: "DELETE" });
 export const syncPhoneNumber = (phoneNumberId: string) =>
   request<PhoneNumber>(`/phone-numbers/${phoneNumberId}/sync`, { method: "POST" });
 

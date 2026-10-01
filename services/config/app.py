@@ -281,6 +281,13 @@ async def _native_config_exists(request: Request, exc: telephony_configs_service
     return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
+@app.exception_handler(telephony_configs_service.TelephonyConfigHasNumbers)
+async def _telephony_config_has_numbers(
+    request: Request, exc: telephony_configs_service.TelephonyConfigHasNumbers,
+) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc), "number_count": exc.count})
+
+
 @app.exception_handler(phone_numbers_service.DidAlreadyAssigned)
 async def _did_already_assigned(request: Request, exc: phone_numbers_service.DidAlreadyAssigned) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(exc)})

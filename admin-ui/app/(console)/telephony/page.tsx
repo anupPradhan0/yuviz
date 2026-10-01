@@ -1532,6 +1532,10 @@ function EditNumberModal({
   const [status, setStatus] = useState<PhoneNumber["status"]>("active");
   const [sync, setSync] = useState<ProviderSync | null>(null);
   const [purchase, setPurchase] = useState<PurchasedNumber | undefined>(undefined);
+  // Whether this carrier number was bought through us; unknown until loaded.
+  const [purchaseLookup, setPurchaseLookup] = useState<"loading" | "failed" | "done">("done");
+  // Set when the provider refused to detach: the admin may remove it anyway.
+  const [detachRefused, setDetachRefused] = useState<string | null>(null);
   const [busy, setBusy] = useState<null | "save" | "sync" | "remove">(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   // A retry already changed the stored row: refresh the list on close.
@@ -1548,16 +1552,23 @@ function EditNumberModal({
     setSync(target.provider_sync ?? null);
     setPurchase(undefined);
     setConfirmRemove(false);
+    setDetachRefused(null);
     setDirty(false);
     setError(null);
+    setPurchaseLookup(config?.kind === "carrier" ? "loading" : "done");
     if (config?.kind !== "carrier") return;
     let cancelled = false;
     listPurchasedNumbers(target.tenant_id)
       .then((all) => {
         if (cancelled) return;
         setPurchase(all.find((p) => p.carrier_id === config.id && !p.released_at && digits(p.phone_number) === digits(target.did)));
+        setPurchaseLookup("done");
       })
-      .catch(() => {});
+      .catch((e) => {
+        if (cancelled) return;
+        setPurchaseLookup("failed");
+        setError(`Couldn't check whether this number was purchased, so it can't be removed safely: ${e instanceof ApiError ? e.detail : String(e)}`);
+      });
     return () => { cancelled = true; };
   }, [target, config]);
 
@@ -1604,23 +1615,25 @@ function EditNumberModal({
 
   const mode = removeModeFor(config, purchase, isSuperadmin);
 
-  const handleRemove = async () => {
+  const handleRemove = async (force = false) => {
     if (!target) return;
     setBusy("remove");
     setError(null);
     try {
       // Release first: if the carrier refuses, the number keeps routing here.
-      if (mode === "release" && purchase) await releaseNumber(purchase.id);
-      await deletePhoneNumber(target.id);
+      if (mode === "release" && purchase && !force) await releaseNumber(purchase.id);
+      await deletePhoneNumber(target.id, { force });
       onClose();
       onChanged();
     } catch (e) {
       setConfirmRemove(false);
-      fail(e);
+      if (e instanceof ApiError && e.status === 502 && mode === "remove_rest") setDetachRefused(e.detail);
+      else fail(e);
     } finally {
       setBusy(null);
     }
   };
+  const removeBlocked = purchaseLookup !== "done";
 
   const providerLabel = config?.providerLabel ?? "the provider";
   const syncsWithProvider = config?.kind === "telephony_config" && config.provider !== NATIVE;
@@ -1765,16 +1778,30 @@ function EditNumberModal({
         </div>
       ) : (
         <div style={{ display: "flex", alignItems: "center", gap: 12, border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px" }}>
-          <div className="form-hint" style={{ flex: 1, lineHeight: 1.5, margin: 0 }}>{REMOVE_COPY[mode].explain}</div>
-          {confirmRemove ? (
+          <div className="form-hint" style={{ flex: 1, lineHeight: 1.5, margin: 0 }}>
+            {detachRefused ? (
+              <span style={{ color: "var(--red)" }}>
+                {detachRefused}. Remove it anyway? {providerLabel} will keep sending this number&apos;s calls here until you
+                change it there.
+              </span>
+            ) : purchaseLookup === "loading" ? "Checking whether this number was purchased…" : REMOVE_COPY[mode].explain}
+          </div>
+          {detachRefused ? (
+            <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+              <button className="btn btn-ghost btn-sm" onClick={() => setDetachRefused(null)} disabled={busy !== null}>Keep</button>
+              <button className="btn btn-danger btn-sm" onClick={() => handleRemove(true)} disabled={busy !== null}>
+                {busy === "remove" ? "Removing…" : "Remove anyway"}
+              </button>
+            </div>
+          ) : confirmRemove ? (
             <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
               <button className="btn btn-ghost btn-sm" onClick={() => setConfirmRemove(false)} disabled={busy !== null}>Keep</button>
-              <button className="btn btn-danger btn-sm" onClick={handleRemove} disabled={busy !== null}>
+              <button className="btn btn-danger btn-sm" onClick={() => handleRemove()} disabled={busy !== null || removeBlocked}>
                 {busy === "remove" ? "Removing…" : `Yes, ${REMOVE_COPY[mode].button.toLowerCase()}`}
               </button>
             </div>
           ) : (
-            <button className="btn btn-danger btn-sm" style={{ flexShrink: 0 }} onClick={() => setConfirmRemove(true)} disabled={busy !== null}>
+            <button className="btn btn-danger btn-sm" style={{ flexShrink: 0 }} onClick={() => setConfirmRemove(true)} disabled={busy !== null || removeBlocked}>
               {REMOVE_COPY[mode].button}
             </button>
           )}

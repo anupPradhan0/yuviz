@@ -157,7 +157,9 @@ class CloudonixProvider(ITelephonyProvider):
         Voice Application name Cloudonix's DNID API needs."""
         return None
 
-    async def attach_inbound(self, number: str, urls: InboundUrls, *, label: str) -> InboundSyncResult:
+    async def attach_inbound(
+        self, number: str, urls: InboundUrls, *, label: str, refresh_app: bool = True,
+    ) -> InboundSyncResult:
         return InboundSyncResult(
             ok=False,
             message=(

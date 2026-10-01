@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from libs.tenancy import set_target_tenant
@@ -28,6 +30,8 @@ tenant_scoped_router = APIRouter(
 )
 router = APIRouter(prefix="/telephony-configs", tags=["telephony_configs"])
 providers_router = APIRouter(tags=["telephony_configs"])
+
+_SYNC_CONCURRENCY = 5
 
 
 async def _resolve_tenant_id(tenant_id: str) -> None:
@@ -154,14 +158,25 @@ async def sync_numbers(
         n for n in await phone_numbers_service.list_phone_numbers(cfg["tenant_id"])
         if str(n.get("telephony_config_id")) == str(cfg["id"])
     ]
-    results = []
-    for number in numbers:
-        sync = await number_sync.attach(cfg, number["did"])
+    results: list[dict] = []
+
+    async def sync_one(number: dict, config: dict, refresh_app: bool) -> None:
+        sync = await number_sync.attach(config, number["did"], refresh_app=refresh_app)
         if sync is not None:
             await phone_numbers_service.record_provider_sync(number["id"], number["tenant_id"], sync)
             results.append({"did": number["did"], **sync})
-        # Reload: the first attach may have created the provider-side app.
+
+    if numbers:
+        # The first may create the shared provider app and refreshes its URLs once.
+        await sync_one(numbers[0], cfg, refresh_app=True)
         cfg = await telephony_configs_service.get_telephony_config(config_id, platform_scoped=True)
+        limit = asyncio.Semaphore(_SYNC_CONCURRENCY)
+
+        async def bounded(number: dict) -> None:
+            async with limit:
+                await sync_one(number, cfg, refresh_app=False)
+
+        await asyncio.gather(*(bounded(n) for n in numbers[1:]))
     return {"results": results}
 
 

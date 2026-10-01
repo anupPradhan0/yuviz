@@ -20,6 +20,7 @@ from ..registry import SmsProviderRegistry, TelephonyProviderRegistry
 
 _call_id_counter = itertools.count(1)
 _message_id_counter = itertools.count(1)
+_app_id_counter = itertools.count(1)
 
 # Callers build a fresh instance per request, so tests read sync calls here.
 SYNC_LOG: list[tuple[str, str, Any]] = []
@@ -110,12 +111,23 @@ class FakeProvider(ITelephonyProvider, ISmsProvider):
             raise TelephonyProviderError("fake: scripted ownership lookup failure")
         return {"yes": True, "no": False}.get(mode)
 
-    async def attach_inbound(self, number: str, urls: InboundUrls, *, label: str) -> InboundSyncResult:
+    async def attach_inbound(
+        self, number: str, urls: InboundUrls, *, label: str, refresh_app: bool = True,
+    ) -> InboundSyncResult:
         SYNC_LOG.append(("attach", number, urls))
-        if self._credentials.get("attach_ok", True):
-            update = None if self._credentials.get("inbound_application_id") else {"inbound_application_id": "fake-app-1"}
-            return InboundSyncResult(ok=True, credentials_update=update)
-        return InboundSyncResult(ok=False, message="fake: scripted attach failure")
+        if not self._credentials.get("attach_ok", True):
+            return InboundSyncResult(ok=False, message="fake: scripted attach failure")
+        update = None
+        if not self._credentials.get("inbound_application_id"):
+            app_id = f"fake-app-{next(_app_id_counter)}"
+            SYNC_LOG.append(("create_app", number, app_id))
+            update = {"inbound_application_id": app_id}
+        elif refresh_app:
+            SYNC_LOG.append(("refresh_app", number, self._credentials["inbound_application_id"]))
+        return InboundSyncResult(ok=True, credentials_update=update)
+
+    async def discard_inbound_resources(self, credentials_update: dict[str, Any]) -> None:
+        SYNC_LOG.append(("discard_app", "", credentials_update.get("inbound_application_id")))
 
     async def detach_inbound(self, number: str) -> InboundSyncResult:
         SYNC_LOG.append(("detach", number, None))

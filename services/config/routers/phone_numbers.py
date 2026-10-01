@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 import re
 
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from libs.tenancy import set_target_tenant
 
@@ -191,8 +193,13 @@ async def update_phone_number(
             fields.get("telephony_config_id", phone_number.get("telephony_config_id")),
             fields.get("carrier_id", phone_number.get("carrier_id")),
         )
+    def _id(value: Any) -> str | None:
+        # The stored id is a UUID, the request's a str.
+        return None if value is None else str(value)
+
     moved = ("did" in fields and fields["did"] != phone_number["did"]) or (
-        "telephony_config_id" in fields and fields["telephony_config_id"] != phone_number.get("telephony_config_id")
+        "telephony_config_id" in fields
+        and _id(fields["telephony_config_id"]) != _id(phone_number.get("telephony_config_id"))
     )
     old_cfg = await _telephony_config(phone_number.get("telephony_config_id")) if moved else None
     new_cfg = await _telephony_config(fields.get("telephony_config_id", phone_number.get("telephony_config_id"))) if moved else None
@@ -233,7 +240,9 @@ async def sync_phone_number(
 
 @router.delete("/{phone_number_id}", status_code=204)
 async def delete_phone_number(
-    phone_number_id: str, current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
+    phone_number_id: str,
+    force: bool = Query(False, description="remove it here even if the provider won't detach it"),
+    current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
     phone_number = await get_or_404(
         phone_numbers_service.get_phone_number(
@@ -248,13 +257,15 @@ async def delete_phone_number(
         current_user, phone_number["did"], phone_number.get("telephony_config_id"), phone_number.get("carrier_id"),
     )
     set_target_tenant(phone_number["tenant_id"])
-    # Detach at the provider first: if that fails, keep the row, so the number
-    # is never left routing calls here with nothing on record to answer them.
+    # Detach at the provider first: if that fails, keep the row unless the
+    # admin forces it, so a number never silently keeps routing here.
     cfg = await _telephony_config(phone_number.get("telephony_config_id"))
     if cfg is not None:
         released = await number_sync.detach(cfg, phone_number["did"])
         if released is not None and not released["ok"]:
-            raise HTTPException(status_code=502, detail=f"{cfg['provider']} didn't release the number: {released['message']}")
+            if not force:
+                raise HTTPException(status_code=502, detail=f"{cfg['provider']} didn't release the number: {released['message']}")
+            log.warning("phone_numbers: %s removed without detaching at %s: %s", phone_number["did"], cfg["provider"], released["message"])
     await phone_numbers_service.soft_delete_phone_number(
         phone_number_id, user_id=current_user.id, user_email=current_user.email,
     )

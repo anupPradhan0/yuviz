@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 from typing import Any
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -21,6 +22,8 @@ import httpx
 from ..exceptions import TelephonyProviderError
 from ..interface import ISmsProvider, ITelephonyProvider, InboundSyncResult, InboundUrls, NormalizedInboundCall
 from ..registry import SmsProviderRegistry, TelephonyProviderRegistry
+
+log = logging.getLogger(__name__)
 
 _BASE_URL = "https://api.vobiz.ai/api"
 
@@ -229,7 +232,9 @@ class VobizTelephonyProvider(ITelephonyProvider, ISmsProvider):
         except httpx.HTTPError as exc:
             raise TelephonyProviderError(f"couldn't reach Vobiz: {exc}") from exc
 
-    async def attach_inbound(self, number: str, urls: InboundUrls, *, label: str) -> InboundSyncResult:
+    async def attach_inbound(
+        self, number: str, urls: InboundUrls, *, label: str, refresh_app: bool = True,
+    ) -> InboundSyncResult:
         """Binds the number to this config's Vobiz Application, creating the
         Application on first use (its id comes back as credentials_update).
         An existing Application gets its URLs refreshed, which repairs every
@@ -245,24 +250,28 @@ class VobizTelephonyProvider(ITelephonyProvider, ISmsProvider):
         try:
             async with self._client() as client:
 
-                async def create_app() -> str | None:
+                async def create_app() -> tuple[str | None, str | None]:
                     resp = await client.post(f"{account}/Application/", json={"app_name": label, **app_fields}, headers=self._headers)
                     if resp.status_code not in (200, 201):
-                        return None
-                    return str(resp.json().get("app_id") or "") or None
+                        return None, f"Vobiz didn't create the application (HTTP {resp.status_code}: {_vobiz_error(resp)})"
+                    new_id = str(resp.json().get("app_id") or "")
+                    return (new_id, None) if new_id else (None, "Vobiz created the application but returned no id")
 
                 if not app_id:
-                    app_id = await create_app()
+                    app_id, error = await create_app()
                     if not app_id:
-                        return InboundSyncResult(ok=False, message="Vobiz didn't create the application for this number")
+                        return InboundSyncResult(ok=False, message=error)
                     created = {"inbound_application_id": app_id}
 
                 attach_url = f"{account}/numbers/{quote(target, safe='')}/application"
                 resp = await client.post(attach_url, json={"application_id": app_id}, headers=self._headers)
                 if resp.status_code == 404 and created is None:
-                    # The stored Application may have been deleted in Vobiz: make a new one once.
-                    app_id = await create_app()
-                    if app_id:
+                    # Recreate only if the stored Application is what's missing, not the number.
+                    app = await client.get(f"{account}/Application/{app_id}/", headers=self._headers)
+                    if app.status_code == 404:
+                        app_id, error = await create_app()
+                        if not app_id:
+                            return InboundSyncResult(ok=False, message=error)
                         created = {"inbound_application_id": app_id}
                         resp = await client.post(attach_url, json={"application_id": app_id}, headers=self._headers)
                 if resp.status_code not in (200, 201, 204):
@@ -276,15 +285,29 @@ class VobizTelephonyProvider(ITelephonyProvider, ISmsProvider):
                             message += ". Vobiz trial numbers can't be attached to an application; use a paid number"
                     return InboundSyncResult(ok=False, message=message, credentials_update=created)
 
-                if created is None:
+                if created is None and refresh_app:
                     resp = await client.post(f"{account}/Application/{app_id}/", json=app_fields, headers=self._headers)
                     if resp.status_code not in (200, 202):
                         return InboundSyncResult(
-                            ok=False, message=f"Vobiz rejected updating the application's URLs (HTTP {resp.status_code})",
+                            ok=False,
+                            message=f"Vobiz rejected updating the application's URLs (HTTP {resp.status_code}: {_vobiz_error(resp)})",
                         )
         except httpx.HTTPError as exc:
             return InboundSyncResult(ok=False, message=f"couldn't reach Vobiz: {exc}", credentials_update=created)
         return InboundSyncResult(ok=True, credentials_update=created)
+
+    async def discard_inbound_resources(self, credentials_update: dict[str, Any]) -> None:
+        app_id = credentials_update.get("inbound_application_id")
+        if not app_id:
+            return
+        url = f"{_BASE_URL}/v1/Account/{self._auth_id}/Application/{app_id}/"
+        try:
+            async with self._client() as client:
+                resp = await client.delete(url, headers=self._headers)
+            if resp.status_code not in (200, 204, 404):
+                log.warning("vobiz: couldn't delete unused application %s (HTTP %s)", app_id, resp.status_code)
+        except httpx.HTTPError as exc:
+            log.warning("vobiz: couldn't delete unused application %s: %s", app_id, exc)
 
     async def detach_inbound(self, number: str) -> InboundSyncResult:
         target = _e164(number)

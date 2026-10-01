@@ -82,7 +82,7 @@ async def ensure_owned(config: dict[str, Any], did: str) -> None:
         raise NumberNotInAccount(did, config["provider"])
 
 
-async def attach(config: dict[str, Any], did: str) -> dict[str, Any] | None:
+async def attach(config: dict[str, Any], did: str, *, refresh_app: bool = True) -> dict[str, Any] | None:
     """None when the config has nothing to sync (native, carriers)."""
     provider = _provider_for(config)
     if provider is None:
@@ -91,9 +91,13 @@ async def attach(config: dict[str, Any], did: str) -> dict[str, Any] | None:
     if urls is None:
         return {"ok": False, "message": f"{PUBLIC_BASE_URL_ENV} isn't set on the Config service, so the "
                                          "provider can't be pointed at this platform"}
-    result = await provider.attach_inbound(did, urls, label=f"Yuviz - {config['name']}")
-    if result.credentials_update:
-        await _merge_credentials(config, result.credentials_update)
+    result = await provider.attach_inbound(did, urls, label=f"Yuviz - {config['name']}", refresh_app=refresh_app)
+    if result.credentials_update and not await _merge_credentials(config, result.credentials_update):
+        # A concurrent sync stored its own resource first: use that one, drop ours.
+        winner = await telephony_configs.get_telephony_config(config["id"], platform_scoped=True)
+        retried = await attach(winner, did, refresh_app=False) if winner is not None else None
+        await provider.discard_inbound_resources(result.credentials_update)
+        return retried
     if not result.ok:
         log.warning("number_sync: attach failed config=%s did=%s: %s", config["id"], did, result.message)
     return {"ok": result.ok, "message": result.message}
@@ -107,16 +111,27 @@ async def detach(config: dict[str, Any], did: str) -> dict[str, Any] | None:
     return {"ok": result.ok, "message": result.message}
 
 
-async def _merge_credentials(config: dict[str, Any], update: dict[str, Any]) -> None:
+async def _merge_credentials(config: dict[str, Any], update: dict[str, Any]) -> bool:
+    """Compare-and-swap: stores `update` only if those keys still hold what
+    `config` was read with. False means another sync changed them first."""
+    seen = config.get("credentials") or {}
+    params: list[Any] = [config["id"], _json.dumps(update), config["tenant_id"]]
+    unchanged = []
+    for key in update:
+        params += [key, _json.dumps(seen.get(key))]
+        unchanged.append(f"credentials -> ${len(params) - 1}::text IS NOT DISTINCT FROM NULLIF(${len(params)}::jsonb, 'null'::jsonb)")
     pool = await db.get_pool()
     async with platform_conn(pool, reason="number-sync-provider-ids", stamp_tenant=str(config["tenant_id"])) as conn:
-        await conn.execute(
+        stored = await conn.fetchval(
             "UPDATE telephony_configs SET credentials = credentials || $2::jsonb, updated_at = now() "
-            "WHERE id = $1 AND tenant_id = $3",
-            config["id"], _json.dumps(update), config["tenant_id"],
+            f"WHERE id = $1 AND tenant_id = $3 AND {' AND '.join(unchanged)} RETURNING true",
+            *params,
         )
+        if not stored:
+            return False
         await audit.write_audit(
             conn, entity_type="telephony_config", entity_id=config["id"], action="updated",
             user_id=None, user_email="number-sync", new_value=update,
         )
     await cache.invalidate(telephony_configs._cache_key(config["id"]))
+    return True
