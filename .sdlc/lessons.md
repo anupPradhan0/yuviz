@@ -336,3 +336,16 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
     the merged state, not on each part. If you cannot do that join, you cannot run the batch in
     parallel: the speed-up just relocates the integration failure to production.
     *Earned: two independently-green fix batches whose combination had never been run together.*
+
+42. [architect][implementer][security][critic] When a service is replaced or rewritten, the tests
+    that guarded its controls are part of what must be carried over — deleting them with the old code
+    lets the control regress with nothing left to notice. And when the same sensitive input can enter
+    through more than one path, verify the control at every entry point, then tripwire the list of
+    entry points itself so a new one cannot be added unseen.
+    *Earned: vobiz was replaced by services/telephony/ + libs/media_stream_sdk/, and its DTMF
+    `digit=%s` tripwire was deleted in the same commit. The security review then checked the
+    media-stream entry point ("logs dtmf received without the digit, lesson 33 applied") and passed
+    it, while a second, webhook entry point for carriers that deliver DTMF over HTTP shipped in the
+    same change logging every keypress at INFO — plus a second copy on every gRPC error. A PIN typed
+    at a `collect` node on those carriers was recoverable from logs. Rewriting the tripwire over both
+    entry points found both leaks, one of which reading by eye had missed.*

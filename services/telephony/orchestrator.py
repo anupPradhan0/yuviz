@@ -255,7 +255,10 @@ async def handle_dtmf_webhook(provider_name: str, account: Account, request: Req
             return False
 
         await _send_dtmf_to_conversation_service(session_id, dtmf_digit)
-        log.info("telephony.dtmf.sent provider=%s account=%s session=%s digit=%s", provider_name, account.account_ref, session_id, dtmf_digit)
+        # Presence only: a keypress at a `collect` node is a PIN or a card
+        # number, so the digit never reaches a log line
+        # (services/telephony/tests/test_dtmf_never_logged.py).
+        log.info("telephony.dtmf.sent provider=%s account=%s session=%s", provider_name, account.account_ref, session_id)
         return True
     except Exception as e:
         log.exception("telephony.dtmf.error provider=%s account=%s", provider_name, account.account_ref)
@@ -283,4 +286,4 @@ async def _send_dtmf_to_conversation_service(session_id: str, digit: str) -> Non
             except asyncio.TimeoutError:
                 pass
     except Exception as e:
-        log.warning("telephony.dtmf.grpc_error session=%s digit=%s error=%s", session_id, digit, str(e))
+        log.warning("telephony.dtmf.grpc_error session=%s error=%s", session_id, str(e))
