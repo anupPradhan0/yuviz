@@ -29,6 +29,7 @@ from libs.tenancy import platform_conn, tenant_conn
 from . import audit, cache, db
 
 _UPDATABLE_FIELDS = {"name", "credentials", "is_default_outbound"}
+_PLATFORM_MANAGED_CREDENTIAL_FIELDS = ("inbound_application_id",)
 
 # 'native' is the 5000-5009 Kamailio/FreeSWITCH rows after the relabel
 # migration (T23) — the REST plane never serves them, so there is no
@@ -264,6 +265,12 @@ async def update_telephony_config(
         if "credentials" in fields and fields["credentials"] is not None:
             new_credentials = _normalize_credentials(old["provider"], fields["credentials"])
             validate_credentials(old["provider"], new_credentials)
+            # Ids the platform created at the provider (number_sync.py) aren't
+            # in the admin's form; dropping them would orphan that resource.
+            old_credentials = db.json_col(old["credentials"]) or {}
+            for key in _PLATFORM_MANAGED_CREDENTIAL_FIELDS:
+                if key in old_credentials and key not in new_credentials:
+                    new_credentials[key] = old_credentials[key]
             fields = {**fields, "credentials": _json.dumps(new_credentials)}
 
         if fields.get("is_default_outbound") is True:

@@ -392,6 +392,14 @@ export interface PhoneNumber {
   region: string | null;
   created_at: string;
   updated_at: string;
+  // Present when saving the number also pointed it at this platform at the
+  // provider (create, or a DID/config change). ok=false: saved, but not wired.
+  provider_sync?: ProviderSync;
+}
+
+export interface ProviderSync {
+  ok: boolean;
+  message: string | null;
 }
 
 export interface PhoneNumberCreate {
@@ -498,6 +506,8 @@ export const createTelephonyConfig = (tenantId: string, body: TelephonyConfigCre
   request<TelephonyConfig>(`/tenants/${tenantId}/telephony-configs`, { method: "POST", body: JSON.stringify(body) });
 export const getTelephonyConfig = (configId: string) =>
   request<TelephonyConfig>(`/telephony-configs/${configId}`);
+export const syncTelephonyNumbers = (configId: string) =>
+  request<{ results: (ProviderSync & { did: string })[] }>(`/telephony-configs/${configId}/sync-numbers`, { method: "POST" });
 export const updateTelephonyConfig = (configId: string, body: TelephonyConfigUpdate) =>
   request<TelephonyConfig>(`/telephony-configs/${configId}`, { method: "PATCH", body: JSON.stringify(body) });
 export const setDefaultOutboundTelephonyConfig = (configId: string) =>

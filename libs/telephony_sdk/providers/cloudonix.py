@@ -29,7 +29,7 @@ import httpx
 from libs.config_sdk.secrets import is_encrypted
 
 from ..exceptions import TelephonyProviderError, WebhookRejected
-from ..interface import ITelephonyProvider, NormalizedInboundCall
+from ..interface import ITelephonyProvider, InboundSyncResult, InboundUrls, NormalizedInboundCall
 from ..registry import TelephonyProviderRegistry
 
 _MAX_API_KEYS = 10
@@ -151,6 +151,25 @@ class CloudonixProvider(ITelephonyProvider):
     @classmethod
     def sensitive_credential_fields(cls) -> list[str]:
         return ["api_keys", "account_api_key"]
+
+    async def owns_number(self, number: str) -> bool | None:
+        """Not automated yet: our configs don't hold the bearer token and
+        Voice Application name Cloudonix's DNID API needs."""
+        return None
+
+    async def attach_inbound(self, number: str, urls: InboundUrls, *, label: str) -> InboundSyncResult:
+        return InboundSyncResult(
+            ok=False,
+            message=(
+                "Automatic setup isn't available for Cloudonix yet. In Cloudonix, add this number to your "
+                f"Voice Application and set the application's URL to {urls.answer_url} (POST)."
+            ),
+        )
+
+    async def detach_inbound(self, number: str) -> InboundSyncResult:
+        # The Voice Application URL is shared by every number on it, so there
+        # is nothing per-number to undo.
+        return InboundSyncResult(ok=True)
 
     async def check_health(self) -> bool:
         """No probe endpoint exists for Cloudonix — usable default."""

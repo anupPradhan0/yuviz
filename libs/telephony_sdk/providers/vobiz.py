@@ -14,12 +14,12 @@ import base64
 import hashlib
 import hmac
 from typing import Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, urlparse, urlunparse
 
 import httpx
 
 from ..exceptions import TelephonyProviderError
-from ..interface import ISmsProvider, ITelephonyProvider, NormalizedInboundCall
+from ..interface import ISmsProvider, ITelephonyProvider, InboundSyncResult, InboundUrls, NormalizedInboundCall
 from ..registry import SmsProviderRegistry, TelephonyProviderRegistry
 
 _BASE_URL = "https://api.vobiz.ai/api"
@@ -30,6 +30,12 @@ def _base_url_no_query(url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
 
 
+def _e164(number: str) -> str:
+    """Vobiz's number inventory keys numbers as E.164 with a leading "+"."""
+    digits = "".join(c for c in number if c.isdigit())
+    return f"+{digits}"
+
+
 def _expected_signature(auth_token: str, base_url: str, nonce: str, version: str) -> str:
     signed_payload = base_url + (f".{nonce}" if version == "v3" else nonce)
     digest = hmac.new(auth_token.encode("utf-8"), signed_payload.encode("utf-8"), hashlib.sha256).digest()
@@ -38,6 +44,8 @@ def _expected_signature(auth_token: str, base_url: str, nonce: str, version: str
 
 class VobizTelephonyProvider(ITelephonyProvider, ISmsProvider):
     PROVIDER_NAME = "vobiz"
+    # Tests replace this with an httpx.MockTransport.
+    _http_transport: httpx.AsyncBaseTransport | None = None
 
     def __init__(self, credentials: dict[str, Any]) -> None:
         super().__init__(credentials)
@@ -184,6 +192,97 @@ class VobizTelephonyProvider(ITelephonyProvider, ISmsProvider):
         except httpx.HTTPError:
             return False
         return resp.status_code < 500
+
+    def _client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(timeout=15.0, transport=self._http_transport)
+
+    async def owns_number(self, number: str) -> bool | None:
+        target = _e164(number)
+        endpoint = f"{_BASE_URL}/v1/Account/{self._auth_id}/numbers"
+        page = 1
+        try:
+            async with self._client() as client:
+                while True:
+                    resp = await client.get(
+                        endpoint, params={"page": page, "per_page": 100, "search": target}, headers=self._headers,
+                    )
+                    if resp.status_code != 200:
+                        raise TelephonyProviderError(f"Vobiz number lookup returned {resp.status_code}")
+                    data = resp.json()
+                    items = data.get("items") or []
+                    if any(item.get("e164") == target for item in items):
+                        return True
+                    per_page = int(data.get("per_page") or 100)
+                    if not items or page * per_page >= int(data.get("total") or 0):
+                        return False
+                    page += 1
+        except httpx.HTTPError as exc:
+            raise TelephonyProviderError(f"couldn't reach Vobiz: {exc}") from exc
+
+    async def attach_inbound(self, number: str, urls: InboundUrls, *, label: str) -> InboundSyncResult:
+        """Binds the number to this config's Vobiz Application, creating the
+        Application on first use (its id comes back as credentials_update).
+        An existing Application gets its URLs refreshed, which repairs every
+        sibling number after the public base URL changes."""
+        target = _e164(number)
+        app_fields = {
+            "answer_url": urls.answer_url, "answer_method": "POST",
+            "hangup_url": urls.hangup_url, "hangup_method": "POST",
+        }
+        account = f"{_BASE_URL}/v1/Account/{self._auth_id}"
+        app_id = self._credentials.get("inbound_application_id")
+        created: dict[str, Any] | None = None
+        try:
+            async with self._client() as client:
+
+                async def create_app() -> str | None:
+                    resp = await client.post(f"{account}/Application/", json={"app_name": label, **app_fields}, headers=self._headers)
+                    if resp.status_code not in (200, 201):
+                        return None
+                    return str(resp.json().get("app_id") or "") or None
+
+                if not app_id:
+                    app_id = await create_app()
+                    if not app_id:
+                        return InboundSyncResult(ok=False, message="Vobiz didn't create the application for this number")
+                    created = {"inbound_application_id": app_id}
+
+                attach_url = f"{account}/numbers/{quote(target, safe='')}/application"
+                resp = await client.post(attach_url, json={"application_id": app_id}, headers=self._headers)
+                if resp.status_code == 404 and created is None:
+                    # The stored Application may have been deleted in Vobiz: make a new one once.
+                    app_id = await create_app()
+                    if app_id:
+                        created = {"inbound_application_id": app_id}
+                        resp = await client.post(attach_url, json={"application_id": app_id}, headers=self._headers)
+                if resp.status_code not in (200, 201, 204):
+                    if resp.status_code == 404:
+                        message = f"Vobiz can't find {target} in this account"
+                    else:
+                        message = f"Vobiz rejected attaching {target} (HTTP {resp.status_code})"
+                    return InboundSyncResult(ok=False, message=message, credentials_update=created)
+
+                if created is None:
+                    resp = await client.post(f"{account}/Application/{app_id}/", json=app_fields, headers=self._headers)
+                    if resp.status_code not in (200, 202):
+                        return InboundSyncResult(
+                            ok=False, message=f"Vobiz rejected updating the application's URLs (HTTP {resp.status_code})",
+                        )
+        except httpx.HTTPError as exc:
+            return InboundSyncResult(ok=False, message=f"couldn't reach Vobiz: {exc}", credentials_update=created)
+        return InboundSyncResult(ok=True, credentials_update=created)
+
+    async def detach_inbound(self, number: str) -> InboundSyncResult:
+        target = _e164(number)
+        url = f"{_BASE_URL}/v1/Account/{self._auth_id}/numbers/{quote(target, safe='')}/application"
+        try:
+            async with self._client() as client:
+                resp = await client.delete(url, headers=self._headers)
+        except httpx.HTTPError as exc:
+            return InboundSyncResult(ok=False, message=f"couldn't reach Vobiz: {exc}")
+        if resp.status_code in (200, 204, 404):
+            return InboundSyncResult(ok=True)
+        return InboundSyncResult(ok=False, message=f"Vobiz rejected detaching {target} (HTTP {resp.status_code})")
 
     async def send_sms(self, *, from_number: str, to_number: str, text: str) -> str:
         """Vobiz's Message API mirrors its Call API on the same auth

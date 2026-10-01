@@ -13,11 +13,16 @@ import itertools
 from typing import Any
 
 from ..exceptions import TelephonyProviderError
-from ..interface import ISmsProvider, ITelephonyProvider, NormalizedInboundCall, ReconcileResult
+from ..interface import (
+    InboundSyncResult, InboundUrls, ISmsProvider, ITelephonyProvider, NormalizedInboundCall, ReconcileResult,
+)
 from ..registry import SmsProviderRegistry, TelephonyProviderRegistry
 
 _call_id_counter = itertools.count(1)
 _message_id_counter = itertools.count(1)
+
+# Callers build a fresh instance per request, so tests read sync calls here.
+SYNC_LOG: list[tuple[str, str, Any]] = []
 
 
 class FakeProvider(ITelephonyProvider, ISmsProvider):
@@ -96,6 +101,27 @@ class FakeProvider(ITelephonyProvider, ISmsProvider):
         if self._reconcile_outcome == "not_placed":
             return ReconcileResult(outcome="not_placed")
         return ReconcileResult(outcome="indeterminate")
+
+    async def owns_number(self, number: str) -> bool | None:
+        """Scripted by credentials["owns_number"]: "yes" (default), "no",
+        "unknown" (None), or "error" (lookup failure)."""
+        mode = self._credentials.get("owns_number", "yes")
+        if mode == "error":
+            raise TelephonyProviderError("fake: scripted ownership lookup failure")
+        return {"yes": True, "no": False}.get(mode)
+
+    async def attach_inbound(self, number: str, urls: InboundUrls, *, label: str) -> InboundSyncResult:
+        SYNC_LOG.append(("attach", number, urls))
+        if self._credentials.get("attach_ok", True):
+            update = None if self._credentials.get("inbound_application_id") else {"inbound_application_id": "fake-app-1"}
+            return InboundSyncResult(ok=True, credentials_update=update)
+        return InboundSyncResult(ok=False, message="fake: scripted attach failure")
+
+    async def detach_inbound(self, number: str) -> InboundSyncResult:
+        SYNC_LOG.append(("detach", number, None))
+        if self._credentials.get("detach_ok", True):
+            return InboundSyncResult(ok=True)
+        return InboundSyncResult(ok=False, message="fake: scripted detach failure")
 
     async def send_sms(self, *, from_number: str, to_number: str, text: str) -> str:
         self.send_count += 1

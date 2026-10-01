@@ -4,6 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from libs.tenancy import set_target_tenant
 
+from .. import number_sync
+from .. import phone_numbers as phone_numbers_service
 from .. import telephony_configs as telephony_configs_service
 from .. import tenants as tenants_service
 from ..auth import CurrentUser
@@ -138,6 +140,28 @@ async def set_default_outbound(
     return await telephony_configs_service.set_default_outbound(
         config_id, user_id=current_user.id, user_email=current_user.email,
     )
+
+
+@router.post("/{config_id}/sync-numbers")
+async def sync_numbers(
+    config_id: str, current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
+):
+    """Re-points every number on this config at the platform, e.g. after the
+    public base URL changed."""
+    cfg = await _authorize_telephony_config(config_id, current_user)
+    set_target_tenant(cfg["tenant_id"])
+    numbers = [
+        n for n in await phone_numbers_service.list_phone_numbers(cfg["tenant_id"])
+        if str(n.get("telephony_config_id")) == str(cfg["id"])
+    ]
+    results = []
+    for number in numbers:
+        sync = await number_sync.attach(cfg, number["did"])
+        if sync is not None:
+            results.append({"did": number["did"], **sync})
+        # Reload: the first attach may have created the provider-side app.
+        cfg = await telephony_configs_service.get_telephony_config(config_id, platform_scoped=True)
+    return {"results": results}
 
 
 @router.delete("/{config_id}", status_code=204)

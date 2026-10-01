@@ -19,6 +19,8 @@ import {
   createPhoneNumber,
   createTelephonyConfig,
   getCurrentUser,
+  ProviderSync,
+  syncTelephonyNumbers,
   listAgents,
   listCalls,
   listCarriers,
@@ -60,6 +62,14 @@ const fmtInt = (n: number) => n.toLocaleString("en-IN");
 const digits = (s: string | null | undefined) => (s ?? "").replace(/\D/g, "");
 const providerLabelFor = (kind: "carrier" | "telephony_config", provider: string) =>
   kind === "carrier" ? CARRIER_PROVIDER_LABEL[provider as CarrierProvider] ?? provider : TELEPHONY_PROVIDER_LABEL[provider] ?? provider;
+
+type SyncNotice = { ok: boolean; text: string };
+
+// What the provider was told when a number was added or re-synced.
+const noticeFor = (provider: string, did: string, sync: ProviderSync): SyncNotice =>
+  sync.ok
+    ? { ok: true, text: `${did}: ${provider} now sends this number's calls here.` }
+    : { ok: false, text: `${did} was saved, but ${provider} wasn't updated: ${sync.message ?? "unknown error"}` };
 
 type TrunkHealth = "healthy" | "degraded" | "standby";
 
@@ -204,6 +214,8 @@ export default function TelephonyPage() {
   const refresh = () => setReloadKey((k) => k + 1);
 
   const [addOpen, setAddOpen] = useState(false);
+  // Lives here, not in ConfigDetail: a refresh briefly unmounts the detail view.
+  const [syncNotice, setSyncNotice] = useState<SyncNotice | null>(null);
   // Gates Native controls only; the server enforces the same rule regardless.
   const [isSuperadmin, setIsSuperadmin] = useState(false);
   useEffect(() => {
@@ -371,7 +383,9 @@ export default function TelephonyPage() {
         tenant={allTenants.find((t) => t.id === selectedConfig.tenantId) ?? null}
         agents={agentsByTenant[selectedConfig.tenantId]?.agents ?? []}
         isSuperadmin={isSuperadmin}
-        onBack={() => router.push("/telephony")}
+        syncNotice={syncNotice}
+        onSyncNotice={setSyncNotice}
+        onBack={() => { setSyncNotice(null); router.push("/telephony"); }}
         onChanged={refresh}
       />
     ) : (
@@ -756,12 +770,36 @@ function webhookUrlFor(config: ConfigRow): string | null {
 }
 
 function ConfigDetail({
-  config, numbers, tenant, agents, isSuperadmin, onBack, onChanged,
+  config, numbers, tenant, agents, isSuperadmin, syncNotice, onSyncNotice, onBack, onChanged,
 }: {
   config: ConfigRow; numbers: NumberRow[]; tenant: Tenant | null; agents: Agent[]; isSuperadmin: boolean;
+  syncNotice: SyncNotice | null; onSyncNotice: (n: SyncNotice | null) => void;
   onBack: () => void; onChanged: () => void;
 }) {
   const isNative = config.kind === "telephony_config" && config.provider === NATIVE;
+  // REST providers whose inbound routing the platform sets up itself.
+  const syncsWithProvider = config.kind === "telephony_config" && !isNative;
+  const [resyncing, setResyncing] = useState(false);
+
+  const handleResync = async () => {
+    setResyncing(true);
+    onSyncNotice(null);
+    try {
+      const { results } = await syncTelephonyNumbers(config.id);
+      const failed = results.filter((r) => !r.ok);
+      onSyncNotice(
+        results.length === 0
+          ? { ok: true, text: "No numbers on this configuration to sync." }
+          : failed.length === 0
+            ? { ok: true, text: `${results.length} number${results.length === 1 ? "" : "s"} re-synced with ${config.providerLabel}.` }
+            : { ok: false, text: failed.map((r) => noticeFor(config.providerLabel, r.did, r).text).join(" ") },
+      );
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setResyncing(false);
+    }
+  };
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -822,6 +860,7 @@ function ConfigDetail({
       </div>
 
       {error && <div className="error-banner">{error}</div>}
+      {syncNotice && <div className={syncNotice.ok ? "info-banner" : "error-banner"}>{syncNotice.text}</div>}
 
       {isNative ? (
         <div className="card" style={{ marginBottom: 16 }}>
@@ -855,8 +894,23 @@ function ConfigDetail({
         <div className="card-hdr">
           <span className="card-title">Phone numbers</span>
           <span className="card-sub">{fmtInt(numbers.length)} DID{numbers.length === 1 ? "" : "s"}</span>
+          {syncsWithProvider && numbers.length > 0 && (
+            <button
+              className="btn btn-ghost btn-sm"
+              style={{ marginLeft: "auto" }}
+              onClick={handleResync}
+              disabled={resyncing}
+              title={`Point every number here at this platform in ${config.providerLabel} again, e.g. after the public URL changed`}
+            >
+              {resyncing ? "Re-syncing…" : "Re-sync numbers"}
+            </button>
+          )}
           {(!isNative || isSuperadmin) && (
-            <button className="btn btn-primary btn-sm" style={{ marginLeft: "auto" }} onClick={() => setAddOpen(true)}>
+            <button
+              className="btn btn-primary btn-sm"
+              style={{ marginLeft: syncsWithProvider && numbers.length > 0 ? 8 : "auto" }}
+              onClick={() => setAddOpen(true)}
+            >
               + Add phone number
             </button>
           )}
@@ -927,7 +981,11 @@ function ConfigDetail({
           config={config}
           tenant={tenant}
           agents={agents}
-          onCreated={() => { setAddOpen(false); onChanged(); }}
+          onCreated={(did, sync) => {
+            setAddOpen(false);
+            onSyncNotice(sync ? noticeFor(config.providerLabel, did, sync) : null);
+            onChanged();
+          }}
         />
       )}
 
@@ -1141,7 +1199,10 @@ function EditCredentialsModal({
 
 function AddNumberModal({
   open, onClose, config, tenant, agents, onCreated,
-}: { open: boolean; onClose: () => void; config: ConfigRow; tenant: Tenant; agents: Agent[]; onCreated: () => void }) {
+}: {
+  open: boolean; onClose: () => void; config: ConfigRow; tenant: Tenant; agents: Agent[];
+  onCreated: (did: string, sync?: ProviderSync) => void;
+}) {
   const [tab, setTab] = useState<"manual" | "buy">("manual");
   const [error, setError] = useState<string | null>(null);
 
@@ -1184,8 +1245,8 @@ function AddNumberModal({
         status: active ? "active" : "inactive",
         ...(config.kind === "carrier" ? { carrier_id: config.id } : { telephony_config_id: config.id }),
       };
-      await createPhoneNumber(tenant.id, body);
-      onCreated();
+      const created = await createPhoneNumber(tenant.id, body);
+      onCreated(created.did, created.provider_sync);
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : String(e));
     } finally {
@@ -1215,8 +1276,8 @@ function AddNumberModal({
     setError(null);
     try {
       await purchaseNumber(tenant.id, { carrier_id: config.id, phone_number: phoneNumber });
-      await createPhoneNumber(tenant.id, { did: phoneNumber, carrier_id: config.id, status: "active" });
-      onCreated();
+      const created = await createPhoneNumber(tenant.id, { did: phoneNumber, carrier_id: config.id, status: "active" });
+      onCreated(created.did, created.provider_sync);
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : String(e));
     } finally {

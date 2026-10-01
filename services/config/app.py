@@ -24,6 +24,7 @@ from libs.ratelimit import FixedWindowCounter
 
 from . import cache, db, email, invites
 from . import agents as agents_service
+from . import number_sync
 from . import phone_numbers as phone_numbers_service
 from . import provider_configs as provider_configs_service
 from . import telephony_configs as telephony_configs_service
@@ -263,6 +264,16 @@ async def _agent_has_live_calls(request: Request, exc: agents_service.AgentHasLi
         status_code=409,
         content={"detail": str(exc), "live_call_count": exc.live_call_count},
     )
+
+
+@app.exception_handler(number_sync.NumberNotInAccount)
+async def _number_not_in_account(request: Request, exc: number_sync.NumberNotInAccount) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(number_sync.ProviderUnreachable)
+async def _provider_unreachable(request: Request, exc: number_sync.ProviderUnreachable) -> JSONResponse:
+    return JSONResponse(status_code=502, content={"detail": str(exc)})
 
 
 @app.exception_handler(telephony_configs_service.NativeConfigExists)
