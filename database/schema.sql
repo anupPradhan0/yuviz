@@ -466,7 +466,7 @@ CREATE TABLE IF NOT EXISTS carriers (
 -- decide — see project memory for the full reasoning.
 CREATE TABLE IF NOT EXISTS phone_numbers (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    did                TEXT NOT NULL UNIQUE,
+    did                TEXT NOT NULL,  -- unique among live rows only (phone_numbers_did_live_key)
     tenant_id          UUID NOT NULL REFERENCES tenants(id),
     agent_id           UUID REFERENCES agents(id),  -- nullable: unassigned number
     -- Used when agent_id is null or its agent is unavailable/deleted —
@@ -491,6 +491,24 @@ ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 
 DO $$ BEGIN
     ALTER TABLE phone_numbers ADD CONSTRAINT phone_numbers_status_check CHECK (status IN ('active', 'inactive', 'suspended'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- A DID is unique among live numbers only: deleting one releases it for any
+-- tenant to add again, while the deleted row stays as ownership history.
+-- Replaces the original table-wide UNIQUE (did). Guard and swap share one DO
+-- block (lesson 13); the index is created before the old constraint is
+-- dropped, so global uniqueness among live rows never lapses.
+DO $$
+DECLARE dupes int;
+BEGIN
+  SELECT count(*) INTO dupes FROM (
+    SELECT did FROM phone_numbers WHERE deleted_at IS NULL GROUP BY did HAVING count(*) > 1
+  ) d;
+  IF dupes > 0 THEN
+    RAISE EXCEPTION 'phone_numbers has % DID(s) with more than one live row; resolve them before applying schema.sql', dupes;
+  END IF;
+  EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS phone_numbers_did_live_key ON phone_numbers (did) WHERE deleted_at IS NULL';
+  EXECUTE 'ALTER TABLE phone_numbers DROP CONSTRAINT IF EXISTS phone_numbers_did_key';
+END $$;
 
 -- carrier_account_ref (DID Management platform): the carrier's
 -- own account identifier (e.g. Plivo Auth ID / Twilio Account SID) needed

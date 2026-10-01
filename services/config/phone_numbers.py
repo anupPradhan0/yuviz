@@ -21,6 +21,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import asyncpg
+
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import audit, cache, db
@@ -151,6 +153,20 @@ async def list_phone_numbers(tenant_id: Any) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+class DidAlreadyAssigned(Exception):
+    """The DID has a live row (any tenant). Deliberately names no owner: a
+    tenant probing a number must not learn which customer holds it."""
+
+    def __init__(self, did: str) -> None:
+        self.did = did
+        super().__init__(f"{did} is already assigned")
+
+
+def _raise_if_did_taken(exc: asyncpg.UniqueViolationError, did: str) -> None:
+    if exc.constraint_name == "phone_numbers_did_live_key":
+        raise DidAlreadyAssigned(did) from None
+
+
 async def create_phone_number(
     *,
     tenant_id: Any,
@@ -166,12 +182,16 @@ async def create_phone_number(
 ) -> dict[str, Any]:
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
-        row = await conn.fetchrow(
-            "INSERT INTO phone_numbers "
-            "(tenant_id, did, agent_id, fallback_agent_id, carrier_id, telephony_config_id, region, status) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *",
-            tenant_id, did, agent_id, fallback_agent_id, carrier_id, telephony_config_id, region, status,
-        )
+        try:
+            row = await conn.fetchrow(
+                "INSERT INTO phone_numbers "
+                "(tenant_id, did, agent_id, fallback_agent_id, carrier_id, telephony_config_id, region, status) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *",
+                tenant_id, did, agent_id, fallback_agent_id, carrier_id, telephony_config_id, region, status,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            _raise_if_did_taken(exc, did)
+            raise
         result = dict(row)
         await audit.write_audit(
             conn,
@@ -215,11 +235,15 @@ async def update_phone_number(
 
         columns = list(fields.keys())
         set_clause = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(columns))
-        new_row = await conn.fetchrow(
-            f"UPDATE phone_numbers SET {set_clause}, updated_at = now() "
-            f"WHERE id = $1 RETURNING *",
-            phone_number_id, *(fields[col] for col in columns),
-        )
+        try:
+            new_row = await conn.fetchrow(
+                f"UPDATE phone_numbers SET {set_clause}, updated_at = now() "
+                f"WHERE id = $1 RETURNING *",
+                phone_number_id, *(fields[col] for col in columns),
+            )
+        except asyncpg.UniqueViolationError as exc:
+            _raise_if_did_taken(exc, fields.get("did", old["did"]))
+            raise
         new = dict(new_row)
 
         await audit.write_audit(

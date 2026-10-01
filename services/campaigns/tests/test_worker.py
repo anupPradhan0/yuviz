@@ -20,7 +20,7 @@ async def _provision_default_caller_id(test_tenant, pool):
     Every test in this module that reaches resolve_outbound_route dials
     from the same default number, so it must actually be provisioned."""
     await pool.execute(
-        "INSERT INTO phone_numbers (did, tenant_id) VALUES ($1, $2) ON CONFLICT (did) DO NOTHING",
+        "INSERT INTO phone_numbers (did, tenant_id) VALUES ($1, $2) ON CONFLICT (did) WHERE deleted_at IS NULL DO NOTHING",
         _DEFAULT_CALLER_ID, test_tenant["id"],
     )
     yield

@@ -264,6 +264,11 @@ async def _agent_has_live_calls(request: Request, exc: agents_service.AgentHasLi
     )
 
 
+@app.exception_handler(phone_numbers_service.DidAlreadyAssigned)
+async def _did_already_assigned(request: Request, exc: phone_numbers_service.DidAlreadyAssigned) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
 @app.exception_handler(invites.PermissionDenied)
 async def _invite_permission_denied(request: Request, exc: invites.PermissionDenied) -> JSONResponse:
     return JSONResponse(status_code=403, content={"detail": "not permitted to invite this role/tenant"})
