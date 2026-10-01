@@ -77,13 +77,14 @@ async def _with_provider_sync(number: dict, cfg: dict | None) -> dict:
     return {**number, "provider_sync": stored}
 
 
-_E164 = re.compile(r"^\+[1-9]\d{6,14}$")
+# 7-15 digits, "+" optional: Vobiz routes its numbers without one.
+_PUBLIC_NUMBER = re.compile(r"\+?[1-9]\d{6,14}")
 
 
 def _is_local_address(did: str) -> bool:
     """Inbound routing keys on the DID alone, so anything that isn't a
     public number or SIP URI is an extension on the shared Kamailio/FreeSWITCH."""
-    return not (_E164.match(did) or did.lower().startswith("sip:"))
+    return not (_PUBLIC_NUMBER.fullmatch(did) or did.lower().startswith("sip:"))
 
 
 async def _require_superadmin_for_local_number(
@@ -97,13 +98,14 @@ async def _require_superadmin_for_local_number(
         return
     local = _is_local_address(did) or (telephony_config_id is None and carrier_id is None)
     if not local and telephony_config_id is not None:
-        cfg = await telephony_configs_service.get_telephony_config(telephony_config_id, platform_scoped=True)
-        # A config that no longer resolves fails closed.
-        local = cfg is None or cfg["provider"] == telephony_configs_service.NATIVE_PROVIDER
+        # By kind, so a soft-deleted REST config's numbers stay the tenant's;
+        # only a missing row fails closed.
+        kind = await telephony_configs_service.get_provider_kind(telephony_config_id)
+        local = kind is None or kind == telephony_configs_service.NATIVE_PROVIDER
     if local:
         raise HTTPException(
             status_code=403,
-            detail="Local numbers and extensions are assigned by the platform; enter public numbers in E.164 form (+...)",
+            detail="Local numbers and extensions are assigned by the platform",
         )
 
 

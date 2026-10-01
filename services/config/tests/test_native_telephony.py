@@ -136,7 +136,7 @@ async def test_tenant_admin_can_route_but_not_move_a_native_number(
 async def test_tenant_admin_cannot_claim_a_local_extension_under_any_provider(test_tenant, test_admin, pool):
     """Routing keys on the DID alone, so a REST config or carrier must not
     let a tenant admin take a local extension."""
-    ext = f"5{uuid.uuid4().int % 10**6:06d}"
+    ext = f"59{uuid.uuid4().int % 10**4:04d}"  # extensions are at most 6 digits
     vobiz = await pool.fetchval(
         "INSERT INTO telephony_configs (tenant_id, name, provider, credentials) "
         "VALUES ($1, 'Fake', 'fake', '{}'::jsonb) RETURNING id", test_tenant["id"],
@@ -165,6 +165,47 @@ async def test_tenant_admin_cannot_claim_a_local_extension_under_any_provider(te
         await pool.execute("DELETE FROM telephony_configs WHERE id = $1", vobiz)
         await pool.execute("DELETE FROM carriers WHERE id = $1", carrier)
         await cache.invalidate(f"did:{public}")
+
+
+async def test_tenant_admin_can_add_a_public_number_without_a_plus(test_tenant, test_admin, pool):
+    """Vobiz routes its numbers as E.164 without the "+"."""
+    config = await pool.fetchval(
+        "INSERT INTO telephony_configs (tenant_id, name, provider, credentials) "
+        "VALUES ($1, 'Fake', 'fake', '{}'::jsonb) RETURNING id", test_tenant["id"],
+    )
+    did = f"91{uuid.uuid4().int % 10**10:010d}"
+    try:
+        async with _client(test_admin["token"]) as admin:
+            resp = await admin.post(
+                f"/tenants/{test_tenant['id']}/phone-numbers", json={"did": did, "telephony_config_id": str(config)},
+            )
+        assert resp.status_code == 201, resp.text
+    finally:
+        await pool.execute("DELETE FROM phone_numbers WHERE tenant_id = $1", test_tenant["id"])
+        await pool.execute("DELETE FROM telephony_configs WHERE id = $1", config)
+        await cache.invalidate(f"did:{did}")
+
+
+async def test_a_public_number_on_a_deleted_rest_config_stays_the_tenants(test_tenant, test_admin, test_superadmin, pool):
+    config = await pool.fetchval(
+        "INSERT INTO telephony_configs (tenant_id, name, provider, credentials) "
+        "VALUES ($1, 'Fake', 'fake', '{}'::jsonb) RETURNING id", test_tenant["id"],
+    )
+    did = f"+1555{uuid.uuid4().int % 10**7:07d}"
+    try:
+        async with _client(test_admin["token"]) as admin:
+            created = await admin.post(
+                f"/tenants/{test_tenant['id']}/phone-numbers", json={"did": did, "telephony_config_id": str(config)},
+            )
+            assert created.status_code == 201, created.text
+            await pool.execute("UPDATE telephony_configs SET deleted_at = now() WHERE id = $1", config)
+            await cache.invalidate(f"telephony_config:{config}")
+            resp = await admin.delete(f"/phone-numbers/{created.json()['id']}")
+        assert resp.status_code == 204, resp.text
+    finally:
+        await pool.execute("DELETE FROM phone_numbers WHERE tenant_id = $1", test_tenant["id"])
+        await pool.execute("DELETE FROM telephony_configs WHERE id = $1", config)
+        await cache.invalidate(f"did:{did}")
 
 
 async def test_a_number_whose_config_was_deleted_stays_platform_only(
