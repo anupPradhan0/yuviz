@@ -160,6 +160,22 @@ class TestTenantEndpoints:
         gone = await client.get(f"/tenants/{test_tenant['slug']}")
         assert gone.status_code == 404
 
+    async def test_delete_tenant_retires_its_numbers_and_their_routes(self, client, test_tenant, pool):
+        from services.config import cache, phone_numbers
+
+        did = f"test-did-{uuid.uuid4().hex[:8]}"
+        set_target_tenant(test_tenant["id"])
+        await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
+        assert await cache.get_json(f"did:{did}") is not None
+        try:
+            resp = await client.delete(f"/tenants/{test_tenant['id']}?force=true")
+            assert resp.status_code == 204
+
+            assert await pool.fetchval("SELECT deleted_at FROM phone_numbers WHERE did = $1", did) is not None
+            assert await cache.get_json(f"did:{did}") is None
+        finally:
+            await pool.execute("DELETE FROM phone_numbers WHERE did = $1", did)
+
     async def test_delete_tenant_with_nothing_attached_needs_no_force(self, client, test_tenant):
         # The common case — the check itself must not become an extra
         # confirmation step when there's genuinely nothing to warn about.
@@ -798,7 +814,7 @@ class TestProviderConfigEndpoints:
         finally:
             await pool.execute("DELETE FROM knowledge_bases WHERE id = $1", kb_id)
 
-    async def test_delete_provider_force_true_bypasses_the_block(self, client, test_tenant):
+    async def test_delete_provider_force_no_longer_bypasses_the_block(self, client, test_tenant):
         stt = await client.post(
             f"/tenants/{test_tenant['id']}/providers",
             json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
@@ -811,7 +827,28 @@ class TestProviderConfigEndpoints:
         assert agent.status_code == 201
 
         resp = await client.delete(f"/providers/{provider_id}?force=true")
-        assert resp.status_code == 204
+        assert resp.status_code == 409
+        assert (await client.get(f"/providers/{provider_id}")).status_code == 200
+
+    async def test_delete_provider_in_use_by_inactive_agent_is_409(self, client, test_tenant):
+        stt = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+        )
+        provider_id = stt.json()["id"]
+        agent = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "idle-agent", "name": "Idle", "stt_config_id": provider_id},
+        )
+        assert agent.status_code == 201
+        patched = await client.patch(
+            f"/tenants/{test_tenant['slug']}/agents/{agent.json()['id']}", json={"status": "inactive"},
+        )
+        assert patched.status_code == 200
+
+        resp = await client.delete(f"/providers/{provider_id}")
+        assert resp.status_code == 409
+        assert resp.json()["resource_names"] == ["Idle"]
 
     async def test_voices_requires_elevenlabs_engine(self, client, test_tenant):
         create = await client.post(

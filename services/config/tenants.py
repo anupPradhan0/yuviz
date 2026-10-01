@@ -14,7 +14,7 @@ from typing import Any
 
 from libs.tenancy import platform_conn
 
-from . import audit, cache, db
+from . import audit, cache, db, phone_numbers
 
 # Columns an UPDATE is allowed to touch — deliberately not "whatever kwargs
 # the caller passes", so a typo'd field name fails loudly instead of being
@@ -215,5 +215,24 @@ async def soft_delete_tenant(
             user_email=user_email,
             old_value=old,
         )
+        # A deleted tenant's numbers must stop routing; did:{did} has no TTL,
+        # so nothing else would ever remove them.
+        retired = await conn.fetch(
+            "UPDATE phone_numbers SET deleted_at = now() WHERE tenant_id = $1 AND deleted_at IS NULL "
+            "RETURNING *",
+            tenant_id,
+        )
+        for row in retired:
+            await audit.write_audit(
+                conn,
+                entity_type="phone_number",
+                entity_id=row["id"],
+                action="deleted",
+                user_id=user_id,
+                user_email=user_email,
+                old_value=dict(row),
+            )
 
     await cache.invalidate(_cache_key(old["slug"]))
+    for row in retired:
+        await cache.invalidate(phone_numbers._cache_key(row["did"]))

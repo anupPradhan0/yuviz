@@ -234,9 +234,9 @@ async def update_provider_config(
 
 
 class ProviderConfigInUse(Exception):
-    """Raised instead of deleting when active agents (stt/llm/tts roles) or
-    active knowledge bases (embedding role) still have this provider
-    assigned and the caller didn't pass force=True — whichever one points
+    """Raised instead of deleting when any non-deleted agent (stt/llm/tts
+    roles) or knowledge base (embedding role), active or not, still has this
+    provider assigned — whichever one points
     at a deleted provider fails to resolve it the next time it needs it
     (an agent mid-call-setup; a knowledge base mid-ingest or mid-retrieval,
     see services/knowledge/{retrieval,ingestion_worker}.py's own
@@ -252,7 +252,7 @@ class ProviderConfigInUse(Exception):
         self.resource_names = resource_names
         noun = "agent" if resource_type == "agent" else "knowledge base"
         super().__init__(
-            f"{resource_count} active {noun}(s) use this provider — pass force=True to delete anyway"
+            f"{resource_count} {noun}(s) use this provider — reassign them before deleting it"
         )
 
 
@@ -271,8 +271,11 @@ _ROLE_TO_USAGE_CHECK = {
 
 
 async def soft_delete_provider_config(
-    provider_id: Any, *, user_id: Any | None = None, user_email: str | None = None, force: bool = False,
+    provider_id: Any, *, user_id: Any | None = None, user_email: str | None = None,
 ) -> None:
+    """Refuses while any non-deleted agent/KB references it, active or not.
+    There is no force: a deleted provider leaves its agents silently falling
+    back to the built-in default script at call time."""
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         old_row = await conn.fetchrow(
@@ -283,17 +286,16 @@ async def soft_delete_provider_config(
         old = dict(old_row)
         old["extra"] = db.json_col(old["extra"])
 
-        if not force:
-            check = _ROLE_TO_USAGE_CHECK.get(old["role"])
-            if check is not None:
-                table, tenant_column, ref_column, resource_type = check
-                rows = await conn.fetch(
-                    f"SELECT name FROM {table} WHERE {tenant_column} = $1 AND deleted_at IS NULL "
-                    f"AND status = 'active' AND {ref_column} = $2",
-                    old["tenant_id"], provider_id,
-                )
-                if rows:
-                    raise ProviderConfigInUse(resource_type, len(rows), [r["name"] for r in rows])
+        check = _ROLE_TO_USAGE_CHECK.get(old["role"])
+        if check is not None:
+            table, tenant_column, ref_column, resource_type = check
+            rows = await conn.fetch(
+                f"SELECT name FROM {table} WHERE {tenant_column} = $1 AND deleted_at IS NULL "
+                f"AND {ref_column} = $2",
+                old["tenant_id"], provider_id,
+            )
+            if rows:
+                raise ProviderConfigInUse(resource_type, len(rows), [r["name"] for r in rows])
 
         await conn.execute(
             "UPDATE provider_configs SET deleted_at = now() WHERE id = $1", provider_id,

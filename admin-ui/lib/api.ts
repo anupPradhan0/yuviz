@@ -169,8 +169,8 @@ export interface ProviderConfigUpdate {
 
 export const updateProvider = (providerId: string, body: ProviderConfigUpdate) =>
   request<ProviderConfig>(`/providers/${providerId}`, { method: "PATCH", body: JSON.stringify(body) });
-export const deleteProvider = (providerId: string, force?: boolean) =>
-  request<void>(`/providers/${providerId}${force ? "?force=true" : ""}`, { method: "DELETE" });
+export const deleteProvider = (providerId: string) =>
+  request<void>(`/providers/${providerId}`, { method: "DELETE" });
 
 export interface ElevenLabsVoiceVerifiedLanguage {
   language: string; // validated ISO 639-1 code — unlike labels.language, which is arbitrary free text

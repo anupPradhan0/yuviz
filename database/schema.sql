@@ -1228,6 +1228,45 @@ BEGIN
     FOREIGN KEY (call_flow_id, tenant_id) REFERENCES call_flows(id, tenant_id) ON DELETE SET NULL$sql$;
 END $$;
 
+-- An agent's STT/LLM/TTS provider must belong to the agent's own tenant.
+-- Config's API already checks this, but seed scripts and raw SQL bypassed
+-- it and left agents running on another tenant's provider. Same composite-FK
+-- shape as call_flows above, but added only if missing (never dropped and
+-- re-added): knowledge_schema.sql's knowledge_bases FK also depends on
+-- provider_configs_id_tenant_id_key, so dropping it on a re-apply would fail.
+-- Guard and constraints share one DO block (lesson 13). NULL provider ids
+-- are exempt under MATCH SIMPLE.
+DO $$
+DECLARE violations int;
+BEGIN
+  SELECT count(*) INTO violations
+    FROM agents a
+    CROSS JOIN LATERAL (VALUES (a.stt_config_id), (a.llm_config_id), (a.tts_config_id)) ref(provider_id)
+    JOIN provider_configs p ON p.id = ref.provider_id
+   WHERE p.tenant_id IS DISTINCT FROM a.tenant_id;
+  IF violations > 0 THEN
+    RAISE EXCEPTION
+      'agents has % provider reference(s) to another tenant''s provider_configs row; '
+      'point them at the agent''s own tenant''s provider before applying schema.sql', violations;
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'provider_configs_id_tenant_id_key') THEN
+    EXECUTE 'ALTER TABLE provider_configs ADD CONSTRAINT provider_configs_id_tenant_id_key UNIQUE (id, tenant_id)';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agents_stt_config_tenant_fkey') THEN
+    EXECUTE $sql$ALTER TABLE agents ADD CONSTRAINT agents_stt_config_tenant_fkey
+      FOREIGN KEY (stt_config_id, tenant_id) REFERENCES provider_configs(id, tenant_id)$sql$;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agents_llm_config_tenant_fkey') THEN
+    EXECUTE $sql$ALTER TABLE agents ADD CONSTRAINT agents_llm_config_tenant_fkey
+      FOREIGN KEY (llm_config_id, tenant_id) REFERENCES provider_configs(id, tenant_id)$sql$;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'agents_tts_config_tenant_fkey') THEN
+    EXECUTE $sql$ALTER TABLE agents ADD CONSTRAINT agents_tts_config_tenant_fkey
+      FOREIGN KEY (tts_config_id, tenant_id) REFERENCES provider_configs(id, tenant_id)$sql$;
+  END IF;
+END $$;
+
 -- CREATE TABLE ... IF NOT EXISTS is a no-op on a database that already has
 -- call_flows from the first version of this table, so `direction` needs its
 -- own idempotent ALTER to reach one (same reason audit_log.tenant_id's FK fix

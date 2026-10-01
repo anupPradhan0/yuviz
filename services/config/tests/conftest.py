@@ -46,6 +46,12 @@ async def test_tenant(pool):
     tenant = dict(row)
     yield tenant
     await cache.invalidate(f"tenant:{slug}")
+    # did:{did} has no TTL and the row deletes below never touch Redis, so
+    # routes written during the test would otherwise outlive it forever.
+    async for key in cache.get_client().scan_iter(match="did:*"):
+        route = await cache.get_json(key)
+        if route and route.get("tenant_slug") == slug:
+            await cache.invalidate(key)
     # Cascade manually — agents/provider_configs/phone_numbers/
     # tool_provider_configs FK-reference tenants without ON DELETE CASCADE
     # (a real delete in production should be a deliberate, audited action

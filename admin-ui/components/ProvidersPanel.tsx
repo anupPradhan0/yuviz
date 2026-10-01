@@ -195,22 +195,6 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
     }
   };
 
-  const handleForceDelete = async () => {
-    if (!deleteTarget) return;
-    setDeleteSubmitting(true);
-    setDeleteError(null);
-    try {
-      await deleteProvider(deleteTarget.id, true);
-      setDeleteTarget(null);
-      setDeleteResourceNames(null);
-      refresh();
-    } catch (e) {
-      setDeleteError(e instanceof ApiError ? e.detail : String(e));
-    } finally {
-      setDeleteSubmitting(false);
-    }
-  };
-
   const modelOptions = form.role === "embedding" ? EMBEDDING_MODELS_BY_ENGINE[form.engine] : MODELS_BY_ENGINE[form.engine];
   const voiceOptions = VOICES_BY_ENGINE[form.engine];
 
@@ -471,12 +455,7 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
               deleteChecking ? (
                 <button className="btn btn-ghost btn-sm" onClick={() => setDeleteTarget(null)}>Cancel</button>
               ) : isBlocked ? (
-                <>
-                  <button className="btn btn-ghost btn-sm" onClick={() => setDeleteTarget(null)}>Cancel</button>
-                  <button className="btn btn-danger btn-sm" onClick={handleForceDelete} disabled={deleteSubmitting}>
-                    {deleteSubmitting ? "Deleting…" : "Force delete anyway"}
-                  </button>
-                </>
+                <button className="btn btn-ghost btn-sm" onClick={() => setDeleteTarget(null)}>Close</button>
               ) : (
                 <>
                   <button className="btn btn-ghost btn-sm" onClick={() => setDeleteTarget(null)}>Cancel</button>
@@ -512,7 +491,7 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
                     return (
                       <>
                         <b>{deleteResourceNames.join(", ")}</b>{" "}
-                        {`${many ? "use" : "uses"} this provider right now — ${consequence}, or force the delete if you're certain.`}
+                        {`${many ? "use" : "uses"} this provider — ${consequence}. Inactive ones count too: they'd break the moment they're reactivated.`}
                       </>
                     );
                   })()}
