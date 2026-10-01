@@ -746,19 +746,28 @@ function SecurityPanel() {
 export default function SettingsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [role, setRole] = useState<UserRole | null>(null);
+  // undefined while loading; null if it failed to load.
+  const [role, setRole] = useState<UserRole | null | undefined>(undefined);
+  const [roleError, setRoleError] = useState<string | null>(null);
   useEffect(() => {
-    getCurrentUser().then((me) => setRole(me.role)).catch(() => setRole(null));
+    getCurrentUser()
+      .then((me) => setRole(me.role))
+      .catch((e) => {
+        setRole(null);
+        setRoleError(e instanceof ApiError ? e.detail : String(e));
+      });
   }, []);
 
   const groups = SECTION_GROUPS
-    .map((g) => ({ ...g, sections: g.sections.filter((s) => !s.roles || (role !== null && s.roles.includes(role))) }))
+    .map((g) => ({ ...g, sections: g.sections.filter((s) => !s.roles || (!!role && s.roles.includes(role))) }))
     .filter((g) => g.sections.length > 0);
   const requested = searchParams.get("section");
   const section: SettingsSection = groups.some((g) => g.sections.some((s) => s.id === requested))
     ? (requested as SettingsSection)
     : "profile";
   const setSection = (id: SettingsSection) => router.replace(id === "profile" ? "/settings" : `/settings?section=${id}`);
+  // A link to a role-gated tab waits for the role instead of flashing Profile.
+  const waitingForRole = role === undefined && SECTION_GROUPS.some((g) => g.sections.some((s) => s.id === requested && s.roles));
 
   return (
     <div style={{ maxWidth: 980 }}>
@@ -802,11 +811,20 @@ export default function SettingsPage() {
         ))}
       </div>
 
-      {section === "profile" && <ProfilePanel />}
-      {section === "sessions" && <SessionsPanel />}
-      {section === "security" && <SecurityPanel />}
-      {section === "team" && <TeamMembers embedded />}
-      {section === "audit-log" && <AuditLogPanel />}
+      {roleError && (
+        <div className="error-banner">Couldn&apos;t load your role, so only your personal settings are shown: {roleError}</div>
+      )}
+      {waitingForRole ? (
+        <div className="empty-state">Loading…</div>
+      ) : (
+        <>
+          {section === "profile" && <ProfilePanel />}
+          {section === "sessions" && <SessionsPanel />}
+          {section === "security" && <SecurityPanel />}
+          {section === "team" && <TeamMembers embedded />}
+          {section === "audit-log" && <AuditLogPanel />}
+        </>
+      )}
     </div>
   );
 }
