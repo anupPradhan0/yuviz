@@ -24,6 +24,7 @@ from libs.config_sdk.workflow import graphs_equivalent, starter_graph
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import audit, cache, db
+from .provider_configs import require_usable_tts_voice
 
 # `workflow` is absent — only publish/create may write a validated graph
 # (except the greeting/system_prompt mirror sync in update_agent).
@@ -179,14 +180,6 @@ _PROVIDER_ROLE_BY_FIELD = {
     "stt_config_id": "stt", "llm_config_id": "llm", "tts_config_id": "tts",
 }
 
-# macos/kokoro/deepgram all fall back to a sensible default voice when
-# provider_configs.voice is unset (see ai_provider_manager.py's
-# _make_macos_tts/_make_kokoro_tts/_make_deepgram_tts) — only elevenlabs has
-# no safe fallback (cfg.voice or "" — an empty voice_id, which fails at
-# call time with an opaque ElevenLabs API error). Checked here instead, so
-# "connected but never picked a voice" is a clear save-time error.
-_TTS_ENGINES_REQUIRING_VOICE = {"elevenlabs"}
-
 
 async def _validate_provider_assignments(conn: Any, tenant_id: Any, fields: dict[str, Any]) -> None:
     """FK existence alone lets stt_config_id point at another tenant's
@@ -228,11 +221,7 @@ async def _validate_provider_assignments(conn: Any, tenant_id: Any, fields: dict
             raise ValueError(f"{field}={config_id!r} belongs to a different tenant")
         if row["role"] != expected_role:
             raise ValueError(f"{field}={config_id!r} has role {row['role']!r}, expected {expected_role!r}")
-        if row["engine"] in _TTS_ENGINES_REQUIRING_VOICE and not row["voice"]:
-            raise ValueError(
-                f"{field}={config_id!r} is a {row['engine']} provider with no voice selected — "
-                "pick a voice for it before assigning it to an agent"
-            )
+        require_usable_tts_voice(field, config_id, row["engine"], row["voice"])
 
 
 async def create_agent(

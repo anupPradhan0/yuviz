@@ -233,6 +233,20 @@ async def update_provider_config(
     return new
 
 
+# Other TTS engines fall back to a default voice; ElevenLabs fails at call time.
+_TTS_ENGINES_REQUIRING_VOICE = {"elevenlabs"}
+
+
+def require_usable_tts_voice(field: str, config_id: Any, engine: str, voice: str | None) -> None:
+    """One rule for every TTS assignment (agent or account default): an
+    engine that needs a voice fails at call time without one."""
+    if engine in _TTS_ENGINES_REQUIRING_VOICE and not voice:
+        raise ValueError(
+            f"{field}={config_id!r} is a {engine} provider with no voice selected — "
+            "pick a voice for it before assigning it"
+        )
+
+
 class ProviderConfigInUse(Exception):
     """Raised instead of deleting when any non-deleted agent (stt/llm/tts
     roles) or knowledge base (embedding role), active or not, still has this

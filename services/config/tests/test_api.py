@@ -906,6 +906,41 @@ class TestProviderConfigEndpoints:
             await pool.execute("DELETE FROM provider_configs WHERE id = $1", foreign)
             await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
 
+    async def test_an_elevenlabs_default_needs_a_voice_like_an_agent_assignment(self, client, test_tenant):
+        tts = (await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "ElevenLabs", "role": "tts", "engine": "elevenlabs"},
+        )).json()["id"]
+        resp = await client.patch(f"/tenants/{test_tenant['id']}", json={"default_tts_config_id": tts})
+        assert resp.status_code == 400
+        assert "no voice selected" in resp.json()["detail"]
+
+    async def test_setting_a_default_locks_the_provider_before_the_tenant(self, client, test_tenant, pool):
+        """Provider delete locks provider then tenant; the default update must
+        too, or the two deadlock."""
+        import asyncio
+
+        import asyncpg
+        llm = (await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Groq", "role": "llm", "engine": "groq"},
+        )).json()["id"]
+        async with pool.acquire() as conn:
+            tx = conn.transaction()
+            await tx.start()
+            await conn.execute("SELECT 1 FROM provider_configs WHERE id = $1 FOR UPDATE", llm)
+            update = asyncio.create_task(
+                client.patch(f"/tenants/{test_tenant['id']}", json={"default_llm_config_id": llm})
+            )
+            await asyncio.sleep(0.5)
+            try:
+                await conn.execute("SELECT 1 FROM tenants WHERE id = $1 FOR UPDATE NOWAIT", test_tenant["id"])
+            except asyncpg.LockNotAvailableError:
+                pytest.fail("update_tenant locked the tenant before the provider")
+            finally:
+                await tx.rollback()
+        assert (await update).status_code == 200
+
     async def test_raw_sql_cannot_point_an_account_default_at_another_tenants_provider(self, test_tenant, pool):
         import asyncpg
         other = await pool.fetchval(

@@ -16,6 +16,7 @@ from typing import Any
 from libs.tenancy import platform_conn
 
 from . import audit, cache, db, phone_numbers
+from .provider_configs import require_usable_tts_voice
 
 # Columns an UPDATE is allowed to touch — deliberately not "whatever kwargs
 # the caller passes", so a typo'd field name fails loudly instead of being
@@ -44,13 +45,14 @@ async def _validate_default_providers(conn: Any, tenant_id: Any, fields: dict[st
             raise ValueError(f"{field}={config_id!r} is not a valid id") from None
         # FOR SHARE: serializes with a concurrent delete's FOR UPDATE.
         row = await conn.fetchrow(
-            "SELECT tenant_id, role FROM provider_configs WHERE id = $1 AND deleted_at IS NULL FOR SHARE",
+            "SELECT tenant_id, role, engine, voice FROM provider_configs WHERE id = $1 AND deleted_at IS NULL FOR SHARE",
             config_id,
         )
         if row is None or str(row["tenant_id"]) != str(tenant_id):
             raise ValueError(f"{field}={config_id!r} is not one of this account's providers")
         if row["role"] != role:
             raise ValueError(f"{field}={config_id!r} is a {row['role']} provider, not {role}")
+        require_usable_tts_voice(field, config_id, row["engine"], row["voice"])
 
 
 def _cache_key(slug: str) -> str:
@@ -150,6 +152,9 @@ async def update_tenant(
 
     pool = await db.get_pool()
     async with platform_conn(pool, reason="tenants-out-of-rls-scope") as conn:
+        # Before the tenants lock: provider delete locks the provider, then
+        # the tenant, so this must take them in the same order.
+        await _validate_default_providers(conn, tenant_id, fields)
         # FOR UPDATE locks the row for the rest of this transaction — a
         # plain SELECT here would let two concurrent update_tenant() calls
         # both read the same "old" value, so the audit_log row from
@@ -161,7 +166,6 @@ async def update_tenant(
         if old_row is None:
             raise LookupError(f"tenant {tenant_id} not found")
         old = dict(old_row)
-        await _validate_default_providers(conn, tenant_id, fields)
 
         columns = list(fields.keys())
         set_clause = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(columns))
