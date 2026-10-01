@@ -68,7 +68,10 @@ async def _with_provider_sync(number: dict, cfg: dict | None) -> dict:
     if cfg is None:
         return number
     sync = await number_sync.attach(cfg, number["did"])
-    return number if sync is None else {**number, "provider_sync": sync}
+    if sync is None:
+        return number
+    stored = await phone_numbers_service.record_provider_sync(number["id"], number["tenant_id"], sync)
+    return {**number, "provider_sync": stored}
 
 
 async def _require_superadmin_for_local_number(
@@ -190,6 +193,27 @@ async def update_phone_number(
         if released is not None and not released["ok"]:
             log.warning("phone_numbers: previous routing for %s not removed: %s", phone_number["did"], released["message"])
     return await _with_provider_sync(updated, new_cfg)
+
+
+@router.post("/{phone_number_id}/sync")
+async def sync_phone_number(
+    phone_number_id: str, current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
+):
+    """Retry pointing one number at the platform at its provider."""
+    phone_number = await get_or_404(
+        phone_numbers_service.get_phone_number(
+            phone_number_id, platform_scoped=is_platform_scoped(current_user),
+        ),
+        f"phone_number {phone_number_id!r} not found",
+    )
+    await assert_tenant_access(phone_number["tenant_id"], current_user)
+    set_target_tenant(phone_number["tenant_id"])
+    cfg = await _telephony_config(phone_number.get("telephony_config_id"))
+    sync = await number_sync.attach(cfg, phone_number["did"]) if cfg is not None else None
+    if sync is None:
+        raise HTTPException(status_code=400, detail="this number's provider has nothing to sync")
+    stored = await phone_numbers_service.record_provider_sync(phone_number["id"], phone_number["tenant_id"], sync)
+    return {**phone_number, "provider_sync": stored}
 
 
 @router.delete("/{phone_number_id}", status_code=204)

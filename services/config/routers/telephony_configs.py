@@ -158,6 +158,7 @@ async def sync_numbers(
     for number in numbers:
         sync = await number_sync.attach(cfg, number["did"])
         if sync is not None:
+            await phone_numbers_service.record_provider_sync(number["id"], number["tenant_id"], sync)
             results.append({"did": number["did"], **sync})
         # Reload: the first attach may have created the provider-side app.
         cfg = await telephony_configs_service.get_telephony_config(config_id, platform_scoped=True)

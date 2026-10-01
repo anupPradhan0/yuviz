@@ -63,7 +63,8 @@ async def test_adding_a_number_points_it_at_the_platform_and_stores_the_app_id(c
     resp = await _add(client, test_tenant, config_id, did)
 
     assert resp.status_code == 201, resp.text
-    assert resp.json()["provider_sync"] == {"ok": True, "message": None}
+    sync = resp.json()["provider_sync"]
+    assert (sync["ok"], sync["message"]) == (True, None) and sync["at"]
     (action, number, urls), = fake.SYNC_LOG
     assert (action, number) == ("attach", did)
     assert urls.answer_url == f"{BASE}/fake/voice/{config_id}"
@@ -93,7 +94,8 @@ async def test_a_failed_attach_keeps_the_number_and_reports_why(client, test_ten
     config_id = await _fake_config(pool, test_tenant, attach_ok=False)
     resp = await _add(client, test_tenant, config_id, _did())
     assert resp.status_code == 201
-    assert resp.json()["provider_sync"] == {"ok": False, "message": "fake: scripted attach failure"}
+    sync = resp.json()["provider_sync"]
+    assert (sync["ok"], sync["message"]) == (False, "fake: scripted attach failure")
 
 
 async def test_without_a_public_base_url_the_number_is_saved_with_a_clear_warning(client, test_tenant, pool, cleanup, monkeypatch):
@@ -140,7 +142,7 @@ async def test_routing_only_changes_do_not_touch_the_provider(client, test_tenan
     number_id = (await _add(client, test_tenant, config_id, _did())).json()["id"]
     fake.SYNC_LOG.clear()
     resp = await client.patch(f"/phone-numbers/{number_id}", json={"status": "inactive"})
-    assert resp.status_code == 200 and "provider_sync" not in resp.json()
+    assert resp.status_code == 200
     assert fake.SYNC_LOG == []
 
 
@@ -157,6 +159,29 @@ async def test_resync_reattaches_every_number_and_creates_the_app_once(client, t
     assert sorted(r["did"] for r in resp.json()["results"]) == sorted(dids)
     assert all(r["ok"] for r in resp.json()["results"])
     assert sorted(n for a, n, _ in fake.SYNC_LOG if a == "attach") == sorted(dids)
+
+
+async def test_sync_outcome_is_stored_on_the_number_and_retry_updates_it(client, test_tenant, pool, cleanup):
+    config_id = await _fake_config(pool, test_tenant, attach_ok=False)
+    number_id = (await _add(client, test_tenant, config_id, _did())).json()["id"]
+
+    listed = (await client.get(f"/tenants/{test_tenant['id']}/phone-numbers")).json()
+    stored = next(n for n in listed if n["id"] == number_id)["provider_sync"]
+    assert stored["ok"] is False and stored["message"] == "fake: scripted attach failure" and stored["at"]
+
+    await pool.execute("UPDATE telephony_configs SET credentials = '{}'::jsonb WHERE id = $1", config_id)
+    await cache.invalidate(f"telephony_config:{config_id}")
+    retried = await client.post(f"/phone-numbers/{number_id}/sync")
+    assert retried.status_code == 200
+    assert retried.json()["provider_sync"]["ok"] is True
+    got = (await client.get(f"/phone-numbers/{number_id}")).json()
+    assert got["provider_sync"]["ok"] is True
+
+
+async def test_retry_on_a_number_with_nothing_to_sync_is_400(client, test_tenant, pool, cleanup):
+    did = _did()
+    number_id = (await client.post(f"/tenants/{test_tenant['id']}/phone-numbers", json={"did": did})).json()["id"]
+    assert (await client.post(f"/phone-numbers/{number_id}/sync")).status_code == 400
 
 
 async def test_resaving_credentials_keeps_the_platform_created_app_id(client, test_tenant, pool, cleanup):

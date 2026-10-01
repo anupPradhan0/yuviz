@@ -37,6 +37,11 @@ CREATE INDEX IF NOT EXISTS idx_telephony_configs_tenant ON telephony_configs(ten
 -- write-through cache-aside pattern) — extend, don't duplicate.
 ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS telephony_config_id UUID REFERENCES telephony_configs(id);
 
+-- Last outcome of pointing this number at the platform at its provider
+-- ({ok, message, at}; services/config/number_sync.py). NULL: never synced,
+-- or a provider with nothing to sync (native, carriers).
+ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS provider_sync JSONB;
+
 -- Native (local SIP: the platform's own Kamailio + FreeSWITCH) needs no
 -- credentials, so a tenant never needs more than one; a second would only
 -- split its local numbers across identical configs. Guard and index in one

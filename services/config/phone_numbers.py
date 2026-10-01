@@ -140,7 +140,7 @@ async def get_phone_number(phone_number_id: Any, *, platform_scoped: bool = Fals
         row = await conn.fetchrow(
             "SELECT * FROM phone_numbers WHERE id = $1 AND deleted_at IS NULL", phone_number_id,
         )
-    return dict(row) if row is not None else None
+    return _row(row) if row is not None else None
 
 
 async def list_phone_numbers(tenant_id: Any) -> list[dict[str, Any]]:
@@ -150,7 +150,27 @@ async def list_phone_numbers(tenant_id: Any) -> list[dict[str, Any]]:
             "SELECT * FROM phone_numbers WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY did",
             tenant_id,
         )
-    return [dict(row) for row in rows]
+    return [_row(row) for row in rows]
+
+
+def _row(row: Any) -> dict[str, Any]:
+    result = dict(row)
+    if "provider_sync" in result:
+        result["provider_sync"] = db.json_col(result["provider_sync"])
+    return result
+
+
+async def record_provider_sync(phone_number_id: Any, tenant_id: Any, sync: dict[str, Any]) -> dict[str, Any]:
+    """Stores the latest sync outcome on the number; returns it with its time."""
+    pool = await db.get_pool()
+    async with platform_conn(pool, reason="phone-numbers-provider-sync", stamp_tenant=str(tenant_id)) as conn:
+        stored = await conn.fetchval(
+            "UPDATE phone_numbers SET provider_sync = jsonb_build_object("
+            "  'ok', $2::boolean, 'message', $3::text, 'at', to_jsonb(now())"
+            ") WHERE id = $1 AND tenant_id = $4 RETURNING provider_sync",
+            phone_number_id, sync["ok"], sync.get("message"), tenant_id,
+        )
+    return db.json_col(stored)
 
 
 class DidAlreadyAssigned(Exception):
@@ -192,7 +212,7 @@ async def create_phone_number(
         except asyncpg.UniqueViolationError as exc:
             _raise_if_did_taken(exc, did)
             raise
-        result = dict(row)
+        result = _row(row)
         await audit.write_audit(
             conn,
             entity_type="phone_number",
@@ -244,7 +264,7 @@ async def update_phone_number(
         except asyncpg.UniqueViolationError as exc:
             _raise_if_did_taken(exc, fields.get("did", old["did"]))
             raise
-        new = dict(new_row)
+        new = _row(new_row)
 
         await audit.write_audit(
             conn,
