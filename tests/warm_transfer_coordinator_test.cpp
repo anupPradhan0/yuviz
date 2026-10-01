@@ -132,7 +132,7 @@ EslConfig make_cfg(uint16_t port) {
 }
 
 struct DisabledWarmTransferCoordinatorTest : ::testing::Test {
-    Logger              logger{"test"};
+    Logger              logger = Logger::make_null();
     EslConfig           esl_cfg;  // enabled=false by default
     EslClient           esl_client{esl_cfg, logger};
     TransferCorrelator  leg_correlator;

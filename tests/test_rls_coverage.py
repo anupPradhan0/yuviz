@@ -324,6 +324,8 @@ _BYPASS_REASONS = {
     "did-purchased-number-by-id",
     "conversation-reconcile-sweep",
     "telephony-account-preload",
+    "pre-auth-password-reset",
+    "telephony-config-kind", "number-sync-provider-ids", "phone-numbers-provider-sync",
 }
 
 # Sites where a platform-branch mutation genuinely has no tenant to stamp

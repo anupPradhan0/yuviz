@@ -172,7 +172,7 @@ TEST_F(ConfigTest, FromRedisFallsBackToDefaultsWhenRedisDisabled) {
     voiceai::Config cfg;
     cfg.load(tmp_yaml_.string());
 
-    voiceai::Logger logger{"test"};
+    voiceai::Logger logger = voiceai::Logger::make_null();
     voiceai::RedisClient redis{cfg.gateway().redis, logger};  // enabled=false by default
 
     const auto expected = voiceai::TenantConfig::from_default(cfg.gateway());
@@ -194,7 +194,7 @@ TEST_F(ConfigTest, PhoneRouteFallsBackToDefaultsWhenRedisDisabled) {
     voiceai::Config cfg;
     cfg.load(tmp_yaml_.string());
 
-    voiceai::Logger logger{"test"};
+    voiceai::Logger logger = voiceai::Logger::make_null();
     voiceai::RedisClient redis{cfg.gateway().redis, logger};  // enabled=false by default
 
     const auto route = voiceai::PhoneRoute::from_redis(redis, "5000");
@@ -209,7 +209,7 @@ TEST_F(ConfigTest, PhoneRouteFallsBackToDefaultsOnEmptyDid) {
     voiceai::Config cfg;
     cfg.load(tmp_yaml_.string());
 
-    voiceai::Logger logger{"test"};
+    voiceai::Logger logger = voiceai::Logger::make_null();
     voiceai::RedisClient redis{cfg.gateway().redis, logger};
 
     const auto route = voiceai::PhoneRoute::from_redis(redis, "");

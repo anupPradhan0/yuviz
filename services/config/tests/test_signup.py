@@ -22,7 +22,20 @@ from services.config import users as users_service
 from services.config.app import AcceptThrottle, app
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SCHEMA_SQL = (REPO_ROOT / "database" / "schema.sql").read_text()
+# Same files, same order as deployment/sh/init.sh: rls.sql grants the
+# yuviz_app/yuviz_platform roles that platform_conn switches to.
+SCHEMA_FILES = ["schema.sql", "knowledge_schema.sql", "telephony_schema.sql", "rls.sql"]
+
+
+async def _apply_schemas(dsn: str) -> None:
+    for name in SCHEMA_FILES:
+        proc = await asyncio.create_subprocess_exec(
+            "psql", dsn, "-v", "ON_ERROR_STOP=1", "-v", "yuviz_app_password=test-only", "-q",
+            "-f", str(REPO_ROOT / "database" / name),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        assert proc.returncode == 0, f"{name} failed to apply: {err.decode()}"
 
 SUPERADMIN = {"email": "root@example.com", "password": "a-real-password"}
 
@@ -59,9 +72,8 @@ async def fresh_db():
         await conn.close()
 
     test_dsn = urlunsplit(urlsplit(base_dsn)._replace(path=f"/{name}"))
+    await _apply_schemas(test_dsn)
     test_pool = await asyncpg.create_pool(test_dsn, min_size=1, max_size=10)
-    async with test_pool.acquire() as c:
-        await c.execute(SCHEMA_SQL)
 
     original = db._pool  # noqa: SLF001
     db._pool = test_pool  # noqa: SLF001
