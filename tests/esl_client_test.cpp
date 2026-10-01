@@ -247,6 +247,120 @@ TEST(EslClientTransferTest, EmptyDestinationReturnsFalseWithoutConnecting) {
     EXPECT_EQ(error, "empty_destination");
 }
 
+// ── Tenant-configured values pasted into ESL commands ───────────────────────
+
+const std::vector<std::string> kInjectedDestinations = {
+    "1001\n\napi hupall",
+    "1001\r\n\r\napi hupall",
+    "1001 XML public",
+    "sip:agent@example.com' inline\n\napi hupall",
+    "sip:agent@example.com\n\napi hupall",
+    "{sip_h_X-Yuviz-Leg=transfer}sip:1002@example.com",
+    "sip:a@b,sofia/external/sip:c@d",
+    "sip:${global_getvar(x)}@example.com",
+    "1",
+    "1234567890123456",
+};
+
+TEST(EslClientTransferTest, InjectedDestinationRefusedBeforeAnyCommand) {
+    for (const auto& dest : kInjectedDestinations) {
+        FakeEslServer server;
+        server.start();
+        Logger logger = Logger::make_null();
+        EslClient client{make_cfg(server.port), logger};
+
+        std::string error;
+        EXPECT_FALSE(client.transfer(make_req("call-uuid-x", dest), error)) << dest;
+        EXPECT_EQ(error, "invalid_destination") << dest;
+        EXPECT_TRUE(server.received_commands.empty()) << dest;
+    }
+}
+
+TEST(EslClientTransferTest, SipUriWithTransportParamStillAllowed) {
+    FakeEslServer server;
+    server.start();
+    Logger logger = Logger::make_null();
+    EslClient client{make_cfg(server.port), logger};
+
+    std::string error;
+    EXPECT_TRUE(client.transfer(make_req("call-uuid-y", "sip:agent@pbx.example.com:5070;transport=tcp"), error));
+    ASSERT_EQ(server.received_commands.size(), 1u);
+    EXPECT_EQ(server.received_commands[0],
+              "api uuid_transfer call-uuid-y 'bridge:sofia/external/sip:agent@pbx.example.com:5070;transport=tcp' inline");
+}
+
+TEST(EslClientOriginateAsyncTest, InjectedDestinationRefusedBeforeAnyCommand) {
+    for (const auto& dest : kInjectedDestinations) {
+        FakeEslServer server;
+        server.start();
+        Logger logger = Logger::make_null();
+        EslClient client{make_cfg(server.port), logger};
+
+        std::string job_uuid, error;
+        EXPECT_FALSE(client.originate_async(dest, "+15551234567", job_uuid, error)) << dest;
+        EXPECT_EQ(error, "invalid_destination") << dest;
+        EXPECT_TRUE(server.received_commands.empty()) << dest;
+    }
+}
+
+TEST(EslClientOriginateAsyncTest, InjectedCallerIdIsDroppedNotInterpolated) {
+    const std::vector<std::string> bad_caller_ids = {
+        "+15551234567}\n\napi hupall\n\n",
+        "+1555,sip_h_X-Yuviz-Leg=transfer",
+        "anonymous",
+    };
+    for (const auto& caller_id : bad_caller_ids) {
+        FakeEslServer server;
+        server.start();
+        server.next_reply_body = "Reply-Text: +OK Job-UUID: job-1\nJob-UUID: job-1";
+        Logger logger = Logger::make_null();
+        EslConfig cfg = make_cfg(server.port);
+        cfg.sip_proxy_host = "192.168.0.116";
+        cfg.sip_proxy_port = 5060;
+        EslClient client{cfg, logger};
+
+        std::string job_uuid, error;
+        EXPECT_TRUE(client.originate_async("1001", caller_id, job_uuid, error)) << caller_id;
+        ASSERT_EQ(server.received_commands.size(), 1u) << caller_id;
+        EXPECT_EQ(server.received_commands[0],
+                  "bgapi originate sofia/external/sip:1001@192.168.0.116:5060 &park()") << caller_id;
+    }
+}
+
+const std::vector<std::string> kInjectedUuids = {
+    "call-uuid\n\napi hupall",
+    "call-uuid api hupall",
+    "call-uuid{x=1}",
+    std::string(65, 'a'),
+};
+
+TEST(EslClientUuidGuardTest, EveryUuidCommandRefusesNonUuidInput) {
+    for (const auto& bad : kInjectedUuids) {
+        FakeEslServer server;
+        server.start();
+        server.next_reply_body = "Reply-Text: +OK";
+        Logger logger = Logger::make_null();
+        EslClient client{make_cfg(server.port), logger};
+        std::string error;
+
+        EXPECT_FALSE(client.transfer(make_req(bad, "1005"), error));
+        EXPECT_EQ(error, "invalid_uuid");
+        EXPECT_FALSE(client.bridge(bad, "agent-uuid", error));
+        EXPECT_EQ(error, "invalid_uuid");
+        EXPECT_FALSE(client.bridge("customer-uuid", bad, error));
+        EXPECT_EQ(error, "invalid_uuid");
+        EXPECT_FALSE(client.stop_audio_fork(bad, error));
+        EXPECT_EQ(error, "invalid_uuid");
+        EXPECT_FALSE(client.hold(bad, error));
+        EXPECT_EQ(error, "invalid_uuid");
+        EXPECT_FALSE(client.unhold(bad, error));
+        EXPECT_EQ(error, "invalid_uuid");
+        client.hangup(bad, "caller_hangup");
+
+        EXPECT_TRUE(server.received_commands.empty()) << bad;
+    }
+}
+
 // ── Connection failure ───────────────────────────────────────────────────────
 
 TEST(EslClientTransferTest, UnreachableEslReturnsFalse) {

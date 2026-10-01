@@ -17,9 +17,16 @@ local gateway_ws = os.getenv("VOICE_AI_GATEWAY_WS") or "ws://127.0.0.1:8080"
 local uuid = session:get_uuid()
 session:answer()
 
+-- Both values come from the caller's own SIP INVITE. Anything outside this
+-- allowlist could break out of the JSON (e.g. inject a different "did") or
+-- split the API args.
+local function sip_token(value)
+    return (tostring(value or ""):gsub("[^%w%+%-%._@]", ""))
+end
+
 local meta = string.format('{"did":"%s","ani":"%s","direction":"inbound"}',
-    session:getVariable("destination_number") or "",
-    session:getVariable("caller_id_number") or "")
+    sip_token(session:getVariable("destination_number")),
+    sip_token(session:getVariable("caller_id_number")))
 
 local result = freeswitch.API():execute("uuid_audio_fork",
     uuid .. " start " .. gateway_ws .. "/voice/" .. uuid .. " mono 16000 " .. meta)
