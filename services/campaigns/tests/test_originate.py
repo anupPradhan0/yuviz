@@ -109,6 +109,40 @@ async def test_originate_call_no_server_listening_raises(monkeypatch):
         await originate.originate_call("+14155551234", "+14155550100")
 
 
+_INJECTION_SHAPES = [
+    "5551234\n\napi hupall",
+    "5551234\r\n\r\napi hupall",
+    "1234\n",
+    "5551234@evil.example",
+    "+1 4155551234",
+    "1001&bridge(sofia/external/sip:1002@x)",
+    "１２３４",  # full-width digits
+    "12",
+    "1234567890123456",
+    "",
+]
+
+
+@pytest.mark.parametrize("bad", _INJECTION_SHAPES)
+@pytest.mark.parametrize("field", ["phone_number", "caller_id"])
+async def test_originate_call_rejects_non_digit_input_before_connecting(monkeypatch, bad, field):
+    server = _FakeEslServer("+OK Job-UUID: abc")
+    port = await server.start()
+    monkeypatch.setattr(originate, "_ESL_PORT", port)
+    args = {"phone_number": "+14155551234", "caller_id": "5006", field: bad}
+
+    with pytest.raises(originate.OriginateError, match="refusing to dial"):
+        await originate.originate_call(**args)
+
+    assert server.received_commands == []
+    await server.stop()
+
+
+@pytest.mark.parametrize("good", ["1001", "5006", "+14155551234", "919876543210"])
+def test_is_valid_dial_number_accepts_plain_numbers(good):
+    assert originate.is_valid_dial_number(good)
+
+
 def test_parse_job_event_success():
     # Real shape confirmed live against FreeSWITCH (see
     # originate.py's EslJobEventListener docstring): the outer envelope

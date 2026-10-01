@@ -141,6 +141,57 @@ async def test_originate_failure_marks_contact_failed(test_tenant, test_agent, m
     assert contacts[0]["status"] == "failed"
 
 
+async def test_malformed_owned_caller_id_pauses_campaign_without_spending_attempts(
+    test_tenant, test_agent, monkeypatch, scoped, pool,
+):
+    bad_did = "+91-80-4567-8900"
+    await pool.execute("INSERT INTO phone_numbers (did, tenant_id) VALUES ($1, $2)", bad_did, test_tenant["id"])
+    try:
+        campaign = await _make_running_campaign(test_tenant, test_agent, caller_id=bad_did, max_attempts=3)
+        await campaign_contacts.bulk_insert_contacts(campaign["id"], [{"phone_number": "+14155551111", "name": ""}])
+        calls = []
+
+        async def fake_originate(phone_number, caller_id):
+            calls.append(phone_number)
+            return "job-1"
+
+        monkeypatch.setattr(originate, "originate_call", fake_originate)
+        worker = CampaignWorker()
+
+        await worker._tick_campaign(campaign)
+
+        assert calls == []
+        contacts = await campaign_contacts.list_contacts(campaign["id"])
+        assert (contacts[0]["status"], contacts[0]["attempt_count"]) == ("pending", 0)
+        assert (await campaigns.get_campaign(campaign["id"]))["status"] == "paused"
+        assert worker._in_flight[str(campaign["id"])] == 0
+    finally:
+        await pool.execute("DELETE FROM phone_numbers WHERE did = $1", bad_did)
+
+
+async def test_malformed_stored_contact_fails_without_retry(test_tenant, test_agent, monkeypatch, scoped):
+    campaign = await _make_running_campaign(test_tenant, test_agent, max_attempts=3)
+    await campaign_contacts.bulk_insert_contacts(
+        campaign["id"], [{"phone_number": "1001\n\napi hupall", "name": ""}],
+    )
+    calls = []
+
+    async def fake_originate(phone_number, caller_id):
+        calls.append(phone_number)
+        return "job-1"
+
+    monkeypatch.setattr(originate, "originate_call", fake_originate)
+    worker = CampaignWorker()
+
+    await worker._tick_campaign(campaign)
+
+    assert calls == []
+    contacts = await campaign_contacts.list_contacts(campaign["id"])
+    assert (contacts[0]["status"], contacts[0]["attempt_count"]) == ("failed", 1)
+    assert (await campaigns.get_campaign(campaign["id"]))["status"] == "running"
+    assert worker._in_flight[str(campaign["id"])] == 0
+
+
 async def test_on_job_complete_resolves_contact_and_decrements_in_flight(test_tenant, test_agent, monkeypatch, scoped):
     campaign = await _make_running_campaign(test_tenant, test_agent)
     await campaign_contacts.bulk_insert_contacts(campaign["id"], [{"phone_number": "+14155551111", "name": ""}])

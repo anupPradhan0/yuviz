@@ -215,6 +215,25 @@ class CampaignWorker:
                     )
                     return
             else:
+                # originate_call refuses these too; catching them here keeps a
+                # campaign-wide config error from failing every contact in turn,
+                # and a permanently bad stored number from burning its retries.
+                if not originate.is_valid_dial_number(campaign["caller_id"]):
+                    log.warning(
+                        "CampaignWorker: campaign=%s caller_id is not a plain dial number — "
+                        "pausing the campaign; fix its caller_id and resume", campaign_id,
+                    )
+                    await campaign_contacts.release_claim(contact_id, platform_scoped=True)
+                    self._in_flight[campaign_id] = max(0, self._in_flight.get(campaign_id, 1) - 1)
+                    await campaigns.set_status(campaign_id, "paused", platform_scoped=True)
+                    return
+                if not originate.is_valid_dial_number(contact["phone_number"]):
+                    log.warning(
+                        "CampaignWorker: contact=%s phone_number is not a plain dial number — "
+                        "failing it without retry", contact_id,
+                    )
+                    await self._resolve_contact(campaign_id, contact_id, "failed")
+                    return
                 job_uuid = await originate.originate_call(contact["phone_number"], campaign["caller_id"])
             if job_uuid:
                 self._job_to_contact[job_uuid] = (campaign_id, contact_id, max_attempts, attempt_count)

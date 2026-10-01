@@ -58,8 +58,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 
 log = logging.getLogger(__name__)
+
+# Digits only (optional leading +): anything else interpolated into the ESL
+# command below could smuggle a newline and a second command.
+_DIAL_NUMBER_RE = re.compile(r"\+?[0-9]{3,15}")
 
 _ESL_HOST = os.environ.get("FREESWITCH_ESL_HOST", "127.0.0.1")
 _ESL_PORT = int(os.environ.get("FREESWITCH_ESL_PORT", "8022"))
@@ -77,6 +82,10 @@ class OriginateError(Exception):
     surfaced here. This module only reports whether FreeSWITCH ACCEPTED
     the command, exactly like EslClient::originate_async()'s own
     "Accepted, not succeeded" contract."""
+
+
+def is_valid_dial_number(value: str) -> bool:
+    return _DIAL_NUMBER_RE.fullmatch(value) is not None
 
 
 async def _read_until_blank_line(reader: asyncio.StreamReader) -> dict[str, str]:
@@ -103,6 +112,9 @@ async def originate_call(phone_number: str, caller_id: str) -> str:
     arrives later as a FreeSWITCH event this module does not itself listen
     for — see worker.py's polling of the calls table instead). Raises
     OriginateError if FreeSWITCH rejected the command outright."""
+    for label, value in (("phone_number", phone_number), ("caller_id", caller_id)):
+        if not is_valid_dial_number(value):
+            raise OriginateError(f"refusing to dial: {label} {value!r} is not a plain dial number")
     try:
         reader, writer = await asyncio.open_connection(_ESL_HOST, _ESL_PORT)
     except OSError as exc:
