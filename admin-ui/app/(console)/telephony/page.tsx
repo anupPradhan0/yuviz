@@ -884,10 +884,12 @@ function ConfigDetail({
     setResyncing(true);
     onSyncNotice(null);
     try {
-      const { results } = await syncTelephonyNumbers(config.id);
+      const { results, application } = await syncTelephonyNumbers(config.id);
       const failed = results.filter((r) => !r.ok);
       onSyncNotice(
-        results.length === 0
+        application && !application.ok
+          ? { ok: false, text: `${config.providerLabel} kept the old address for every number here: ${application.message ?? "unknown error"}` }
+          : results.length === 0
           ? { ok: true, text: "No numbers on this configuration to sync." }
           : failed.length === 0
             ? { ok: true, text: `${results.length} number${results.length === 1 ? "" : "s"} re-synced with ${config.providerLabel}.` }

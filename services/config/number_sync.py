@@ -103,6 +103,20 @@ async def attach(config: dict[str, Any], did: str, *, refresh_app: bool = True) 
     return {"ok": result.ok, "message": result.message}
 
 
+async def refresh(config: dict[str, Any]) -> dict[str, Any] | None:
+    """Re-points the config's shared provider resource; None if there is none yet."""
+    provider = _provider_for(config)
+    urls = inbound_urls(config)
+    if provider is None or urls is None:
+        return None
+    result = await provider.refresh_inbound(urls)
+    if result is None:
+        return None
+    if not result.ok:
+        log.warning("number_sync: refresh failed config=%s: %s", config["id"], result.message)
+    return {"ok": result.ok, "message": result.message}
+
+
 async def detach(config: dict[str, Any], did: str) -> dict[str, Any] | None:
     provider = _provider_for(config)
     if provider is None:

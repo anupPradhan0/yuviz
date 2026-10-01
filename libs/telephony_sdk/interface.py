@@ -149,6 +149,11 @@ class ITelephonyProvider(ABC):
         `urls` to an existing shared resource (a bulk sync does that once)."""
         raise NotImplementedError(f"{self.PROVIDER_NAME}: attach_inbound must be implemented")
 
+    async def refresh_inbound(self, urls: InboundUrls) -> InboundSyncResult | None:
+        """Re-point a resource shared by all the account's numbers at `urls`.
+        None when there is nothing shared (yet)."""
+        return None
+
     async def discard_inbound_resources(self, credentials_update: dict[str, Any]) -> None:
         """Delete what an attach created when another sync's copy was stored
         first. Best effort; default has nothing to delete."""

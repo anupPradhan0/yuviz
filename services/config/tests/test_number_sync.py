@@ -261,3 +261,29 @@ async def test_a_new_provider_account_does_not_inherit_the_old_accounts_app(clie
     assert other.status_code == 200, other.text
     creds = json.loads(await pool.fetchval("SELECT credentials FROM telephony_configs WHERE id = $1", config_id))
     assert "inbound_application_id" not in creds
+
+
+async def test_resync_refreshes_the_shared_app_even_if_no_number_attaches(client, test_tenant, pool, cleanup):
+    config_id = await _fake_config(pool, test_tenant, inbound_application_id="fake-app-x", attach_ok=False)
+    for d in (_did(), _did()):
+        await pool.execute(
+            "INSERT INTO phone_numbers (tenant_id, did, telephony_config_id) VALUES ($1, $2, $3)",
+            test_tenant["id"], d, config_id,
+        )
+
+    resp = await client.post(f"/telephony-configs/{config_id}/sync-numbers")
+
+    assert resp.status_code == 200
+    assert resp.json()["application"]["ok"] is True
+    assert not any(r["ok"] for r in resp.json()["results"])
+    assert [app for a, _, app in fake.SYNC_LOG if a == "refresh_app"] == ["fake-app-x"]
+
+
+async def test_a_number_cannot_be_written_onto_a_deleted_config(test_tenant, pool, cleanup):
+    from libs.tenancy import set_target_tenant
+    from services.config import phone_numbers
+    config_id = await _fake_config(pool, test_tenant)
+    await pool.execute("UPDATE telephony_configs SET deleted_at = now() WHERE id = $1", config_id)
+    set_target_tenant(test_tenant["id"])
+    with pytest.raises(LookupError):
+        await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=_did(), telephony_config_id=config_id)

@@ -179,3 +179,10 @@ async def test_discard_deletes_the_unused_application():
     vobiz = _Vobiz(existing_apps=("app7", "app8"))
     await _provider(vobiz).discard_inbound_resources({"inbound_application_id": "app8"})
     assert list(vobiz.apps) == ["app7"]
+
+
+async def test_refresh_inbound_repoints_the_stored_application():
+    vobiz = _Vobiz(existing_apps=("app7",))
+    result = await _provider(vobiz, inbound_application_id="app7").refresh_inbound(URLS)
+    assert result.ok and vobiz.apps["app7"]["answer_url"] == URLS.answer_url
+    assert await _provider(vobiz).refresh_inbound(URLS) is None

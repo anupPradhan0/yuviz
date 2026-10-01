@@ -60,6 +60,18 @@ _UPDATABLE_FIELDS = {"did", "agent_id", "fallback_agent_id", "carrier_id", "tele
 # the window where a stale/absent entry silently misroutes a real call.
 
 
+async def _lock_live_telephony_config(conn: Any, telephony_config_id: Any) -> None:
+    """FOR SHARE conflicts with a config delete's FOR UPDATE, so a number
+    can't land on a config deleted under it."""
+    if telephony_config_id is None:
+        return
+    found = await conn.fetchval(
+        "SELECT 1 FROM telephony_configs WHERE id = $1 AND deleted_at IS NULL FOR SHARE", telephony_config_id,
+    )
+    if found is None:
+        raise LookupError(f"telephony_config {telephony_config_id} not found")
+
+
 def _cache_key(did: str) -> str:
     return f"did:{did}"
 
@@ -202,6 +214,7 @@ async def create_phone_number(
 ) -> dict[str, Any]:
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
+        await _lock_live_telephony_config(conn, telephony_config_id)
         try:
             row = await conn.fetchrow(
                 "INSERT INTO phone_numbers "
@@ -254,6 +267,7 @@ async def update_phone_number(
         if old_row is None:
             raise LookupError(f"phone_number {phone_number_id} not found")
         old = dict(old_row)
+        await _lock_live_telephony_config(conn, fields.get("telephony_config_id"))
 
         columns = list(fields.keys())
         set_clause = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(columns))

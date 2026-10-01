@@ -126,6 +126,13 @@ class FakeProvider(ITelephonyProvider, ISmsProvider):
             SYNC_LOG.append(("refresh_app", number, self._credentials["inbound_application_id"]))
         return InboundSyncResult(ok=True, credentials_update=update)
 
+    async def refresh_inbound(self, urls: InboundUrls) -> InboundSyncResult | None:
+        app_id = self._credentials.get("inbound_application_id")
+        if not app_id:
+            return None
+        SYNC_LOG.append(("refresh_app", "", app_id))
+        return InboundSyncResult(ok=True)
+
     async def discard_inbound_resources(self, credentials_update: dict[str, Any]) -> None:
         SYNC_LOG.append(("discard_app", "", credentials_update.get("inbound_application_id")))
 

@@ -166,18 +166,22 @@ async def sync_numbers(
             await phone_numbers_service.record_provider_sync(number["id"], number["tenant_id"], sync)
             results.append({"did": number["did"], **sync})
 
-    if numbers:
-        # The first may create the shared provider app and refreshes its URLs once.
-        await sync_one(numbers[0], cfg, refresh_app=True)
+    # Refreshed once on its own, so no single number's failure can skip it.
+    application = await number_sync.refresh(cfg)
+    rest = numbers
+    if application is None and numbers:
+        # No shared app yet: the first attach creates it with the current URLs.
+        await sync_one(numbers[0], cfg, refresh_app=False)
         cfg = await telephony_configs_service.get_telephony_config(config_id, platform_scoped=True)
-        limit = asyncio.Semaphore(_SYNC_CONCURRENCY)
+        rest = numbers[1:]
+    limit = asyncio.Semaphore(_SYNC_CONCURRENCY)
 
-        async def bounded(number: dict) -> None:
-            async with limit:
-                await sync_one(number, cfg, refresh_app=False)
+    async def bounded(number: dict) -> None:
+        async with limit:
+            await sync_one(number, cfg, refresh_app=False)
 
-        await asyncio.gather(*(bounded(n) for n in numbers[1:]))
-    return {"results": results}
+    await asyncio.gather(*(bounded(n) for n in rest))
+    return {"results": results, "application": application}
 
 
 @router.delete("/{config_id}", status_code=204)

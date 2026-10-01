@@ -511,7 +511,9 @@ export const createTelephonyConfig = (tenantId: string, body: TelephonyConfigCre
 export const getTelephonyConfig = (configId: string) =>
   request<TelephonyConfig>(`/telephony-configs/${configId}`);
 export const syncTelephonyNumbers = (configId: string) =>
-  request<{ results: (ProviderSync & { did: string })[] }>(`/telephony-configs/${configId}/sync-numbers`, { method: "POST" });
+  request<{ results: (ProviderSync & { did: string })[]; application: ProviderSync | null }>(
+    `/telephony-configs/${configId}/sync-numbers`, { method: "POST" },
+  );
 export const updateTelephonyConfig = (configId: string, body: TelephonyConfigUpdate) =>
   request<TelephonyConfig>(`/telephony-configs/${configId}`, { method: "PATCH", body: JSON.stringify(body) });
 export const setDefaultOutboundTelephonyConfig = (configId: string) =>

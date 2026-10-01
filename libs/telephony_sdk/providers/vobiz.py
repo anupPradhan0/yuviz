@@ -296,6 +296,28 @@ class VobizTelephonyProvider(ITelephonyProvider, ISmsProvider):
             return InboundSyncResult(ok=False, message=f"couldn't reach Vobiz: {exc}", credentials_update=created)
         return InboundSyncResult(ok=True, credentials_update=created)
 
+    async def refresh_inbound(self, urls: InboundUrls) -> InboundSyncResult | None:
+        app_id = self._credentials.get("inbound_application_id")
+        if not app_id:
+            return None
+        app_fields = {
+            "answer_url": urls.answer_url, "answer_method": "POST",
+            "hangup_url": urls.hangup_url, "hangup_method": "POST",
+        }
+        try:
+            async with self._client() as client:
+                resp = await client.post(
+                    f"{_BASE_URL}/v1/Account/{self._auth_id}/Application/{app_id}/", json=app_fields, headers=self._headers,
+                )
+        except httpx.HTTPError as exc:
+            return InboundSyncResult(ok=False, message=f"couldn't reach Vobiz: {exc}")
+        if resp.status_code not in (200, 202):
+            return InboundSyncResult(
+                ok=False,
+                message=f"Vobiz rejected updating the application's URLs (HTTP {resp.status_code}: {_vobiz_error(resp)})",
+            )
+        return InboundSyncResult(ok=True)
+
     async def discard_inbound_resources(self, credentials_update: dict[str, Any]) -> None:
         app_id = credentials_update.get("inbound_application_id")
         if not app_id:
