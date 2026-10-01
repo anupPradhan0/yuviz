@@ -32,6 +32,19 @@ async def _resolve_tenant_id(tenant_id: str) -> None:
     await validate_id_exists(tenant_id, tenants_service.get_tenant_by_id, "tenant")
 
 
+_NATIVE_NOT_DEFAULT_OUTBOUND = (
+    "a Native configuration can't be the default for outbound calls: that default is used to place "
+    "calls through a REST provider, and native numbers dial through the platform's FreeSWITCH"
+)
+
+
+def _require_superadmin_for_native(provider: str, current_user: CurrentUser) -> None:
+    # Native is the platform's shared Kamailio/FreeSWITCH, not a tenant's own
+    # account: local numbers and their config are assigned by the platform.
+    if provider == telephony_configs_service.NATIVE_PROVIDER and current_user.role != "superadmin":
+        raise HTTPException(status_code=403, detail="Native (local SIP) configurations are managed by the platform")
+
+
 @tenant_scoped_router.get("")
 async def list_telephony_configs(
     tenant_id: str, current_user: CurrentUser = Depends(get_current_user),
@@ -45,6 +58,9 @@ async def create_telephony_config(
     body: TelephonyConfigCreate,
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
+    _require_superadmin_for_native(body.provider, current_user)
+    if body.provider == telephony_configs_service.NATIVE_PROVIDER and body.is_default_outbound:
+        raise HTTPException(status_code=400, detail=_NATIVE_NOT_DEFAULT_OUTBOUND)
     await _resolve_tenant_id(tenant_id)
     return await telephony_configs_service.create_telephony_config(
         tenant_id=tenant_id,
@@ -98,7 +114,10 @@ async def update_telephony_config(
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
     cfg = await _authorize_telephony_config(config_id, current_user)
+    _require_superadmin_for_native(cfg["provider"], current_user)
     fields = body.model_dump(exclude_unset=True)
+    if cfg["provider"] == telephony_configs_service.NATIVE_PROVIDER and fields.get("is_default_outbound"):
+        raise HTTPException(status_code=400, detail=_NATIVE_NOT_DEFAULT_OUTBOUND)
     if not fields:
         raise HTTPException(status_code=400, detail="request body has no fields to update")
     set_target_tenant(cfg["tenant_id"])
@@ -112,6 +131,9 @@ async def set_default_outbound(
     config_id: str, current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
     cfg = await _authorize_telephony_config(config_id, current_user)
+    _require_superadmin_for_native(cfg["provider"], current_user)
+    if cfg["provider"] == telephony_configs_service.NATIVE_PROVIDER:
+        raise HTTPException(status_code=400, detail=_NATIVE_NOT_DEFAULT_OUTBOUND)
     set_target_tenant(cfg["tenant_id"])
     return await telephony_configs_service.set_default_outbound(
         config_id, user_id=current_user.id, user_email=current_user.email,
@@ -123,6 +145,7 @@ async def delete_telephony_config(
     config_id: str, current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
     cfg = await _authorize_telephony_config(config_id, current_user)
+    _require_superadmin_for_native(cfg["provider"], current_user)
     set_target_tenant(cfg["tenant_id"])
     await telephony_configs_service.soft_delete_telephony_config(
         config_id, user_id=current_user.id, user_email=current_user.email,

@@ -18,6 +18,7 @@ import {
   createCarrier,
   createPhoneNumber,
   createTelephonyConfig,
+  getCurrentUser,
   listAgents,
   listCalls,
   listCarriers,
@@ -40,9 +41,13 @@ const CARRIER_PROVIDER_LABEL: Record<CarrierProvider, string> = {
   vonage: "Vonage",
 };
 const CARRIER_PROVIDERS: CarrierProvider[] = ["twilio", "plivo", "vonage"];
-const TELEPHONY_PROVIDER_LABEL: Record<string, string> = { cloudonix: "Cloudonix", vobiz: "Vobiz" };
+const TELEPHONY_PROVIDER_LABEL: Record<string, string> = {
+  cloudonix: "Cloudonix", vobiz: "Vobiz", native: "Native (local SIP)",
+};
 const TELEPHONY_PROVIDERS = ["cloudonix", "vobiz"] as const;
-type NewConfigProvider = CarrierProvider | (typeof TELEPHONY_PROVIDERS)[number];
+// The platform's own Kamailio + FreeSWITCH: no credentials, superadmin-only.
+const NATIVE = "native" as const;
+type NewConfigProvider = CarrierProvider | (typeof TELEPHONY_PROVIDERS)[number] | typeof NATIVE;
 
 // How many calls per account the recent-activity columns are computed over.
 // There is no per-DID aggregate endpoint (services/config/calls.py exposes a
@@ -199,6 +204,11 @@ export default function TelephonyPage() {
   const refresh = () => setReloadKey((k) => k + 1);
 
   const [addOpen, setAddOpen] = useState(false);
+  // Gates Native controls only; the server enforces the same rule regardless.
+  const [isSuperadmin, setIsSuperadmin] = useState(false);
+  useEffect(() => {
+    getCurrentUser().then((me) => setIsSuperadmin(me.role === "superadmin")).catch(() => setIsSuperadmin(false));
+  }, []);
 
   // Scoped to whatever the header switcher has selected, same as Agents and
   // IVR Flows — one account by default, every account under "All tenants".
@@ -360,6 +370,7 @@ export default function TelephonyPage() {
         numbers={numbers.filter((n) => n.configKind === selectedConfig.kind && n.configId === selectedConfig.id)}
         tenant={allTenants.find((t) => t.id === selectedConfig.tenantId) ?? null}
         agents={agentsByTenant[selectedConfig.tenantId]?.agents ?? []}
+        isSuperadmin={isSuperadmin}
         onBack={() => router.push("/telephony")}
         onChanged={refresh}
       />
@@ -422,7 +433,7 @@ export default function TelephonyPage() {
             {visibleConfigs.length === 0 ? (
               <div className="empty-state">
                 {configs.length === 0
-                  ? "No telephony configurations yet — add a carrier (Twilio/Plivo/Vonage) or a webhook provider (Cloudonix/Vobiz)."
+                  ? "No telephony configurations yet — add a carrier (Twilio/Plivo/Vonage), a webhook provider (Cloudonix/Vobiz), or Native (local SIP)."
                   : `No configurations match "${search}".`}
               </div>
             ) : (
@@ -451,6 +462,7 @@ export default function TelephonyPage() {
         onClose={() => setAddOpen(false)}
         allTenants={allTenants}
         defaultTenantId={tenant?.id ?? allTenants[0]?.id ?? ""}
+        isSuperadmin={isSuperadmin}
         onCreated={() => {
           setAddOpen(false);
           refresh();
@@ -461,8 +473,11 @@ export default function TelephonyPage() {
 }
 
 function AddConfigModal({
-  open, onClose, allTenants, defaultTenantId, onCreated,
-}: { open: boolean; onClose: () => void; allTenants: Tenant[]; defaultTenantId: string; onCreated: () => void }) {
+  open, onClose, allTenants, defaultTenantId, isSuperadmin, onCreated,
+}: {
+  open: boolean; onClose: () => void; allTenants: Tenant[]; defaultTenantId: string; isSuperadmin: boolean;
+  onCreated: () => void;
+}) {
   const [tenantId, setTenantId] = useState(defaultTenantId);
   const [provider, setProvider] = useState<NewConfigProvider>("twilio");
   const [name, setName] = useState("");
@@ -495,6 +510,7 @@ function AddConfigModal({
   }, [open, defaultTenantId]);
 
   const isCarrier = (CARRIER_PROVIDERS as string[]).includes(provider);
+  const isNative = provider === NATIVE;
 
   const handleSubmit = async () => {
     setSubmitting(true);
@@ -508,6 +524,8 @@ function AddConfigModal({
           auth_token_ref: authTokenRef || undefined,
           carrier_account_ref: carrierAccountRef || undefined,
         });
+      } else if (isNative) {
+        await createTelephonyConfig(tenantId, { name, provider: NATIVE, credentials: {}, is_default_outbound: false });
       } else if (provider === "cloudonix") {
         await createTelephonyConfig(tenantId, {
           name,
@@ -533,13 +551,15 @@ function AddConfigModal({
 
   const canSubmit =
     !!name &&
-    (isCarrier
+    (isCarrier || isNative
       ? true
       : provider === "cloudonix"
         ? !!domain && !!apiKey
         : !!vobizAuthId && !!vobizAuthToken);
 
-  const allProviders: NewConfigProvider[] = [...CARRIER_PROVIDERS, ...TELEPHONY_PROVIDERS];
+  const allProviders: NewConfigProvider[] = [
+    ...CARRIER_PROVIDERS, ...TELEPHONY_PROVIDERS, ...(isSuperadmin ? [NATIVE] : []),
+  ];
   const providerLabel = (p: NewConfigProvider) =>
     (CARRIER_PROVIDER_LABEL as Record<string, string>)[p] ?? (TELEPHONY_PROVIDER_LABEL as Record<string, string>)[p] ?? p;
   const docsUrl: Record<string, string> = {
@@ -613,8 +633,8 @@ function AddConfigModal({
         <label className="form-label" style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <input
             type="checkbox"
-            checked={isDefaultOutbound}
-            disabled={isCarrier}
+            checked={isDefaultOutbound && !isNative}
+            disabled={isCarrier || isNative}
             onChange={(e) => setIsDefaultOutbound(e.target.checked)}
           />
           Set as default for outbound calls
@@ -628,6 +648,9 @@ function AddConfigModal({
           {isCarrier ? (
             <>Carriers (Twilio/Plivo/Vonage) don&apos;t have a default-outbound column yet — this stays disabled
               until that&apos;s added, rather than silently accepting a setting that won&apos;t save.</>
+          ) : isNative ? (
+            <>Not available for Native: the default is used to place calls through a REST provider, and native
+              numbers dial through the platform&apos;s FreeSWITCH.</>
           ) : (
             <>Used by test calls and campaigns when no specific configuration is selected.</>
           )}
@@ -680,6 +703,14 @@ function AddConfigModal({
         </>
       )}
 
+      {isNative && (
+        <div className="hint" style={{ display: "block", lineHeight: 1.6, marginBottom: 14 }}>
+          Local SIP numbers on this platform&apos;s own Kamailio + FreeSWITCH — no provider account or credentials.
+          Calls reach an agent when the platform&apos;s SIP proxy routes the dialed number to FreeSWITCH; each
+          number you add here is matched to its inbound agent. One Native configuration per account.
+        </div>
+      )}
+
       {provider === "vobiz" && (
         <>
           <div className="form-group">
@@ -725,11 +756,12 @@ function webhookUrlFor(config: ConfigRow): string | null {
 }
 
 function ConfigDetail({
-  config, numbers, tenant, agents, onBack, onChanged,
+  config, numbers, tenant, agents, isSuperadmin, onBack, onChanged,
 }: {
-  config: ConfigRow; numbers: NumberRow[]; tenant: Tenant | null; agents: Agent[];
+  config: ConfigRow; numbers: NumberRow[]; tenant: Tenant | null; agents: Agent[]; isSuperadmin: boolean;
   onBack: () => void; onChanged: () => void;
 }) {
+  const isNative = config.kind === "telephony_config" && config.provider === NATIVE;
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -791,26 +823,43 @@ function ConfigDetail({
 
       {error && <div className="error-banner">{error}</div>}
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-hdr">
-          <span className="card-title">Credentials</span>
-          <span className="card-sub">masked — use Edit to change</span>
-          <button className="btn btn-ghost btn-sm" style={{ marginLeft: "auto" }} onClick={() => setEditing(true)}>
-            Edit credentials
-          </button>
+      {isNative ? (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="card-hdr">
+            <span className="card-title">Connection</span>
+            <span className="card-sub">managed by the platform</span>
+          </div>
+          <div className="card-body" style={{ fontSize: ".82rem", color: "var(--text-2)", lineHeight: 1.6 }}>
+            Local SIP on the platform&apos;s own Kamailio + FreeSWITCH — there are no credentials or webhook to set.
+            An inbound call reaches its agent when the SIP proxy routes the dialed number to FreeSWITCH, and the number
+            below is matched to its inbound agent. Numbers here are assigned by the platform; account admins can change
+            each number&apos;s agent and status.
+          </div>
         </div>
-        <div className="card-body" style={{ padding: "0 16px" }}>
-          <CredentialsRows config={config} webhookUrl={webhookUrl} />
+      ) : (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="card-hdr">
+            <span className="card-title">Credentials</span>
+            <span className="card-sub">masked — use Edit to change</span>
+            <button className="btn btn-ghost btn-sm" style={{ marginLeft: "auto" }} onClick={() => setEditing(true)}>
+              Edit credentials
+            </button>
+          </div>
+          <div className="card-body" style={{ padding: "0 16px" }}>
+            <CredentialsRows config={config} webhookUrl={webhookUrl} />
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="card">
         <div className="card-hdr">
           <span className="card-title">Phone numbers</span>
           <span className="card-sub">{fmtInt(numbers.length)} DID{numbers.length === 1 ? "" : "s"}</span>
-          <button className="btn btn-primary btn-sm" style={{ marginLeft: "auto" }} onClick={() => setAddOpen(true)}>
-            + Add phone number
-          </button>
+          {(!isNative || isSuperadmin) && (
+            <button className="btn btn-primary btn-sm" style={{ marginLeft: "auto" }} onClick={() => setAddOpen(true)}>
+              + Add phone number
+            </button>
+          )}
         </div>
         {numbers.length === 0 ? (
           <div className="empty-state">No phone numbers on this configuration yet.</div>
@@ -1196,7 +1245,9 @@ function AddNumberModal({
       {error && <div className="error-banner">{error}</div>}
 
       <p style={{ fontSize: ".78rem", color: "var(--text-3)", marginTop: -4, marginBottom: 14 }}>
-        PSTN numbers (E.164), SIP URIs (sip:user@host), and SIP extensions are all supported.
+        {config.provider === NATIVE
+          ? "A local SIP number or extension on the platform's FreeSWITCH. It only receives calls if the platform's SIP proxy routes it there (locally: 5000–5009)."
+          : "PSTN numbers (E.164), SIP URIs (sip:user@host), and SIP extensions are all supported."}
       </p>
 
       {config.kind === "carrier" && (

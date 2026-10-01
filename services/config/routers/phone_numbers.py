@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from libs.tenancy import set_target_tenant
@@ -49,8 +51,41 @@ async def _resolve_telephony_config_id(telephony_config_id: str | None, tenant_i
     if telephony_config_id is None:
         return
     cfg = await telephony_configs_service.get_telephony_config(telephony_config_id)
-    if cfg is None or cfg.get("tenant_id") != tenant_id:
+    # str(): a fresh row carries a UUID, a cache hit a str (see agents.py).
+    if cfg is None or str(cfg.get("tenant_id")) != str(tenant_id):
         raise HTTPException(status_code=404, detail="telephony_config not found")
+
+
+# 7-15 digits, "+" optional: Vobiz routes its numbers without one.
+_PUBLIC_NUMBER = re.compile(r"\+?[1-9]\d{6,14}")
+
+
+def _is_local_address(did: str) -> bool:
+    """Inbound routing keys on the DID alone, so anything that isn't a
+    public number or SIP URI is an extension on the shared Kamailio/FreeSWITCH."""
+    return not (_PUBLIC_NUMBER.fullmatch(did) or did.lower().startswith("sip:"))
+
+
+async def _require_superadmin_for_local_number(
+    current_user: CurrentUser, did: str, telephony_config_id: str | None, carrier_id: str | None,
+) -> None:
+    """A local extension, a number under a Native config, or one under no
+    provider is a local SIP number on the platform's shared Kamailio/
+    FreeSWITCH. Only the platform assigns those: a tenant choosing its own
+    local extension could claim one that routes to another tenant's phones."""
+    if current_user.role == "superadmin":
+        return
+    local = _is_local_address(did) or (telephony_config_id is None and carrier_id is None)
+    if not local and telephony_config_id is not None:
+        # By kind, so a soft-deleted REST config's numbers stay the tenant's;
+        # only a missing row fails closed.
+        kind = await telephony_configs_service.get_provider_kind(telephony_config_id)
+        local = kind is None or kind == telephony_configs_service.NATIVE_PROVIDER
+    if local:
+        raise HTTPException(
+            status_code=403,
+            detail="Local numbers and extensions are assigned by the platform",
+        )
 
 
 @tenant_scoped_router.get("")
@@ -69,6 +104,7 @@ async def create_phone_number(
     await _resolve_agent_id(body.fallback_agent_id)
     await _resolve_carrier_id(body.carrier_id)
     await _resolve_telephony_config_id(body.telephony_config_id, tenant_id)
+    await _require_superadmin_for_local_number(current_user, body.did, body.telephony_config_id, body.carrier_id)
     return await phone_numbers_service.create_phone_number(
         tenant_id=tenant_id,
         did=body.did,
@@ -122,7 +158,18 @@ async def update_phone_number(
     if "carrier_id" in fields:
         await _resolve_carrier_id(fields["carrier_id"])
     if "telephony_config_id" in fields:
-        await _resolve_telephony_config_id(fields["telephony_config_id"])
+        await _resolve_telephony_config_id(fields["telephony_config_id"], phone_number["tenant_id"])
+    if {"did", "telephony_config_id", "carrier_id"} & fields.keys():
+        # Both where the number is now and where it would end up.
+        await _require_superadmin_for_local_number(
+            current_user, phone_number["did"], phone_number.get("telephony_config_id"), phone_number.get("carrier_id"),
+        )
+        await _require_superadmin_for_local_number(
+            current_user,
+            fields.get("did") or phone_number["did"],
+            fields.get("telephony_config_id", phone_number.get("telephony_config_id")),
+            fields.get("carrier_id", phone_number.get("carrier_id")),
+        )
     return await phone_numbers_service.update_phone_number(
         phone_number_id, user_id=current_user.id, user_email=current_user.email, **fields,
     )
@@ -139,6 +186,11 @@ async def delete_phone_number(
         f"phone_number {phone_number_id!r} not found",
     )
     await assert_tenant_access(phone_number["tenant_id"], current_user)
+    # Releasing a local number is as platform-owned as assigning one: a tenant
+    # admin who deleted it could never add it back. They can set it inactive.
+    await _require_superadmin_for_local_number(
+        current_user, phone_number["did"], phone_number.get("telephony_config_id"), phone_number.get("carrier_id"),
+    )
     set_target_tenant(phone_number["tenant_id"])
     await phone_numbers_service.soft_delete_phone_number(
         phone_number_id, user_id=current_user.id, user_email=current_user.email,
