@@ -25,7 +25,7 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "advanced", label: "Advanced" },
   { key: "knowledge", label: "Knowledge & Tools" },
   { key: "prompt", label: "Prompt" },
-  { key: "sip", label: "SIP" },
+  { key: "sip", label: "Phone numbers" },
 ];
 
 export default function AgentDetailPage() {

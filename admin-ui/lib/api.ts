@@ -392,14 +392,16 @@ export interface PhoneNumber {
   region: string | null;
   created_at: string;
   updated_at: string;
-  // Present when saving the number also pointed it at this platform at the
-  // provider (create, or a DID/config change). ok=false: saved, but not wired.
-  provider_sync?: ProviderSync;
+  // Last attempt to point this number at the platform at its provider; null
+  // if never tried or nothing to sync. ok=false: saved, but not wired.
+  provider_sync?: ProviderSync | null;
 }
 
 export interface ProviderSync {
   ok: boolean;
   message: string | null;
+  /** When it was last tried; absent on a sync-numbers result row. */
+  at?: string;
 }
 
 export interface PhoneNumberCreate {
@@ -429,6 +431,8 @@ export const updatePhoneNumber = (phoneNumberId: string, body: PhoneNumberUpdate
   request<PhoneNumber>(`/phone-numbers/${phoneNumberId}`, { method: "PATCH", body: JSON.stringify(body) });
 export const deletePhoneNumber = (phoneNumberId: string) =>
   request<void>(`/phone-numbers/${phoneNumberId}`, { method: "DELETE" });
+export const syncPhoneNumber = (phoneNumberId: string) =>
+  request<PhoneNumber>(`/phone-numbers/${phoneNumberId}/sync`, { method: "POST" });
 
 // ── Carriers ─────────────────────────────────────────────────────────────
 

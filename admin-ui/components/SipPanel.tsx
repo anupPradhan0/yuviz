@@ -4,10 +4,9 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ApiError, PhoneNumber, listPhoneNumbers } from "@/lib/api";
 
-// Carrier/telephony-config CRUD and the Buy-a-Number flow that used to live
-// here moved to the unified Telephony console (admin-ui/app/telephony/) —
-// this panel is now read-only: which DID (if any) routes to this agent, and
-// a link to the configuration that owns it. See that page for editing.
+const STATUS_CLS: Record<PhoneNumber["status"], string> = { active: "green", inactive: "gray", suspended: "amber" };
+
+// Read-only: the numbers whose calls reach this agent. Edited on Telephony.
 export function SipPanel({ tenantId, agentId }: { tenantId: string; agentId: string }) {
   const [numbers, setNumbers] = useState<PhoneNumber[]>([]);
   const [loading, setLoading] = useState(true);
@@ -26,45 +25,48 @@ export function SipPanel({ tenantId, agentId }: { tenantId: string; agentId: str
 
   if (loading) return <div className="empty-state">Loading…</div>;
 
-  const assigned = numbers.filter((n) => n.agent_id === agentId);
+  const reachable = numbers
+    .filter((n) => n.agent_id === agentId || n.fallback_agent_id === agentId)
+    .sort((a, b) => Number(b.agent_id === agentId) - Number(a.agent_id === agentId) || a.did.localeCompare(b.did));
 
   return (
     <div className="card">
       <div className="card-hdr">
-        <div className="card-title">Assigned Number</div>
-        <div className="card-sub">which DID routes calls to this agent</div>
+        <div className="card-title">Reachable on</div>
+        <div className="card-sub">numbers whose calls reach this agent</div>
+        <Link href="/telephony" className="btn btn-ghost btn-sm" style={{ marginLeft: "auto" }}>Manage in Telephony</Link>
       </div>
 
       {error && <div className="error-banner">{error}</div>}
 
-      {assigned.length === 0 ? (
+      {reachable.length === 0 ? (
         <div className="empty-state">
-          No number assigned to this agent yet — assign one from its telephony configuration.
+          No number routes to this agent yet. In Telephony, open a configuration and add a number, or edit one and pick this agent.
         </div>
       ) : (
-        assigned.map((n) => {
+        reachable.map((n) => {
           const configKey = n.carrier_id
             ? `carrier:${n.carrier_id}`
             : n.telephony_config_id
               ? `telephony_config:${n.telephony_config_id}`
               : null;
+          const isFallback = n.agent_id !== agentId;
+          const syncFailed = n.provider_sync?.ok === false;
           return (
             <div key={n.id} className="kb-row">
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 500 }}>{n.did}</div>
-                <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>Registered · {n.status}</div>
+                <div style={{ fontWeight: 500, fontFamily: "var(--mono)" }}>{n.did}</div>
+                <div style={{ fontSize: ".7rem", color: syncFailed ? "var(--red)" : "var(--text-3)" }}>
+                  {isFallback ? "Fallback: answers when the number's main agent can't" : "Inbound agent"}
+                  {n.region ? ` · ${n.region}` : ""}
+                  {syncFailed ? ` · provider isn't sending calls here: ${n.provider_sync?.message ?? "unknown error"}` : ""}
+                </div>
               </div>
-              <span className={`badge ${n.status === "active" ? "green" : n.status === "suspended" ? "red" : "gray"}`}>
-                {n.status}
-              </span>
+              <span className={`badge ${STATUS_CLS[n.status]}`}>{n.status}</span>
               {configKey ? (
-                <Link href={`/telephony?config=${configKey}`} className={`badge ${n.status === "active" ? "green" : n.status === "suspended" ? "red" : "gray"}`}>
-                  View configuration
-                </Link>
+                <Link href={`/telephony?config=${configKey}`} className="btn btn-ghost btn-sm">View configuration</Link>
               ) : (
-                <Link href="/telephony" className="badge amber">
-                  Not linked to a provider — assign one
-                </Link>
+                <Link href="/telephony" className="badge amber">No configuration</Link>
               )}
             </div>
           );
