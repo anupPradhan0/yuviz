@@ -7,6 +7,7 @@ import pytest
 from libs.config_sdk.workflow import (
     WorkflowInvalid,
     graph_warnings,
+    literal_destination_errors,
     parse_graph,
     render,
     starter_graph,
@@ -255,28 +256,32 @@ def test_transfer_node_requires_a_destination():
     assert any(e.id == "n2" and e.field == "transfer_destination" for e in errors)
 
 
-@pytest.mark.parametrize("dest", ["1001 XML public", "sip:a@b,sofia/external/sip:c@d", "1001\n\napi hupall"])
-def test_transfer_node_with_unsafe_literal_destination_is_rejected_at_publish(dest):
-    errors = _errors({
+def _transfer_graph(dest):
+    return {
         "nodes": [
             _node("n1", "start", "greeting"),
             _node("n2", "transfer", "to_human", prompt="Connecting you now.", transfer_destination=dest),
+            _node("n3", "end", "goodbye"),
         ],
-        "edges": [_edge("e1", "n1", "n2", "needs a person")],
-    })
-    assert any(e.id == "n2" and e.field == "transfer_destination" for e in errors)
+        "edges": [_edge("e1", "n1", "n2", "needs a person"), _edge("e2", "n1", "n3", "done")],
+    }
+
+
+@pytest.mark.parametrize("dest", ["1001 XML public", "sip:a@b,sofia/external/sip:c@d", "1001\n\napi hupall"])
+def test_transfer_node_with_unsafe_literal_destination_is_rejected_at_publish(dest):
+    errors = literal_destination_errors(parse_graph(_transfer_graph(dest)))
+    assert [(e.id, e.field) for e in errors] == [("n2", "transfer_destination")]
+
+
+@pytest.mark.parametrize("dest", ["1001 XML public", "+14155551234 front desk"])
+def test_a_stored_graph_with_an_unsafe_destination_still_loads_at_call_time(dest):
+    # The runtime parses with parse_graph; failing here would swap in the starter graph.
+    graph = parse_graph(_transfer_graph(dest))
+    assert graph.nodes["n2"].transfer_destination == dest
 
 
 def test_transfer_node_with_templated_destination_is_left_for_runtime():
-    errors = _errors({
-        "nodes": [
-            _node("n1", "start", "greeting"),
-            _node("n2", "transfer", "to_human", prompt="Connecting you now.",
-                  transfer_destination="{{ branch_number }}"),
-        ],
-        "edges": [_edge("e1", "n1", "n2", "needs a person")],
-    })
-    assert not any(e.id == "n2" and e.field == "transfer_destination" for e in errors)
+    assert literal_destination_errors(parse_graph(_transfer_graph("{{ branch_number }}"))) == []
 
 
 def test_transfer_node_with_destination_is_valid():

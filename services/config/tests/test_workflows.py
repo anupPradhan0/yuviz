@@ -452,3 +452,27 @@ async def test_patch_system_prompt_rejects_a_graph_with_no_global_node(test_tena
             agent["id"], tenant_slug=test_tenant["slug"], system_prompt="Nope",
         )
 
+
+
+async def test_an_unsafe_literal_transfer_destination_cannot_be_published(test_tenant, scoped):
+    agent = await _agent(test_tenant)
+    unsafe = {
+        "version": 1,
+        "nodes": [
+            GRAPH["nodes"][0],
+            {"id": "n2", "type": "transfer", "position": {"x": 0, "y": 190},
+             "data": {"name": "to human", "prompt": "Connecting you.", "transfer_destination": "1001 XML public"}},
+            GRAPH["nodes"][2],
+        ],
+        "edges": [{"id": "e1", "source": "n1", "target": "n2",
+                   "data": {"label": "wants a person", "condition": "The caller asked for a person."}},
+                  {"id": "e2", "source": "n1", "target": "n3",
+                   "data": {"label": "all done", "condition": "The caller is done."}}],
+    }
+    await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=unsafe)
+
+    with pytest.raises(workflows.WorkflowValidationError) as exc:
+        await workflows.publish(agent["id"], tenant_slug=test_tenant["slug"])
+
+    assert [(e.id, e.field) for e in exc.value.errors] == [("n2", "transfer_destination")]
+    assert (await workflows.get_workflow(agent["id"], test_tenant["slug"]))["workflow"] == CREATED_GRAPH

@@ -358,6 +358,20 @@ def _edge_from_raw(raw: dict[str, Any]) -> Edge:
     )
 
 
+def literal_destination_errors(graph: WorkflowGraph) -> list[WorkflowError]:
+    """Publish-time only: a stored graph that fails this must still load at
+    call time, where pipeline.py refuses just the bad transfer. Templated
+    destinations are checked after rendering, at call time."""
+    return [
+        WorkflowError("node", node.id, "transfer_destination",
+                      f"{node.name!r} has an invalid destination — use a phone number/extension "
+                      "or sip:user@host")
+        for node in graph.nodes.values()
+        if node.type == "transfer" and node.transfer_destination
+        and "{{" not in node.transfer_destination and not is_transfer_destination(node.transfer_destination)
+    ]
+
+
 def parse_graph(raw: dict[str, Any]) -> WorkflowGraph:
     """Raises WorkflowInvalid — never returns a partial graph."""
     errors, graph = _validate_and_build(raw)
@@ -488,12 +502,6 @@ def _validate_and_build(
         if node.type == "transfer" and not str(node.transfer_destination or "").strip():
             err("node", node.id, "transfer_destination",
                 f"{node.name!r} hands the call to a human, so it needs a destination number")
-        elif (node.type == "transfer" and "{{" not in node.transfer_destination
-              and not is_transfer_destination(node.transfer_destination)):
-            # Templated destinations are checked after rendering, at call time.
-            err("node", node.id, "transfer_destination",
-                f"{node.name!r} has an invalid destination — use a phone number/extension "
-                "or sip:user@host")
         if node.is_terminal and out_edges[node.id]:
             err("node", node.id, None,
                 f"{node.name!r} " + ("hands the call to a human" if node.type == "transfer" else "ends the call")
