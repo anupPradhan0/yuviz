@@ -23,7 +23,7 @@ from typing import Any
 from libs.config_sdk.workflow import graphs_equivalent, starter_graph
 from libs.tenancy import platform_conn, tenant_conn
 
-from . import audit, cache, db
+from . import audit, cache, call_flows, db
 
 # `workflow` is absent — only publish/create may write a validated graph
 # (except the greeting/system_prompt mirror sync in update_agent).
@@ -397,6 +397,9 @@ async def update_agent(
         )
 
     await cache.invalidate(cache_key(tenant_slug, old["slug"]))
+    # A published IVR flow handing calls to this agent cached whether it can
+    # answer; a deactivation must reach the next call, not the next TTL.
+    await call_flows.invalidate_runtime_caches_naming_agent(old["tenant_id"], tenant_slug, agent_id)
     return _public_agent(new)
 
 
@@ -450,3 +453,4 @@ async def soft_delete_agent(
         )
 
     await cache.invalidate(cache_key(tenant_slug, old["slug"]))
+    await call_flows.invalidate_runtime_caches_naming_agent(old["tenant_id"], tenant_slug, agent_id)
