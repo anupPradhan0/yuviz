@@ -52,14 +52,33 @@ def test_parse_contacts_csv_strips_common_separators():
 
 def test_parse_contacts_csv_rejects_multiline_injection():
     content = b'phone_number,name\n+14155551111,Alice\n"5551234\n\napi hupall",Mallory\n'
-    with pytest.raises(ValueError, match=r"line\(s\) 5"):
+    with pytest.raises(ValueError, match=r"row\(s\) 3:"):
         campaign_contacts.parse_contacts_csv(content)
 
 
-def test_parse_contacts_csv_rejects_any_non_digit_and_names_every_line():
+def test_parse_contacts_csv_rejects_any_non_digit_and_names_every_row():
     content = b"phone_number\n+14155551111\n555@evil\n+14155552222\nabc\n"
-    with pytest.raises(ValueError, match=r"line\(s\) 3, 5"):
+    with pytest.raises(ValueError, match=r"row\(s\) 3, 5:"):
         campaign_contacts.parse_contacts_csv(content)
+
+
+def test_parse_contacts_csv_reports_spreadsheet_row_after_multiline_cell():
+    content = b'phone_number,name\n1001,"Acme\nBilling"\nxx,c\n'
+    with pytest.raises(ValueError, match=r"row\(s\) 3:"):
+        campaign_contacts.parse_contacts_csv(content)
+
+
+async def test_release_claim_returns_contact_to_pending_without_counting_the_attempt(test_tenant, test_agent, scoped):
+    campaign = await _make_campaign(test_tenant, test_agent)
+    await campaign_contacts.bulk_insert_contacts(campaign["id"], [{"phone_number": "+14155551111", "name": ""}])
+    claimed = await campaign_contacts.claim_next_pending(campaign["id"])
+    assert claimed["attempt_count"] == 1
+
+    await campaign_contacts.release_claim(claimed["id"])
+
+    contacts = await campaign_contacts.list_contacts(campaign["id"])
+    assert contacts[0]["status"] == "pending"
+    assert contacts[0]["attempt_count"] == 0
 
 
 async def _make_campaign(test_tenant, test_agent):

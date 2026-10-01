@@ -23,7 +23,8 @@ def parse_contacts_csv(content: bytes) -> list[dict[str, str]]:
     are ignored. Blank phone_number rows are skipped rather than raising,
     since a hand-edited CSV exported from a spreadsheet often has trailing
     blank rows. Common separators are stripped; any other non-digit makes
-    the whole upload fail, naming the offending lines."""
+    the whole upload fail, naming the offending spreadsheet rows (header =
+    row 1; a quoted multi-line cell is still one row)."""
     text = content.decode("utf-8-sig")  # -sig: strips a BOM Excel-exported CSVs commonly carry
     reader = csv.DictReader(io.StringIO(text))
     if reader.fieldnames is None or "phone_number" not in [f.strip().lower() for f in reader.fieldnames]:
@@ -36,20 +37,20 @@ def parse_contacts_csv(content: bytes) -> list[dict[str, str]]:
     name_col = field_map.get("name")
 
     contacts = []
-    invalid_lines = []
-    for row in reader:
+    invalid_rows = []
+    for row_num, row in enumerate(reader, start=2):
         phone = (row.get(phone_col) or "").strip()
         if not phone:
             continue
         phone = phone.translate(_PHONE_SEPARATORS)
         if not originate.is_valid_dial_number(phone):
-            invalid_lines.append(reader.line_num)
+            invalid_rows.append(row_num)
             continue
         contacts.append({"phone_number": phone, "name": (row.get(name_col) or "").strip() if name_col else ""})
-    if invalid_lines:
-        shown = ", ".join(str(n) for n in invalid_lines[:10])
-        more = f" (and {len(invalid_lines) - 10} more)" if len(invalid_lines) > 10 else ""
-        raise ValueError(f"invalid phone_number on line(s) {shown}{more}: use digits with an optional leading +")
+    if invalid_rows:
+        shown = ", ".join(str(n) for n in invalid_rows[:10])
+        more = f" (and {len(invalid_rows) - 10} more)" if len(invalid_rows) > 10 else ""
+        raise ValueError(f"invalid phone_number on row(s) {shown}{more}: use digits with an optional leading +")
     return contacts
 
 
@@ -105,6 +106,19 @@ async def claim_next_pending(campaign_id: Any, *, platform_scoped: bool = False)
             row["id"],
         )
         return dict(updated)
+
+
+async def release_claim(contact_id: Any, *, platform_scoped: bool = False) -> None:
+    """Undoes claim_next_pending for a dial that never happened: back to
+    pending, and the attempt it counted is given back."""
+    pool = await db.get_pool()
+    conn_cm = platform_conn(pool, reason="campaign-by-id") if platform_scoped else tenant_conn(pool)
+    async with conn_cm as conn:
+        await conn.execute(
+            "UPDATE campaign_contacts SET status = 'pending', attempt_count = GREATEST(attempt_count - 1, 0) "
+            "WHERE id = $1 AND status = 'calling'",
+            contact_id,
+        )
 
 
 async def mark_contact_status(
