@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from .dial_targets import is_transfer_destination
+
 NODE_TYPES = ("start", "agent", "transfer", "end", "global")
 TERMINAL_NODE_TYPES = ("end", "transfer")
 # `global` is always-on prompt text, not a call step — exempt from wiring rules.
@@ -354,6 +356,20 @@ def _edge_from_raw(raw: dict[str, Any]) -> Edge:
         condition=str(data.get("condition") or "").strip(),
         transition_speech=speech,
     )
+
+
+def literal_destination_errors(graph: WorkflowGraph) -> list[WorkflowError]:
+    """Publish-time only: a stored graph that fails this must still load at
+    call time, where pipeline.py refuses just the bad transfer. Templated
+    destinations are checked after rendering, at call time."""
+    return [
+        WorkflowError("node", node.id, "transfer_destination",
+                      f"{node.name!r} has an invalid destination — use a phone number/extension "
+                      "or sip:user@host")
+        for node in graph.nodes.values()
+        if node.type == "transfer" and node.transfer_destination
+        and "{{" not in node.transfer_destination and not is_transfer_destination(node.transfer_destination)
+    ]
 
 
 def parse_graph(raw: dict[str, Any]) -> WorkflowGraph:

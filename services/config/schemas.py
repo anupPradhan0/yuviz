@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from libs.config_sdk.dial_targets import is_dial_number, is_transfer_destination
+
 MAX_WORKFLOW_NODES = 50
 MAX_WORKFLOW_EDGES = 120
 # Caps prompt bloat: a 2-node graph can still carry multi-MB strings.
@@ -119,6 +121,21 @@ class AgentUpdate(BaseModel):
     caller_id_policy:     Literal["original", "platform", "custom"] | None = None
     platform_did:         str | None = None
     custom_caller_id:     str | None = None
+
+    @field_validator("transfer_destination")
+    @classmethod
+    def _transfer_destination_shape(cls, value: str | None) -> str | None:
+        if value and not is_transfer_destination(value):
+            raise ValueError("transfer_destination must be a phone number/extension or sip:user@host")
+        return value
+
+    @field_validator("platform_did", "custom_caller_id")
+    @classmethod
+    def _caller_id_shape(cls, value: str | None) -> str | None:
+        if value and not is_dial_number(value):
+            raise ValueError("must be a phone number: digits with an optional leading +")
+        return value
+
     transfer_waiting_experience: Literal["announcement_moh", "announcement_silence"] | None = None
     # Condition-clause overrides for the [[END_CALL]]/[[TRANSFER]] trigger
     # instructions; None/empty = built-in defaults (see pipeline.py).

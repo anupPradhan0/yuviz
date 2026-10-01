@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
 
 from libs.config_sdk import RuntimeConfig, validate_transfer_timeout_ms
+from libs.config_sdk.dial_targets import is_transfer_destination
 from libs.knowledge_sdk import IKnowledgeProvider, RetrievalPolicy
 
 from .directives import (
@@ -336,30 +337,23 @@ def _build_transfer_instruction(
         "never say it out loud or explain it to the caller."
     )
 
-# Phase 5F fail-fast config validation: shapes a transfer destination may
-# take. Deliberately shallow — FreeSWITCH/Kamailio own real routing; this
-# only catches obviously-broken config (empty, prose, a stray URL) at
-# session setup instead of mid-call.
-_SIP_URI_RE = re.compile(r"^sips?:[^@\s]+@[^\s]+$", re.IGNORECASE)
-_PHONE_RE   = re.compile(r"^\+?\d{2,15}$")
-
-
+# Runtime ESL-injection allowlist for transfer destinations, including
+# workflow-rendered ones. Must match EslClient.cpp's is_safe_destination;
+# never relax it for convenience.
 def transfer_destination_problem(destination: str | None) -> str | None:
     """None when the destination looks routable; otherwise a human-readable
-    diagnosis for the session-setup error log."""
+    diagnosis for the session-setup error log. Checks the exact value the
+    Gateway will receive (no strip), with the Gateway's own allowlist."""
     if destination is None or not destination.strip():
         return "transfer_destination is empty"
-    d = destination.strip()
-    if d.lower().startswith(("sip:", "sips:")):
-        if not _SIP_URI_RE.match(d):
-            return f"malformed SIP URI {d!r} (expected sip:user@host)"
+    if is_transfer_destination(destination):
         return None
-    if not _PHONE_RE.match(d):
-        return (
-            f"transfer_destination {d!r} is neither a phone number/extension "
-            "(2-15 digits, optional leading +) nor a sip:/sips: URI"
-        )
-    return None
+    if destination.lower().startswith(("sip:", "sips:")):
+        return f"malformed SIP URI {destination!r} (expected sip:user@host)"
+    return (
+        f"transfer_destination {destination!r} is neither a phone number/extension "
+        "(2-15 digits, optional leading +) nor a sip:/sips: URI"
+    )
 
 # Phase 5C of AI-to-human transfer: when a cold transfer fails, generate a
 # brief apology and continue the conversation rather than ending the call

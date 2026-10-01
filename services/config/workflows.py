@@ -24,6 +24,7 @@ from libs.config_sdk.workflow import (
     WorkflowInvalid,
     graph_warnings,
     graphs_equivalent,
+    literal_destination_errors,
     parse_graph,
 )
 from libs.tenancy import tenant_conn
@@ -49,6 +50,9 @@ def _validate_sync(graph: dict[str, Any]) -> list[dict[str, Any]]:
         parsed = parse_graph(graph)
     except WorkflowInvalid as exc:
         raise WorkflowValidationError(exc.errors) from None
+    unsafe = literal_destination_errors(parsed)
+    if unsafe:
+        raise WorkflowValidationError(unsafe)
     return [w.to_dict() for w in graph_warnings(parsed)]
 
 
