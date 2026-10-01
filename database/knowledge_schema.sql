@@ -262,3 +262,23 @@ BEGIN
 END
 $kb_workflow_backfill$;
 
+
+-- A knowledge base's embedding provider must belong to the KB's own tenant
+-- (see the matching agents block in schema.sql, which creates
+-- provider_configs_id_tenant_id_key). Guard and constraint in one DO block.
+DO $$
+DECLARE violations int;
+BEGIN
+  SELECT count(*) INTO violations
+    FROM knowledge_bases k JOIN provider_configs p ON p.id = k.embedding_config_id
+   WHERE p.tenant_id IS DISTINCT FROM k.tenant_id;
+  IF violations > 0 THEN
+    RAISE EXCEPTION
+      'knowledge_bases has % embedding_config_id(s) pointing at another tenant''s provider; '
+      'fix them before applying knowledge_schema.sql', violations;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'knowledge_bases_embedding_config_tenant_fkey') THEN
+    EXECUTE $sql$ALTER TABLE knowledge_bases ADD CONSTRAINT knowledge_bases_embedding_config_tenant_fkey
+      FOREIGN KEY (embedding_config_id, tenant_id) REFERENCES provider_configs(id, tenant_id)$sql$;
+  END IF;
+END $$;

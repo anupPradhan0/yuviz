@@ -10,11 +10,13 @@ lives.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from libs.tenancy import platform_conn
 
-from . import audit, cache, db
+from . import audit, cache, db, phone_numbers
+from .provider_configs import require_usable_tts_voice
 
 # Columns an UPDATE is allowed to touch — deliberately not "whatever kwargs
 # the caller passes", so a typo'd field name fails loudly instead of being
@@ -27,6 +29,30 @@ _UPDATABLE_FIELDS = {
     "default_stt_config_id", "default_llm_config_id", "default_tts_config_id",
     "max_concurrent_calls",
 }
+
+
+async def _validate_default_providers(conn: Any, tenant_id: Any, fields: dict[str, Any]) -> None:
+    """An account default must be this account's own live provider of that
+    role; agents without their own provider run on it."""
+    for role in ("stt", "llm", "tts"):
+        field = f"default_{role}_config_id"
+        config_id = fields.get(field)
+        if config_id is None:
+            continue
+        try:
+            uuid.UUID(str(config_id))
+        except ValueError:
+            raise ValueError(f"{field}={config_id!r} is not a valid id") from None
+        # FOR SHARE: serializes with a concurrent delete's FOR UPDATE.
+        row = await conn.fetchrow(
+            "SELECT tenant_id, role, engine, voice FROM provider_configs WHERE id = $1 AND deleted_at IS NULL FOR SHARE",
+            config_id,
+        )
+        if row is None or str(row["tenant_id"]) != str(tenant_id):
+            raise ValueError(f"{field}={config_id!r} is not one of this account's providers")
+        if row["role"] != role:
+            raise ValueError(f"{field}={config_id!r} is a {row['role']} provider, not {role}")
+        require_usable_tts_voice(field, config_id, row["engine"], row["voice"])
 
 
 def _cache_key(slug: str) -> str:
@@ -126,6 +152,9 @@ async def update_tenant(
 
     pool = await db.get_pool()
     async with platform_conn(pool, reason="tenants-out-of-rls-scope") as conn:
+        # Before the tenants lock: provider delete locks the provider, then
+        # the tenant, so this must take them in the same order.
+        await _validate_default_providers(conn, tenant_id, fields)
         # FOR UPDATE locks the row for the rest of this transaction — a
         # plain SELECT here would let two concurrent update_tenant() calls
         # both read the same "old" value, so the audit_log row from
@@ -215,5 +244,24 @@ async def soft_delete_tenant(
             user_email=user_email,
             old_value=old,
         )
+        # A deleted tenant's numbers must stop routing; did:{did} has no TTL,
+        # so nothing else would ever remove them.
+        retired = await conn.fetch(
+            "UPDATE phone_numbers SET deleted_at = now() WHERE tenant_id = $1 AND deleted_at IS NULL "
+            "RETURNING *",
+            tenant_id,
+        )
+        for row in retired:
+            await audit.write_audit(
+                conn,
+                entity_type="phone_number",
+                entity_id=row["id"],
+                action="deleted",
+                user_id=user_id,
+                user_email=user_email,
+                old_value=dict(row),
+            )
 
     await cache.invalidate(_cache_key(old["slug"]))
+    for row in retired:
+        await cache.invalidate(phone_numbers._cache_key(row["did"]))

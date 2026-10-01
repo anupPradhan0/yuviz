@@ -46,6 +46,12 @@ async def test_tenant(pool):
     tenant = dict(row)
     yield tenant
     await cache.invalidate(f"tenant:{slug}")
+    # did:{did} has no TTL and the row deletes below never touch Redis, so
+    # routes written during the test would otherwise outlive it forever.
+    async for key in cache.get_client().scan_iter(match="did:*"):
+        route = await cache.get_json(key)
+        if route and route.get("tenant_slug") == slug:
+            await cache.invalidate(key)
     # Cascade manually — agents/provider_configs/phone_numbers/
     # tool_provider_configs FK-reference tenants without ON DELETE CASCADE
     # (a real delete in production should be a deliberate, audited action
@@ -63,6 +69,10 @@ async def test_tenant(pool):
     await pool.execute("DELETE FROM phone_numbers WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM agents WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM tool_provider_configs WHERE tenant_id = $1", tenant["id"])
+    await pool.execute(
+        "UPDATE tenants SET default_stt_config_id = NULL, default_llm_config_id = NULL, "
+        "default_tts_config_id = NULL WHERE id = $1", tenant["id"],
+    )
     await pool.execute("DELETE FROM provider_configs WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM carriers WHERE tenant_id = $1", tenant["id"])
     # test_admin (soft-deleted, not hard-deleted, by its own teardown — see

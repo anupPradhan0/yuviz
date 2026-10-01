@@ -160,6 +160,22 @@ class TestTenantEndpoints:
         gone = await client.get(f"/tenants/{test_tenant['slug']}")
         assert gone.status_code == 404
 
+    async def test_delete_tenant_retires_its_numbers_and_their_routes(self, client, test_tenant, pool):
+        from services.config import cache, phone_numbers
+
+        did = f"test-did-{uuid.uuid4().hex[:8]}"
+        set_target_tenant(test_tenant["id"])
+        await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
+        assert await cache.get_json(f"did:{did}") is not None
+        try:
+            resp = await client.delete(f"/tenants/{test_tenant['id']}?force=true")
+            assert resp.status_code == 204
+
+            assert await pool.fetchval("SELECT deleted_at FROM phone_numbers WHERE did = $1", did) is not None
+            assert await cache.get_json(f"did:{did}") is None
+        finally:
+            await pool.execute("DELETE FROM phone_numbers WHERE did = $1", did)
+
     async def test_delete_tenant_with_nothing_attached_needs_no_force(self, client, test_tenant):
         # The common case — the check itself must not become an extra
         # confirmation step when there's genuinely nothing to warn about.
@@ -798,7 +814,7 @@ class TestProviderConfigEndpoints:
         finally:
             await pool.execute("DELETE FROM knowledge_bases WHERE id = $1", kb_id)
 
-    async def test_delete_provider_force_true_bypasses_the_block(self, client, test_tenant):
+    async def test_delete_provider_force_no_longer_bypasses_the_block(self, client, test_tenant):
         stt = await client.post(
             f"/tenants/{test_tenant['id']}/providers",
             json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
@@ -811,7 +827,135 @@ class TestProviderConfigEndpoints:
         assert agent.status_code == 201
 
         resp = await client.delete(f"/providers/{provider_id}?force=true")
-        assert resp.status_code == 204
+        assert resp.status_code == 409
+        assert (await client.get(f"/providers/{provider_id}")).status_code == 200
+
+    async def test_delete_provider_in_use_by_inactive_agent_is_409(self, client, test_tenant):
+        stt = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+        )
+        provider_id = stt.json()["id"]
+        agent = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "idle-agent", "name": "Idle", "stt_config_id": provider_id},
+        )
+        assert agent.status_code == 201
+        patched = await client.patch(
+            f"/tenants/{test_tenant['slug']}/agents/{agent.json()['id']}", json={"status": "inactive"},
+        )
+        assert patched.status_code == 200
+
+        resp = await client.delete(f"/providers/{provider_id}")
+        assert resp.status_code == 409
+        assert resp.json()["resource_names"] == ["Idle"]
+
+    async def test_delete_provider_that_is_the_account_default_is_409(self, client, test_tenant):
+        llm = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Groq", "role": "llm", "engine": "groq"},
+        )
+        provider_id = llm.json()["id"]
+        set_default = await client.patch(f"/tenants/{test_tenant['id']}", json={"default_llm_config_id": provider_id})
+        assert set_default.status_code == 200, set_default.text
+
+        resp = await client.delete(f"/providers/{provider_id}")
+        assert resp.status_code == 409
+        assert resp.json()["resource_type"] == "tenant_default"
+        assert resp.json()["resource_names"] == [test_tenant["name"]]
+        assert (await client.get(f"/providers/{provider_id}")).status_code == 200
+
+    async def test_a_deleted_provider_cannot_be_assigned_to_an_agent(self, client, test_tenant):
+        stt = await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+        )
+        provider_id = stt.json()["id"]
+        assert (await client.delete(f"/providers/{provider_id}")).status_code == 204
+
+        resp = await client.post(
+            f"/tenants/{test_tenant['slug']}/agents",
+            json={"slug": "late-agent", "name": "Late", "stt_config_id": provider_id},
+        )
+        assert resp.status_code == 400
+
+    async def test_account_default_must_be_the_accounts_own_live_provider_of_that_role(self, client, test_tenant, pool):
+        stt = (await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+        )).json()["id"]
+        wrong_role = await client.patch(f"/tenants/{test_tenant['id']}", json={"default_llm_config_id": stt})
+        assert wrong_role.status_code == 400
+
+        other = await pool.fetchrow(
+            "INSERT INTO tenants (slug, name) VALUES ($1, 'Other') RETURNING id",
+            f"other-{test_tenant['slug']}",
+        )
+        foreign = await pool.fetchval(
+            "INSERT INTO provider_configs (tenant_id, name, role, engine) VALUES ($1, 'Theirs', 'stt', 'deepgram') RETURNING id",
+            other["id"],
+        )
+        try:
+            cross = await client.patch(f"/tenants/{test_tenant['id']}", json={"default_stt_config_id": str(foreign)})
+            assert cross.status_code == 400
+
+            assert (await client.delete(f"/providers/{stt}")).status_code == 204
+            deleted = await client.patch(f"/tenants/{test_tenant['id']}", json={"default_stt_config_id": stt})
+            assert deleted.status_code == 400
+        finally:
+            await pool.execute("DELETE FROM provider_configs WHERE id = $1", foreign)
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+    async def test_an_elevenlabs_default_needs_a_voice_like_an_agent_assignment(self, client, test_tenant):
+        tts = (await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "ElevenLabs", "role": "tts", "engine": "elevenlabs"},
+        )).json()["id"]
+        resp = await client.patch(f"/tenants/{test_tenant['id']}", json={"default_tts_config_id": tts})
+        assert resp.status_code == 400
+        assert "no voice selected" in resp.json()["detail"]
+
+    async def test_setting_a_default_locks_the_provider_before_the_tenant(self, client, test_tenant, pool):
+        """Provider delete locks provider then tenant; the default update must
+        too, or the two deadlock."""
+        import asyncio
+
+        import asyncpg
+        llm = (await client.post(
+            f"/tenants/{test_tenant['id']}/providers",
+            json={"name": "Groq", "role": "llm", "engine": "groq"},
+        )).json()["id"]
+        async with pool.acquire() as conn:
+            tx = conn.transaction()
+            await tx.start()
+            await conn.execute("SELECT 1 FROM provider_configs WHERE id = $1 FOR UPDATE", llm)
+            update = asyncio.create_task(
+                client.patch(f"/tenants/{test_tenant['id']}", json={"default_llm_config_id": llm})
+            )
+            await asyncio.sleep(0.5)
+            try:
+                await conn.execute("SELECT 1 FROM tenants WHERE id = $1 FOR UPDATE NOWAIT", test_tenant["id"])
+            except asyncpg.LockNotAvailableError:
+                pytest.fail("update_tenant locked the tenant before the provider")
+            finally:
+                await tx.rollback()
+        assert (await update).status_code == 200
+
+    async def test_raw_sql_cannot_point_an_account_default_at_another_tenants_provider(self, test_tenant, pool):
+        import asyncpg
+        other = await pool.fetchval(
+            "INSERT INTO tenants (slug, name) VALUES ($1, 'Other') RETURNING id", f"other2-{test_tenant['slug']}",
+        )
+        foreign = await pool.fetchval(
+            "INSERT INTO provider_configs (tenant_id, name, role, engine) VALUES ($1, 'Theirs', 'tts', 'kokoro') RETURNING id",
+            other,
+        )
+        try:
+            with pytest.raises(asyncpg.ForeignKeyViolationError):
+                await pool.execute("UPDATE tenants SET default_tts_config_id = $1 WHERE id = $2", foreign, test_tenant["id"])
+        finally:
+            await pool.execute("DELETE FROM provider_configs WHERE id = $1", foreign)
+            await pool.execute("DELETE FROM tenants WHERE id = $1", other)
 
     async def test_voices_requires_elevenlabs_engine(self, client, test_tenant):
         create = await client.post(
