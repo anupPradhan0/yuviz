@@ -36,6 +36,16 @@ def _e164(number: str) -> str:
     return f"+{digits}"
 
 
+def _vobiz_error(resp: httpx.Response) -> str:
+    try:
+        body = resp.json()
+    except ValueError:
+        return resp.text[:200] or "no details"
+    if isinstance(body, dict):
+        return str(body.get("error") or body.get("message") or body)[:200]
+    return str(body)[:200]
+
+
 def _expected_signature(auth_token: str, base_url: str, nonce: str, version: str) -> str:
     signed_payload = base_url + (f".{nonce}" if version == "v3" else nonce)
     digest = hmac.new(auth_token.encode("utf-8"), signed_payload.encode("utf-8"), hashlib.sha256).digest()
@@ -259,7 +269,11 @@ class VobizTelephonyProvider(ITelephonyProvider, ISmsProvider):
                     if resp.status_code == 404:
                         message = f"Vobiz can't find {target} in this account"
                     else:
-                        message = f"Vobiz rejected attaching {target} (HTTP {resp.status_code})"
+                        reason = _vobiz_error(resp)
+                        message = f"Vobiz refused to attach {target} (HTTP {resp.status_code}: {reason})"
+                        if reason == "access denied":
+                            # Seen live on a free-trial number.
+                            message += ". Vobiz trial numbers can't be attached to an application; use a paid number"
                     return InboundSyncResult(ok=False, message=message, credentials_update=created)
 
                 if created is None:

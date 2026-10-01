@@ -107,6 +107,20 @@ async def test_attach_of_a_number_outside_the_account_fails_clearly():
     assert not result.ok and "can't find" in result.message
 
 
+async def test_a_trial_number_rejection_explains_why():
+    vobiz = _Vobiz()
+
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/application"):
+            return httpx.Response(400, json={"error": "access denied"})
+        return vobiz(request)
+
+    result = await _provider(handler).attach_inbound("+918065354620", URLS, label="x")
+    assert not result.ok
+    assert "access denied" in result.message and "trial numbers" in result.message
+    assert result.credentials_update == {"inbound_application_id": "app1"}
+
+
 async def test_detach_succeeds_and_treats_a_missing_number_as_done():
     vobiz = _Vobiz()
     vobiz.attached["+918065354620"] = "app1"
