@@ -467,9 +467,64 @@ async def test_publish_refuses_an_agent_node_naming_an_unavailable_agent(test_te
         with pytest.raises(call_flows.CallFlowValidationError):
             await call_flows.publish(flow["id"], _graph("not-a-uuid"))
 
+        # Forms uuid.UUID() accepts but that must not get through: asyncpg's
+        # encoder rejects braces and urn:uuid: (a 500, not a red node), and
+        # an uppercase id would miss the runtime's exact-string agent_slugs
+        # lookup even though it names the live agent.
+        live_id = str(live["id"])
+        for variant in (f"{{{live_id}}}", f"urn:uuid:{live_id}", live_id.upper()):
+            with pytest.raises(call_flows.CallFlowValidationError) as exc:
+                await call_flows.publish(flow["id"], _graph(variant))
+            assert [(e.kind, e.id, e.field) for e in exc.value.errors] == [("node", "a1", "agent_id")], variant
+
         # The live agent still publishes, and nothing above left a version behind.
         published = await call_flows.publish(flow["id"], _graph(str(live["id"])))
-    assert published["config_version"] == 2, "the four refused publishes must not have bumped it"
+    assert published["config_version"] == 2, "the refused publishes must not have bumped it"
 
     await pool.execute("DELETE FROM agents WHERE tenant_id = $1", other_tenant["id"])
     await pool.execute("DELETE FROM tenants WHERE id = $1", other_tenant["id"])
+
+
+async def test_agent_deactivation_or_delete_reaches_a_warm_runtime_cache(test_tenant, pool):
+    """get_published_for_runtime() caches agent_slugs. Once a flow's payload
+    is warm, an agent deactivated or deleted through the service must drop
+    out of it on the next read, not after the cache TTL."""
+    with _as_tenant(test_tenant["id"]):
+        deactivated = await agents.create_agent(
+            tenant_id=test_tenant["id"], slug="to-deactivate", name="To Deactivate",
+        )
+        deleted = await agents.create_agent(
+            tenant_id=test_tenant["id"], slug="to-delete", name="To Delete",
+        )
+    graph = {
+        "version": 1,
+        "nodes": [
+            {"id": "n1", "type": "start", "data": {}},
+            {"id": "m1", "type": "menu", "data": {"prompt": "Pick one."}},
+            {"id": "a1", "type": "agent", "data": {"agent_id": str(deactivated["id"])}},
+            {"id": "a2", "type": "agent", "data": {"agent_id": str(deleted["id"])}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "m1"},
+            {"id": "e2", "source": "m1", "target": "a1", "data": {"key": "1"}},
+            {"id": "e3", "source": "m1", "target": "a2", "data": {"key": "2"}},
+        ],
+    }
+    with _as_tenant(test_tenant["id"]):
+        flow = await call_flows.create_call_flow(
+            tenant_id=test_tenant["id"], slug=f"flow-{uuid.uuid4().hex[:6]}", name="Warm Flow", graph=graph,
+        )
+        assert flow["graph"] is not None
+
+        warm = await call_flows.get_published_for_runtime(test_tenant["slug"], flow["id"])
+        assert set(warm["agent_slugs"]) == {str(deactivated["id"]), str(deleted["id"])}
+        key = call_flows._runtime_cache_key(test_tenant["slug"], flow["id"])
+        assert await cache.get_json(key) is not None, "the payload must be cached for this test to mean anything"
+
+        await agents.update_agent(deactivated["id"], tenant_slug=test_tenant["slug"], status="inactive")
+        after_deactivate = await call_flows.get_published_for_runtime(test_tenant["slug"], flow["id"])
+        assert set(after_deactivate["agent_slugs"]) == {str(deleted["id"])}
+
+        await agents.soft_delete_agent(deleted["id"], tenant_slug=test_tenant["slug"])
+        after_delete = await call_flows.get_published_for_runtime(test_tenant["slug"], flow["id"])
+        assert after_delete["agent_slugs"] == {}

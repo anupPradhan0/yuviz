@@ -12,6 +12,22 @@ import { useEffect, useState } from "react";
 import { ApiError } from "@/lib/api";
 import { CallFlowVersion, listCallFlowVersions, rollbackCallFlow } from "@/lib/callFlowApi";
 
+// A refused restore comes back as 400 {"detail": "call flow is not valid",
+// "errors": [...]}, and the detail alone gives no node and no reason. On the
+// rollback path, usually an emergency, the reason (most often "the agent
+// this step hands the call to is no longer available") is the whole point.
+function errorText(e: unknown): string {
+  if (!(e instanceof ApiError)) return String(e);
+  const errors = e.body?.errors;
+  if (Array.isArray(errors)) {
+    const messages = errors
+      .map((err) => (err && typeof err === "object" ? (err as { message?: unknown }).message : null))
+      .filter((m): m is string => typeof m === "string" && m.length > 0);
+    if (messages.length > 0) return `${e.detail}: ${Array.from(new Set(messages)).join(" ")}`;
+  }
+  return e.detail;
+}
+
 export function CallFlowVersionPanel({
   callFlowId,
   refreshKey,
@@ -38,7 +54,7 @@ export function CallFlowVersionPanel({
       await rollbackCallFlow(callFlowId, version);
       onRolledBack();
     } catch (e) {
-      setError(e instanceof ApiError ? e.detail : String(e));
+      setError(errorText(e));
     } finally {
       setBusy(null);
     }

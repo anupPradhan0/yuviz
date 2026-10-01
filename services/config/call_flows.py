@@ -102,10 +102,16 @@ async def _agent_reference_errors(
         if not agent_id:
             continue  # _node_errors already reports an unset agent_id
         try:
-            uuid.UUID(agent_id)
+            canonical = str(uuid.UUID(agent_id))
         except (ValueError, AttributeError, TypeError):
-            # Never let a malformed id reach `::uuid[]` below — that would be
-            # a 500 on publish instead of a red node in the editor.
+            canonical = None
+        if canonical != agent_id:
+            # Only the canonical lowercase hyphenated form gets past here.
+            # uuid.UUID() also accepts braces, a urn:uuid: prefix and
+            # uppercase: asyncpg's uuid encoder rejects the first two, so
+            # `::uuid[]` below would 500 instead of showing a red node, and
+            # an uppercase id would miss the runtime's exact-string
+            # agent_slugs lookup and be reported as a dead agent.
             errs.append(CallFlowError(
                 "node", node_id, "agent_id",
                 "This step no longer points at a real agent — pick one again.",
@@ -245,6 +251,27 @@ async def _invalidate_runtime_cache(call_flow_id: Any, tenant_id: Any) -> None:
         await cache.invalidate(_runtime_cache_key(tenant["slug"], call_flow_id))
 
 
+async def invalidate_runtime_caches_naming_agent(
+    tenant_id: Any, tenant_slug: str, agent_id: Any,
+) -> None:
+    """Drop the cached runtime payload of every published flow whose `agent`
+    node names this agent. get_published_for_runtime() resolves agent_slugs
+    once and caches the result, so without this an agent deactivated or
+    deleted after publish keeps resolving until the cache TTL expires. Called by agents.update_agent() and
+    agents.soft_delete_agent() after their writes commit."""
+    needle = json.dumps([{"type": "agent", "data": {"agent_id": str(agent_id)}}])
+    pool = await db.get_pool()
+    async with tenant_conn(pool) as conn:
+        rows = await conn.fetch(
+            "SELECT id FROM call_flows "
+            " WHERE tenant_id = $1 AND deleted_at IS NULL AND graph IS NOT NULL "
+            "   AND graph->'nodes' @> $2::jsonb",
+            tenant_id, needle,
+        )
+    if rows:
+        await cache.invalidate(*(_runtime_cache_key(tenant_slug, r["id"]) for r in rows))
+
+
 async def create_call_flow(
     *, tenant_id: Any, slug: str, name: str, description: str = "",
     direction: str = "inbound", clone_from_id: Any | None = None,
@@ -257,8 +284,9 @@ async def create_call_flow(
     a clone_from_id belonging to another tenant resolves to nothing and is
     reported as not-found rather than silently copied across the boundary.
 
-    A valid graph is published on creation; an incomplete scaffold lands as a
-    draft (see below).
+    A valid graph is published on creation; an incomplete scaffold, or a
+    clone naming an agent that is no longer available, lands as a draft
+    (see below).
     """
     if clone_from_id is not None:
         source = await get_call_flow(clone_from_id)
@@ -272,9 +300,11 @@ async def create_call_flow(
     # "hand to an AI agent" can't name the agent until you pick one, and the
     # picker is not the place to do that. So an invalid graph lands as a
     # draft (unpublished, nothing points at it, the canvas shows what to
-    # fix) instead of failing creation outright. The starter and any clone
-    # are always valid and still publish immediately, which is what keeps an
-    # attachable flow from ever answering a call with nothing.
+    # fix) instead of failing creation outright. The starter publishes
+    # immediately, which is what keeps an attachable flow from ever answering
+    # a call with nothing. A clone usually does too, but lands as a draft if
+    # one of its `agent` nodes names an agent that is no longer available
+    # (checked below, once there is a connection).
     try:
         await validate(graph)
         publishable = True
