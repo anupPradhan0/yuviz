@@ -60,6 +60,18 @@ _UPDATABLE_FIELDS = {"did", "agent_id", "fallback_agent_id", "carrier_id", "tele
 # the window where a stale/absent entry silently misroutes a real call.
 
 
+async def _lock_live_telephony_config(conn: Any, telephony_config_id: Any) -> None:
+    """FOR SHARE conflicts with a config delete's FOR UPDATE, so a number
+    can't land on a config deleted under it."""
+    if telephony_config_id is None:
+        return
+    found = await conn.fetchval(
+        "SELECT 1 FROM telephony_configs WHERE id = $1 AND deleted_at IS NULL FOR SHARE", telephony_config_id,
+    )
+    if found is None:
+        raise LookupError(f"telephony_config {telephony_config_id} not found")
+
+
 def _cache_key(did: str) -> str:
     return f"did:{did}"
 
@@ -140,7 +152,7 @@ async def get_phone_number(phone_number_id: Any, *, platform_scoped: bool = Fals
         row = await conn.fetchrow(
             "SELECT * FROM phone_numbers WHERE id = $1 AND deleted_at IS NULL", phone_number_id,
         )
-    return dict(row) if row is not None else None
+    return _row(row) if row is not None else None
 
 
 async def list_phone_numbers(tenant_id: Any) -> list[dict[str, Any]]:
@@ -150,7 +162,27 @@ async def list_phone_numbers(tenant_id: Any) -> list[dict[str, Any]]:
             "SELECT * FROM phone_numbers WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY did",
             tenant_id,
         )
-    return [dict(row) for row in rows]
+    return [_row(row) for row in rows]
+
+
+def _row(row: Any) -> dict[str, Any]:
+    result = dict(row)
+    if "provider_sync" in result:
+        result["provider_sync"] = db.json_col(result["provider_sync"])
+    return result
+
+
+async def record_provider_sync(phone_number_id: Any, tenant_id: Any, sync: dict[str, Any]) -> dict[str, Any]:
+    """Stores the latest sync outcome on the number; returns it with its time."""
+    pool = await db.get_pool()
+    async with platform_conn(pool, reason="phone-numbers-provider-sync", stamp_tenant=str(tenant_id)) as conn:
+        stored = await conn.fetchval(
+            "UPDATE phone_numbers SET provider_sync = jsonb_build_object("
+            "  'ok', $2::boolean, 'message', $3::text, 'at', to_jsonb(now())"
+            ") WHERE id = $1 AND tenant_id = $4 RETURNING provider_sync",
+            phone_number_id, sync["ok"], sync.get("message"), tenant_id,
+        )
+    return db.json_col(stored)
 
 
 class DidAlreadyAssigned(Exception):
@@ -182,6 +214,7 @@ async def create_phone_number(
 ) -> dict[str, Any]:
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
+        await _lock_live_telephony_config(conn, telephony_config_id)
         try:
             row = await conn.fetchrow(
                 "INSERT INTO phone_numbers "
@@ -192,7 +225,7 @@ async def create_phone_number(
         except asyncpg.UniqueViolationError as exc:
             _raise_if_did_taken(exc, did)
             raise
-        result = dict(row)
+        result = _row(row)
         await audit.write_audit(
             conn,
             entity_type="phone_number",
@@ -234,6 +267,7 @@ async def update_phone_number(
         if old_row is None:
             raise LookupError(f"phone_number {phone_number_id} not found")
         old = dict(old_row)
+        await _lock_live_telephony_config(conn, fields.get("telephony_config_id"))
 
         columns = list(fields.keys())
         set_clause = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(columns))
@@ -246,7 +280,7 @@ async def update_phone_number(
         except asyncpg.UniqueViolationError as exc:
             _raise_if_did_taken(exc, fields.get("did", old["did"]))
             raise
-        new = dict(new_row)
+        new = _row(new_row)
 
         await audit.write_audit(
             conn,

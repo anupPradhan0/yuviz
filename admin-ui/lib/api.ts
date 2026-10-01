@@ -392,6 +392,16 @@ export interface PhoneNumber {
   region: string | null;
   created_at: string;
   updated_at: string;
+  // Last attempt to point this number at the platform at its provider; null
+  // if never tried or nothing to sync. ok=false: saved, but not wired.
+  provider_sync?: ProviderSync | null;
+}
+
+export interface ProviderSync {
+  ok: boolean;
+  message: string | null;
+  /** When it was last tried; absent on a sync-numbers result row. */
+  at?: string;
 }
 
 export interface PhoneNumberCreate {
@@ -419,8 +429,10 @@ export const createPhoneNumber = (tenantId: string, body: PhoneNumberCreate) =>
   request<PhoneNumber>(`/tenants/${tenantId}/phone-numbers`, { method: "POST", body: JSON.stringify(body) });
 export const updatePhoneNumber = (phoneNumberId: string, body: PhoneNumberUpdate) =>
   request<PhoneNumber>(`/phone-numbers/${phoneNumberId}`, { method: "PATCH", body: JSON.stringify(body) });
-export const deletePhoneNumber = (phoneNumberId: string) =>
-  request<void>(`/phone-numbers/${phoneNumberId}`, { method: "DELETE" });
+export const deletePhoneNumber = (phoneNumberId: string, opts: { force?: boolean } = {}) =>
+  request<void>(`/phone-numbers/${phoneNumberId}${opts.force ? "?force=true" : ""}`, { method: "DELETE" });
+export const syncPhoneNumber = (phoneNumberId: string) =>
+  request<PhoneNumber>(`/phone-numbers/${phoneNumberId}/sync`, { method: "POST" });
 
 // ── Carriers ─────────────────────────────────────────────────────────────
 
@@ -498,6 +510,10 @@ export const createTelephonyConfig = (tenantId: string, body: TelephonyConfigCre
   request<TelephonyConfig>(`/tenants/${tenantId}/telephony-configs`, { method: "POST", body: JSON.stringify(body) });
 export const getTelephonyConfig = (configId: string) =>
   request<TelephonyConfig>(`/telephony-configs/${configId}`);
+export const syncTelephonyNumbers = (configId: string) =>
+  request<{ results: (ProviderSync & { did: string })[]; application: ProviderSync | null }>(
+    `/telephony-configs/${configId}/sync-numbers`, { method: "POST" },
+  );
 export const updateTelephonyConfig = (configId: string, body: TelephonyConfigUpdate) =>
   request<TelephonyConfig>(`/telephony-configs/${configId}`, { method: "PATCH", body: JSON.stringify(body) });
 export const setDefaultOutboundTelephonyConfig = (configId: string) =>

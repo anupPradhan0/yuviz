@@ -50,6 +50,24 @@ re-resolved server-side against that tenant before any vendor is called
 Campaigns' `services/campaigns/telephony_originate.py` additionally reads
 `TELEPHONY_SERVICE_URL` (default `http://localhost:8750`).
 
+## Provider number sync
+
+Admins never wire a number up in the vendor's dashboard. Config Service
+(`services/config/number_sync.py`) does it when a number is added, moved
+or deleted under a provider configuration, using the same
+`TELEPHONY_PUBLIC_BASE_URL` (set it on Config Service too; without it,
+numbers are saved with a "not synced" warning):
+
+| Step | Vobiz | Cloudonix |
+|---|---|---|
+| Add: ownership check | Number must be in the account's inventory, else 400 (Vobiz unreachable: 502) | Not checked |
+| Add: point at platform | First number creates a Vobiz Application (`Yuviz - <config name>`) with answer `…/vobiz/voice/{config_id}` and hangup `…/vobiz/status/{config_id}`, stores its id as `inbound_application_id`, then attaches the number; later numbers reuse it and refresh its URLs | Not automated yet: the warning names the exact URL to set on the Voice Application |
+| Delete | Detaches first; if Vobiz refuses, the number is kept (502) | No-op (the application URL is shared) |
+| Public URL changed | **Re-sync numbers** on the configuration re-attaches every number and refreshes the Application's URLs | — |
+
+A sync failure on add never loses the number: the response carries
+`provider_sync: {ok, message}` and the Telephony page shows it.
+
 ## Cutover runbook
 
 Three merges against one design — **all three have landed**; the two

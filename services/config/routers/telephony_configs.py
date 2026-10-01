@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from libs.tenancy import set_target_tenant
 
+from .. import number_sync
+from .. import phone_numbers as phone_numbers_service
 from .. import telephony_configs as telephony_configs_service
 from .. import tenants as tenants_service
 from ..auth import CurrentUser
@@ -26,6 +30,8 @@ tenant_scoped_router = APIRouter(
 )
 router = APIRouter(prefix="/telephony-configs", tags=["telephony_configs"])
 providers_router = APIRouter(tags=["telephony_configs"])
+
+_SYNC_CONCURRENCY = 5
 
 
 async def _resolve_tenant_id(tenant_id: str) -> None:
@@ -138,6 +144,44 @@ async def set_default_outbound(
     return await telephony_configs_service.set_default_outbound(
         config_id, user_id=current_user.id, user_email=current_user.email,
     )
+
+
+@router.post("/{config_id}/sync-numbers")
+async def sync_numbers(
+    config_id: str, current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
+):
+    """Re-points every number on this config at the platform, e.g. after the
+    public base URL changed."""
+    cfg = await _authorize_telephony_config(config_id, current_user)
+    set_target_tenant(cfg["tenant_id"])
+    numbers = [
+        n for n in await phone_numbers_service.list_phone_numbers(cfg["tenant_id"])
+        if str(n.get("telephony_config_id")) == str(cfg["id"])
+    ]
+    results: list[dict] = []
+
+    async def sync_one(number: dict, config: dict, refresh_app: bool) -> None:
+        sync = await number_sync.attach(config, number["did"], refresh_app=refresh_app)
+        if sync is not None:
+            await phone_numbers_service.record_provider_sync(number["id"], number["tenant_id"], sync)
+            results.append({"did": number["did"], **sync})
+
+    # Refreshed once on its own, so no single number's failure can skip it.
+    application = await number_sync.refresh(cfg)
+    rest = numbers
+    if application is None and numbers:
+        # No shared app yet: the first attach creates it with the current URLs.
+        await sync_one(numbers[0], cfg, refresh_app=False)
+        cfg = await telephony_configs_service.get_telephony_config(config_id, platform_scoped=True)
+        rest = numbers[1:]
+    limit = asyncio.Semaphore(_SYNC_CONCURRENCY)
+
+    async def bounded(number: dict) -> None:
+        async with limit:
+            await sync_one(number, cfg, refresh_app=False)
+
+    await asyncio.gather(*(bounded(n) for n in rest))
+    return {"results": results, "application": application}
 
 
 @router.delete("/{config_id}", status_code=204)
