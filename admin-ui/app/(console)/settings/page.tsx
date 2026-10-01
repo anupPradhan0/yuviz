@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   ApiError,
   AuditLogEntry,
@@ -17,18 +18,28 @@ import {
 import { CodeInput } from "@/components/CodeInput";
 import { Modal } from "@/components/Modal";
 import { setToken } from "@/lib/auth";
+import { TeamMembers } from "@/components/TeamMembers";
 
-type SettingsSection = "profile" | "sessions" | "security" | "audit-log";
+type SettingsSection = "profile" | "sessions" | "security" | "team" | "audit-log";
 
-// Users deliberately is NOT a tab here, nor a link out. It has its own
-// top-level page (/users) reachable from the sidebar — the copy that used
-// to live inside Settings was a duplicate of that whole surface, modal and
-// role gate included, and the second entry point was itself the confusion.
-const SECTIONS: { id: SettingsSection; label: string }[] = [
-  { id: "profile", label: "Profile" },
-  { id: "sessions", label: "Sessions" },
-  { id: "security", label: "Security" },
-  { id: "audit-log", label: "Audit Log" },
+// Personal settings first, then the account's own; each tab gated to the
+// roles whose API calls it makes (team: invites.py, audit log: audit_log.py).
+const SECTION_GROUPS: { label: string; sections: { id: SettingsSection; label: string; roles?: UserRole[] }[] }[] = [
+  {
+    label: "Your account",
+    sections: [
+      { id: "profile", label: "Profile" },
+      { id: "sessions", label: "Sessions" },
+      { id: "security", label: "Security" },
+    ],
+  },
+  {
+    label: "Organization",
+    sections: [
+      { id: "team", label: "Team members", roles: ["superadmin", "admin"] },
+      { id: "audit-log", label: "Audit Log", roles: ["superadmin"] },
+    ],
+  },
 ];
 
 const ENTITY_TYPES = [
@@ -733,7 +744,30 @@ function SecurityPanel() {
 }
 
 export default function SettingsPage() {
-  const [section, setSection] = useState<SettingsSection>("profile");
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  // undefined while loading; null if it failed to load.
+  const [role, setRole] = useState<UserRole | null | undefined>(undefined);
+  const [roleError, setRoleError] = useState<string | null>(null);
+  useEffect(() => {
+    getCurrentUser()
+      .then((me) => setRole(me.role))
+      .catch((e) => {
+        setRole(null);
+        setRoleError(e instanceof ApiError ? e.detail : String(e));
+      });
+  }, []);
+
+  const groups = SECTION_GROUPS
+    .map((g) => ({ ...g, sections: g.sections.filter((s) => !s.roles || (!!role && s.roles.includes(role))) }))
+    .filter((g) => g.sections.length > 0);
+  const requested = searchParams.get("section");
+  const section: SettingsSection = groups.some((g) => g.sections.some((s) => s.id === requested))
+    ? (requested as SettingsSection)
+    : "profile";
+  const setSection = (id: SettingsSection) => router.replace(id === "profile" ? "/settings" : `/settings?section=${id}`);
+  // A link to a role-gated tab waits for the role instead of flashing Profile.
+  const waitingForRole = role === undefined && SECTION_GROUPS.some((g) => g.sections.some((s) => s.id === requested && s.roles));
 
   return (
     <div style={{ maxWidth: 980 }}>
@@ -742,7 +776,7 @@ export default function SettingsPage() {
           Settings
         </h1>
         <div className="form-hint" style={{ marginTop: 4 }}>
-          Your profile and sign-in, plus the audit trail for this account.
+          Your profile and sign-in{groups.length > 1 ? ", plus your organization's settings" : ""}.
         </div>
       </div>
 
@@ -750,24 +784,47 @@ export default function SettingsPage() {
           console uses. The left rail this replaced was a second navigation
           idiom for four panels, and it pushed every panel into a narrow
           column on an otherwise empty page. */}
-      <div className="tabs">
-        {SECTIONS.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            className={`tab${section === item.id ? " active" : ""}`}
-            onClick={() => setSection(item.id)}
-            aria-current={section === item.id}
-          >
-            {item.label}
-          </button>
+      <div className="tabs" style={{ alignItems: "center" }}>
+        {groups.map((g, i) => (
+          <div key={g.label} role="group" aria-label={g.label} style={{ display: "contents" }}>
+            <span
+              style={{
+                fontSize: ".62rem", fontWeight: 600, letterSpacing: ".06em", textTransform: "uppercase",
+                color: "var(--text-3)", padding: "0 6px", marginLeft: i > 0 ? 18 : 0,
+                borderLeft: i > 0 ? "1px solid var(--border)" : undefined, paddingLeft: i > 0 ? 18 : 0,
+              }}
+            >
+              {g.label}
+            </span>
+            {g.sections.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={`tab${section === item.id ? " active" : ""}`}
+                onClick={() => setSection(item.id)}
+                aria-current={section === item.id}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
         ))}
       </div>
 
-      {section === "profile" && <ProfilePanel />}
-      {section === "sessions" && <SessionsPanel />}
-      {section === "security" && <SecurityPanel />}
-      {section === "audit-log" && <AuditLogPanel />}
+      {roleError && (
+        <div className="error-banner">Couldn&apos;t load your role, so only your personal settings are shown: {roleError}</div>
+      )}
+      {waitingForRole ? (
+        <div className="empty-state">Loading…</div>
+      ) : (
+        <>
+          {section === "profile" && <ProfilePanel />}
+          {section === "sessions" && <SessionsPanel />}
+          {section === "security" && <SecurityPanel />}
+          {section === "team" && <TeamMembers embedded />}
+          {section === "audit-log" && <AuditLogPanel />}
+        </>
+      )}
     </div>
   );
 }

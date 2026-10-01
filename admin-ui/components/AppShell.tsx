@@ -146,9 +146,8 @@ const MANAGEMENT_ITEMS = [
   { href: "/telephony", label: "Telephony", icon: "telephony" },
 ];
 
-// Invite-based onboarding is a superadmin/admin surface only (matches
-// require_role("superadmin", "admin") on services/config/routers/invites.py's
-// admin routes) — everyone else never sees the nav item at all.
+// Superadmin's cross-account user view; admins manage their team under
+// Settings → Team members instead.
 const USERS_ITEM = { href: "/users", label: "Users", icon: "users" };
 
 const CALLING_ITEMS = [
@@ -369,7 +368,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const visibleManagement = isSupervisor
     ? []
     : MANAGEMENT_ITEMS.filter((item) => matches(item.label) && (item.href !== "/tenants" || user?.role === "superadmin"));
-  const visibleUsers = !isSupervisor && canManageUsers && matches(USERS_ITEM.label);
+  const visibleUsers = user?.role === "superadmin" && matches(USERS_ITEM.label);
   const visibleCalling = isSupervisor
     ? CALLING_ITEMS.filter((item) => item.href === "/live-calls")
     : CALLING_ITEMS.filter((item) => matches(item.label));
