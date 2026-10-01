@@ -255,6 +255,30 @@ def test_transfer_node_requires_a_destination():
     assert any(e.id == "n2" and e.field == "transfer_destination" for e in errors)
 
 
+@pytest.mark.parametrize("dest", ["1001 XML public", "sip:a@b,sofia/external/sip:c@d", "1001\n\napi hupall"])
+def test_transfer_node_with_unsafe_literal_destination_is_rejected_at_publish(dest):
+    errors = _errors({
+        "nodes": [
+            _node("n1", "start", "greeting"),
+            _node("n2", "transfer", "to_human", prompt="Connecting you now.", transfer_destination=dest),
+        ],
+        "edges": [_edge("e1", "n1", "n2", "needs a person")],
+    })
+    assert any(e.id == "n2" and e.field == "transfer_destination" for e in errors)
+
+
+def test_transfer_node_with_templated_destination_is_left_for_runtime():
+    errors = _errors({
+        "nodes": [
+            _node("n1", "start", "greeting"),
+            _node("n2", "transfer", "to_human", prompt="Connecting you now.",
+                  transfer_destination="{{ branch_number }}"),
+        ],
+        "edges": [_edge("e1", "n1", "n2", "needs a person")],
+    })
+    assert not any(e.id == "n2" and e.field == "transfer_destination" for e in errors)
+
+
 def test_transfer_node_with_destination_is_valid():
     graph = parse_graph({
         "nodes": [

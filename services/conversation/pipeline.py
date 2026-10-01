@@ -337,10 +337,9 @@ def _build_transfer_instruction(
         "never say it out loud or explain it to the caller."
     )
 
-# Phase 5F fail-fast config validation: shapes a transfer destination may
-# take. Deliberately shallow — FreeSWITCH/Kamailio own real routing; this
-# only catches obviously-broken config (empty, prose, a stray URL) at
-# session setup instead of mid-call.
+# Runtime ESL-injection allowlist for transfer destinations, including
+# workflow-rendered ones. Must match EslClient.cpp's is_safe_destination;
+# never relax it for convenience.
 def transfer_destination_problem(destination: str | None) -> str | None:
     """None when the destination looks routable; otherwise a human-readable
     diagnosis for the session-setup error log. Checks the exact value the

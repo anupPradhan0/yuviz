@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from .dial_targets import is_transfer_destination
+
 NODE_TYPES = ("start", "agent", "transfer", "end", "global")
 TERMINAL_NODE_TYPES = ("end", "transfer")
 # `global` is always-on prompt text, not a call step — exempt from wiring rules.
@@ -486,6 +488,12 @@ def _validate_and_build(
         if node.type == "transfer" and not str(node.transfer_destination or "").strip():
             err("node", node.id, "transfer_destination",
                 f"{node.name!r} hands the call to a human, so it needs a destination number")
+        elif (node.type == "transfer" and "{{" not in node.transfer_destination
+              and not is_transfer_destination(node.transfer_destination)):
+            # Templated destinations are checked after rendering, at call time.
+            err("node", node.id, "transfer_destination",
+                f"{node.name!r} has an invalid destination — use a phone number/extension "
+                "or sip:user@host")
         if node.is_terminal and out_edges[node.id]:
             err("node", node.id, None,
                 f"{node.name!r} " + ("hands the call to a human" if node.type == "transfer" else "ends the call")
