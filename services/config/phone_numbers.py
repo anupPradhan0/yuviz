@@ -223,7 +223,9 @@ async def create_phone_number(
             new_value=result,
         )
     # Warm the cache immediately rather than lazily on first call — see this
-    # module's top-of-file comment for why.
+    # module's top-of-file comment for why. Invalidate first: a re-added DID
+    # may still have its previous owner's route cached.
+    await cache.invalidate(_cache_key(did))
     await get_by_did(did)
     return result
 

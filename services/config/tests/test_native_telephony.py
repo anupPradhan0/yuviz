@@ -131,3 +131,69 @@ async def test_tenant_admin_can_route_but_not_move_a_native_number(
     finally:
         await pool.execute("DELETE FROM phone_numbers WHERE did LIKE $1", f"{did}%")
         await cache.invalidate(f"did:{did}")
+
+
+async def test_tenant_admin_cannot_claim_a_local_extension_under_any_provider(test_tenant, test_admin, pool):
+    """Routing keys on the DID alone, so a REST config or carrier must not
+    let a tenant admin take a local extension."""
+    ext = f"5{uuid.uuid4().int % 10**6:06d}"
+    vobiz = await pool.fetchval(
+        "INSERT INTO telephony_configs (tenant_id, name, provider, credentials) "
+        "VALUES ($1, 'Fake', 'fake', '{}'::jsonb) RETURNING id", test_tenant["id"],
+    )
+    carrier = await pool.fetchval(
+        "INSERT INTO carriers (tenant_id, name, provider) VALUES ($1, 'Twilio', 'twilio') RETURNING id", test_tenant["id"],
+    )
+    public = f"+1555{uuid.uuid4().int % 10**7:07d}"
+    try:
+        async with _client(test_admin["token"]) as admin:
+            via_config = await admin.post(
+                f"/tenants/{test_tenant['id']}/phone-numbers", json={"did": ext, "telephony_config_id": str(vobiz)},
+            )
+            via_carrier = await admin.post(
+                f"/tenants/{test_tenant['id']}/phone-numbers", json={"did": ext, "carrier_id": str(carrier)},
+            )
+            created = await admin.post(
+                f"/tenants/{test_tenant['id']}/phone-numbers", json={"did": public, "carrier_id": str(carrier)},
+            )
+            renamed = await admin.patch(f"/phone-numbers/{created.json()['id']}", json={"did": ext})
+        assert (via_config.status_code, via_carrier.status_code) == (403, 403)
+        assert created.status_code == 201, created.text
+        assert renamed.status_code == 403
+    finally:
+        await pool.execute("DELETE FROM phone_numbers WHERE tenant_id = $1", test_tenant["id"])
+        await pool.execute("DELETE FROM telephony_configs WHERE id = $1", vobiz)
+        await pool.execute("DELETE FROM carriers WHERE id = $1", carrier)
+        await cache.invalidate(f"did:{public}")
+
+
+async def test_a_number_whose_config_was_deleted_stays_platform_only(
+    test_tenant, test_superadmin, test_admin, native_config, did, pool,
+):
+    try:
+        async with _client(test_superadmin["token"]) as su:
+            created = await su.post(
+                f"/tenants/{test_tenant['id']}/phone-numbers",
+                json={"did": f"+1555{uuid.uuid4().int % 10**7:07d}", "telephony_config_id": native_config["id"]},
+            )
+        assert created.status_code == 201, created.text
+        await pool.execute("UPDATE telephony_configs SET deleted_at = now() WHERE id = $1", native_config["id"])
+        await cache.invalidate(f"telephony_config:{native_config['id']}")
+        async with _client(test_admin["token"]) as admin:
+            resp = await admin.delete(f"/phone-numbers/{created.json()['id']}")
+        assert resp.status_code == 403
+    finally:
+        await pool.execute("DELETE FROM phone_numbers WHERE tenant_id = $1", test_tenant["id"])
+
+
+async def test_re_adding_a_did_replaces_the_previous_owners_cached_route(test_tenant, test_superadmin, did, pool):
+    await cache.set_json(f"did:{did}", {"tenant_slug": "previous-owner", "agent_slug": "x", "version": None})
+    try:
+        async with _client(test_superadmin["token"]) as su:
+            created = await su.post(f"/tenants/{test_tenant['id']}/phone-numbers", json={"did": did})
+        assert created.status_code == 201, created.text
+        cached = await cache.get_json(f"did:{did}")
+        assert cached["tenant_slug"] == test_tenant["slug"]
+    finally:
+        await pool.execute("DELETE FROM phone_numbers WHERE did = $1", did)
+        await cache.invalidate(f"did:{did}")
