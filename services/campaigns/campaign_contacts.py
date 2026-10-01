@@ -56,11 +56,15 @@ def parse_contacts_csv(content: bytes) -> list[dict[str, str]]:
 
 async def bulk_insert_contacts(
     campaign_id: Any, contacts: list[dict[str, str]], *, platform_scoped: bool = False,
+    tenant_id: Any | None = None,
 ) -> int:
+    """tenant_id is the campaign's; it stamps the platform-scoped write."""
     if not contacts:
         return 0
     pool = await db.get_pool()
-    conn_cm = platform_conn(pool, reason="campaign-by-id") if platform_scoped else tenant_conn(pool)
+    conn_cm = (
+        platform_conn(pool, reason="campaign-by-id", stamp_tenant=tenant_id) if platform_scoped else tenant_conn(pool)
+    )
     async with conn_cm as conn:
         await conn.executemany(
             "INSERT INTO campaign_contacts (campaign_id, phone_number, name) VALUES ($1, $2, $3)",

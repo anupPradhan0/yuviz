@@ -161,7 +161,7 @@ async def update_tenant(
         # whichever commits second would record a stale old_value instead
         # of the state its own update actually changed away from.
         old_row = await conn.fetchrow(
-            "SELECT * FROM tenants WHERE id = $1 FOR UPDATE", tenant_id,
+            "SELECT * FROM tenants WHERE id = $1 AND deleted_at IS NULL FOR UPDATE", tenant_id,
         )
         if old_row is None:
             raise LookupError(f"tenant {tenant_id} not found")

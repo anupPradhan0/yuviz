@@ -138,10 +138,9 @@ async def request_intervention(
         if exc.status_code == 404:
             # _resolve_scope's own branch-selection 404 was previously
             # unaudited (security finding #5) — audit it as a denial too,
-            # attributed to the caller's own resolved tenant. fresh_authority
-            # here is a memo hit (or a no-op re-read for a role that already
-            # passed): it does not re-run tenant resolution.
-            effective_user = await deps.fresh_authority(request.app.state, user, scope_key)
+            # attributed to the caller's own resolved tenant. Keyed "self", not
+            # the failed slug, so the entry _resolve_scope evicted stays evicted.
+            effective_user = await deps.fresh_authority(request.app.state, user, "self")
             if effective_user.tenant_id is not None:
                 await live_calls_service.record_denied_intervention(
                     tenant_id=uuid.UUID(effective_user.tenant_id), session_id=session_id,
