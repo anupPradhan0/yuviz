@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from typing import Any
 
 from libs.config_sdk.callflow import (
@@ -69,6 +70,74 @@ def _validate_sync(graph: dict[str, Any]) -> list[dict[str, Any]]:
 async def validate(graph: dict[str, Any]) -> list[dict[str, Any]]:
     """CPU-bound parse + warnings off the event loop (Config also serves call setup)."""
     return await asyncio.to_thread(_validate_sync, graph)
+
+
+async def _agent_reference_errors(
+    conn: Any, graph: dict[str, Any], tenant_id: Any,
+) -> list[CallFlowError]:
+    """Editor-facing errors for `agent` nodes naming an agent that cannot
+    answer: deleted, deactivated, or another tenant's.
+
+    parse_graph() cannot do this — the agent_id lives inside the graph JSONB,
+    so no FK constrains it and libs/config_sdk has no database. That left the
+    one tenant-authored id reference in this feature with no validation at
+    all: a flow naming a dead agent published clean and then dropped the call
+    at the `agent` node with nothing but a server-side ERROR (see
+    services/conversation/callflow/handler.py's _handoff_to). Agents do get
+    deleted and moved between tenants, so this fires in practice.
+
+    Same predicate as get_published_for_runtime()'s agent_slugs query, so a
+    published flow cannot name an agent that the runtime would then drop.
+    """
+    pairs = [
+        (str(n.get("id") or ""), str((n.get("data") or {}).get("agent_id") or ""))
+        for n in (graph.get("nodes") or [])
+        if isinstance(n, dict) and n.get("type") == "agent"
+    ]
+
+    errs: list[CallFlowError] = []
+    # node ids keyed by the agent id they name, so one lookup covers repeats
+    by_agent: dict[str, list[str]] = {}
+    for node_id, agent_id in pairs:
+        if not agent_id:
+            continue  # _node_errors already reports an unset agent_id
+        try:
+            canonical = str(uuid.UUID(agent_id))
+        except (ValueError, AttributeError, TypeError):
+            canonical = None
+        if canonical != agent_id:
+            # Only the canonical lowercase hyphenated form gets past here.
+            # uuid.UUID() also accepts braces, a urn:uuid: prefix and
+            # uppercase: asyncpg's uuid encoder rejects the first two, so
+            # `::uuid[]` below would 500 instead of showing a red node, and
+            # an uppercase id would miss the runtime's exact-string
+            # agent_slugs lookup and be reported as a dead agent.
+            errs.append(CallFlowError(
+                "node", node_id, "agent_id",
+                "This step no longer points at a real agent — pick one again.",
+            ))
+            continue
+        by_agent.setdefault(agent_id, []).append(node_id)
+
+    if by_agent:
+        rows = await conn.fetch(
+            "SELECT id FROM agents "
+            " WHERE id = ANY($1::uuid[]) AND tenant_id = $2 "
+            "   AND deleted_at IS NULL AND status = 'active'",
+            list(by_agent), tenant_id,
+        )
+        live = {str(r["id"]) for r in rows}
+        for agent_id, node_ids in by_agent.items():
+            if agent_id in live:
+                continue
+            for node_id in node_ids:
+                errs.append(CallFlowError(
+                    "node", node_id, "agent_id",
+                    "The agent this step hands the call to is no longer "
+                    "available — it may have been deleted or deactivated. "
+                    "Pick another.",
+                ))
+    return errs
 
 
 async def list_call_flows(tenant_id: Any) -> list[dict[str, Any]]:
@@ -182,6 +251,27 @@ async def _invalidate_runtime_cache(call_flow_id: Any, tenant_id: Any) -> None:
         await cache.invalidate(_runtime_cache_key(tenant["slug"], call_flow_id))
 
 
+async def invalidate_runtime_caches_naming_agent(
+    tenant_id: Any, tenant_slug: str, agent_id: Any,
+) -> None:
+    """Drop the cached runtime payload of every published flow whose `agent`
+    node names this agent. get_published_for_runtime() resolves agent_slugs
+    once and caches the result, so without this an agent deactivated or
+    deleted after publish keeps resolving until the cache TTL expires. Called by agents.update_agent() and
+    agents.soft_delete_agent() after their writes commit."""
+    needle = json.dumps([{"type": "agent", "data": {"agent_id": str(agent_id)}}])
+    pool = await db.get_pool()
+    async with tenant_conn(pool) as conn:
+        rows = await conn.fetch(
+            "SELECT id FROM call_flows "
+            " WHERE tenant_id = $1 AND deleted_at IS NULL AND graph IS NOT NULL "
+            "   AND graph->'nodes' @> $2::jsonb",
+            tenant_id, needle,
+        )
+    if rows:
+        await cache.invalidate(*(_runtime_cache_key(tenant_slug, r["id"]) for r in rows))
+
+
 async def create_call_flow(
     *, tenant_id: Any, slug: str, name: str, description: str = "",
     direction: str = "inbound", clone_from_id: Any | None = None,
@@ -194,8 +284,9 @@ async def create_call_flow(
     a clone_from_id belonging to another tenant resolves to nothing and is
     reported as not-found rather than silently copied across the boundary.
 
-    A valid graph is published on creation; an incomplete scaffold lands as a
-    draft (see below).
+    A valid graph is published on creation; an incomplete scaffold, or a
+    clone naming an agent that is no longer available, lands as a draft
+    (see below).
     """
     if clone_from_id is not None:
         source = await get_call_flow(clone_from_id)
@@ -209,9 +300,11 @@ async def create_call_flow(
     # "hand to an AI agent" can't name the agent until you pick one, and the
     # picker is not the place to do that. So an invalid graph lands as a
     # draft (unpublished, nothing points at it, the canvas shows what to
-    # fix) instead of failing creation outright. The starter and any clone
-    # are always valid and still publish immediately, which is what keeps an
-    # attachable flow from ever answering a call with nothing.
+    # fix) instead of failing creation outright. The starter publishes
+    # immediately, which is what keeps an attachable flow from ever answering
+    # a call with nothing. A clone usually does too, but lands as a draft if
+    # one of its `agent` nodes names an agent that is no longer available
+    # (checked below, once there is a connection).
     try:
         await validate(graph)
         publishable = True
@@ -222,6 +315,12 @@ async def create_call_flow(
 
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
+        # A clone carries the source's `agent` nodes, and the agent one of
+        # them names may have been deleted or deactivated since. Land it as a
+        # draft — the same treatment the builder's incomplete scaffold gets —
+        # rather than publishing a flow that would drop a call at that node.
+        if publishable and await _agent_reference_errors(conn, graph, tenant_id):
+            publishable = False
         row = await conn.fetchrow(
             "INSERT INTO call_flows (tenant_id, slug, name, description, direction, graph, graph_draft) "
             "VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb) RETURNING *",
@@ -331,10 +430,16 @@ async def publish(
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         current = await conn.fetchrow(
-            "SELECT config_version FROM call_flows WHERE id = $1 AND deleted_at IS NULL", call_flow_id,
+            "SELECT config_version, tenant_id FROM call_flows "
+            " WHERE id = $1 AND deleted_at IS NULL", call_flow_id,
         )
         if current is None:
             raise LookupError(f"call_flow {call_flow_id} not found")
+        # Before anything is written: an `agent` node naming an agent that
+        # cannot answer would publish clean here and then drop a live call.
+        agent_errs = await _agent_reference_errors(conn, graph, current["tenant_id"])
+        if agent_errs:
+            raise CallFlowValidationError(agent_errs)
         next_version = current["config_version"] + 1
         row = await conn.fetchrow(
             "UPDATE call_flows SET graph = $2::jsonb, graph_draft = $2::jsonb, "

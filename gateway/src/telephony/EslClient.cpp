@@ -25,6 +25,52 @@ bool looks_like_sip_uri(const std::string& destination) {
     return destination.rfind("sip:", 0) == 0 || destination.rfind("sips:", 0) == 0;
 }
 
+bool is_ascii_alnum(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+bool is_dial_number(const std::string& s) {
+    const size_t start = (!s.empty() && s[0] == '+') ? 1 : 0;
+    const size_t digits = s.size() - start;
+    if (digits < 2 || digits > 15) return false;
+    for (size_t i = start; i < s.size(); ++i) {
+        if (s[i] < '0' || s[i] > '9') return false;
+    }
+    return true;
+}
+
+// Tenant-configured values are pasted into ESL commands: anything that could
+// end the command (newline), split app args (space), close a quoted arg ('),
+// or open a channel-variable block ({ , }) must never get through.
+bool is_safe_sip_uri(const std::string& s) {
+    const size_t scheme = s.rfind("sips:", 0) == 0 ? 5 : (s.rfind("sip:", 0) == 0 ? 4 : 0);
+    if (scheme == 0) return false;
+    const auto at = s.find('@', scheme);
+    if (at == std::string::npos || at == scheme || at + 1 == s.size()) return false;
+    if (s.find('@', at + 1) != std::string::npos) return false;
+    for (size_t i = scheme; i < s.size(); ++i) {
+        const char c = s[i];
+        if (!is_ascii_alnum(c) && c != '@' && c != '.' && c != '-' && c != '_' &&
+            c != '+' && c != ':' && c != ';' && c != '=' && c != '~') {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool is_safe_uuid(const std::string& s) {
+    if (s.empty() || s.size() > 64) return false;
+    for (const char c : s) {
+        if (!is_ascii_alnum(c) && c != '-') return false;
+    }
+    return true;
+}
+
+bool is_safe_destination(const std::string& destination) {
+    return looks_like_sip_uri(destination) ? is_safe_sip_uri(destination)
+                                           : is_dial_number(destination);
+}
+
 // bgapi's immediate reply carries no Content-Length body — the Job-UUID is
 // a header line, e.g. "Reply-Text: +OK Job-UUID: <uuid>\nJob-UUID: <uuid>"
 // (confirmed live against this deployment's FreeSWITCH — see
@@ -152,6 +198,13 @@ bool EslClient::ensure_connected_locked() {
 }
 
 bool EslClient::send_command_locked(const std::string& command, std::string& reply_out) {
+    // Backstop for every command: a line break ends an ESL command, so one
+    // inside it would run whatever follows as a second command.
+    if (command.find_first_of(std::string("\r\n\0", 3)) != std::string::npos) {
+        logger_.error("EslClient: refusing to send a command containing CR/LF/NUL length={}",
+                      command.size());
+        return false;
+    }
     if (!ensure_connected_locked()) return false;
 
     const std::string full = command + "\n\n";
@@ -197,6 +250,11 @@ void EslClient::hangup(const std::string& uuid, const std::string& reason) {
                      reason);
         return;
     }
+    if (!is_safe_uuid(uuid)) {
+        logger_.warn("EslClient: hangup refused, call_id is not a plain uuid length={} reason={}",
+                     uuid.size(), reason);
+        return;
+    }
 
     std::lock_guard lock{mutex_};
     std::string reply;
@@ -236,6 +294,18 @@ bool EslClient::transfer(const TransferRequest& req, std::string& error_out) {
         error_out = "empty_destination";
         logger_.warn("EslClient: transfer requested with empty destination uuid={} reason={}",
                      uuid, reason);
+        return false;
+    }
+    if (!is_safe_uuid(uuid)) {
+        error_out = "invalid_uuid";
+        logger_.warn("EslClient: transfer refused, call_id is not a plain uuid length={}",
+                     uuid.size());
+        return false;
+    }
+    if (!is_safe_destination(destination)) {
+        error_out = "invalid_destination";
+        logger_.warn("EslClient: transfer refused, destination is not a plain number or "
+                     "sip URI uuid={} reason={} length={}", uuid, reason, destination.size());
         return false;
     }
 
@@ -285,6 +355,21 @@ bool EslClient::originate_async(const std::string& destination,
         logger_.warn("EslClient: originate requested with empty destination");
         return false;
     }
+    if (!is_safe_destination(destination)) {
+        error_out = "invalid_destination";
+        logger_.warn("EslClient: originate refused, destination is not a plain number or "
+                     "sip URI length={}", destination.size());
+        return false;
+    }
+    // A bad caller id must not block the transfer (an anonymous ANI is legitimate);
+    // it is dropped rather than interpolated.
+    std::string caller_id_vars;
+    if (is_dial_number(caller_id_number)) {
+        caller_id_vars = "{origination_caller_id_number=" + caller_id_number + "}";
+    } else if (!caller_id_number.empty()) {
+        logger_.warn("EslClient: originate dropping caller id that is not a plain number "
+                     "length={}", caller_id_number.size());
+    }
 
     // SIP URI: dial directly. Plain extension/number: dial directly against
     // the deployment's SIP proxy (cfg_.sip_proxy_host/port — Kamailio in
@@ -319,8 +404,7 @@ bool EslClient::originate_async(const std::string& destination,
         : "sofia/external/sip:" + destination + "@" + cfg_.sip_proxy_host + ":" +
               std::to_string(cfg_.sip_proxy_port);
 
-    const std::string command = "bgapi originate {origination_caller_id_number=" +
-        caller_id_number + "}" + dial_string + " &park()";
+    const std::string command = "bgapi originate " + caller_id_vars + dial_string + " &park()";
 
     std::lock_guard lock{mutex_};
     std::string reply;
@@ -354,6 +438,11 @@ bool EslClient::bridge(const std::string& uuid_a, const std::string& uuid_b,
                      uuid_a, uuid_b);
         return false;
     }
+    if (!is_safe_uuid(uuid_a) || !is_safe_uuid(uuid_b)) {
+        error_out = "invalid_uuid";
+        logger_.warn("EslClient: bridge refused, a uuid is not a plain uuid");
+        return false;
+    }
 
     std::lock_guard lock{mutex_};
     std::string reply;
@@ -380,6 +469,10 @@ bool EslClient::stop_audio_fork(const std::string& uuid, std::string& error_out)
     }
     if (uuid.empty()) {
         error_out = "empty_uuid";
+        return false;
+    }
+    if (!is_safe_uuid(uuid)) {
+        error_out = "invalid_uuid";
         return false;
     }
 
@@ -409,6 +502,10 @@ bool EslClient::hold(const std::string& uuid, std::string& error_out) {
         error_out = "empty_uuid";
         return false;
     }
+    if (!is_safe_uuid(uuid)) {
+        error_out = "invalid_uuid";
+        return false;
+    }
 
     std::lock_guard lock{mutex_};
     std::string reply;
@@ -429,6 +526,10 @@ bool EslClient::unhold(const std::string& uuid, std::string& error_out) {
     }
     if (uuid.empty()) {
         error_out = "empty_uuid";
+        return false;
+    }
+    if (!is_safe_uuid(uuid)) {
+        error_out = "invalid_uuid";
         return false;
     }
 

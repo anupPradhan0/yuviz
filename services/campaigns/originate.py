@@ -143,6 +143,9 @@ async def originate_call(phone_number: str, caller_id: str) -> str:
             f"bgapi originate {{origination_caller_id_number={caller_id}}}"
             f"{dial_string} &bridge({bridge_target})"
         )
+        # Backstop: a line break ends an ESL command, so one here would run a second command.
+        if any(c in command for c in "\r\n\0"):
+            raise OriginateError("refusing to send an ESL command containing CR/LF/NUL")
         writer.write(f"{command}\n\n".encode())
         await writer.drain()
         reply = await _read_until_blank_line(reader)

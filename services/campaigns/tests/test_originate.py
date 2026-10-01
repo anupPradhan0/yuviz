@@ -143,6 +143,19 @@ def test_is_valid_dial_number_accepts_plain_numbers(good):
     assert originate.is_valid_dial_number(good)
 
 
+async def test_originate_call_never_sends_a_command_containing_a_line_break(monkeypatch):
+    server = _FakeEslServer("+OK Job-UUID: abc")
+    port = await server.start()
+    monkeypatch.setattr(originate, "_ESL_PORT", port)
+    monkeypatch.setattr(originate, "_SIP_PROXY_HOST", "proxy\n\napi hupall")
+
+    with pytest.raises(originate.OriginateError, match="CR/LF"):
+        await originate.originate_call("+14155551234", "5006")
+
+    assert not any("originate" in c or "hupall" in c for c in server.received_commands)
+    await server.stop()
+
+
 def test_parse_job_event_success():
     # Real shape confirmed live against FreeSWITCH (see
     # originate.py's EslJobEventListener docstring): the outer envelope

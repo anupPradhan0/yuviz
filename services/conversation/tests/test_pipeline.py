@@ -1705,6 +1705,18 @@ def test_transfer_instruction_absent_for_unknown_transfer_type():
     assert "[[TRANSFER" not in handler._workflow.system_prompt()
 
 
+@pytest.mark.parametrize("dest", [
+    "1001\n\napi hupall",
+    "1001\n",
+    "sip:agent@example.com' inline\n\napi hupall",
+    "{sip_h_X-Yuviz-Leg=transfer}sip:1002@example.com",
+    "sip:a@b,sofia/external/sip:c@d",
+])
+def test_transfer_destination_problem_refuses_esl_injection(dest):
+    from ..pipeline import transfer_destination_problem
+    assert transfer_destination_problem(dest) is not None
+
+
 def test_transfer_destination_problem_diagnoses():
     from ..pipeline import transfer_destination_problem
     assert transfer_destination_problem(None) is not None
@@ -1714,7 +1726,9 @@ def test_transfer_destination_problem_diagnoses():
     assert transfer_destination_problem("1001") is None
     assert transfer_destination_problem("+18005550100") is None
     assert transfer_destination_problem("sip:agent@example.com") is None
-    assert transfer_destination_problem("SIPS:agent@host.tld") is None
+    assert transfer_destination_problem("sips:agent@host.tld") is None
+    # The Gateway only routes lowercase schemes as SIP URIs (EslClient::looks_like_sip_uri).
+    assert transfer_destination_problem("SIPS:agent@host.tld") is not None
 
 
 # ---------------------------------------------------------------------------

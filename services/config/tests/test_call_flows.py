@@ -10,6 +10,7 @@ import re
 import uuid
 from contextlib import contextmanager
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
@@ -127,15 +128,11 @@ async def test_payload_resolves_same_tenant_active_agent_and_omits_cross_tenant_
         inactive_agent = await agents.create_agent(
             tenant_id=test_tenant["id"], slug="inactive-one", name="Inactive Agent",
         )
-    await pool.execute("UPDATE agents SET status = 'inactive' WHERE id = $1", inactive_agent["id"])
-    other_tenant_agent_id = str(uuid.uuid4())
-    # Same-id-shaped row planted in the OTHER tenant — a query that resolves
-    # agents without the tenant scope would leak this one in (lesson 29/30
-    # shape: reproduce the leak, don't just assert its absence).
-    await pool.execute(
-        "INSERT INTO agents (id, tenant_id, slug, name) VALUES ($1, $2, 'planted', 'Planted')",
-        other_tenant_agent_id, other_tenant["id"],
-    )
+    with _as_tenant(test_tenant["id"]):
+        moved_agent = await agents.create_agent(
+            tenant_id=test_tenant["id"], slug="planted", name="Planted",
+        )
+    other_tenant_agent_id = str(moved_agent["id"])
 
     # "agent" is a terminal node type, so each candidate needs its own
     # out-edge from a menu branch rather than chaining agent -> agent.
@@ -155,10 +152,24 @@ async def test_payload_resolves_same_tenant_active_agent_and_omits_cross_tenant_
             {"id": "e4", "source": "m1", "target": "a3", "data": {"key": "3"}},
         ],
     }
+    # Publish while all three resolve, THEN take two away — the order reality
+    # produces, and the only order publish() now permits (_agent_reference_errors
+    # refuses a flow naming an agent that cannot answer). The runtime filter's
+    # job is precisely this case: an agent that went away after publish.
     with _as_tenant(test_tenant["id"]):
         flow = await call_flows.create_call_flow(
             tenant_id=test_tenant["id"], slug=f"flow-{uuid.uuid4().hex[:6]}", name="Agent Flow", graph=graph,
         )
+    assert flow["graph"] is not None, "all three agents resolved, so this must publish"
+
+    await pool.execute("UPDATE agents SET status = 'inactive' WHERE id = $1", inactive_agent["id"])
+    # Moved rather than planted: the node's id now names a row that EXISTS but
+    # in the wrong tenant, so a query missing the tenant scope leaks it in
+    # (lesson 29/30 shape — reproduce the leak, don't just assert its absence).
+    await pool.execute("UPDATE agents SET tenant_id = $2 WHERE id = $1",
+                       other_tenant_agent_id, other_tenant["id"])
+
+    with _as_tenant(test_tenant["id"]):
         payload = await call_flows.get_published_for_runtime(test_tenant["slug"], flow["id"])
     assert payload["agent_slugs"] == {str(same_tenant_agent["id"]): "picked-up"}
 
@@ -402,3 +413,118 @@ async def test_published_route_404s_for_unpublished_and_outbound_and_soft_delete
     assert draft_resp.status_code == 404
     assert outbound_resp.status_code == 404
     assert deleted_resp.status_code == 404
+
+
+async def test_publish_refuses_an_agent_node_naming_an_unavailable_agent(test_tenant, pool):
+    """The one tenant-authored id reference with no FK behind it: agent_id
+    lives inside the graph JSONB, so parse_graph() cannot check it and
+    nothing stopped a flow naming a deleted/deactivated/other-tenant agent
+    from publishing clean and then dropping a live call at that node."""
+    other_tenant = await _create_tenant(pool)
+    with _as_tenant(test_tenant["id"]):
+        live = await agents.create_agent(
+            tenant_id=test_tenant["id"], slug="still-here", name="Live Agent",
+        )
+        going_away = await agents.create_agent(
+            tenant_id=test_tenant["id"], slug="going-away", name="Going Away",
+        )
+
+    def _graph(agent_id: str) -> dict:
+        return {
+            "version": 1,
+            "nodes": [
+                {"id": "n1", "type": "start", "data": {}},
+                {"id": "a1", "type": "agent", "data": {"agent_id": agent_id}},
+            ],
+            "edges": [{"id": "e1", "source": "n1", "target": "a1"}],
+        }
+
+    with _as_tenant(test_tenant["id"]):
+        flow = await call_flows.create_call_flow(
+            tenant_id=test_tenant["id"], slug=f"flow-{uuid.uuid4().hex[:6]}",
+            name="Handoff Flow", graph=_graph(str(live["id"])),
+        )
+
+        # Deactivated — parse_graph() sees a perfectly well-formed graph.
+        await pool.execute("UPDATE agents SET status = 'inactive' WHERE id = $1", going_away["id"])
+        with pytest.raises(call_flows.CallFlowValidationError) as exc:
+            await call_flows.publish(flow["id"], _graph(str(going_away["id"])))
+        assert [(e.kind, e.id, e.field) for e in exc.value.errors] == [("node", "a1", "agent_id")]
+
+        # Another tenant's agent.
+        with _as_tenant(other_tenant["id"]):
+            outsider = await agents.create_agent(
+                tenant_id=other_tenant["id"], slug="outsider", name="Outsider",
+            )
+        with pytest.raises(call_flows.CallFlowValidationError):
+            await call_flows.publish(flow["id"], _graph(str(outsider["id"])))
+
+        # Gone entirely.
+        with pytest.raises(call_flows.CallFlowValidationError):
+            await call_flows.publish(flow["id"], _graph(str(uuid.uuid4())))
+
+        # Not a uuid at all — must be a red node, never a 500 from `::uuid[]`.
+        with pytest.raises(call_flows.CallFlowValidationError):
+            await call_flows.publish(flow["id"], _graph("not-a-uuid"))
+
+        # Forms uuid.UUID() accepts but that must not get through: asyncpg's
+        # encoder rejects braces and urn:uuid: (a 500, not a red node), and
+        # an uppercase id would miss the runtime's exact-string agent_slugs
+        # lookup even though it names the live agent.
+        live_id = str(live["id"])
+        for variant in (f"{{{live_id}}}", f"urn:uuid:{live_id}", live_id.upper()):
+            with pytest.raises(call_flows.CallFlowValidationError) as exc:
+                await call_flows.publish(flow["id"], _graph(variant))
+            assert [(e.kind, e.id, e.field) for e in exc.value.errors] == [("node", "a1", "agent_id")], variant
+
+        # The live agent still publishes, and nothing above left a version behind.
+        published = await call_flows.publish(flow["id"], _graph(str(live["id"])))
+    assert published["config_version"] == 2, "the refused publishes must not have bumped it"
+
+    await pool.execute("DELETE FROM agents WHERE tenant_id = $1", other_tenant["id"])
+    await pool.execute("DELETE FROM tenants WHERE id = $1", other_tenant["id"])
+
+
+async def test_agent_deactivation_or_delete_reaches_a_warm_runtime_cache(test_tenant, pool):
+    """get_published_for_runtime() caches agent_slugs. Once a flow's payload
+    is warm, an agent deactivated or deleted through the service must drop
+    out of it on the next read, not after the cache TTL."""
+    with _as_tenant(test_tenant["id"]):
+        deactivated = await agents.create_agent(
+            tenant_id=test_tenant["id"], slug="to-deactivate", name="To Deactivate",
+        )
+        deleted = await agents.create_agent(
+            tenant_id=test_tenant["id"], slug="to-delete", name="To Delete",
+        )
+    graph = {
+        "version": 1,
+        "nodes": [
+            {"id": "n1", "type": "start", "data": {}},
+            {"id": "m1", "type": "menu", "data": {"prompt": "Pick one."}},
+            {"id": "a1", "type": "agent", "data": {"agent_id": str(deactivated["id"])}},
+            {"id": "a2", "type": "agent", "data": {"agent_id": str(deleted["id"])}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "m1"},
+            {"id": "e2", "source": "m1", "target": "a1", "data": {"key": "1"}},
+            {"id": "e3", "source": "m1", "target": "a2", "data": {"key": "2"}},
+        ],
+    }
+    with _as_tenant(test_tenant["id"]):
+        flow = await call_flows.create_call_flow(
+            tenant_id=test_tenant["id"], slug=f"flow-{uuid.uuid4().hex[:6]}", name="Warm Flow", graph=graph,
+        )
+        assert flow["graph"] is not None
+
+        warm = await call_flows.get_published_for_runtime(test_tenant["slug"], flow["id"])
+        assert set(warm["agent_slugs"]) == {str(deactivated["id"]), str(deleted["id"])}
+        key = call_flows._runtime_cache_key(test_tenant["slug"], flow["id"])
+        assert await cache.get_json(key) is not None, "the payload must be cached for this test to mean anything"
+
+        await agents.update_agent(deactivated["id"], tenant_slug=test_tenant["slug"], status="inactive")
+        after_deactivate = await call_flows.get_published_for_runtime(test_tenant["slug"], flow["id"])
+        assert set(after_deactivate["agent_slugs"]) == {str(deleted["id"])}
+
+        await agents.soft_delete_agent(deleted["id"], tenant_slug=test_tenant["slug"])
+        after_delete = await call_flows.get_published_for_runtime(test_tenant["slug"], flow["id"])
+        assert after_delete["agent_slugs"] == {}

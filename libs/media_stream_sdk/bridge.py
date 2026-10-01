@@ -169,6 +169,7 @@ class MediaStreamBridge:
         self._speaking = False     # True while we're inside a detected caller utterance
         self._playing_tts = False  # True from first paced frame sent until the turn fully drains
         self._turn_active = False  # True from speech_ended sent until that turn resolves
+        self._session_id = ""
         self._turn_generation = 0
         self._turn_watchdog: asyncio.Task | None = None
 
@@ -232,6 +233,13 @@ class MediaStreamBridge:
         self._play_buf.clear()
         self._playback_started_at = None
         self._frames_sent = 0
+
+    def _send_playback_finished(self, interrupted: bool) -> None:
+        # Same signal the Gateway sends; the servicer releases a held
+        # TransferRequest (and advances its FSM) only on this.
+        self._grpc_write_queue.put_nowait(pb.GatewayMessage(playback_finished=pb.PlaybackFinished(
+            session_id=self._session_id, interrupted=interrupted,
+        )))
 
     def _flush_pending_audio_now(self) -> None:
         """Bypasses the normal age-based hold and immediately enqueues every
@@ -301,6 +309,7 @@ class MediaStreamBridge:
         # call to :50051 — found live during a deployment audit.
         conv_target = os.environ.get("CONVERSATION_SVC_TARGET", "localhost:10000")
         session_id = str(uuid.uuid4())
+        self._session_id = session_id
         self.log.info(
             "session=%s call=%s tenant=%s agent=%s dir=%s -> %s",
             session_id, self.call_id, self.tenant_slug, self.agent_slug, self.direction, conv_target,
@@ -454,6 +463,7 @@ class MediaStreamBridge:
                     self._grpc_write_queue.put_nowait(pb.GatewayMessage(cancel_generation=pb.CancelGeneration(
                         session_id=session_id,
                     )))
+                    self._send_playback_finished(interrupted=True)
                     self._flush_pending_audio_now()
             elif vad_event == VADEvent.SPEECH_END and self._speaking:
                 self._speaking = False
@@ -504,6 +514,28 @@ class MediaStreamBridge:
                 self._resolve_turn()
                 if msg.error.fatal:
                     return
+            elif which == "transfer_request":
+                # No provider call-control path for transfers yet: fail at
+                # once so the caller hears the failed-transfer fallback
+                # instead of silence until the pipeline's transfer timeout.
+                tr = msg.transfer_request
+                self.log.warning("transfer_request unsupported on provider calls call=%s "
+                                 "transfer_id=%s", self.call_id, tr.transfer_id)
+                # Initiated first, as the Gateway does: the FSM only accepts a
+                # failure from TRANSFERRING, and the attempt gets counted.
+                self._grpc_write_queue.put_nowait(pb.GatewayMessage(transfer_initiated=pb.TransferInitiated(
+                    session_id=tr.session_id,
+                    transfer_type=tr.transfer_type,
+                    destination=tr.destination,
+                    reason=tr.reason,
+                    transfer_id=tr.transfer_id,
+                )))
+                self._grpc_write_queue.put_nowait(pb.GatewayMessage(transfer_failed=pb.TransferFailed(
+                    session_id=tr.session_id,
+                    destination=tr.destination,
+                    reason="unsupported_provider",
+                    transfer_id=tr.transfer_id,
+                )))
             elif which == "end_call":
                 self.log.info("end_call reason=%s call=%s", msg.end_call.reason, self.call_id)
                 return
@@ -520,6 +552,7 @@ class MediaStreamBridge:
                 self._playback_started_at = None
                 self._frames_sent = 0
                 self._resolve_turn()
+                self._send_playback_finished(interrupted=False)
                 continue
 
             self._playing_tts = True
