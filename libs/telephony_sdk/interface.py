@@ -34,6 +34,23 @@ class ReconcileResult:
     provider_call_id: str | None = None
 
 
+@dataclass(frozen=True)
+class InboundUrls:
+    """Where the provider should send a number's inbound calls."""
+    answer_url: str
+    hangup_url: str
+
+
+@dataclass(frozen=True)
+class InboundSyncResult:
+    """Outcome of pointing (or un-pointing) a number at this platform.
+    `credentials_update` carries provider-side ids the caller must persist
+    on the telephony config (e.g. a Vobiz Application created on first sync)."""
+    ok: bool
+    message: str | None = None
+    credentials_update: dict[str, Any] | None = None
+
+
 class ITelephonyProvider(ABC):
     """One instance per telephony_configs row — constructed with that row's
     `credentials` dict."""
@@ -115,6 +132,37 @@ class ITelephonyProvider(ABC):
 
     async def transfer_call(self, *, call_id: str, destination: str) -> None:
         raise TelephonyTransferUnsupported(f"{self.PROVIDER_NAME}: transfer_call not yet supported")
+
+    async def owns_number(self, number: str) -> bool | None:
+        """Whether `number` is in this provider account. None means the
+        provider has no way to check. Raises TelephonyProviderError when the
+        lookup itself fails. No default: a new provider must decide, so it
+        can't silently skip ownership checks."""
+        raise NotImplementedError(f"{self.PROVIDER_NAME}: owns_number must be implemented")
+
+    async def attach_inbound(
+        self, number: str, urls: InboundUrls, *, label: str, refresh_app: bool = True,
+    ) -> InboundSyncResult:
+        """Point `number`'s inbound calls at `urls`, creating whatever the
+        provider needs. Never raises for a provider rejection: returns ok=False
+        with a message the admin can act on. refresh_app=False skips re-pushing
+        `urls` to an existing shared resource (a bulk sync does that once)."""
+        raise NotImplementedError(f"{self.PROVIDER_NAME}: attach_inbound must be implemented")
+
+    async def refresh_inbound(self, urls: InboundUrls) -> InboundSyncResult | None:
+        """Re-point a resource shared by all the account's numbers at `urls`.
+        None when there is nothing shared (yet)."""
+        return None
+
+    async def discard_inbound_resources(self, credentials_update: dict[str, Any]) -> None:
+        """Delete what an attach created when another sync's copy was stored
+        first. Best effort; default has nothing to delete."""
+        return None
+
+    async def detach_inbound(self, number: str) -> InboundSyncResult:
+        """Stop sending `number`'s inbound calls here. A number already
+        detached, or no longer in the account, is ok=True."""
+        raise NotImplementedError(f"{self.PROVIDER_NAME}: detach_inbound must be implemented")
 
     async def reconcile_call(
         self, *, reference: str, observed_call_id: str | None,

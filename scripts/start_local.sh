@@ -85,6 +85,10 @@ start_config_service() {
   export SECRET_ENCRYPTION_KEY="${SECRET_ENCRYPTION_KEY:?set this in your shell — see docs/setup.md, never commit the real value}"
   # Signs the login JWTs; same value every service below must export.
   export JWT_SECRET="${JWT_SECRET:?set this in your shell — see docs/setup.md, never commit the real value}"
+  # Optional: the same public URL the telephony service uses. With it, adding a
+  # Vobiz number points it at this platform automatically (number_sync.py);
+  # without it, numbers are saved with a "not synced" warning.
+  export TELEPHONY_PUBLIC_BASE_URL="${TELEPHONY_PUBLIC_BASE_URL:-}"
   cd "$REPO"
   python3 -m uvicorn services.config.app:app --host 0.0.0.0 --port 8000
 }

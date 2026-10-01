@@ -138,11 +138,7 @@ const MANAGEMENT_ITEMS = [
   { href: "/workflows", label: "IVR Flows", icon: "workflows" },
   { href: "/knowledge-bases", label: "Knowledge Base", icon: "knowledge-bases" },
   { href: "/ai-voice", label: "AI & Voice", icon: "ai-voice" },
-  { href: "/phone-numbers", label: "Phone Numbers", icon: "phone-numbers" },
-  // Read-only trunk/DID/routing overview across the selected account(s).
-  // Every write path stays on /phone-numbers (assign, re-route, delete) —
-  // this page reads the same inventory, so duplicating the CRUD here would
-  // mean two places to keep correct.
+  // Provider configurations and every number on them, add to remove.
   { href: "/telephony", label: "Telephony", icon: "telephony" },
 ];
 

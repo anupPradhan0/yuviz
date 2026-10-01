@@ -18,7 +18,11 @@ import {
   createCarrier,
   createPhoneNumber,
   createTelephonyConfig,
+  deletePhoneNumber,
   getCurrentUser,
+  ProviderSync,
+  syncPhoneNumber,
+  syncTelephonyNumbers,
   listAgents,
   listCalls,
   listCarriers,
@@ -60,6 +64,14 @@ const fmtInt = (n: number) => n.toLocaleString("en-IN");
 const digits = (s: string | null | undefined) => (s ?? "").replace(/\D/g, "");
 const providerLabelFor = (kind: "carrier" | "telephony_config", provider: string) =>
   kind === "carrier" ? CARRIER_PROVIDER_LABEL[provider as CarrierProvider] ?? provider : TELEPHONY_PROVIDER_LABEL[provider] ?? provider;
+
+type SyncNotice = { ok: boolean; text: string };
+
+// What the provider was told when a number was added or re-synced.
+const noticeFor = (provider: string, did: string, sync: ProviderSync): SyncNotice =>
+  sync.ok
+    ? { ok: true, text: `${did}: ${provider} now sends this number's calls here.` }
+    : { ok: false, text: `${did} was saved, but ${provider} wasn't updated: ${sync.message ?? "unknown error"}` };
 
 type TrunkHealth = "healthy" | "degraded" | "standby";
 
@@ -176,6 +188,9 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
+const STATUS_BADGE: Record<PhoneNumber["status"], string> = { active: "green", inactive: "gray", suspended: "amber" };
+const statusBadge = (s: PhoneNumber["status"]) => <span className={`badge ${STATUS_BADGE[s]}`}>{s}</span>;
+
 const typeBadge = (n: NumberRow) => {
   if (n.inbound > 0 && n.outbound > 0) return <span className="badge cyan">Both</span>;
   if (n.inbound > 0) return <span className="badge green">Inbound</span>;
@@ -204,6 +219,10 @@ export default function TelephonyPage() {
   const refresh = () => setReloadKey((k) => k + 1);
 
   const [addOpen, setAddOpen] = useState(false);
+  const [numberSearch, setNumberSearch] = useState("");
+  const [editNumber, setEditNumber] = useState<NumberRow | null>(null);
+  // Lives here, not in ConfigDetail: a refresh briefly unmounts the detail view.
+  const [syncNotice, setSyncNotice] = useState<SyncNotice | null>(null);
   // Gates Native controls only; the server enforces the same rule regardless.
   const [isSuperadmin, setIsSuperadmin] = useState(false);
   useEffect(() => {
@@ -355,6 +374,19 @@ export default function TelephonyPage() {
     return [...matched].sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name));
   }, [configs, search]);
 
+  const configFor = (n: NumberRow) => configs.find((c) => c.kind === n.configKind && c.id === n.configId) ?? null;
+
+  const visibleNumbers = useMemo(() => {
+    const q = numberSearch.trim().toLowerCase();
+    const qDigits = digits(q);
+    const matched = q
+      ? numbers.filter((n) =>
+          `${n.did} ${n.region ?? ""} ${n.configName ?? ""} ${n.routesTo} ${n.tenantName} ${n.status}`.toLowerCase().includes(q)
+          || (qDigits.length > 0 && digits(n.did).includes(qDigits)))
+      : numbers;
+    return [...matched].sort((a, b) => a.tenantName.localeCompare(b.tenantName) || a.did.localeCompare(b.did));
+  }, [numbers, numberSearch]);
+
   const selectedConfig = selectedKey ? configs.find((c) => c.key === `${selectedKey.kind}:${selectedKey.id}`) ?? null : null;
 
   const accountLine = isAllTenants
@@ -371,7 +403,9 @@ export default function TelephonyPage() {
         tenant={allTenants.find((t) => t.id === selectedConfig.tenantId) ?? null}
         agents={agentsByTenant[selectedConfig.tenantId]?.agents ?? []}
         isSuperadmin={isSuperadmin}
-        onBack={() => router.push("/telephony")}
+        syncNotice={syncNotice}
+        onSyncNotice={setSyncNotice}
+        onBack={() => { setSyncNotice(null); router.push("/telephony"); }}
         onChanged={refresh}
       />
     ) : (
@@ -397,7 +431,6 @@ export default function TelephonyPage() {
           <div className="form-hint" style={{ marginTop: 4 }}>{accountLine}</div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <Link href="/phone-numbers" className="btn btn-sm btn-indigo">Manage DIDs</Link>
           <Link href="/live-calls" className="btn btn-sm btn-indigo">Live calls</Link>
         </div>
       </div>
@@ -454,8 +487,87 @@ export default function TelephonyPage() {
             Counts cover the most recent {fmtInt(CALL_WINDOW)} calls per account. Channel capacity, ASR and MOS need a
             carrier telemetry feed, which is not connected to this console yet.
           </div>
+
+          <div className="card">
+            <div className="card-hdr">
+              <span className="card-title">All numbers</span>
+              <span className="card-sub" style={{ marginLeft: "auto" }}>
+                {fmtInt(visibleNumbers.length)} of {fmtInt(numbers.length)}
+              </span>
+              <input
+                className="form-input"
+                style={{ width: 200 }}
+                placeholder="Search numbers or agents"
+                value={numberSearch}
+                onChange={(e) => setNumberSearch(e.target.value)}
+              />
+            </div>
+            {visibleNumbers.length === 0 ? (
+              <div className="empty-state">
+                {numbers.length === 0
+                  ? "No numbers yet. Open a configuration above and add one."
+                  : `No numbers match "${numberSearch}".`}
+              </div>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table className="tbl">
+                  <thead>
+                    <tr>
+                      <th>Number</th>
+                      {isAllTenants && <th>Account</th>}
+                      <th>Configuration</th>
+                      <th>Routes to</th>
+                      <th>Status</th>
+                      <th>Provider routing</th>
+                      <th style={{ textAlign: "right" }}>Calls (recent)</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleNumbers.map((n) => {
+                      const cfg = configFor(n);
+                      return (
+                        <tr key={n.id}>
+                          <td className="bold mono" style={{ color: "var(--text)" }}>
+                            {n.did}
+                            {n.region && <div style={{ fontFamily: "inherit", fontWeight: 400, fontSize: ".7rem", color: "var(--text-3)" }}>{n.region}</div>}
+                          </td>
+                          {isAllTenants && <td>{n.tenantName}</td>}
+                          <td>
+                            {cfg ? (
+                              <Link href={`/telephony?config=${cfg.key}`} style={{ color: "var(--text)" }}>
+                                {cfg.name} <span style={{ color: "var(--text-3)" }}>· {cfg.providerLabel}</span>
+                              </Link>
+                            ) : (
+                              <i style={{ color: "var(--text-3)" }}>none</i>
+                            )}
+                          </td>
+                          <td>{n.routesTo}</td>
+                          <td>{statusBadge(n.status)}</td>
+                          <td>{syncBadge(n, cfg)}</td>
+                          <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtInt(n.inbound + n.outbound)}</td>
+                          <td>
+                            <button className="btn btn-ghost btn-sm" onClick={() => setEditNumber(n)}>Edit</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </>
       )}
+
+      <EditNumberModal
+        target={editNumber}
+        config={editNumber ? configFor(editNumber) : null}
+        agents={editNumber ? agentsByTenant[editNumber.tenant_id]?.agents ?? [] : []}
+        isSuperadmin={isSuperadmin}
+        onClose={() => setEditNumber(null)}
+        onChanged={refresh}
+      />
 
       <AddConfigModal
         open={addOpen}
@@ -756,12 +868,39 @@ function webhookUrlFor(config: ConfigRow): string | null {
 }
 
 function ConfigDetail({
-  config, numbers, tenant, agents, isSuperadmin, onBack, onChanged,
+  config, numbers, tenant, agents, isSuperadmin, syncNotice, onSyncNotice, onBack, onChanged,
 }: {
   config: ConfigRow; numbers: NumberRow[]; tenant: Tenant | null; agents: Agent[]; isSuperadmin: boolean;
+  syncNotice: SyncNotice | null; onSyncNotice: (n: SyncNotice | null) => void;
   onBack: () => void; onChanged: () => void;
 }) {
   const isNative = config.kind === "telephony_config" && config.provider === NATIVE;
+  const syncsWithProvider = config.kind === "telephony_config" && !isNative;
+  // REST providers whose inbound routing the platform sets up itself.
+  const autoSyncs = syncsWithProvider && !MANUAL_SETUP_PROVIDERS.has(config.provider);
+  const [resyncing, setResyncing] = useState(false);
+
+  const handleResync = async () => {
+    setResyncing(true);
+    onSyncNotice(null);
+    try {
+      const { results, application } = await syncTelephonyNumbers(config.id);
+      const failed = results.filter((r) => !r.ok);
+      onSyncNotice(
+        application && !application.ok
+          ? { ok: false, text: `${config.providerLabel} kept the old address for every number here: ${application.message ?? "unknown error"}` }
+          : results.length === 0
+          ? { ok: true, text: "No numbers on this configuration to sync." }
+          : failed.length === 0
+            ? { ok: true, text: `${results.length} number${results.length === 1 ? "" : "s"} re-synced with ${config.providerLabel}.` }
+            : { ok: false, text: failed.map((r) => noticeFor(config.providerLabel, r.did, r).text).join(" ") },
+      );
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : String(e));
+    } finally {
+      setResyncing(false);
+    }
+  };
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -784,30 +923,6 @@ function ConfigDetail({
   const purchasedFor = (n: NumberRow) =>
     purchased.find((p) => p.carrier_id === config.id && digits(p.phone_number) === digits(n.did));
 
-  const handleRelease = async (n: NumberRow) => {
-    const p = purchasedFor(n);
-    if (!p) {
-      setError(`No purchase record found for ${n.did} — nothing to release.`);
-      return;
-    }
-    if (!window.confirm(`Release ${n.did} back to the carrier? This cannot be undone.`)) return;
-    try {
-      await releaseNumber(p.id);
-      onChanged();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.detail : String(e));
-    }
-  };
-
-  const handleStatusChange = async (n: NumberRow, status: PhoneNumber["status"]) => {
-    try {
-      await updatePhoneNumber(n.id, { status });
-      onChanged();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.detail : String(e));
-    }
-  };
-
   const webhookUrl = webhookUrlFor(config);
 
   return (
@@ -822,6 +937,7 @@ function ConfigDetail({
       </div>
 
       {error && <div className="error-banner">{error}</div>}
+      {syncNotice && <div className={syncNotice.ok ? "info-banner" : "error-banner"}>{syncNotice.text}</div>}
 
       {isNative ? (
         <div className="card" style={{ marginBottom: 16 }}>
@@ -855,8 +971,23 @@ function ConfigDetail({
         <div className="card-hdr">
           <span className="card-title">Phone numbers</span>
           <span className="card-sub">{fmtInt(numbers.length)} DID{numbers.length === 1 ? "" : "s"}</span>
+          {autoSyncs && numbers.length > 0 && (
+            <button
+              className="btn btn-ghost btn-sm"
+              style={{ marginLeft: "auto" }}
+              onClick={handleResync}
+              disabled={resyncing}
+              title={`Point every number here at this platform in ${config.providerLabel} again, e.g. after the public URL changed`}
+            >
+              {resyncing ? "Re-syncing…" : "Re-sync numbers"}
+            </button>
+          )}
           {(!isNative || isSuperadmin) && (
-            <button className="btn btn-primary btn-sm" style={{ marginLeft: "auto" }} onClick={() => setAddOpen(true)}>
+            <button
+              className="btn btn-primary btn-sm"
+              style={{ marginLeft: autoSyncs && numbers.length > 0 ? 8 : "auto" }}
+              onClick={() => setAddOpen(true)}
+            >
               + Add phone number
             </button>
           )}
@@ -871,6 +1002,7 @@ function ConfigDetail({
                 <th>Label</th>
                 <th>Status</th>
                 <th>Inbound agent</th>
+                {syncsWithProvider && <th>{config.providerLabel} routing</th>}
                 <th>Traffic</th>
                 <th style={{ textAlign: "right" }}>Calls (recent)</th>
                 {config.kind === "carrier" && <th>Purchased</th>}
@@ -884,19 +1016,9 @@ function ConfigDetail({
                   <tr key={n.id}>
                     <td className="bold mono" style={{ color: "var(--text)" }}>{n.did}</td>
                     <td>{n.region || <i style={{ color: "var(--text-3)" }}>none</i>}</td>
-                    <td onClick={(e) => e.stopPropagation()}>
-                      <select
-                        className={`form-select status-select ${n.status}`}
-                        style={{ width: 110, padding: "3px 8px", fontSize: ".71rem" }}
-                        value={n.status}
-                        onChange={(e) => handleStatusChange(n, e.target.value as PhoneNumber["status"])}
-                      >
-                        <option value="active">active</option>
-                        <option value="inactive">inactive</option>
-                        <option value="suspended">suspended</option>
-                      </select>
-                    </td>
+                    <td>{statusBadge(n.status)}</td>
                     <td>{n.routesTo}</td>
+                    {syncsWithProvider && <td>{syncBadge(n, config)}</td>}
                     <td>{typeBadge(n)}</td>
                     <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
                       {fmtInt(n.inbound + n.outbound)}
@@ -904,11 +1026,8 @@ function ConfigDetail({
                     {config.kind === "carrier" && (
                       <td>{p ? new Date(p.purchased_at).toLocaleDateString() : "—"}</td>
                     )}
-                    <td style={{ display: "flex", gap: 6 }}>
+                    <td>
                       <button className="btn btn-ghost btn-sm" onClick={() => setEditTarget(n)}>Edit</button>
-                      {config.kind === "carrier" && (
-                        <button className="btn btn-danger btn-sm" onClick={() => handleRelease(n)}>Release</button>
-                      )}
                     </td>
                   </tr>
                 );
@@ -927,15 +1046,21 @@ function ConfigDetail({
           config={config}
           tenant={tenant}
           agents={agents}
-          onCreated={() => { setAddOpen(false); onChanged(); }}
+          onCreated={(did, sync) => {
+            setAddOpen(false);
+            onSyncNotice(sync ? noticeFor(config.providerLabel, did, sync) : null);
+            onChanged();
+          }}
         />
       )}
 
       <EditNumberModal
         target={editTarget}
+        config={config}
         agents={agents}
+        isSuperadmin={isSuperadmin}
         onClose={() => setEditTarget(null)}
-        onSaved={() => { setEditTarget(null); onChanged(); }}
+        onChanged={onChanged}
       />
     </>
   );
@@ -1141,7 +1266,10 @@ function EditCredentialsModal({
 
 function AddNumberModal({
   open, onClose, config, tenant, agents, onCreated,
-}: { open: boolean; onClose: () => void; config: ConfigRow; tenant: Tenant; agents: Agent[]; onCreated: () => void }) {
+}: {
+  open: boolean; onClose: () => void; config: ConfigRow; tenant: Tenant; agents: Agent[];
+  onCreated: (did: string, sync?: ProviderSync) => void;
+}) {
   const [tab, setTab] = useState<"manual" | "buy">("manual");
   const [error, setError] = useState<string | null>(null);
 
@@ -1184,8 +1312,8 @@ function AddNumberModal({
         status: active ? "active" : "inactive",
         ...(config.kind === "carrier" ? { carrier_id: config.id } : { telephony_config_id: config.id }),
       };
-      await createPhoneNumber(tenant.id, body);
-      onCreated();
+      const created = await createPhoneNumber(tenant.id, body);
+      onCreated(created.did, created.provider_sync ?? undefined);
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : String(e));
     } finally {
@@ -1215,8 +1343,8 @@ function AddNumberModal({
     setError(null);
     try {
       await purchaseNumber(tenant.id, { carrier_id: config.id, phone_number: phoneNumber });
-      await createPhoneNumber(tenant.id, { did: phoneNumber, carrier_id: config.id, status: "active" });
-      onCreated();
+      const created = await createPhoneNumber(tenant.id, { did: phoneNumber, carrier_id: config.id, status: "active" });
+      onCreated(created.did, created.provider_sync ?? undefined);
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : String(e));
     } finally {
@@ -1356,13 +1484,64 @@ function AddNumberModal({
   );
 }
 
+type SyncState = "synced" | "failed" | "pending" | "manual" | "none";
+
+// Providers whose inbound routing the platform can't set itself yet.
+const MANUAL_SETUP_PROVIDERS = new Set(["cloudonix"]);
+
+// Whether the provider has been told to send this number's calls here.
+function syncStateOf(n: PhoneNumber, config: ConfigRow | null): SyncState {
+  if (!config || config.kind !== "telephony_config" || config.provider === NATIVE) return "none";
+  if (MANUAL_SETUP_PROVIDERS.has(config.provider)) return "manual";
+  if (!n.provider_sync) return "pending";
+  return n.provider_sync.ok ? "synced" : "failed";
+}
+
+const SYNC_BADGE: Record<Exclude<SyncState, "none">, { label: string; cls: string }> = {
+  synced: { label: "Synced", cls: "green" },
+  failed: { label: "Sync failed", cls: "red" },
+  pending: { label: "Not synced", cls: "gray" },
+  manual: { label: "Manual setup", cls: "amber" },
+};
+
+const syncBadge = (n: PhoneNumber, config: ConfigRow | null) => {
+  const state = syncStateOf(n, config);
+  if (state === "none") return <span style={{ color: "var(--text-3)" }}>—</span>;
+  const b = SYNC_BADGE[state];
+  return <span className={`badge ${b.cls}`} title={n.provider_sync?.message ?? undefined}>{b.label}</span>;
+};
+
+type RemoveMode = "remove_rest" | "release" | "remove_local" | "remove_plain" | "local_locked";
+
+function removeModeFor(config: ConfigRow | null, purchase: PurchasedNumber | undefined, isSuperadmin: boolean): RemoveMode {
+  const local = !config || (config.kind === "telephony_config" && config.provider === NATIVE);
+  if (local) return isSuperadmin ? "remove_local" : "local_locked";
+  if (config.kind === "telephony_config") return "remove_rest";
+  return purchase ? "release" : "remove_plain";
+}
+
+/** Everything about one number: identity, routing, status, provider sync,
+    and removing it. Opened from a configuration's table or All numbers. */
 function EditNumberModal({
-  target, agents, onClose, onSaved,
-}: { target: NumberRow | null; agents: Agent[]; onClose: () => void; onSaved: () => void }) {
+  target, config, agents, isSuperadmin, onClose, onChanged,
+}: {
+  target: NumberRow | null; config: ConfigRow | null; agents: Agent[]; isSuperadmin: boolean;
+  onClose: () => void; onChanged: () => void;
+}) {
   const [agentId, setAgentId] = useState("");
   const [fallbackAgentId, setFallbackAgentId] = useState("");
   const [region, setRegion] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  const [status, setStatus] = useState<PhoneNumber["status"]>("active");
+  const [sync, setSync] = useState<ProviderSync | null>(null);
+  const [purchase, setPurchase] = useState<PurchasedNumber | undefined>(undefined);
+  // Whether this carrier number was bought through us; unknown until loaded.
+  const [purchaseLookup, setPurchaseLookup] = useState<"loading" | "failed" | "done">("done");
+  // Set when the provider refused to detach: the admin may remove it anyway.
+  const [detachRefused, setDetachRefused] = useState<string | null>(null);
+  const [busy, setBusy] = useState<null | "save" | "sync" | "remove">(null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  // A retry already changed the stored row: refresh the list on close.
+  const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -1371,44 +1550,162 @@ function EditNumberModal({
     setAgentId(target.agent_id ?? "");
     setFallbackAgentId(target.fallback_agent_id ?? "");
     setRegion(target.region ?? "");
+    setStatus(target.status);
+    setSync(target.provider_sync ?? null);
+    setPurchase(undefined);
+    setConfirmRemove(false);
+    setDetachRefused(null);
+    setDirty(false);
     setError(null);
-  }, [target]);
+    setPurchaseLookup(config?.kind === "carrier" ? "loading" : "done");
+    if (config?.kind !== "carrier") return;
+    let cancelled = false;
+    listPurchasedNumbers(target.tenant_id)
+      .then((all) => {
+        if (cancelled) return;
+        setPurchase(all.find((p) => p.carrier_id === config.id && !p.released_at && digits(p.phone_number) === digits(target.did)));
+        setPurchaseLookup("done");
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setPurchaseLookup("failed");
+        setError(`Couldn't check whether this number was purchased, so it can't be removed safely: ${e instanceof ApiError ? e.detail : String(e)}`);
+      });
+    return () => { cancelled = true; };
+  }, [target, config]);
+
+  const close = () => {
+    onClose();
+    if (dirty) onChanged();
+  };
+  const fail = (e: unknown) => setError(e instanceof ApiError ? e.detail : String(e));
 
   const handleSave = async () => {
     if (!target) return;
-    setSubmitting(true);
+    setBusy("save");
     setError(null);
     try {
       await updatePhoneNumber(target.id, {
         agent_id: agentId || null,
         fallback_agent_id: fallbackAgentId || null,
         region: region || undefined,
+        status,
       });
-      onSaved();
+      onClose();
+      onChanged();
     } catch (e) {
-      setError(e instanceof ApiError ? e.detail : String(e));
+      fail(e);
     } finally {
-      setSubmitting(false);
+      setBusy(null);
     }
+  };
+
+  const handleRetry = async () => {
+    if (!target) return;
+    setBusy("sync");
+    setError(null);
+    try {
+      const updated = await syncPhoneNumber(target.id);
+      setSync(updated.provider_sync ?? null);
+      setDirty(true);
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const mode = removeModeFor(config, purchase, isSuperadmin);
+
+  const handleRemove = async (force = false) => {
+    if (!target) return;
+    setBusy("remove");
+    setError(null);
+    try {
+      // Release first: if the carrier refuses, the number keeps routing here.
+      if (mode === "release" && purchase && !force) await releaseNumber(purchase.id);
+      await deletePhoneNumber(target.id, { force });
+      onClose();
+      onChanged();
+    } catch (e) {
+      setConfirmRemove(false);
+      if (e instanceof ApiError && e.status === 502 && mode === "remove_rest") setDetachRefused(e.detail);
+      else fail(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const removeBlocked = purchaseLookup !== "done";
+
+  const providerLabel = config?.providerLabel ?? "the provider";
+  const syncsWithProvider = config?.kind === "telephony_config" && config.provider !== NATIVE;
+  const manualSetup = config !== null && MANUAL_SETUP_PROVIDERS.has(config.provider);
+  const sectionTitle = { fontSize: ".68rem", fontWeight: 600, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--text-3)", margin: "18px 0 8px" } as const;
+  const rowStyle = { display: "flex", gap: 10, padding: "5px 0", fontSize: ".8rem" } as const;
+  const labelStyle = { color: "var(--text-3)", width: 120, flexShrink: 0 } as const;
+
+  const REMOVE_COPY: Record<Exclude<RemoveMode, "local_locked">, { button: string; explain: string }> = {
+    remove_rest: {
+      button: `Remove from Yuviz`,
+      explain: manualSetup
+        ? `Stops routing this number's calls here. Remove it from your ${providerLabel} Voice Application yourself; the number stays in your account.`
+        : `Stops routing this number's calls here and detaches it in ${providerLabel}. The number stays in your ${providerLabel} account.`,
+    },
+    release: {
+      button: "Release to carrier",
+      explain: `Returns the number to ${providerLabel} and removes it here. You stop paying for it and may not get it back.`,
+    },
+    remove_plain: {
+      button: "Remove from Yuviz",
+      explain: `Stops routing this number's calls here. Nothing changes in your ${providerLabel} account.`,
+    },
+    remove_local: {
+      button: "Remove number",
+      explain: "Frees this local number. It can be assigned again to any account afterwards.",
+    },
   };
 
   return (
     <Modal
       open={target !== null}
       title={`Edit DID — ${target?.did ?? ""}`}
-      onClose={onClose}
+      onClose={close}
       footer={
         <>
-          <button className="btn btn-ghost btn-sm" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={submitting}>
-            {submitting ? "Saving…" : "Save Changes"}
+          <button className="btn btn-ghost btn-sm" onClick={close}>Cancel</button>
+          <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={busy !== null}>
+            {busy === "save" ? "Saving…" : "Save Changes"}
           </button>
         </>
       }
     >
       {error && <div className="error-banner">{error}</div>}
+
+      <div style={{ ...sectionTitle, marginTop: 0 }}>Number</div>
+      <div style={rowStyle}>
+        <div style={labelStyle}>Address</div>
+        <div style={{ fontFamily: "var(--mono)", color: "var(--text)" }}>{target?.did}</div>
+      </div>
+      <div style={rowStyle}>
+        <div style={labelStyle}>Configuration</div>
+        <div style={{ color: "var(--text)" }}>
+          {config ? <>{config.name} <span style={{ color: "var(--text-3)" }}>· {config.providerLabel}</span></> : <i style={{ color: "var(--text-3)" }}>none (local SIP)</i>}
+        </div>
+      </div>
+      <div style={rowStyle}>
+        <div style={labelStyle}>Account</div>
+        <div style={{ color: "var(--text)" }}>{target?.tenantName}</div>
+      </div>
+      {purchase && (
+        <div style={rowStyle}>
+          <div style={labelStyle}>Purchased</div>
+          <div style={{ color: "var(--text)" }}>{new Date(purchase.purchased_at).toLocaleDateString()}</div>
+        </div>
+      )}
+
+      <div style={sectionTitle}>Routing</div>
       <div className="form-group">
-        <label className="form-label">Label</label>
+        <label className="form-label">Label <span className="hint">free text, e.g. a region or team name</span></label>
         <input className="form-input" value={region} onChange={(e) => setRegion(e.target.value)} />
       </div>
       <div className="form-group">
@@ -1431,6 +1728,87 @@ function EditNumberModal({
           ))}
         </select>
       </div>
+      <div className="form-group">
+        <label className="form-label">
+          Status <span className="hint">inactive and suspended numbers don&apos;t take calls</span>
+        </label>
+        <select className="form-select" value={status} onChange={(e) => setStatus(e.target.value as PhoneNumber["status"])}>
+          <option value="active">active</option>
+          <option value="inactive">inactive</option>
+          <option value="suspended">suspended</option>
+        </select>
+      </div>
+
+      {syncsWithProvider && manualSetup && config && (
+        <>
+          <div style={sectionTitle}>{providerLabel} routing</div>
+          <div className="form-hint" style={{ lineHeight: 1.6 }}>
+            Set up once in {providerLabel}: add this number to your Voice Application and set the application&apos;s URL to{" "}
+            <span style={{ fontFamily: "var(--mono)", color: "var(--text)", wordBreak: "break-all" }}>{webhookUrlFor(config)}</span> (POST).
+          </div>
+        </>
+      )}
+
+      {syncsWithProvider && !manualSetup && (
+        <>
+          <div style={sectionTitle}>{providerLabel} routing</div>
+          <div
+            className={sync?.ok ? "info-banner" : sync ? "error-banner" : undefined}
+            style={{ display: "flex", alignItems: "flex-start", gap: 10, ...(sync ? {} : { fontSize: ".8rem", color: "var(--text-2)" }) }}
+          >
+            <div style={{ flex: 1, lineHeight: 1.5 }}>
+              {!sync
+                ? `${providerLabel} hasn't been told to send this number's calls here yet.`
+                : sync.ok
+                  ? `${providerLabel} sends this number's calls here.`
+                  : `${providerLabel} isn't sending this number's calls here: ${sync.message ?? "unknown error"}`}
+              {sync?.at && (
+                <div style={{ fontSize: ".7rem", opacity: 0.75 }}>Last checked {new Date(sync.at).toLocaleString()}</div>
+              )}
+            </div>
+            <button className="btn btn-ghost btn-sm" onClick={handleRetry} disabled={busy !== null}>
+              {busy === "sync" ? "Syncing…" : sync?.ok ? "Sync again" : "Retry"}
+            </button>
+          </div>
+        </>
+      )}
+
+      <div style={{ ...sectionTitle, color: "var(--red)" }}>Danger zone</div>
+      {mode === "local_locked" ? (
+        <div className="form-hint" style={{ lineHeight: 1.6 }}>
+          Local numbers are assigned and removed by the platform. To stop taking calls on it, set its status to inactive.
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px" }}>
+          <div className="form-hint" style={{ flex: 1, lineHeight: 1.5, margin: 0 }}>
+            {detachRefused ? (
+              <span style={{ color: "var(--red)" }}>
+                {detachRefused}. Remove it anyway? {providerLabel} will keep sending this number&apos;s calls here until you
+                change it there.
+              </span>
+            ) : purchaseLookup === "loading" ? "Checking whether this number was purchased…" : REMOVE_COPY[mode].explain}
+          </div>
+          {detachRefused ? (
+            <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+              <button className="btn btn-ghost btn-sm" onClick={() => setDetachRefused(null)} disabled={busy !== null}>Keep</button>
+              <button className="btn btn-danger btn-sm" onClick={() => handleRemove(true)} disabled={busy !== null}>
+                {busy === "remove" ? "Removing…" : "Remove anyway"}
+              </button>
+            </div>
+          ) : confirmRemove ? (
+            <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+              <button className="btn btn-ghost btn-sm" onClick={() => setConfirmRemove(false)} disabled={busy !== null}>Keep</button>
+              <button className="btn btn-danger btn-sm" onClick={() => handleRemove()} disabled={busy !== null || removeBlocked}>
+                {busy === "remove" ? "Removing…" : `Yes, ${REMOVE_COPY[mode].button.toLowerCase()}`}
+              </button>
+            </div>
+          ) : (
+            <button className="btn btn-danger btn-sm" style={{ flexShrink: 0 }} onClick={() => setConfirmRemove(true)} disabled={busy !== null || removeBlocked}>
+              {REMOVE_COPY[mode].button}
+            </button>
+          )}
+        </div>
+      )}
     </Modal>
   );
 }
