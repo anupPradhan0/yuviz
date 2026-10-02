@@ -22,6 +22,22 @@ _env_set() {
 
 _env_get() { grep "^$1=" "$REPO/.env" | cut -d= -f2-; }
 
+# Like _env_set, but appends KEY when .env has no line for it (_env_set alone
+# would change nothing and still succeed). Returns 1 on failure.
+_env_put() {
+  if grep -q "^$1=" "$REPO/.env"; then
+    _env_set "$1" "$2"
+    return
+  fi
+  # Keep the new line on its own when .env does not end in a newline.
+  if [ -s "$REPO/.env" ] && [ -n "$(tail -c 1 "$REPO/.env")" ]; then
+    printf '\n' >> "$REPO/.env" || return 1
+  fi
+  printf '%s=%s\n' "$1" "$2" >> "$REPO/.env" && return 0
+  echo "could not write $1 to $REPO/.env" >&2
+  return 1
+}
+
 # Creates .env from .env.example, adds keys added to the example since, and
 # fills any blank platform secret. Never touches a value already set.
 _env_init() {
