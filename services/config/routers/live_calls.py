@@ -126,25 +126,21 @@ async def request_intervention(
     # WRITE: 403 outright on a demoted/deleted/re-tenanted actor (AC9)
     # rather than silently rescoping it the way _resolve_scope's branch
     # selection does for the read-only GET route.
-    await deps.assert_current_authority(user)
+    fresh = await deps.assert_current_authority(user)
 
     ip_address = _extract_client_ip(request)
     tenant_slug = body.tenant_slug
-    scope_key = tenant_slug or "self"
 
     try:
         slug, tenant_id, effective_user = await _resolve_scope(request, user, tenant_slug)
     except HTTPException as exc:
         if exc.status_code == 404:
-            # _resolve_scope's own branch-selection 404 was previously
-            # unaudited (security finding #5) — audit it as a denial too,
-            # attributed to the caller's own resolved tenant. Keyed "self", not
-            # the failed slug, so the entry _resolve_scope evicted stays evicted.
-            effective_user = await deps.fresh_authority(request.app.state, user, "self")
-            if effective_user.tenant_id is not None:
+            # Audit _resolve_scope's 404 as a denial under the tenant just read
+            # from the DB, never a memo entry that may predate a re-tenant.
+            if fresh.tenant_id is not None:
                 await live_calls_service.record_denied_intervention(
-                    tenant_id=uuid.UUID(effective_user.tenant_id), session_id=session_id,
-                    user=effective_user, ip_address=ip_address,
+                    tenant_id=uuid.UUID(fresh.tenant_id), session_id=session_id,
+                    user=fresh, ip_address=ip_address,
                 )
         raise
 

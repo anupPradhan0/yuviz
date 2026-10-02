@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -25,12 +26,14 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 # Same files, same order as deployment/sh/init.sh: rls.sql grants the
 # yuviz_app/yuviz_platform roles that platform_conn switches to.
 SCHEMA_FILES = ["schema.sql", "knowledge_schema.sql", "telephony_schema.sql", "rls.sql"]
+# Roles are cluster-wide: never plant a known password if rls.sql creates yuviz_app here.
+_APP_PASSWORD = secrets.token_urlsafe(24)
 
 
 async def _apply_schemas(dsn: str) -> None:
     for name in SCHEMA_FILES:
         proc = await asyncio.create_subprocess_exec(
-            "psql", dsn, "-v", "ON_ERROR_STOP=1", "-v", "yuviz_app_password=test-only", "-q",
+            "psql", dsn, "-v", "ON_ERROR_STOP=1", "-v", f"yuviz_app_password={_APP_PASSWORD}", "-q",
             "-f", str(REPO_ROOT / "database" / name),
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
         )

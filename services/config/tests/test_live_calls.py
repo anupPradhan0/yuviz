@@ -20,7 +20,9 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import time
 import uuid
+from collections import OrderedDict
 
 import asyncpg
 import pytest
@@ -1116,6 +1118,41 @@ class TestAuthorityMemoBounds:
             assert (str(test_admin["user"]["id"]), other_tenant["slug"]) not in memo
         finally:
             await _cleanup_tenant(pool, other_tenant)
+
+    async def test_post_intervention_404_denial_ignores_a_stale_self_memo_entry(
+        self, pool, test_tenant, test_admin,
+    ):
+        """A cached "self" entry from before a re-tenant must not decide which
+        tenant's audit log the 404 denial lands in."""
+        previous_tenant = await _create_tenant(pool, name="Previous Tenant")
+        target_tenant = await _create_tenant(pool, name="Target Tenant")
+        user_id = str(test_admin["user"]["id"])
+        for tid in (test_tenant["id"], previous_tenant["id"]):
+            live_calls._denial_audit_windows.pop((user_id, str(tid)), None)
+        try:
+            _clear_authority_memo()
+            _reset_throttle()
+            stale = auth.CurrentUser(
+                id=user_id, email=test_admin["user"]["email"], role="admin",
+                tenant_id=str(previous_tenant["id"]),
+                token_version=test_admin["user"].get("token_version", 0),
+            )
+            app.state._live_calls_authority_memo = OrderedDict(
+                {(user_id, "self"): (time.monotonic(), stale)}
+            )
+            own_before = await _count_audit_rows(pool, test_tenant["id"], "denied")
+            prev_before = await _count_audit_rows(pool, previous_tenant["id"], "denied")
+            async with _client_as(test_admin["user"]) as client:
+                resp = await _post_intervention(
+                    client, f"test-live-{uuid.uuid4().hex[:8]}", tenant_slug=target_tenant["slug"],
+                )
+            assert resp.status_code == 404
+            assert await _count_audit_rows(pool, previous_tenant["id"], "denied") == prev_before
+            assert await _count_audit_rows(pool, test_tenant["id"], "denied") == own_before + 1
+        finally:
+            _clear_authority_memo()
+            await _cleanup_tenant(pool, previous_tenant)
+            await _cleanup_tenant(pool, target_tenant)
 
 
 # ── T25 — soft-deleted own tenant 403s instead of falling through ────────
