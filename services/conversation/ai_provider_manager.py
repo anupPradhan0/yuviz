@@ -293,6 +293,25 @@ async def _make_deepgram_tts(cfg: ProviderConfig, api_key: str | None) -> Any:
     )
 
 
+async def _make_cartesia_tts(cfg: ProviderConfig, api_key: str | None) -> Any:
+    from .providers.tts.cartesia import CartesiaTTS
+
+    # voice is a Cartesia voice id (a UUID), not a display name — there is
+    # no sensible default, so an unset one fails here rather than
+    # synthesizing in whatever voice the API happens to pick.
+    voice = (cfg.voice or "").strip()
+    if not voice:
+        raise ValueError(
+            f"provider_config id={cfg.id!r} engine='cartesia' has no voice set — "
+            "Cartesia needs a voice id (a UUID from its /voices list)"
+        )
+    return CartesiaTTS(
+        api_key=_require_api_key(cfg, api_key),
+        voice=voice,
+        model=str((cfg.extra or {}).get("model") or "sonic-2"),
+    )
+
+
 # Every engine referenced in the schema/UI now has a real implementation
 # registered here — local (faster_whisper/ollama/macos/kokoro) and cloud
 # (deepgram/openai/elevenlabs) both go through the exact same registry
@@ -312,6 +331,7 @@ _DEFAULT_REGISTRY: dict[tuple[str, str], ProviderFactory] = {
     ("tts", "kokoro"):         _make_kokoro_tts,
     ("tts", "elevenlabs"):     _make_elevenlabs_tts,
     ("tts", "deepgram"):       _make_deepgram_tts,
+    ("tts", "cartesia"):       _make_cartesia_tts,
 }
 
 
