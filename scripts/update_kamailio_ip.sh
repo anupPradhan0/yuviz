@@ -18,9 +18,16 @@
 #      old IP until it's restarted.
 #
 # Most of the rest of the stack (Envoy, Postgres/Redis DSNs, admin-ui, the
-# FreeSWITCH Lua dialplan script) is 127.0.0.1/localhost/0.0.0.0. Not
-# rewritten here except SIP_PROXY_HOST in .env, which the Gateway (warm
-# transfer) and Campaigns (outbound) both read and need on the same LAN IP.
+# FreeSWITCH Lua dialplan script) is 127.0.0.1/localhost/0.0.0.0. The one
+# exception rewritten here: SIP_PROXY_HOST in the repo's .env (added if
+# missing, replaced if present). The Gateway dials every transfer to a number
+# through it (cold transfer and warm transfer's agent leg) and Campaigns
+# dials outbound calls through it, so it must be Kamailio's IP. Restart the
+# Gateway and Campaigns afterwards from a NEW tab (or `unset SIP_PROXY_HOST`
+# and re-source start_local.sh first): a shell that already sourced
+# start_local.sh keeps its old exported value, and the script warns if the
+# shell it was run from has one. config/gateway.yaml's esl.sip_proxy_host is
+# only a fallback and is not touched.
 #
 # Idempotent: safe to run any time, even if the IP hasn't changed. Each of the
 # three steps independently detects "already correct" and skips.
@@ -100,12 +107,31 @@ else
 fi
 echo ""
 
-# The Gateway (warm transfer) and Campaigns (outbound) dial Kamailio at
-# SIP_PROXY_HOST, so keep it on the same LAN IP. Restart them to pick it up.
-if [[ -f "$REPO_ROOT/.env" ]] && ! grep -q "^SIP_PROXY_HOST=${LAN_IP}$" "$REPO_ROOT/.env"; then
-  sed -i.bak "s|^SIP_PROXY_HOST=.*|SIP_PROXY_HOST=${LAN_IP}|" "$REPO_ROOT/.env" && rm -f "$REPO_ROOT/.env.bak"
-  echo "  .env: SIP_PROXY_HOST=${LAN_IP} (restart the Gateway and Campaigns)"
+# The Gateway (cold and warm transfer) and Campaigns (outbound) dial Kamailio
+# at SIP_PROXY_HOST. A stale value (e.g. the old .env.example's 127.0.0.1)
+# sends the INVITE to the wrong host and the caller hears ~32 s of silence,
+# so it moves with the Kamailio IP. _env_put adds the line when it is missing.
+REPO="$REPO_ROOT"
+# shellcheck source=lib/env.sh
+source "$REPO_ROOT/scripts/lib/env.sh"
+if [[ ! -f "$REPO_ROOT/.env" ]]; then
+  echo "  WARNING: $REPO_ROOT/.env not found — SIP_PROXY_HOST NOT written. Source" >&2
+  echo "  scripts/start_local.sh once (it creates .env), then rerun this script." >&2
+elif [[ "$(_env_get SIP_PROXY_HOST || true)" == "$LAN_IP" ]]; then
+  echo "  .env: SIP_PROXY_HOST already $LAN_IP"
+elif _env_put SIP_PROXY_HOST "$LAN_IP" && written="$(_env_get SIP_PROXY_HOST)" && [[ "$written" == "$LAN_IP" ]]; then
+  echo "  .env: SIP_PROXY_HOST=$written (restart the Gateway and Campaigns from a new tab)"
+else
+  echo "ERROR: could not write SIP_PROXY_HOST=$LAN_IP to $REPO_ROOT/.env" >&2
+  exit 1
 fi
+# This script runs as a child of the operator's shell, so this is the value
+# that shell exports. If it sourced start_local.sh before, it keeps the old
+# value (_load_env never overrides) and a restart from it would still dial it.
+if [[ -f "$REPO_ROOT/.env" ]]; then
+  _warn_env_drift SIP_PROXY_HOST
+fi
+echo ""
 
 # ── Step 1: regenerate Kamailio config from templates ───────────────────────
 echo "=== Step 1/3: Kamailio config ==="

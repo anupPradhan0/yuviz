@@ -22,6 +22,38 @@ _env_set() {
 
 _env_get() { grep "^$1=" "$REPO/.env" | cut -d= -f2-; }
 
+# Warns when the shell already exports KEY with a value other than .env's.
+# _load_env never replaces a variable the shell has (on purpose), so after
+# .env changes, a tab that sourced start_local.sh earlier keeps the old value
+# and whatever it starts uses that. Always returns 0: it only prints a hint.
+_warn_env_drift() {
+  local shell_value file_value
+  shell_value=$(printenv "$1" || true)
+  [ -n "$shell_value" ] || return 0
+  file_value=$(_env_get "$1" 2>/dev/null || true)
+  [ "$shell_value" = "$file_value" ] && return 0
+  printf 'WARNING: this shell exports %s=%s but .env has %s=%s.\n' "$1" "$shell_value" "$1" "$file_value" >&2
+  printf '  What you start from here uses %s. Open a new tab, or run\n' "$shell_value" >&2
+  printf '  `unset %s` and source scripts/start_local.sh again, before restarting.\n' "$1" >&2
+  return 0
+}
+
+# Like _env_set, but appends KEY when .env has no line for it (_env_set alone
+# would change nothing and still succeed). Returns 1 on failure.
+_env_put() {
+  if grep -q "^$1=" "$REPO/.env"; then
+    _env_set "$1" "$2"
+    return
+  fi
+  # Keep the new line on its own when .env does not end in a newline.
+  if [ -s "$REPO/.env" ] && [ -n "$(tail -c 1 "$REPO/.env")" ]; then
+    printf '\n' >> "$REPO/.env" || return 1
+  fi
+  printf '%s=%s\n' "$1" "$2" >> "$REPO/.env" && return 0
+  echo "could not write $1 to $REPO/.env" >&2
+  return 1
+}
+
 # Creates .env from .env.example, adds keys added to the example since, and
 # fills any blank platform secret. Never touches a value already set.
 _env_init() {

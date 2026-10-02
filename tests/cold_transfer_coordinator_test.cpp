@@ -213,6 +213,7 @@ TEST(ColdTransferCoordinatorAcceptedPathTest, OnMediaHandoffFiresWhenCommandAcce
     cfg.port               = server.port;
     cfg.password            = "ClueCon";
     cfg.connect_timeout_ms  = 500;
+    cfg.sip_proxy_host      = "127.0.0.1";  // "1001" is dialed through Kamailio
     EslClient client{cfg, logger};
     TransferCorrelator correlator;
     ObservabilityContext obs{"session-1", "tenant-1", "trace-1", "call-uuid-1", ""};

@@ -24,7 +24,11 @@ from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
 
 from libs.config_sdk import RuntimeConfig, validate_transfer_timeout_ms
-from libs.config_sdk.dial_targets import is_transfer_destination
+from libs.config_sdk.dial_targets import (
+    is_platform_ai_number,
+    is_sip_uri_shape,
+    is_transfer_destination,
+)
 from libs.knowledge_sdk import IKnowledgeProvider, RetrievalPolicy
 
 from .directives import (
@@ -348,7 +352,14 @@ def transfer_destination_problem(destination: str | None) -> str | None:
         return "transfer_destination is empty"
     if is_transfer_destination(destination):
         return None
+    if is_platform_ai_number(destination):
+        return (
+            f"transfer_destination {destination!r} is one of this platform's own AI numbers "
+            "(788, 5000-5009) — a transfer there loops back and can never connect"
+        )
     if destination.lower().startswith(("sip:", "sips:")):
+        if is_sip_uri_shape(destination):
+            return f"SIP URI {destination!r} points at this host (loopback or maddr)"
         return f"malformed SIP URI {destination!r} (expected sip:user@host)"
     return (
         f"transfer_destination {destination!r} is neither a phone number/extension "

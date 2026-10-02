@@ -65,6 +65,7 @@ def _point_at_fake_server(monkeypatch):
     ensures no test accidentally reaches a real ESL endpoint."""
     monkeypatch.setattr(originate, "_ESL_HOST", "127.0.0.1")
     monkeypatch.setattr(originate, "_ESL_PASSWORD", "test-esl-password")
+    monkeypatch.setattr(originate, "_SIP_PROXY_HOST", "192.168.0.116")
 
 
 async def test_originate_call_success_returns_job_uuid(monkeypatch):
@@ -184,3 +185,15 @@ async def test_originate_refuses_without_an_esl_password(monkeypatch):
     monkeypatch.setattr(originate, "_ESL_PASSWORD", "")
     with pytest.raises(originate.OriginateError, match="FREESWITCH_ESL_PASSWORD"):
         await originate.originate_call("+14155551111", "+14155552222")
+
+
+async def test_originate_refuses_without_a_sip_proxy_host_before_connecting(monkeypatch):
+    server = _FakeEslServer("+OK Job-UUID: abc")
+    port = await server.start()
+    monkeypatch.setattr(originate, "_ESL_PORT", port)
+    monkeypatch.setattr(originate, "_SIP_PROXY_HOST", "")
+    with pytest.raises(originate.OriginateError, match="SIP_PROXY_HOST is not set"):
+        await originate.originate_call("+14155551111", "+14155552222")
+    assert server.received_commands == []
+    await server.stop()
+

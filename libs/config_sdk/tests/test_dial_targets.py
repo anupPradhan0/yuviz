@@ -38,6 +38,32 @@ def test_transfer_destination_accepts_real_shapes(value):
     assert is_transfer_destination(value)
 
 
+# The platform's own AI numbers loop back into the platform (Kamailio refuses
+# them from FreeSWITCH), and a URI at this host enters FreeSWITCH's dialplan.
+PLATFORM = [
+    "788", "5000", "5005", "5009",
+    "sip:3500@127.0.0.1:5080", "sip:3500@127.1", "sip:779@2130706433", "sip:x@0.0.0.0",
+    "sip:x@localhost", "sip:x@LOCALHOST.", "sip:x@fs.localhost:5080",
+    "sip:x@pbx.example.com;maddr=127.0.0.1", "sip:x@:5080",
+]
+
+
+@pytest.mark.parametrize("value", PLATFORM)
+def test_transfer_destination_rejects_platform_targets(value):
+    assert not is_transfer_destination(value)
+
+
+@pytest.mark.parametrize("value", ["15005", "+5005", "50010", "+14155005555", "7880", "sip:788@example.com"])
+def test_transfer_destination_accepts_numbers_that_only_contain_a_platform_number(value):
+    assert is_transfer_destination(value)
+
+
+@pytest.mark.parametrize("value", PLATFORM)
+def test_agent_update_rejects_platform_transfer_destination(value):
+    with pytest.raises(ValidationError):
+        AgentUpdate(transfer_destination=value)
+
+
 @pytest.mark.parametrize("value", ["+15551234567}\n\napi hupall", "+1555,x=1", "anonymous", "+1 555"])
 def test_dial_number_rejects_non_numbers(value):
     assert not is_dial_number(value)

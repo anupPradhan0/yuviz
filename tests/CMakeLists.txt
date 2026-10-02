@@ -22,6 +22,9 @@ target_link_libraries(gateway_tests
 )
 
 target_compile_features(gateway_tests PRIVATE cxx_std_20)
+# Lets tests read the shipped config/gateway.yaml and .env.example, so a
+# default that ships in those files is what gets tested.
+target_compile_definitions(gateway_tests PRIVATE YUVIZ_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 include(GoogleTest)
 gtest_discover_tests(gateway_tests)

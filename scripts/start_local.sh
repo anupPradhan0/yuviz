@@ -109,6 +109,7 @@ start_knowledge_worker() {
 # block needed for it.
 start_campaigns_service() {
   _require JWT_SECRET FREESWITCH_ESL_PASSWORD || return 0
+  _warn_env_drift SIP_PROXY_HOST
   cd "$REPO"
   python3 -m uvicorn services.campaigns.app:app --host 0.0.0.0 --port 8400
 }
@@ -155,6 +156,7 @@ start_envoy() {
 # ── Block 12: C++ Gateway ──────────────────────────────────────────────────────
 start_gateway() {
   _require FREESWITCH_ESL_PASSWORD || return 0
+  _warn_env_drift SIP_PROXY_HOST
   cd "$REPO"
   ./build/gateway/voice_ai_gateway config/gateway.yaml
 }

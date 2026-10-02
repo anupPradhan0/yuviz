@@ -70,7 +70,11 @@ _ESL_HOST = os.environ.get("FREESWITCH_ESL_HOST", "127.0.0.1")
 _ESL_PORT = int(os.environ.get("FREESWITCH_ESL_PORT", "8022"))
 # No default: FreeSWITCH's own default is public. Set it in .env.
 _ESL_PASSWORD = os.environ.get("FREESWITCH_ESL_PASSWORD", "")
-_SIP_PROXY_HOST = os.environ.get("SIP_PROXY_HOST", "127.0.0.1")
+# No default either: Kamailio listens on a host-specific IP, and a wrong
+# guess sends the INVITE nowhere (the contact is never rung). Written into
+# .env by scripts/update_kamailio_ip.sh; refused below while unset, matching
+# the Gateway's sip_proxy_host_unset.
+_SIP_PROXY_HOST = os.environ.get("SIP_PROXY_HOST", "")
 _SIP_PROXY_PORT = int(os.environ.get("SIP_PROXY_PORT", "5060"))
 
 
@@ -118,6 +122,11 @@ async def originate_call(phone_number: str, caller_id: str) -> str:
             raise OriginateError(f"refusing to dial: {label} {value!r} is not a plain dial number")
     if not _ESL_PASSWORD:
         raise OriginateError("FREESWITCH_ESL_PASSWORD is not set; add it to .env")
+    if not _SIP_PROXY_HOST:
+        raise OriginateError(
+            "SIP_PROXY_HOST is not set; run scripts/update_kamailio_ip.sh to write "
+            "Kamailio's IP into .env, then restart Campaigns"
+        )
     try:
         reader, writer = await asyncio.open_connection(_ESL_HOST, _ESL_PORT)
     except OSError as exc:

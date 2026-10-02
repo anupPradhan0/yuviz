@@ -2,8 +2,12 @@
 #include "config/Config.h"
 #include "config/RedisClient.h"
 #include "logging/Logger.h"
+#include "telephony/EslClient.h"
+#include "telephony/TransferRequest.h"
+#include <cstdlib>
 #include <fstream>
 #include <filesystem>
+#include <string>
 
 namespace {
 
@@ -353,4 +357,48 @@ TEST_F(EslEnvConfigTest, DisabledEslNeedsNoPassword) {
     write_yaml("gateway:\n  esl:\n    enabled: false\n");
     voiceai::Config cfg;
     EXPECT_NO_THROW(cfg.load(tmp_yaml_.string()));
+}
+
+// The shipped files must leave the proxy host unset until
+// scripts/update_kamailio_ip.sh writes it. .env.example's SIP_PROXY_HOST is
+// exported by _load_env and overrides the yaml, so a default there (it was
+// 127.0.0.1) silently replaced the Gateway's sip_proxy_host_unset refusal
+// with an INVITE to a host Kamailio does not listen on.
+TEST_F(EslEnvConfigTest, ShippedConfigAndEnvExampleLeaveNumbersRefused) {
+    const std::filesystem::path src{YUVIZ_SOURCE_DIR};
+    std::ifstream example{src / ".env.example"};
+    ASSERT_TRUE(example.is_open());
+    std::string line, shipped;
+    bool found = false;
+    while (std::getline(example, line)) {
+        if (line.rfind("SIP_PROXY_HOST=", 0) == 0) {
+            shipped = line.substr(std::string("SIP_PROXY_HOST=").size());
+            found = true;
+        }
+    }
+    ASSERT_TRUE(found) << ".env.example has no SIP_PROXY_HOST line";
+
+    // What start_local.sh would hand the Gateway (a blank value is exported
+    // as-is here; _load_env skips it, and env_value() must treat it as unset).
+    ::setenv("SIP_PROXY_HOST", shipped.c_str(), 1);
+    ::setenv("FREESWITCH_ESL_PASSWORD", "p", 1);
+    voiceai::Config cfg;
+    cfg.load((src / "config" / "gateway.yaml").string());
+    EXPECT_EQ(cfg.esl().sip_proxy_host, "");
+
+    voiceai::Logger logger = voiceai::Logger::make_null();
+    voiceai::EslClient client{cfg.esl(), logger};
+    std::string error;
+    EXPECT_FALSE(client.transfer(
+        voiceai::TransferRequest{"call-uuid-1", "cold", "1005", "x"}, error));
+    EXPECT_EQ(error, "sip_proxy_host_unset");
+}
+
+TEST_F(EslEnvConfigTest, BlankSipProxyHostEnvDoesNotOverrideTheYaml) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "p", 1);
+    ::setenv("SIP_PROXY_HOST", "", 1);
+    write_yaml("gateway:\n  esl:\n    enabled: true\n    sip_proxy_host: \"10.9.9.9\"\n");
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+    EXPECT_EQ(cfg.esl().sip_proxy_host, "10.9.9.9");
 }

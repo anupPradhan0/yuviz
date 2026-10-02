@@ -83,7 +83,8 @@ This script:
   - puts ESL on `127.0.0.1:8022`;
   - disables the stock `internal` SIP profile, which would bind 5060, Kamailio's port;
   - sets `local_ip_v4` and `external_{rtp,sip}_ip` to `127.0.0.1` (the default STUN lookup puts your public IP into the call setup and the call goes silent);
-  - installs the dialplan entry.
+  - installs the dialplan entry;
+  - replaces the stock `default` dialplan context with a deny-all one (`scripts/freeswitch/install_default_context.sh`). The stock context is a demo whose `779`/`886` extensions eavesdrop on or intercept any call on the switch, and the stock `public` context hands calls on to it.
 
 Rerun it after every `brew upgrade freeswitch`, which deletes the built module.
 
@@ -188,6 +189,9 @@ sudo sed -i 's|^<include>|<include>\n  <X-PRE-PROCESS cmd="set" data="local_ip_v
 # dialplan + Lua script (symlinked, so edits in the repo apply on the next call)
 sudo cp "$REPO/scripts/freeswitch/00_voice_ai.xml" $C/dialplan/public/
 sudo ln -sf "$REPO/scripts/freeswitch/start_voice_ai.lua" /usr/share/freeswitch/scripts/start_voice_ai.lua
+
+# deny-all "default" context: the stock one eavesdrops on/intercepts other calls (779, 886)
+sudo "$REPO/scripts/freeswitch/install_default_context.sh" $C
 
 sudo systemctl restart freeswitch
 ```
@@ -415,10 +419,32 @@ SIP_IP=<lan-ip> ./scripts/update_kamailio_ip.sh
 ```
 
 Then register the phone as `1001@<lan-ip>`. Rerun both commands whenever the
-IP changes. Don't use a VPN address.
+IP changes, then restart the Gateway and Campaigns from a new tab. Don't use
+a VPN address.
 
-Warm transfer and outbound campaigns also dial through the SIP proxy. They
-read `esl.sip_proxy_host` in `config/gateway.yaml` and `SIP_PROXY_HOST` for
-the campaigns service. Both default to a hardcoded `192.168.0.116`, so set
-them to the same IP (or `127.0.0.1`), or those two features will fail while
-inbound calls keep working.
+Cold transfer to a number, warm transfer and outbound campaigns all dial
+through the SIP proxy (Kamailio) at `SIP_PROXY_HOST` in `.env`, which both the
+Gateway and Campaigns read. `update_kamailio_ip.sh` writes it (adding the line
+if it is missing) with the same IP it renders Kamailio with; restart the
+Gateway and Campaigns after running it, from a new tab (see below). `esl.sip_proxy_host` in
+`config/gateway.yaml` is only a fallback that a non-blank `.env` value
+overrides, so editing the yaml does nothing while `.env` has a value. If
+`SIP_PROXY_HOST` is blank, the Gateway logs `esl.sip_proxy_host is not set` at
+startup and refuses every transfer to a number (`sip_proxy_host_unset`), so
+the agent apologises and carries on instead of the caller sitting through
+~32 s of silence. Campaigns likewise refuses to originate
+(`SIP_PROXY_HOST is not set`).
+
+An `.env` created before this change may hold `SIP_PROXY_HOST=127.0.0.1`
+(the old `.env.example` default), which `start_local.sh` never overwrites.
+That is only right with `SIP_IP=127.0.0.1`. Rerun `update_kamailio_ip.sh` to
+replace it with the address Kamailio really listens on.
+
+**Restart from a new terminal tab.** A tab that already sourced
+`scripts/start_local.sh` keeps the `SIP_PROXY_HOST` it exported then:
+`_load_env` never replaces a variable the shell already has, so
+`start_gateway`/`start_campaigns_service` in that tab would still dial the old
+host. Open a new tab and source `start_local.sh` there, or run
+`unset SIP_PROXY_HOST` and source it again. `update_kamailio_ip.sh`,
+`start_gateway` and `start_campaigns_service` print a warning when the shell's
+value differs from `.env`.
