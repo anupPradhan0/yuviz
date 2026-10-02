@@ -107,7 +107,7 @@ Fill these yourself; nothing can generate them:
 | `TELEPHONY_PUBLIC_BASE_URL` | Public tunnel URL for Vobiz/Cloudonix callbacks. |
 | `SMTP_*`, `GOOGLE_*`, provider API keys | Optional features. |
 
-`SIP_PROXY_HOST` (your LAN IP) is kept current by `update_kamailio_ip.sh`.
+`SIP_PROXY_HOST` ships blank: `update_kamailio_ip.sh` writes the IP Kamailio listens on. Until it does, the Gateway and Campaigns refuse to dial numbers.
 
 ## 5. Service-account credentials
 
