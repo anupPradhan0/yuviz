@@ -128,6 +128,7 @@ EslConfig make_cfg(uint16_t port) {
     cfg.port               = port;
     cfg.password            = "ClueCon";
     cfg.connect_timeout_ms  = 500;
+    cfg.sip_proxy_host      = "192.168.0.116";
     return cfg;
 }
 

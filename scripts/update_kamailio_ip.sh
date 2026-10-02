@@ -18,10 +18,11 @@
 #      old IP until it's restarted.
 #
 # Most of the rest of the stack (Envoy, Postgres/Redis DSNs, admin-ui, the
-# FreeSWITCH Lua dialplan script) is 127.0.0.1/localhost/0.0.0.0. Not
-# rewritten here: config/gateway.yaml esl.sip_proxy_host and SIP_PROXY_HOST
-# for the campaigns service — warm transfer and outbound need those set to
-# the same LAN IP.
+# FreeSWITCH Lua dialplan script) is 127.0.0.1/localhost/0.0.0.0. The one
+# exception rewritten here: config/gateway.yaml esl.sip_proxy_host, which the
+# Gateway dials every transfer to a number through (cold and warm) and so
+# must be Kamailio's IP. Not rewritten: SIP_PROXY_HOST for the campaigns
+# service (an env var) — outbound needs it set to the same IP.
 #
 # Idempotent: safe to run any time, even if the IP hasn't changed. Each of the
 # three steps independently detects "already correct" and skips.
@@ -87,6 +88,22 @@ else
     exit 1
   fi
   echo "Detected LAN IP: $LAN_IP"
+fi
+echo ""
+
+# Cold and warm transfer dial numbers through Kamailio at this address. A
+# stale value sends the INVITE to the wrong host and the caller hears ~32 s
+# of silence before the call drops, so it moves with the Kamailio IP.
+GATEWAY_YAML="$REPO_ROOT/config/gateway.yaml"
+if ! grep -q '^ *sip_proxy_host:' "$GATEWAY_YAML"; then
+  echo "ERROR: no esl.sip_proxy_host line in $GATEWAY_YAML" >&2
+  exit 1
+fi
+if grep -q "^ *sip_proxy_host: \"$LAN_IP\"\$" "$GATEWAY_YAML"; then
+  echo "  gateway.yaml: esl.sip_proxy_host already $LAN_IP"
+else
+  sed -i.bak "s|^\( *sip_proxy_host:\).*|\1 \"$LAN_IP\"|" "$GATEWAY_YAML" && rm -f "$GATEWAY_YAML.bak"
+  echo "  gateway.yaml: esl.sip_proxy_host = $LAN_IP (restart the Gateway to pick it up)"
 fi
 echo ""
 

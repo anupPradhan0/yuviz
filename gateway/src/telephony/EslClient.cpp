@@ -58,6 +58,55 @@ bool is_safe_sip_uri(const std::string& s) {
     return true;
 }
 
+// The platform's own AI entry numbers (scripts/freeswitch/00_voice_ai.xml,
+// scripts/kamailio/kamailio.cfg.tpl). Bridged from FreeSWITCH they hit
+// Kamailio's loop guard, so a transfer to one can never connect.
+bool is_platform_ai_number(const std::string& s) {
+    return s == "788" || (s.size() == 4 && s.rfind("500", 0) == 0 && s[3] >= '0' && s[3] <= '9');
+}
+
+std::string to_lower(std::string s) {
+    for (char& c : s) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return s;
+}
+
+// Host part of an already-validated SIP URI: after '@', up to ':' or ';'.
+std::string sip_uri_host(const std::string& uri) {
+    const auto at = uri.find('@');
+    const auto end = uri.find_first_of(":;", at + 1);
+    std::string host = uri.substr(at + 1, end == std::string::npos ? std::string::npos : end - at - 1);
+    if (!host.empty() && host.back() == '.') host.pop_back();
+    return to_lower(std::move(host));
+}
+
+// inet_aton, like the resolver, also accepts "127.1", "0x7f.1" and "2130706433".
+bool parse_ipv4(const std::string& host, in_addr& out) {
+    return !host.empty() && ::inet_aton(host.c_str(), &out) != 0;
+}
+
+bool is_loopback_or_any(const std::string& host) {
+    in_addr addr{};
+    if (parse_ipv4(host, addr)) {
+        const uint32_t a = ntohl(addr.s_addr);
+        return (a >> 24) == 127 || a == 0;
+    }
+    const std::string suffix = ".localhost";
+    return host == "localhost" ||
+           (host.size() > suffix.size() &&
+            host.compare(host.size() - suffix.size(), suffix.size(), suffix) == 0);
+}
+
+bool is_same_host(const std::string& host, const std::string& platform_host) {
+    if (platform_host.empty()) return false;
+    in_addr a{}, b{};
+    if (parse_ipv4(host, a) && parse_ipv4(platform_host, b)) return a.s_addr == b.s_addr;
+    std::string p = to_lower(platform_host);
+    if (!p.empty() && p.back() == '.') p.pop_back();
+    return host == p;
+}
+
 bool is_safe_uuid(const std::string& s) {
     if (s.empty() || s.size() > 64) return false;
     for (const char c : s) {
@@ -102,7 +151,13 @@ bool parse_job_uuid(const std::string& headers, std::string& out_uuid) {
 EslClient::EslClient(EslConfig cfg, Logger& logger)
     : cfg_(std::move(cfg))
     , logger_(logger)
-{}
+{
+    if (cfg_.enabled && cfg_.sip_proxy_host.empty()) {
+        logger_.error("EslClient: esl.sip_proxy_host is not set — every transfer to a number "
+                      "will be refused. Run scripts/update_kamailio_ip.sh, or set it in "
+                      "config/gateway.yaml to the IP Kamailio listens on.");
+    }
+}
 
 EslClient::~EslClient() {
     std::lock_guard lock{mutex_};
@@ -302,10 +357,20 @@ bool EslClient::transfer(const TransferRequest& req, std::string& error_out) {
                      uuid.size());
         return false;
     }
-    if (!is_safe_destination(destination)) {
-        error_out = "invalid_destination";
-        logger_.warn("EslClient: transfer refused, destination is not a plain number or "
-                     "sip URI uuid={} reason={} length={}", uuid, reason, destination.size());
+    if (const std::string problem = destination_problem(destination); !problem.empty()) {
+        error_out = problem;
+        if (problem == "invalid_destination") {
+            logger_.warn("EslClient: transfer refused, destination is not a plain number or "
+                         "sip URI uuid={} reason={} length={}", uuid, reason, destination.size());
+        } else if (problem == "platform_destination") {
+            logger_.warn("EslClient: transfer refused, destination is this platform's own "
+                         "AI number or address uuid={} reason={} destination={}",
+                         uuid, reason, destination);
+        } else {
+            logger_.error("EslClient: transfer refused, esl.sip_proxy_host is not set — "
+                          "a number cannot be dialed (run scripts/update_kamailio_ip.sh) "
+                          "uuid={} reason={}", uuid, reason);
+        }
         return false;
     }
 
@@ -339,6 +404,25 @@ bool EslClient::transfer(const TransferRequest& req, std::string& error_out) {
     return false;
 }
 
+std::string EslClient::destination_problem(const std::string& destination) const {
+    if (!is_safe_destination(destination)) return "invalid_destination";
+    if (looks_like_sip_uri(destination)) {
+        // A URI at the switch (or the proxy in front of it) would enter one of
+        // FreeSWITCH's own dialplan contexts. maddr overrides the host.
+        const std::string host = sip_uri_host(destination);
+        if (host.empty()) return "invalid_destination";
+        if (to_lower(destination).find(";maddr") != std::string::npos ||
+            is_loopback_or_any(host) || is_same_host(host, cfg_.host) ||
+            is_same_host(host, cfg_.sip_proxy_host)) {
+            return "platform_destination";
+        }
+        return "";
+    }
+    if (is_platform_ai_number(destination)) return "platform_destination";
+    if (cfg_.sip_proxy_host.empty()) return "sip_proxy_host_unset";
+    return "";
+}
+
 std::string EslClient::dial_string_for(const std::string& destination) const {
     return looks_like_sip_uri(destination)
         ? "sofia/external/" + destination
@@ -360,10 +444,18 @@ bool EslClient::originate_async(const std::string& destination,
         logger_.warn("EslClient: originate requested with empty destination");
         return false;
     }
-    if (!is_safe_destination(destination)) {
-        error_out = "invalid_destination";
-        logger_.warn("EslClient: originate refused, destination is not a plain number or "
-                     "sip URI length={}", destination.size());
+    if (const std::string problem = destination_problem(destination); !problem.empty()) {
+        error_out = problem;
+        if (problem == "invalid_destination") {
+            logger_.warn("EslClient: originate refused, destination is not a plain number or "
+                         "sip URI length={}", destination.size());
+        } else if (problem == "platform_destination") {
+            logger_.warn("EslClient: originate refused, destination is this platform's own "
+                         "AI number or address destination={}", destination);
+        } else {
+            logger_.error("EslClient: originate refused, esl.sip_proxy_host is not set — "
+                          "a number cannot be dialed (run scripts/update_kamailio_ip.sh)");
+        }
         return false;
     }
     // A bad caller id must not block the transfer (an anonymous ANI is legitimate);

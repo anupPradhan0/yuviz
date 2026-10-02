@@ -72,17 +72,23 @@ struct EslConfig {
     std::string password{"ClueCon"};   // FreeSWITCH default; override in production
     uint32_t    connect_timeout_ms{2000};
 
-    // Warm transfer's plain-extension destinations (e.g. "1001") are dialed
-    // as sofia/external/sip:<dest>@<sip_proxy_host>:<sip_proxy_port> — see
-    // EslClient::originate_async(). This is deliberately NOT FreeSWITCH's
-    // own "user/<id>" channel type: in any deployment fronted by a SIP
+    // Every number the Gateway dials — a cold transfer (EslClient::transfer)
+    // and a warm transfer's agent leg (EslClient::originate_async) — goes out
+    // as sofia/external/sip:<dest>@<sip_proxy_host>:<sip_proxy_port>, never
+    // through a FreeSWITCH dialplan context and never via FreeSWITCH's own
+    // "user/<id>" channel type: in any deployment fronted by a SIP
     // proxy/registrar (Kamailio, here — see docs/warm_transfer_architecture.md
     // §6), real phones register with the proxy, not with FreeSWITCH, so
-    // FreeSWITCH's own directory has no knowledge of them and "user/<id>"
-    // fails with USER_NOT_REGISTERED even when the destination is genuinely
-    // online. Defaults are non-functional placeholders (matching esl.enabled's
-    // own "safe until configured" pattern) — set explicitly per deployment.
-    std::string sip_proxy_host{"127.0.0.1"};
+    // "user/<id>" fails with USER_NOT_REGISTERED even when the destination is
+    // genuinely online.
+    //
+    // Must be the IP Kamailio listens on, which is host-specific:
+    // scripts/update_kamailio_ip.sh writes it into config/gateway.yaml. Empty
+    // (the default) means not configured: EslClient logs an error at startup
+    // and refuses every transfer to a number with "sip_proxy_host_unset",
+    // rather than sending the INVITE to a wrong host and leaving the caller in
+    // silence until SIP Timer B (~32 s) expires.
+    std::string sip_proxy_host{};
     uint16_t    sip_proxy_port{5060};
 };
 

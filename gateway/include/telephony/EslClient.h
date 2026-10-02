@@ -39,9 +39,17 @@ public:
 
     // Cold-transfer the FreeSWITCH channel identified by `req.call_id` to
     // `req.destination` — a plain phone number/extension (bridged inline
-    // through the SIP proxy, e.g. "1005") or a SIP URI ("sip:"/"sips:",
-    // bridged inline via mod_sofia's external profile). Never routed through
-    // a dialplan context (see dial_string_for).
+    // through the SIP proxy at esl.sip_proxy_host, e.g. "1005") or a SIP URI
+    // ("sip:"/"sips:", bridged inline via mod_sofia's external profile).
+    //
+    // What is guaranteed: the transfer command itself never names a dialplan
+    // context, and destination_problem() refuses the destinations that would
+    // lead back into this platform — its own AI numbers (788, 5000-5009), and
+    // a SIP URI whose host is loopback, 0.0.0.0, esl.host or
+    // esl.sip_proxy_host, or that carries a maddr param. Not guaranteed: a
+    // URI whose hostname only resolves to the switch (no DNS lookup is done
+    // here); FreeSWITCH's deny-all "default" context
+    // (scripts/freeswitch/install_default_context.sh) is the backstop for that.
     //
     // Cold only: this redirects the channel and does not bridge/three-way
     // anything — the AI leg is expected to already be torn down by the
@@ -65,7 +73,8 @@ public:
     // before returning, same as hangup() — safe to call from any thread.
     // false is accompanied by a machine-readable reason in `error_out`
     // ("esl_disabled", "empty_uuid", "empty_destination", "esl_unreachable",
-    // or FreeSWITCH's own -ERR reply text). Never throws.
+    // one of destination_problem()'s codes, or FreeSWITCH's own -ERR reply
+    // text). Never throws.
     bool transfer(const TransferRequest& req, std::string& error_out);
 
     // ── Warm transfer primitives (see docs/warm_transfer_architecture.md §6) ──
@@ -120,6 +129,10 @@ public:
     bool unhold(const std::string& uuid, std::string& error_out);
 
 private:
+    // "" when `destination` may be dialed, else the error code transfer() and
+    // originate_async() report: invalid_destination, platform_destination, or
+    // sip_proxy_host_unset (a number, with no proxy to send it to).
+    std::string destination_problem(const std::string& destination) const;
     // A SIP URI as-is; a number via the SIP proxy (Kamailio), never a dialplan context.
     std::string dial_string_for(const std::string& destination) const;
     bool ensure_connected_locked();
