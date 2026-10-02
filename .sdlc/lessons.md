@@ -147,7 +147,9 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
     local development, make it an explicit opt-out that defaults to secure, never a silent downgrade
     when the upgrade fails.
     *Earned: invite tokens — bearer-equivalent secrets — and the SMTP password crossing the network
-    in cleartext on the documented port 587.*
+    in cleartext on the documented port 587. Recurred on connector presets: OAuth token, refresh and
+    revoke calls following provider docs would put `client_secret`/`refresh_token` in the query
+    string, and `httpx` logs full URLs at INFO. Secrets go in the body; quiet `httpx`/`httpcore`.*
 
 21. [implementer][tester] `Promise.all` over independent fetches makes every one of them required:
     a single 403 on a call the current role legitimately cannot make rejects the whole batch and
@@ -193,13 +195,13 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
     *Earned: a dedicated SMTP `ThreadPoolExecutor` added to isolate stalled sends, never shut down in
     `lifespan`, would have blocked SIGTERM past docker-compose's 10s grace into a SIGKILL.*
 
-27. [architect][implementer][security][qa] `services/config/deps.py` resolves identity **purely from
-    the decoded JWT** — it never reads the database. So `deleted_at` and a changed `role` do not take
-    effect until the token expires (~12h). Soft-deleting or demoting a user does not revoke their
-    access. Any feature that grants authority through a role, or assumes deactivation is immediate,
-    must say how revocation actually works — or add the lookup.
+27. [architect][implementer][security][qa] Console identity is a JWT re-checked against `users`
+    through a ~60s memo (`get_current_user` → `fresh_console_authority`, `services/config/deps.py`), so
+    a demotion or soft-delete takes up to ~60s, not instant. A route that skips `get_current_user` gets
+    the raw JWT and keeps the old ~12h window; say which one a feature relies on.
     *Earned: post-merge QA found a soft-deleted user's token still returning 200 on `GET /users` and
-    minting admin invites via `POST /invites`, while `/auth/me` (which does hit the DB) 401'd.*
+    minting admin invites via `POST /invites`, while `/auth/me` (which does hit the DB) 401'd. Fixed by
+    the memoized re-read; the connector-presets design then cited the stale ~12h rule as a Risk.*
 
 28. [tester][qa] The suite and the reviewers test what someone thought to test. Running the merged
     app against edge cases found 17 defects after three review rounds, a green security audit and 330
@@ -349,3 +351,18 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
     same change logging every keypress at INFO — plus a second copy on every gRPC error. A PIN typed
     at a `collect` node on those carriers was recoverable from logs. Rewriting the tripwire over both
     entry points found both leaks, one of which reading by eye had missed.*
+
+43. [architect][security] An `enc:` ciphertext is a bearer capability: any route that returns it or
+    accepts it from a client lets a user of two tenants paste it across and have it decrypted. Bind
+    ciphertext to its tenant (AEAD associated data), mask refs in responses, and grep every table
+    that stores refs, not just the one in the finding.
+    *Earned: connector-presets security R1 (critical): viewer-readable `custom_apis.auth_config`
+    ciphertext could be replayed through another tenant's `bearer` row to an attacker's host. R3
+    found the same in `provider_configs` and `telephony_configs`, which the fix had not inventoried.*
+
+44. [architect][security] Authorize a call-time action on server-side call metadata, never on what
+    the caller says or the model passes. `caller_did` is the remote party on inbound but the tenant's
+    own DID on outbound, so branch on direction or fail closed (lesson 39's shape).
+    *Earned: `gcal_find_booking` matched `q=<caller-stated phone>`, so any caller could cancel any
+    patient's appointment. The fix bound it to `caller_did`, which on campaign calls is the shared
+    outbound DID, so every callee shared one "ANI".*
