@@ -293,3 +293,46 @@ def test_enforce_raises_when_a_heading_is_missing_or_job_is_short():
 )
 def test_slugify(name, slug):
     assert slugify(name) == slug
+
+
+# ---- criterion 7 copy scan, easyCopy.ts side --------------------------------------------------
+
+EASY_COPY = REPO / "admin-ui/lib/easyCopy.ts"
+_TS_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+_TS_STRING = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
+_TS_STRING_OR_LINE_COMMENT = re.compile(r'"(?:[^"\\\n]|\\.)*"|//[^\n]*')
+
+
+def _easy_copy_source() -> str:
+    """easyCopy.ts without comments; a // inside a double-quoted string is kept."""
+    text = _TS_BLOCK_COMMENT.sub("", EASY_COPY.read_text())
+    return _TS_STRING_OR_LINE_COMMENT.sub(lambda m: m.group(0) if m.group(0)[0] == '"' else "", text)
+
+
+def _easy_copy_strings() -> list[str]:
+    return _TS_STRING.findall(_easy_copy_source())
+
+
+def test_easy_copy_has_only_double_quoted_strings():
+    # the scan reads only double-quoted literals, so any other quote style would escape it
+    rest = _TS_STRING.sub("", _easy_copy_source())
+    assert "'" not in rest and "`" not in rest
+
+
+def test_no_banned_word_in_easy_copy():
+    scanned = _easy_copy_strings()
+    assert len(scanned) > 0
+    assert [s for s in scanned if BANNED.search(s)] == []
+
+
+def test_easy_copy_has_the_messages_the_design_fixes_verbatim():
+    scanned = _easy_copy_strings()
+    assert "Please remove double curly brackets {{ }} from this text." in scanned
+    assert (
+        "These instructions were changed by hand, so they can't be fixed automatically here. "
+        "You can still edit them on the receptionist's page."
+    ) in scanned
+    assert (
+        "That fix would copy details from a specific customer into the instructions. "
+        "Describe the problem in general terms and try again."
+    ) in scanned
