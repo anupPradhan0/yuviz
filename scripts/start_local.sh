@@ -18,54 +18,7 @@ else _start_local_self="$0"; fi
 REPO="$(cd "$(dirname "$_start_local_self")/.." && pwd)"
 
 # ── Settings: everything comes from $REPO/.env (template: .env.example) ──────
-_rand() { head -c "$(( ${1:-32} * 3 ))" /dev/urandom | base64 | LC_ALL=C tr -cd 'A-Za-z0-9' | cut -c "1-${1:-32}"; }
-
-_env_set() {  # Replaces KEY's line in .env (value is alphanumeric/url-safe).
-  sed -i.bak "s|^$1=.*|$1=$2|" "$REPO/.env" && rm -f "$REPO/.env.bak"
-}
-
-# Creates .env from .env.example, adds keys added to the example since, and
-# generates any blank platform secret. Never touches a value already set.
-_env_init() {
-  [ -f "$REPO/.env" ] || { cp "$REPO/.env.example" "$REPO/.env"; echo "✓ created .env from .env.example"; }
-  local line key
-  while IFS= read -r line; do
-    key=${line%%=*}
-    case "$line" in ''|'#'*) continue ;; esac
-    grep -q "^${key}=" "$REPO/.env" || { echo "$line" >> "$REPO/.env"; echo "✓ added $key to .env"; }
-  done < "$REPO/.env.example"
-  local spec name len
-  for spec in JWT_SECRET:48 CONFIG_SERVICE_PASSWORD:32 YUVIZ_APP_PASSWORD:32 TOOLEXEC_ARGS_HMAC_KEY:48; do
-    name=${spec%:*}; len=${spec#*:}
-    [ -n "$(grep "^${name}=" "$REPO/.env" | cut -d= -f2-)" ] || { _env_set "$name" "$(_rand "$len")"; echo "✓ generated $name"; }
-  done
-  if [ -z "$(grep "^SECRET_ENCRYPTION_KEY=" "$REPO/.env" | cut -d= -f2-)" ]; then
-    # Fernet: 32 random bytes, url-safe base64.
-    _env_set SECRET_ENCRYPTION_KEY "$(head -c 32 /dev/urandom | base64 | LC_ALL=C tr '+/' '-_')"
-    echo "✓ generated SECRET_ENCRYPTION_KEY"
-  fi
-}
-
-# Exports every non-blank .env value, except variables already set in the
-# shell (so a one-off override still works).
-_load_env() {
-  local line key value
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in ''|'#'*) continue ;; esac
-    key=${line%%=*}; value=${line#*=}
-    [ -n "$value" ] && [ -z "$(printenv "$key")" ] && export "$key=$value"
-  done < "$REPO/.env"
-  export POSTGRES_DSN="${POSTGRES_DSN:-postgresql://$USER@localhost:5432/voiceai}"
-}
-
-# Fails the block with a pointer to .env when a setting it needs is blank.
-_require() {
-  local name
-  for name in "$@"; do
-    [ -n "$(printenv "$name")" ] || { echo "$name is not set — add it to $REPO/.env (see .env.example)" >&2; return 1; }
-  done
-}
-
+. "$REPO/scripts/lib/env.sh"
 _env_init
 _load_env
 
@@ -118,7 +71,7 @@ start_data() {
   # rls.sql is the 4th schema file: creates yuviz_app/yuviz_platform and the
   # per-table policies. Every start_* block below stays on the superuser
   # POSTGRES_DSN — RLS is live but inert until a later DSN cutover.
-  _require YUVIZ_APP_PASSWORD || return 1
+  _require YUVIZ_APP_PASSWORD || return 0
   psql voiceai -v yuviz_app_password="$YUVIZ_APP_PASSWORD" -f "$REPO/database/rls.sql" 2>/dev/null || true
   echo "✓ PostgreSQL + Redis running"
 }
@@ -132,14 +85,14 @@ start_ollama() {
 start_config_service() {
   # TELEPHONY_PUBLIC_BASE_URL is optional here: without it, new Vobiz numbers
   # are saved with a "not synced" warning (number_sync.py).
-  _require SECRET_ENCRYPTION_KEY JWT_SECRET || return 1
+  _require SECRET_ENCRYPTION_KEY JWT_SECRET || return 0
   cd "$REPO"
   python3 -m uvicorn services.config.app:app --host 0.0.0.0 --port 8000
 }
 
 # ── Block 6: Knowledge Service (REST API, port 8100) ──────────────────────────
 start_knowledge_service() {
-  _require JWT_SECRET || return 1
+  _require JWT_SECRET || return 0
   cd "$REPO"
   python3 -m uvicorn services.knowledge.app:app --host 0.0.0.0 --port 8100
 }
@@ -155,7 +108,7 @@ start_knowledge_worker() {
 # docstring), not a separate process like the Knowledge worker — no extra
 # block needed for it.
 start_campaigns_service() {
-  _require JWT_SECRET FREESWITCH_ESL_PASSWORD || return 1
+  _require JWT_SECRET FREESWITCH_ESL_PASSWORD || return 0
   cd "$REPO"
   python3 -m uvicorn services.campaigns.app:app --host 0.0.0.0 --port 8400
 }
@@ -164,7 +117,7 @@ start_campaigns_service() {
 start_toolexec_service() {
   # Tenant-namespaced credential refs resolve under TOOLEXEC_TENANT_SECRET_ROOT,
   # NOT the platform k8s secret mount — see services/toolexec/auth_schemes.py.
-  _require JWT_SECRET TOOLEXEC_TENANT_SECRET_ROOT TOOLEXEC_ARGS_HMAC_KEY_REF || return 1
+  _require JWT_SECRET TOOLEXEC_TENANT_SECRET_ROOT TOOLEXEC_ARGS_HMAC_KEY_REF || return 0
   cd "$REPO"
   mkdir -p "$TOOLEXEC_TENANT_SECRET_ROOT"
   python3 -m services.toolexec
@@ -173,7 +126,7 @@ start_toolexec_service() {
 # ── Block 8c: Telephony Service (REST API, port 8750) — Vobiz/Cloudonix webhooks + outbound ─
 start_telephony_service() {
   # TELEPHONY_PUBLIC_BASE_URL: your public tunnel URL — see docs/telephony.md.
-  _require JWT_SECRET SECRET_ENCRYPTION_KEY TELEPHONY_PUBLIC_BASE_URL || return 1
+  _require JWT_SECRET SECRET_ENCRYPTION_KEY TELEPHONY_PUBLIC_BASE_URL || return 0
   cd "$REPO"
   python3 -m services.telephony
 }
@@ -183,12 +136,12 @@ _conv_env() {
   _require CONFIG_SERVICE_EMAIL CONFIG_SERVICE_PASSWORD SECRET_ENCRYPTION_KEY
 }
 start_conv1() {
-  _conv_env || return 1
+  _conv_env || return 0
   cd "$REPO"
   python3 -m services.conversation --port 50051 --mode pipeline --log-level INFO
 }
 start_conv2() {
-  _conv_env || return 1
+  _conv_env || return 0
   cd "$REPO"
   python3 -m services.conversation --port 50052 --mode pipeline --log-level INFO
 }
@@ -201,7 +154,7 @@ start_envoy() {
 
 # ── Block 12: C++ Gateway ──────────────────────────────────────────────────────
 start_gateway() {
-  _require FREESWITCH_ESL_PASSWORD || return 1
+  _require FREESWITCH_ESL_PASSWORD || return 0
   cd "$REPO"
   ./build/gateway/voice_ai_gateway config/gateway.yaml
 }

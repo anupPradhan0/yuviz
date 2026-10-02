@@ -48,7 +48,12 @@ FS_CLI="${FS_CLI:-$FS_PREFIX/bin/fs_cli}"
 FS_BIN="${FS_BIN:-$FS_PREFIX/bin/freeswitch}"
 FS_HOME="${FS_HOME:-$HOME/.yuviz/freeswitch}"
 # Credentials come from the repo's .env (see .env.example), never this file.
-if [[ -f "$REPO_ROOT/.env" ]]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
+# Read as literal KEY=value (like start_local.sh), never sourced: a value with
+# spaces must not run as a command. A value already in the shell wins.
+_dotenv() { [[ -f "$REPO_ROOT/.env" ]] && grep "^$1=" "$REPO_ROOT/.env" | cut -d= -f2- || true; }
+FREESWITCH_ESL_PORT="${FREESWITCH_ESL_PORT:-$(_dotenv FREESWITCH_ESL_PORT)}"
+FREESWITCH_ESL_PASSWORD="${FREESWITCH_ESL_PASSWORD:-$(_dotenv FREESWITCH_ESL_PASSWORD)}"
+KAMAILIO_DB_URL="${KAMAILIO_DB_URL:-$(_dotenv KAMAILIO_DB_URL)}"
 FS_ESL_PORT="${FREESWITCH_ESL_PORT:-8022}"
 FS_ESL_PASSWORD="${FREESWITCH_ESL_PASSWORD:?set FREESWITCH_ESL_PASSWORD in .env}"
 KAMAILIO_DB_URL="${KAMAILIO_DB_URL:?set KAMAILIO_DB_URL in .env}"

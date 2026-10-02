@@ -330,6 +330,19 @@ TEST_F(EslEnvConfigTest, EnvironmentWinsOverYaml) {
     EXPECT_EQ(cfg.esl().password, "from-env");
 }
 
+TEST_F(EslEnvConfigTest, OutOfRangeOrMalformedPortRefusesToStart) {
+    write_yaml("gateway:\n  esl:\n    enabled: true\n    password: \"p\"\n");
+    for (const char* bad : {"80220", "8022x", "0", "-1", "99999999999999999999"}) {
+        ::setenv("FREESWITCH_ESL_PORT", bad, 1);
+        voiceai::Config cfg;
+        EXPECT_THROW(cfg.load(tmp_yaml_.string()), std::runtime_error) << bad;
+    }
+    ::unsetenv("FREESWITCH_ESL_PORT");
+    ::setenv("SIP_PROXY_PORT", "70000", 1);
+    voiceai::Config cfg;
+    EXPECT_THROW(cfg.load(tmp_yaml_.string()), std::runtime_error);
+}
+
 TEST_F(EslEnvConfigTest, EnabledEslWithoutAPasswordRefusesToStart) {
     write_yaml("gateway:\n  esl:\n    enabled: true\n");
     voiceai::Config cfg;

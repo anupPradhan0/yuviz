@@ -387,7 +387,7 @@ if [ -f "$ENV_FILE" ]; then
         }
     done < "$ENV_EXAMPLE"
 else
-    cp "$ENV_EXAMPLE" "$ENV_FILE"
+    (umask 077; cp "$ENV_EXAMPLE" "$ENV_FILE")
     ok "deployment/.env created"
 fi
 
@@ -421,6 +421,14 @@ if [ -z "$(grep "^POSTGRES_DSN=" "$ENV_FILE" | cut -d= -f2-)" ]; then
     fi
     rm -f "$ENV_FILE.bak"
     ok "built POSTGRES_DSN"
+fi
+
+# The volume keeps the password it was initialized with, so an existing install
+# stays on the old published default until it is rotated by hand.
+if [ "$(grep "^POSTGRES_PASSWORD=" "$ENV_FILE" | cut -d= -f2-)" = "voiceai" ]; then
+    warn "POSTGRES_PASSWORD is still the old public default 'voiceai'. To rotate it:"
+    info "    1. docker compose -f deployment/docker/docker-compose.yml exec postgres psql -U voiceai -c \"ALTER ROLE voiceai PASSWORD '<new>'\""
+    info "    2. set POSTGRES_PASSWORD=<new> in deployment/.env and the same password in its POSTGRES_DSN"
 fi
 
 # SECRET_ENCRYPTION_KEY can't go through the loop above: it is a Fernet key,

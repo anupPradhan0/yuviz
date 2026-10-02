@@ -82,7 +82,8 @@ depends on it existing.
 ### Environment variables — one `.env`
 
 Every setting lives in the repo's `.env` (gitignored). `.env.example` lists
-all of them, grouped and commented. `scripts/start_local.sh` loads `.env`
+all of them, grouped and commented. Both launchers, `scripts/start_web_test.sh`
+(this guide) and `scripts/start_local.sh` (full telephony stack), load `.env`
 when sourced:
 
 - On first run it copies `.env.example` to `.env`, and it adds any key added
@@ -111,10 +112,11 @@ Fill these yourself; nothing can generate them:
 ## 5. Service-account credentials
 
 The Conversation Service authenticates to Config as a real user. Create it
-with the password `start_local.sh` generated into `.env`:
+with the password the launcher generated into `.env` (sourcing it creates
+`.env` on first run and loads it):
 
 ```bash
-set -a; . ./.env; set +a
+source scripts/start_web_test.sh
 ./venv/bin/python3 scripts/create_service_account.py "$CONFIG_SERVICE_EMAIL" "$CONFIG_SERVICE_PASSWORD"
 ```
 
@@ -136,10 +138,13 @@ SMTP_PORT=587
 SMTP_USER=invites@example.com
 SMTP_FROM=invites@example.com
 SMTP_PASSWORD_REF=env:SMTP_PASSWORD
-SMTP_PASSWORD=<the-mailbox-password-or-app-password>
+SMTP_PASSWORD=abcd efgh ijkl mnop
 SMTP_STARTTLS=true
 INVITE_BASE_URL=http://localhost:3000
 ```
+
+Values are read literally, up to the end of the line: no quotes, and spaces
+(as in a Gmail app password) are fine.
 
 `INVITE_BASE_URL` is the Admin UI origin the accept link points at —
 `${INVITE_BASE_URL}/invite#<token>`, token in the fragment so it never

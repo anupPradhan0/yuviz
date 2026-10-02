@@ -21,6 +21,15 @@ _NOT_IN_CATALOGUE = {"PORT"}
 # Helpers that read os.environ by name (pipeline_config._env, email._env, ...).
 _ENV_HELPERS = {"_env", "_env_int", "_env_float", "_env_bool"}
 _SECRET_NAME = re.compile(r"(PASSWORD|SECRET|_KEY|TOKEN)$")
+# Env reads whose name is computed, keyed (file, name expression) -> the names it can produce.
+_DYNAMIC_READS = {
+    ("services/conversation/__main__.py", "f'VOICEAI_ENABLE_{leg}'"): {"VOICEAI_ENABLE_STT", "VOICEAI_ENABLE_TTS"},
+    # Bodies of the _env helpers; their callers are scanned by name.
+    ("services/config/email.py", "name"): set(),
+    ("services/conversation/pipeline_config.py", "key"): set(),
+    # env:NAME secret refs: the name comes from a provider config, not code.
+    ("libs/config_sdk/secret_resolver.py", "key"): set(),
+}
 
 
 def _tracked(*patterns: str) -> list[Path]:
@@ -38,7 +47,8 @@ def _catalogue() -> dict[str, str]:
     return {k: v for k, v in pairs}
 
 
-def _env_names_read_by(path: Path) -> set[str]:
+def _env_names_read_by(path: Path) -> tuple[set[str], set[str]]:
+    """(names read, unresolved name expressions)."""
     tree = ast.parse(path.read_text(), filename=str(path))
     constants = {
         t.id: n.value.value
@@ -46,7 +56,8 @@ def _env_names_read_by(path: Path) -> set[str]:
         and isinstance(n.value.value, str)
         for t in n.targets if isinstance(t, ast.Name)
     }
-    names = set()
+    names, unresolved = set(), set()
+    rel = path.relative_to(_REPO).as_posix()
     for n in ast.walk(tree):
         if isinstance(n, ast.Call) and n.args:
             fn = ast.unparse(n.func)
@@ -56,16 +67,30 @@ def _env_names_read_by(path: Path) -> set[str]:
                     names.add(arg.value)
                 elif isinstance(arg, ast.Name) and arg.id in constants:
                     names.add(constants[arg.id])
+                else:
+                    unresolved.add(f"{rel}::{ast.unparse(arg)}")
         if isinstance(n, ast.Subscript) and ast.unparse(n.value).endswith("environ"):
             if isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str):
                 names.add(n.slice.value)
-    return {x for x in names if re.fullmatch(r"[A-Z][A-Z0-9_]+", x)}
+            else:
+                unresolved.add(f"{rel}::{ast.unparse(n.slice)}")
+    return {x for x in names if re.fullmatch(r"[A-Z][A-Z0-9_]+", x)}, unresolved
 
 
 def test_every_env_var_the_services_read_is_in_env_example():
     sources = [p for p in _tracked("services/*.py", "libs/*.py") if not _is_test(p) and "generated" not in p.parts]
-    read = {name for p in sources for name in _env_names_read_by(p)}
+    read, unresolved = set(), set()
+    for p in sources:
+        names, dynamic = _env_names_read_by(p)
+        read |= names
+        unresolved |= dynamic
     assert len(read) > 30, "the scan found almost nothing; it is not looking at the services"
+    known = {f"{f}::{expr}" for f, expr in _DYNAMIC_READS}
+    assert not unresolved - known, (
+        f"env reads with a computed name; add them to _DYNAMIC_READS with the names they produce: {sorted(unresolved - known)}"
+    )
+    assert known <= unresolved, f"stale _DYNAMIC_READS entries: {sorted(known - unresolved)}"
+    read |= {name for names in _DYNAMIC_READS.values() for name in names}
     missing = read - set(_catalogue()) - _NOT_IN_CATALOGUE
     assert not missing, f"read by code but not listed in .env.example: {sorted(missing)}"
 
