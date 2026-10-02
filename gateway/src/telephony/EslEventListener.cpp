@@ -318,7 +318,7 @@ void EslEventListener::run_loop() {
         } else if (event_name == "DTMF") {
             const std::string digit = parse_header_value(body, "DTMF-Digit");
             if (!digit.empty() && on_dtmf_) {
-                logger_.info("EslEventListener: DTMF uuid={} digit={}", uuid, digit);
+                logger_.info("EslEventListener: DTMF received uuid={}", uuid);
                 on_dtmf_(uuid, digit);
             }
         }

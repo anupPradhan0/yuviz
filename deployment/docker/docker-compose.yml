@@ -19,7 +19,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-voiceai}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-voiceai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run deployment/sh/dev.sh to generate deployment/.env}
       POSTGRES_DB: ${POSTGRES_DB:-voiceai}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"

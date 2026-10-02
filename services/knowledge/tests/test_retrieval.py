@@ -36,7 +36,7 @@ async def test_resolve_policy_uses_system_default_when_nothing_set(pool, tenant_
         resolved = await _resolve_policy(conn, tenant["slug"], agent["slug"], {})
     assert resolved["top_k"] == 5
     assert resolved["max_tokens"] == 1000
-    assert resolved["minimum_score"] == 0.0
+    assert resolved["minimum_score"] == 0.3  # relevance floor, 7d8a021
     assert resolved["include_citations"] is True
 
 

@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import ast
 import re
+
+import pytest
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[3]
@@ -129,3 +131,81 @@ def test_the_detector_flags_the_known_leak_shapes():
     for src in _CLEAN:
         calls = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call)]
         assert not any(_leaks_a_digit(c) for c in calls), f"false positive: {src!r}"
+
+
+# The C++ Gateway is a DTMF entry point too: FreeSWITCH DTMF events
+# (EslEventListener) and the gRPC hop to Conversation (send_dtmf).
+_CPP_DTMF_ENTRY_POINTS = [_REPO / "gateway"]
+_CPP_LOG_CALL = re.compile(r"\b\w*log\w*\s*(?:\.|->)\s*(?:trace|debug|info|warn|error|critical)\s*\(", re.IGNORECASE)
+
+
+def _cpp_log_calls(path: Path) -> list[tuple[int, str]]:
+    """(line, full call text) for each logger call, spanning lines to its closing paren."""
+    src = path.read_text()
+    calls = []
+    for m in _CPP_LOG_CALL.finditer(src):
+        depth, end = 0, len(src)
+        for j in range(m.end() - 1, len(src)):
+            if src[j] == "(":
+                depth += 1
+            elif src[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    end = j + 1
+                    break
+        calls.append((src.count("\n", 0, m.start()) + 1, src[m.start():end]))
+    return calls
+
+
+def _cpp_leaks_a_digit(call: str) -> bool:
+    return bool(_DIGIT_LABEL.search(call) or re.search(r"\bdigits?\b", call, re.IGNORECASE))
+
+
+def _cpp_sources() -> list[Path]:
+    return [
+        p for root in _CPP_DTMF_ENTRY_POINTS for p in sorted(root.rglob("*"))
+        if p.suffix in {".cpp", ".h", ".hpp"} and "tests" not in p.parts
+    ]
+
+
+def test_the_gateway_sources_exist_and_contain_log_calls():
+    assert sum(len(_cpp_log_calls(p)) for p in _cpp_sources()) > 0, "the C++ scan is not looking anywhere"
+
+
+def test_no_gateway_log_call_passes_a_dtmf_digit():
+    leaks = [
+        f"{path.relative_to(_REPO)}:{line}: {' '.join(call.split())}"
+        for path in _cpp_sources()
+        for line, call in _cpp_log_calls(path)
+        if _cpp_leaks_a_digit(call)
+    ]
+    assert not leaks, "a caller keypress is written to a Gateway log line. Log presence only:\n  " + "\n  ".join(leaks)
+
+
+@pytest.mark.parametrize("call", [
+    'logger_.info("EslEventListener: DTMF uuid={} digit={}", uuid, digit);',
+    'logger_.warn("GrpcTransport: dropping dtmf session={}\\n"\n    " key={}", session_id,\n    digit);',
+    'log_->debug("pressed {}", ev.digits);',
+])
+def test_the_cpp_detector_catches_leaky_shapes(call):
+    (_, text), = _cpp_log_calls_from(call)
+    assert _cpp_leaks_a_digit(text)
+
+
+@pytest.mark.parametrize("call", [
+    'logger_.info("EslEventListener: DTMF received uuid={}", uuid);',
+    'logger_.warn("GrpcTransport: send_queue_ full, dropping dtmf session={}", session_id);',
+])
+def test_the_cpp_detector_passes_presence_only_lines(call):
+    (_, text), = _cpp_log_calls_from(call)
+    assert not _cpp_leaks_a_digit(text)
+
+
+def _cpp_log_calls_from(src: str) -> list[tuple[int, str]]:
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".cpp", delete=False) as f:
+        f.write(src)
+    try:
+        return _cpp_log_calls(Path(f.name))
+    finally:
+        Path(f.name).unlink()

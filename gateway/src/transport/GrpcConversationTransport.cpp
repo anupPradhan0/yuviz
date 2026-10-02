@@ -275,7 +275,7 @@ void GrpcConversationTransport::send_dtmf(const std::string& session_id,
     dtmf->set_digit(digit);
 
     if (!send_queue_->q.push(std::move(msg)))
-        logger_.warn("GrpcTransport: send_queue_ full, dropping dtmf session={} digit={}", session_id, digit);
+        logger_.warn("GrpcTransport: send_queue_ full, dropping dtmf session={}", session_id);
     else
         send_queue_->cv.notify_one();
 }

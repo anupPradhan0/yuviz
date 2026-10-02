@@ -67,7 +67,7 @@ class TestListSupportedProviders:
         assert "fake" not in supported
         assert set(supported["vobiz"].keys()) == {"required", "sensitive"}
         assert supported["vobiz"]["sensitive"] == ["auth_token"]
-        assert supported["cloudonix"]["sensitive"] == ["api_keys"]
+        assert supported["cloudonix"]["sensitive"] == ["api_keys", "account_api_key"]
 
 
 class TestListTelephonyConfigsHealth:

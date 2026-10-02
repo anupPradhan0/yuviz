@@ -312,7 +312,7 @@ async def start_password_reset(email: str) -> str | None:
     code = _new_code()
     now = _now()
     pool = await db.get_pool()
-    async with platform_conn(pool, reason="pre-auth-password-reset") as conn:
+    async with platform_conn(pool, reason="pre-auth-password-reset", stamp_tenant=user["tenant_id"]) as conn:
         existing = await conn.fetchrow(
             "SELECT * FROM password_reset_requests WHERE user_id = $1 FOR UPDATE", user["id"],
         )
@@ -334,7 +334,7 @@ async def discard_password_reset(email: str) -> None:
     if user is None:
         return
     pool = await db.get_pool()
-    async with platform_conn(pool, reason="pre-auth-password-reset") as conn:
+    async with platform_conn(pool, reason="pre-auth-password-reset", stamp_tenant=user["tenant_id"]) as conn:
         await conn.execute("DELETE FROM password_reset_requests WHERE user_id = $1", user["id"])
 
 

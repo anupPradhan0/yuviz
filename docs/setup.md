@@ -79,75 +79,75 @@ psql voiceai -f database/telephony_schema.sql
 `schema.sql` seeds a `default` tenant row — the seed script in step 6
 depends on it existing.
 
-### Environment variables — full reference
+### Environment variables — one `.env`
 
-Each service that reads env vars has a `.env.example` next to its code
-(`services/config/.env.example`, `services/knowledge/.env.example`,
-`services/conversation/.env.example`, `services/webcall/.env.example`)
-listing every variable it reads, with a placeholder value and a one-line
-explanation. `scripts/start_web_test.sh` already exports sane localhost
-defaults for all of these except `CONFIG_SERVICE_PASSWORD` (step 5 below),
-so you don't need to manually set anything to follow this doc — the
-`.env.example` files are there for when you run a service directly
-(`cp services/X/.env.example services/X/.env`, then `set -a; source
-services/X/.env; set +a`) instead of through the helper script, e.g. in a
-container or on a remote host.
+Every setting lives in the repo's `.env` (gitignored). `.env.example` lists
+all of them, grouped and commented. Both launchers, `scripts/start_web_test.sh`
+(this guide) and `scripts/start_local.sh` (full telephony stack), load `.env`
+when sourced:
+
+- On first run it copies `.env.example` to `.env`, and it adds any key added
+  to the example later.
+- It generates the blank platform secrets: `JWT_SECRET`,
+  `SECRET_ENCRYPTION_KEY`, `CONFIG_SERVICE_PASSWORD` and `YUVIZ_APP_PASSWORD`.
+  It never changes a value you already have.
+- Each `start_*` block refuses to start, naming the key, if a setting it
+  needs is blank.
+
+A variable already set in your shell wins over `.env`, so you can override
+one value for a single run. Docker uses `deployment/.env` instead
+(`deployment/sh/dev.sh` generates it), because its hosts are container names.
+
+Fill these yourself; nothing can generate them:
+
+| Key | What |
+|---|---|
+| `FREESWITCH_ESL_PASSWORD` | Must match `password` in FreeSWITCH's `event_socket.conf.xml`. The Gateway and Campaigns refuse to use ESL without it. |
+| `KAMAILIO_DB_URL` | Kamailio's MySQL, e.g. `mysql://kamailio:<password>@localhost/kamailio`. Used by `scripts/update_kamailio_ip.sh`. |
+| `TELEPHONY_PUBLIC_BASE_URL` | Public tunnel URL for Vobiz/Cloudonix callbacks. |
+| `SMTP_*`, `GOOGLE_*`, provider API keys | Optional features. |
+
+`SIP_PROXY_HOST` (your LAN IP) is kept current by `update_kamailio_ip.sh`.
 
 ## 5. Service-account credentials
 
-The Conversation Service (and Knowledge Service) authenticate to the
-Config Service's REST API as a real user, not a shared secret baked into
-this repo. Create one yourself and export it — never commit the real
-value:
+The Conversation Service authenticates to Config as a real user. Create it
+with the password the launcher generated into `.env` (sourcing it creates
+`.env` on first run and loads it). Run it in a `( ... )` subshell: the
+launcher turns on `set -euo pipefail`, and this one-off command fails on a
+re-run (the account already exists), which would otherwise close your
+terminal:
 
 ```bash
-export POSTGRES_DSN="postgresql://$(whoami)@localhost:5432/voiceai"
-./venv/bin/python3 scripts/create_service_account.py conversation-service@internal.yuviz.ai '<pick-your-own-password>'
-export CONFIG_SERVICE_PASSWORD='<the-same-password>'
+( source scripts/start_web_test.sh &&
+  ./venv/bin/python3 scripts/create_service_account.py "$CONFIG_SERVICE_EMAIL" "$CONFIG_SERVICE_PASSWORD" )
 ```
 
-`scripts/start_web_test.sh` reads `CONFIG_SERVICE_PASSWORD` from your
-shell and fails loudly if it's unset, rather than falling back to a
-hardcoded default.
-
-Provider credentials pasted into the Admin UI (or stored via
-`api_key`/`secondary_api_key_ref` on a provider/tool config) are encrypted
-at rest with the `enc:` scheme (`libs/config_sdk/secrets.py`) — both the
-Config Service and every Conversation Service instance need the same
-Fernet key to encrypt/decrypt them:
-
-```bash
-./venv/bin/python3 -c "from libs.config_sdk.secrets import generate_key; print(generate_key())"
-export SECRET_ENCRYPTION_KEY='<the-generated-value>'
-```
-
-Generate this once and keep it — losing it means every `enc:`-stored
-credential becomes permanently undecryptable, not just hard to find.
-`scripts/start_local.sh`'s `start_config_service()`/`_conv_env()` both
-fail loudly if it's unset, same posture as `CONFIG_SERVICE_PASSWORD`.
-
-`JWT_SECRET` signs the login tokens — Config/Knowledge/Campaigns/DID must
-share the same value:
-
-```bash
-export JWT_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
-```
+`SECRET_ENCRYPTION_KEY` encrypts provider credentials pasted into the Admin
+UI (`enc:` scheme, `libs/config_sdk/secrets.py`). Keep it: losing it makes
+every stored `enc:` credential permanently undecryptable. `JWT_SECRET` signs
+login tokens and is shared by every service through `.env`.
 
 Invite emails (user onboarding) are sent via stdlib `smtplib` — no new
 dependency, no queue. `SMTP_PASSWORD_REF` follows the same `env:`/`k8s:`
 secret-ref convention as `api_key_ref`/`auth_token_ref` above; the rest are
 plain config, not secrets:
 
+Set them in `.env`:
+
 ```bash
-export SMTP_HOST="smtp.example.com"
-export SMTP_PORT="587"
-export SMTP_USER="invites@example.com"
-export SMTP_FROM="invites@example.com"
-export SMTP_PASSWORD_REF="env:SMTP_PASSWORD"
-export SMTP_PASSWORD="<the-mailbox-password-or-app-password>"
-export SMTP_STARTTLS="true"
-export INVITE_BASE_URL="http://localhost:3000"
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USER=invites@example.com
+SMTP_FROM=invites@example.com
+SMTP_PASSWORD_REF=env:SMTP_PASSWORD
+SMTP_PASSWORD=abcd efgh ijkl mnop
+SMTP_STARTTLS=true
+INVITE_BASE_URL=http://localhost:3000
 ```
+
+Values are read literally, up to the end of the line: no quotes, and spaces
+(as in a Gmail app password) are fine.
 
 `INVITE_BASE_URL` is the Admin UI origin the accept link points at —
 `${INVITE_BASE_URL}/invite#<token>`, token in the fragment so it never

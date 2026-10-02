@@ -8,6 +8,8 @@ os.environ.setdefault("JWT_SECRET", "dev-only-insecure-secret-do-not-deploy-" * 
 
 import pytest_asyncio
 
+from libs.tenancy import set_target_tenant
+
 from services.config import auth as config_auth
 from services.config import users as users_service
 from services.did import db  # noqa: E402
@@ -31,6 +33,15 @@ async def test_tenant(pool):
     await pool.execute("DELETE FROM phone_numbers WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM carriers WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM tenants WHERE id = $1", tenant["id"])
+
+
+@pytest_asyncio.fixture
+async def scoped(test_tenant):
+    """Binds test_tenant for tests that call services/did functions directly
+    (the HTTP layer binds it in production); reset so it can't leak."""
+    set_target_tenant(str(test_tenant["id"]))
+    yield
+    set_target_tenant(None)
 
 
 @pytest_asyncio.fixture(loop_scope="session")

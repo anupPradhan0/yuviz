@@ -37,15 +37,16 @@ gateway:
     enabled: true
     host: "127.0.0.1"
     port: 8022    # FreeSWITCH event_socket.conf.xml uses 8022, not the ESL default 8021
-    password: "ClueCon"          # FreeSWITCH default — override in production
+    # password: from FREESWITCH_ESL_PASSWORD in .env — never committed here
     connect_timeout_ms: 2000
     # Every number the Gateway dials — cold transfer AND warm transfer's
     # agent leg — goes out through this SIP proxy/registrar (Kamailio), never
-    # a FreeSWITCH dialplan context. Host-specific: it must be the IP Kamailio
-    # listens on, and scripts/update_kamailio_ip.sh rewrites this line along
-    # with the Kamailio config. Left empty, the Gateway logs an error at
-    # startup and refuses transfers to numbers (sip_proxy_host_unset) instead
-    # of sending the INVITE to a wrong host.
+    # a FreeSWITCH dialplan context. The setting is SIP_PROXY_HOST /
+    # SIP_PROXY_PORT in .env, which scripts/update_kamailio_ip.sh writes with
+    # Kamailio's IP; a non-blank .env value overrides these. This yaml value
+    # is only the fallback, and stays empty: with no SIP_PROXY_HOST the
+    # Gateway logs an error at startup and refuses transfers to numbers
+    # (sip_proxy_host_unset) instead of sending the INVITE to a wrong host.
     sip_proxy_host: ""
     sip_proxy_port: 5060
 

@@ -30,6 +30,7 @@ os.environ.setdefault("TOOLEXEC_ARGS_HMAC_KEY_REF", "env:TOOLEXEC_TEST_HMAC_KEY"
 
 import pytest_asyncio  # noqa: E402
 
+from libs.tenancy import set_target_tenant  # noqa: E402
 from services.toolexec import db  # noqa: E402
 
 
@@ -51,7 +52,10 @@ async def tenant_agent(pool):
     agent = dict(await pool.fetchrow(
         "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, 'sup', 'Support') RETURNING *", tenant["id"],
     ))
+    # Service functions open tenant_conn; the HTTP layer binds this in production.
+    set_target_tenant(str(tenant["id"]))
     yield tenant, agent
+    set_target_tenant(None)
     await pool.execute("DELETE FROM api_side_effect_claims WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM api_chain_steps WHERE run_id IN "
                         "(SELECT id FROM api_chain_runs WHERE tenant_id = $1)", tenant["id"])
@@ -62,4 +66,5 @@ async def tenant_agent(pool):
     await pool.execute("DELETE FROM custom_apis WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM agent_tool_policies WHERE agent_id = $1", agent["id"])
     await pool.execute("DELETE FROM agents WHERE tenant_id = $1", tenant["id"])
+    await pool.execute("UPDATE users SET tenant_id = NULL, deleted_at = coalesce(deleted_at, now()) WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM tenants WHERE id = $1", tenant["id"])

@@ -106,7 +106,7 @@ struct FakeEslServer {
 };
 
 struct ColdTransferCoordinatorTest : ::testing::Test {
-    Logger        logger{"test"};
+    Logger        logger = Logger::make_null();
     EslConfig     esl_cfg;  // enabled=false by default
     EslClient     esl_client{esl_cfg, logger};
     TransferCorrelator correlator;

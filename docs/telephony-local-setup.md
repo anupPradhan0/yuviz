@@ -196,9 +196,10 @@ sudo "$REPO/scripts/freeswitch/install_default_context.sh" $C
 sudo systemctl restart freeswitch
 ```
 
-The ESL password is still the default `ClueCon`. That's acceptable only
-because ESL now listens on loopback. Change it in both
-`event_socket.conf.xml` and `config/gateway.yaml` if the machine is shared.
+Set the ESL password to a random value in `event_socket.conf.xml`, and the
+same value as `FREESWITCH_ESL_PASSWORD` in `.env`; the Gateway and Campaigns
+read it from there. Don't leave FreeSWITCH's built-in default: anything that
+can reach port 8022 can control every call.
 
 ### 4. Kamailio
 
@@ -318,7 +319,7 @@ portmap                 # shows what's listening
 
 A few gotchas with `start_local.sh`:
 - The Python helpers call `python3`, so **activate the repo venv first** (`source venv/bin/activate`), otherwise you get `No module named uvicorn`.
-- `start_config_service` hardcodes `POSTGRES_DSN=postgresql://satish@localhost:5432/voiceai`. Change the user to yours.
+- Settings come from the repo's `.env` (template `.env.example`), which sourcing the script creates and fills with generated secrets on first run. Each `start_*` names any setting it still needs, such as `FREESWITCH_ESL_PASSWORD`.
 - After rebuilding `mod_audio_fork`, **restart FreeSWITCH fully**. `reload mod_audio_fork` breaks the module's WebSocket layer, and FreeSWITCH exits on the next call.
 
 ## Softphone

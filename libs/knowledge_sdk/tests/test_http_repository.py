@@ -9,6 +9,7 @@ HttpKnowledgeRepository's cross-service login (Config Service) + API call
 from __future__ import annotations
 
 import uuid
+from contextlib import contextmanager
 
 import pytest
 from httpx import ASGITransport
@@ -16,15 +17,31 @@ from httpx import ASGITransport
 from libs.knowledge_sdk.exceptions import RepositoryUnavailableError
 from libs.knowledge_sdk.models import RetrievalPolicy
 from libs.knowledge_sdk.repositories.http_repository import HttpKnowledgeRepository
+from libs.tenancy import set_target_tenant
 from services.config import agents, provider_configs, tenants, users
+from services.config import db as config_db
 from services.config.app import app as config_app
 from services.knowledge.app import app as knowledge_app
+
+
+@contextmanager
+def _seeding_as(tenant_id):
+    """Binds the tenant only while seeding via Config's service functions,
+    so the HTTP calls under test resolve their own scope."""
+    set_target_tenant(str(tenant_id))
+    try:
+        yield
+    finally:
+        set_target_tenant(None)
 
 
 @pytest.fixture
 async def service_account():
     email = f"test-service-{uuid.uuid4().hex[:8]}@example.com"
     user = await users.create_user(email=email, password="service-password", role="viewer")
+    # Same as scripts/create_service_account.py.
+    pool = await config_db.get_pool()
+    await pool.execute("UPDATE users SET is_service_account = true WHERE id = $1", user["id"])
     yield {"email": email, "password": "service-password"}
     from services.config import db
     pool = await db.get_pool()
@@ -46,7 +63,8 @@ def _repo(service_account) -> HttpKnowledgeRepository:
 async def tenant_agent(pool):
     slug = f"test-{uuid.uuid4().hex[:8]}"
     tenant = await tenants.create_tenant(name="Test Tenant", slug=slug)
-    agent = await agents.create_agent(tenant_id=tenant["id"], slug="sup", name="Support", tenant_slug=slug)
+    with _seeding_as(tenant["id"]):
+        agent = await agents.create_agent(tenant_id=tenant["id"], slug="sup", name="Support", tenant_slug=slug)
     yield tenant, agent
     await pool.execute("DELETE FROM agent_knowledge_bases WHERE agent_id = $1", agent["id"])
     await pool.execute("DELETE FROM kb_chunks WHERE tenant_id = $1", tenant["id"])
@@ -66,9 +84,10 @@ async def test_has_enabled_kb_false_when_nothing_attached(service_account, tenan
 
 async def test_has_enabled_kb_true_after_assignment(service_account, tenant_agent, pool):
     tenant, agent = tenant_agent
-    embedding_cfg = await provider_configs.create_provider_config(
-        tenant_id=tenant["id"], name="Embed", role="embedding", engine="ollama",
-    )
+    with _seeding_as(tenant["id"]):
+        embedding_cfg = await provider_configs.create_provider_config(
+            tenant_id=tenant["id"], name="Embed", role="embedding", engine="ollama",
+        )
     kb = await pool.fetchrow(
         "INSERT INTO knowledge_bases (tenant_id, slug, name, embedding_config_id) "
         "VALUES ($1, 'policies', 'Policies', $2) RETURNING *",

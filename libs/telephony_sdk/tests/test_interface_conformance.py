@@ -79,6 +79,9 @@ def test_subclass_without_normalize_inbound_webhook_is_abstract():
         def build_answer_response(self, websocket_url):
             return websocket_url
 
+        def parse_dtmf_digit(self, fields):
+            return None
+
     with pytest.raises(TypeError, match="abstract"):
         _Incomplete({})
 
@@ -109,6 +112,9 @@ def test_subclass_implementing_normalize_inbound_webhook_instantiates_with_defau
 
         def build_answer_response(self, websocket_url):
             return websocket_url
+
+        def parse_dtmf_digit(self, fields):
+            return None
 
         def normalize_inbound_webhook(self, *, url, headers, fields, account_tenant_slug):
             return NormalizedInboundCall(
@@ -147,6 +153,9 @@ async def test_concrete_defaults():
 
         def build_answer_response(self, websocket_url):
             return websocket_url
+
+        def parse_dtmf_digit(self, fields):
+            return None
 
         def normalize_inbound_webhook(self, *, url, headers, fields, account_tenant_slug):
             return NormalizedInboundCall(

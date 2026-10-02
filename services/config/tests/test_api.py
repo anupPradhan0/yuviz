@@ -1245,36 +1245,36 @@ class TestProviderConfigTenantScoping:
         resp = await client.get(f"/providers/{create.json()['id']}")
         assert resp.status_code == 200
 
-    async def test_superadmin_with_a_tenant_id_set_is_still_unscoped(self, pool, test_tenant):
-        """Regression (found live): a real superadmin account can
-        have a non-null tenant_id (a leftover default from account
-        creation, unrelated to their actual access level) — the
-        authorization check must key off role=="superadmin", not tenant_id
-        being None, or a legitimate superadmin gets a spurious 403 browsing
-        any tenant other than the one their own tenant_id happens to name."""
-        other = await pool.fetchrow(
+    async def test_a_superadmin_with_a_leftover_tenant_id_is_narrowed_to_it(self, pool, test_tenant):
+        """Platform scope is tenant_id IS NULL, not role (RLS design, AC6 case
+        3c; tests/test_cross_tenant_admin.py): a superadmin row that still
+        carries a tenant_id works inside that tenant and gets 403 elsewhere."""
+        own = await pool.fetchrow(
             "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
-            "Other Tenant", f"other-{uuid.uuid4().hex[:8]}",
+            "Own Tenant", f"own-{uuid.uuid4().hex[:8]}",
         )
         user = await users_service.create_user(
             email=f"scoped-superadmin-{uuid.uuid4().hex[:8]}@example.com",
-            password="test-password-not-real", role="superadmin", tenant_id=other["id"],
+            password="test-password-not-real", role="superadmin", tenant_id=own["id"],
         )
         token = auth.create_access_token(user)
-        transport = ASGITransport(app=app)
         try:
-            async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization": f"Bearer {token}"}) as scoped_client:
-                create = await scoped_client.post(
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test",
+                                   headers={"Authorization": f"Bearer {token}"}) as c:
+                foreign = await c.post(
                     f"/tenants/{test_tenant['id']}/providers",
                     json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
                 )
-                resp = await scoped_client.get(f"/providers/{create.json()['id']}")
-                assert resp.status_code == 200
+                mine = await c.post(
+                    f"/tenants/{own['id']}/providers",
+                    json={"name": "Deepgram", "role": "stt", "engine": "deepgram"},
+                )
+            assert foreign.status_code == 403
+            assert mine.status_code == 201, mine.text
         finally:
-            await pool.execute(
-                "UPDATE users SET deleted_at = now(), tenant_id = NULL WHERE id = $1", user["id"],
-            )
-            await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+            await pool.execute("UPDATE users SET deleted_at = now(), tenant_id = NULL WHERE id = $1", user["id"])
+            await pool.execute("DELETE FROM provider_configs WHERE tenant_id = $1", own["id"])
+            await pool.execute("DELETE FROM tenants WHERE id = $1", own["id"])
 
     async def test_viewer_with_no_tenant_id_is_unscoped(self, client, pool, test_tenant):
         """Regression (found live): the Conversation Service's own
@@ -1698,7 +1698,9 @@ class TestAuthEndpoints:
             "/auth/change-password",
             json={"current_password": "test-password-not-real", "new_password": "brand-new-password"},
         )
-        assert resp.status_code == 204
+        # Other sessions are signed out; this one gets a fresh token.
+        assert resp.status_code == 200
+        assert resp.json()["access_token"]
 
         old_login = await anon_client.post(
             "/auth/login",
