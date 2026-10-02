@@ -37,12 +37,13 @@ gateway:
     enabled: true
     host: "127.0.0.1"
     port: 8022    # FreeSWITCH event_socket.conf.xml uses 8022, not the ESL default 8021
-    password: "ClueCon"          # FreeSWITCH default — override in production
+    # password: from FREESWITCH_ESL_PASSWORD in .env — never committed here
     connect_timeout_ms: 2000
     # Warm transfer's plain-extension destinations dial straight at this
     # SIP proxy/registrar (Kamailio) rather than FreeSWITCH's own directory
     # — see EslClient::originate_async()'s doc comment for why.
-    sip_proxy_host: "192.168.0.116"
+    # SIP_PROXY_HOST / SIP_PROXY_PORT in .env override these.
+    sip_proxy_host: "127.0.0.1"
     sip_proxy_port: 5060
 
   redis:

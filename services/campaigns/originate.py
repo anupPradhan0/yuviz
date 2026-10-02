@@ -68,8 +68,9 @@ _DIAL_NUMBER_RE = re.compile(r"\+?[0-9]{3,15}")
 
 _ESL_HOST = os.environ.get("FREESWITCH_ESL_HOST", "127.0.0.1")
 _ESL_PORT = int(os.environ.get("FREESWITCH_ESL_PORT", "8022"))
-_ESL_PASSWORD = os.environ.get("FREESWITCH_ESL_PASSWORD", "ClueCon")
-_SIP_PROXY_HOST = os.environ.get("SIP_PROXY_HOST", "192.168.0.116")
+# No default: FreeSWITCH's own default is public. Set it in .env.
+_ESL_PASSWORD = os.environ.get("FREESWITCH_ESL_PASSWORD", "")
+_SIP_PROXY_HOST = os.environ.get("SIP_PROXY_HOST", "127.0.0.1")
 _SIP_PROXY_PORT = int(os.environ.get("SIP_PROXY_PORT", "5060"))
 
 
@@ -115,6 +116,8 @@ async def originate_call(phone_number: str, caller_id: str) -> str:
     for label, value in (("phone_number", phone_number), ("caller_id", caller_id)):
         if not is_valid_dial_number(value):
             raise OriginateError(f"refusing to dial: {label} {value!r} is not a plain dial number")
+    if not _ESL_PASSWORD:
+        raise OriginateError("FREESWITCH_ESL_PASSWORD is not set; add it to .env")
     try:
         reader, writer = await asyncio.open_connection(_ESL_HOST, _ESL_PORT)
     except OSError as exc:
@@ -207,6 +210,9 @@ class EslJobEventListener:
                 pass
 
     async def _run(self) -> None:
+        if not _ESL_PASSWORD:
+            log.error("EslJobEventListener: FREESWITCH_ESL_PASSWORD is not set; not listening for call outcomes")
+            return
         while not self._stopped:
             try:
                 await self._listen_once()

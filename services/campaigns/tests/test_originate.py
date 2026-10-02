@@ -64,6 +64,7 @@ def _point_at_fake_server(monkeypatch):
     the test body (needs the dynamically-assigned port), this fixture just
     ensures no test accidentally reaches a real ESL endpoint."""
     monkeypatch.setattr(originate, "_ESL_HOST", "127.0.0.1")
+    monkeypatch.setattr(originate, "_ESL_PASSWORD", "test-esl-password")
 
 
 async def test_originate_call_success_returns_job_uuid(monkeypatch):
@@ -177,3 +178,9 @@ def test_parse_job_event_failure():
     assert job_uuid == "abc-123"
     assert succeeded is False
     assert "NO_ANSWER" in detail
+
+
+async def test_originate_refuses_without_an_esl_password(monkeypatch):
+    monkeypatch.setattr(originate, "_ESL_PASSWORD", "")
+    with pytest.raises(originate.OriginateError, match="FREESWITCH_ESL_PASSWORD"):
+        await originate.originate_call("+14155551111", "+14155552222")

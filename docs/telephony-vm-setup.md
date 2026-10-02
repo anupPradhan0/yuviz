@@ -136,14 +136,14 @@ at the end before changing any of them.
 `mod_event_socket`, `mod_lua`, `mod_audio_fork`.
 
 **autoload_configs/event_socket.conf.xml** — port 8022 (not the 8021
-default), password ClueCon, and `listen-ip 0.0.0.0` so the Gateway on the
-host can reach it. That last change matters for security: ESL is an
+default), a random password (the same value as `FREESWITCH_ESL_PASSWORD` in
+`.env`), and `listen-ip 0.0.0.0` so the Gateway on the host can reach it. That last change matters for security: ESL is an
 unauthenticated-by-default remote control surface for the whole switch, so
 pin it to the host with an ACL and change the password:
 
     <param name="listen-ip" value="0.0.0.0"/>
     <param name="listen-port" value="8022"/>
-    <param name="password" value="<something-not-ClueCon>"/>
+    <param name="password" value="<FREESWITCH_ESL_PASSWORD from .env>"/>
     <param name="apply-inbound-acl" value="gateway_host"/>
 
 and define `gateway_host` in autoload_configs/acl.conf.xml as HOST_IP/32.

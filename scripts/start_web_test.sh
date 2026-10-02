@@ -17,7 +17,16 @@
 # scripts/seed_default_config.py once, then the rest in any order.
 
 set -euo pipefail
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# This file is sourced (zsh or bash), so $0 is the shell, not this script.
+if [ -n "${BASH_SOURCE:-}" ]; then _start_web_self="${BASH_SOURCE[0]}"
+elif [ -n "${ZSH_VERSION:-}" ]; then eval '_start_web_self=${(%):-%x}'
+else _start_web_self="$0"; fi
+REPO="$(cd "$(dirname "$_start_web_self")/.." && pwd)"
+
+# Settings come from $REPO/.env (template: .env.example), same as start_local.sh.
+. "$REPO/scripts/lib/env.sh"
+_env_init
+_load_env
 
 # ── Block 1: Data layer (Postgres/Redis; run once, may already be running) ──
 start_data() {
@@ -27,7 +36,7 @@ start_data() {
   psql voiceai -f "$REPO/database/knowledge_schema.sql"
   psql voiceai -f "$REPO/database/telephony_schema.sql"
   echo "✓ PostgreSQL + Redis running, schema applied"
-  echo "  Next: POSTGRES_DSN=postgresql://\$(whoami)@localhost:5432/voiceai REDIS_URL=redis://localhost:6379/0 $REPO/venv/bin/python3 $REPO/scripts/seed_default_config.py"
+  echo "  Next: $REPO/venv/bin/python3 $REPO/scripts/seed_default_config.py"
 }
 
 # ── Block 2: Ollama — only needed if testing with local models (the
@@ -38,7 +47,7 @@ start_ollama() {
 
 # ── Block 3: Config Service (REST API, port 8000) ────────────────────────────
 start_config_service() {
-  export POSTGRES_DSN="postgresql://$(whoami)@localhost:5432/voiceai"
+  _require SECRET_ENCRYPTION_KEY JWT_SECRET || return 0
   cd "$REPO"
   ./venv/bin/python3 -m uvicorn services.config.app:app --host 0.0.0.0 --port 8000
 }
@@ -46,9 +55,7 @@ start_config_service() {
 # ── Block 4: Knowledge Service (REST API, port 8100) — optional, only
 #    needed if testing RAG-backed agents ──────────────────────────────────
 start_knowledge_service() {
-  export POSTGRES_DSN="postgresql://$(whoami)@localhost:5432/voiceai"
-  export REDIS_URL="redis://localhost:6379/0"
-  export KNOWLEDGE_STORAGE_ROOT="$REPO/data/knowledge_documents"
+  _require JWT_SECRET || return 0
   cd "$REPO"
   ./venv/bin/python3 -m uvicorn services.knowledge.app:app --host 0.0.0.0 --port 8100
 }
@@ -57,20 +64,15 @@ start_knowledge_service() {
 #    TTS pipeline. One instance is enough for testing; run start_conv2 too
 #    only if you also want to exercise the Envoy load-balancing path. ─────
 _conv_env() {
-  export POSTGRES_DSN="postgresql://$(whoami)@localhost:5432/voiceai"
-  export REDIS_URL="redis://localhost:6379/0"
-  export CONFIG_SERVICE_URL="http://localhost:8000"
-  export CONFIG_SERVICE_EMAIL="conversation-service@internal.yuviz.ai"
-  export CONFIG_SERVICE_PASSWORD="${CONFIG_SERVICE_PASSWORD:?set this — see docs/setup.md, never commit the real value}"
-  export KNOWLEDGE_SERVICE_URL="http://localhost:8100"
+  _require CONFIG_SERVICE_EMAIL CONFIG_SERVICE_PASSWORD SECRET_ENCRYPTION_KEY
 }
 start_conv1() {
-  _conv_env
+  _conv_env || return 0
   cd "$REPO"
   ./venv/bin/python3 -m services.conversation --port 50051 --mode pipeline --log-level INFO
 }
 start_conv2() {
-  _conv_env
+  _conv_env || return 0
   cd "$REPO"
   ./venv/bin/python3 -m services.conversation --port 50052 --mode pipeline --log-level INFO
 }

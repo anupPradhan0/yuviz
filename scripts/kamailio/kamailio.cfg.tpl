@@ -146,7 +146,7 @@ import_file "kamailio-local.cfg"
 #!ifdef WITH_MYSQL
 # - database URL - used to connect to database server by modules such
 #       as: auth_db, acc, usrloc, a.s.o.
-#!trydef DBURL "mysql://kamailio:kamailiorw@localhost/kamailio"
+#!trydef DBURL "__KAMAILIO_DB_URL__"
 #!endif
 
 #!ifdef WITH_MULTIDOMAIN

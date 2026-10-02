@@ -387,13 +387,13 @@ if [ -f "$ENV_FILE" ]; then
         }
     done < "$ENV_EXAMPLE"
 else
-    cp "$ENV_EXAMPLE" "$ENV_FILE"
+    (umask 077; cp "$ENV_EXAMPLE" "$ENV_FILE")
     ok "deployment/.env created"
 fi
 
 # Blank counts as missing: auth.py's os.environ.get returns "" rather than its
 # fallback, so an empty JWT_SECRET silently becomes the signing key.
-for secret in CONFIG_SERVICE_PASSWORD:32 JWT_SECRET:48 YUVIZ_APP_PASSWORD:32; do
+for secret in POSTGRES_PASSWORD:32 CONFIG_SERVICE_PASSWORD:32 JWT_SECRET:48 YUVIZ_APP_PASSWORD:32; do
     key=${secret%:*}; len=${secret#*:}
     if [ -n "$(grep "^${key}=" "$ENV_FILE" | cut -d= -f2-)" ]; then continue; fi
     value=$(rand "$len")
@@ -408,6 +408,28 @@ for secret in CONFIG_SERVICE_PASSWORD:32 JWT_SECRET:48 YUVIZ_APP_PASSWORD:32; do
     rm -f "$ENV_FILE.bak"
     ok "generated ${key}"
 done
+
+# Built from the generated password, so it never carries a committed one.
+if [ -z "$(grep "^POSTGRES_DSN=" "$ENV_FILE" | cut -d= -f2-)" ]; then
+    pg_user=$(grep "^POSTGRES_USER=" "$ENV_FILE" | cut -d= -f2-)
+    pg_pass=$(grep "^POSTGRES_PASSWORD=" "$ENV_FILE" | cut -d= -f2-)
+    pg_db=$(grep "^POSTGRES_DB=" "$ENV_FILE" | cut -d= -f2-)
+    dsn="postgresql://${pg_user:-voiceai}:${pg_pass}@postgres:5432/${pg_db:-voiceai}"
+    if ! sed -i.bak "s|^POSTGRES_DSN=.*|POSTGRES_DSN=${dsn}|" "$ENV_FILE"; then
+        fail "could not write POSTGRES_DSN to ${ENV_FILE}"
+        exit 1
+    fi
+    rm -f "$ENV_FILE.bak"
+    ok "built POSTGRES_DSN"
+fi
+
+# The volume keeps the password it was initialized with, so an existing install
+# stays on the old published default until it is rotated by hand.
+if [ "$(grep "^POSTGRES_PASSWORD=" "$ENV_FILE" | cut -d= -f2-)" = "voiceai" ]; then
+    warn "POSTGRES_PASSWORD is still the old public default 'voiceai'. To rotate it:"
+    info "    1. docker compose -f deployment/docker/docker-compose.yml exec postgres psql -U voiceai -c \"ALTER ROLE voiceai PASSWORD '<new>'\""
+    info "    2. set POSTGRES_PASSWORD=<new> in deployment/.env and the same password in its POSTGRES_DSN"
+fi
 
 # SECRET_ENCRYPTION_KEY can't go through the loop above: it is a Fernet key,
 # which must be exactly 32 raw bytes in url-safe base64 (44 chars, trailing
