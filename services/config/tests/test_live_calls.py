@@ -20,7 +20,9 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import time
 import uuid
+from collections import OrderedDict
 
 import asyncpg
 import pytest
@@ -1116,6 +1118,119 @@ class TestAuthorityMemoBounds:
             assert (str(test_admin["user"]["id"]), other_tenant["slug"]) not in memo
         finally:
             await _cleanup_tenant(pool, other_tenant)
+
+    async def test_post_intervention_404_denial_ignores_a_stale_self_memo_entry(
+        self, pool, test_tenant, test_admin,
+    ):
+        """A cached "self" entry from before a re-tenant must not decide which
+        tenant's audit log the 404 denial lands in."""
+        previous_tenant = await _create_tenant(pool, name="Previous Tenant")
+        target_tenant = await _create_tenant(pool, name="Target Tenant")
+        user_id = str(test_admin["user"]["id"])
+        for tid in (test_tenant["id"], previous_tenant["id"]):
+            live_calls._denial_audit_windows.pop((user_id, str(tid)), None)
+        try:
+            _clear_authority_memo()
+            _reset_throttle()
+            stale = auth.CurrentUser(
+                id=user_id, email=test_admin["user"]["email"], role="admin",
+                tenant_id=str(previous_tenant["id"]),
+                token_version=test_admin["user"].get("token_version", 0),
+            )
+            app.state._live_calls_authority_memo = OrderedDict(
+                {(user_id, "self"): (time.monotonic(), stale)}
+            )
+            own_before = await _count_audit_rows(pool, test_tenant["id"], "denied")
+            prev_before = await _count_audit_rows(pool, previous_tenant["id"], "denied")
+            async with _client_as(test_admin["user"]) as client:
+                resp = await _post_intervention(
+                    client, f"test-live-{uuid.uuid4().hex[:8]}", tenant_slug=target_tenant["slug"],
+                )
+            assert resp.status_code == 404
+            assert await _count_audit_rows(pool, previous_tenant["id"], "denied") == prev_before
+            assert await _count_audit_rows(pool, test_tenant["id"], "denied") == own_before + 1
+        finally:
+            _clear_authority_memo()
+            await _cleanup_tenant(pool, previous_tenant)
+            await _cleanup_tenant(pool, target_tenant)
+
+    @pytest.mark.parametrize("scope", ["self", "previous-slug"])
+    async def test_post_intervention_never_executes_in_a_stale_memo_tenant(
+        self, pool, test_tenant, test_admin, scope,
+    ):
+        """The write itself, not just its denial audit, must ignore a memo
+        entry that predates a re-tenant. The memo is primed the way another
+        Config process would still hold it after PATCH /users moved this admin
+        from previous_tenant to test_tenant (forget_user only evicts locally).
+        On the old code this 202'd against previous_tenant's live call."""
+        previous_tenant = await _create_tenant(pool, name="Previous Tenant")
+        foreign_session = await _insert_call(pool, tenant_slug=previous_tenant["slug"])
+        user_id = str(test_admin["user"]["id"])
+        for tid in (test_tenant["id"], previous_tenant["id"]):
+            live_calls._denial_audit_windows.pop((user_id, str(tid)), None)
+        scope_key = "self" if scope == "self" else previous_tenant["slug"]
+        tenant_slug = None if scope == "self" else previous_tenant["slug"]
+        try:
+            _clear_authority_memo()
+            _reset_throttle()
+            stale = auth.CurrentUser(
+                id=user_id, email=test_admin["user"]["email"], role="admin",
+                tenant_id=str(previous_tenant["id"]),
+                token_version=test_admin["user"].get("token_version", 0),
+            )
+            app.state._live_calls_authority_memo = OrderedDict(
+                {(user_id, scope_key): (time.monotonic(), stale)}
+            )
+            own_before = await _count_audit_rows(pool, test_tenant["id"], "denied")
+            prev_before = await _count_audit_rows(pool, previous_tenant["id"], "denied")
+            async with _client_as(test_admin["user"]) as client:
+                resp = await _post_intervention(client, foreign_session, tenant_slug=tenant_slug)
+            # Exactly the 404 a cold memo gives for a foreign session id or slug.
+            assert resp.status_code == 404, resp.text
+            assert resp.json() == {"detail": "call not found" if scope == "self" else "tenant not found"}
+            assert await pool.fetchval(
+                "SELECT COUNT(*) FROM live_call_interventions WHERE session_id = $1", foreign_session,
+            ) == 0
+            assert await _count_audit_rows(pool, previous_tenant["id"], "denied") == prev_before
+            assert await _count_audit_rows(pool, test_tenant["id"], "denied") == own_before + 1
+            # The stale entry is gone, not just bypassed for this one request.
+            memo = app.state._live_calls_authority_memo
+            assert all(entry[1].tenant_id == str(test_tenant["id"])
+                       for key, entry in memo.items() if key[0] == user_id)
+        finally:
+            _clear_authority_memo()
+            await _cleanup_call(pool, foreign_session)
+            await _cleanup_tenant(pool, previous_tenant)
+
+    async def test_patch_user_tenant_or_role_evicts_the_live_calls_memo(
+        self, pool, test_tenant, test_superadmin,
+    ):
+        """PATCH /users/{id} must drop the moved user's memoized authority in
+        this process, for a tenant move as well as a role change, not only on
+        a password change. On the old code the (uid, "self") entry survived
+        the move for the full memo TTL."""
+        previous_tenant = await _create_tenant(pool, name="Previous Tenant")
+        moved = await _create_user(role="admin", tenant_id=previous_tenant["id"])
+        moved_id = str(moved["id"])
+        try:
+            for patch in ({"tenant_id": str(test_tenant["id"])}, {"role": "supervisor"}):
+                _clear_authority_memo()
+                _reset_throttle()
+                async with _client_as(moved) as client:
+                    primed = await client.get("/live-calls")
+                assert primed.status_code == 200, primed.text
+                assert (moved_id, "self") in app.state._live_calls_authority_memo
+
+                async with _client_as(test_superadmin["user"]) as admin_client:
+                    resp = await admin_client.patch(f"/users/{moved_id}", json=patch)
+                assert resp.status_code == 200, resp.text
+                assert not [k for k in app.state._live_calls_authority_memo if k[0] == moved_id]
+                # Re-mint so the next round's token matches the moved row.
+                moved = await users_service.get_user_by_id(moved_id)
+        finally:
+            _clear_authority_memo()
+            await _soft_delete_user(pool, moved_id)
+            await _cleanup_tenant(pool, previous_tenant)
 
 
 # ── T25 — soft-deleted own tenant 403s instead of falling through ────────

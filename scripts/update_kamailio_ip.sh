@@ -19,9 +19,8 @@
 #
 # Most of the rest of the stack (Envoy, Postgres/Redis DSNs, admin-ui, the
 # FreeSWITCH Lua dialplan script) is 127.0.0.1/localhost/0.0.0.0. Not
-# rewritten here: config/gateway.yaml esl.sip_proxy_host and SIP_PROXY_HOST
-# for the campaigns service — warm transfer and outbound need those set to
-# the same LAN IP.
+# rewritten here except SIP_PROXY_HOST in .env, which the Gateway (warm
+# transfer) and Campaigns (outbound) both read and need on the same LAN IP.
 #
 # Idempotent: safe to run any time, even if the IP hasn't changed. Each of the
 # three steps independently detects "already correct" and skips.
@@ -48,8 +47,19 @@ FS_PREFIX="$(brew --prefix freeswitch 2>/dev/null || echo /usr/local/freeswitch)
 FS_CLI="${FS_CLI:-$FS_PREFIX/bin/fs_cli}"
 FS_BIN="${FS_BIN:-$FS_PREFIX/bin/freeswitch}"
 FS_HOME="${FS_HOME:-$HOME/.yuviz/freeswitch}"
-FS_ESL_PORT=8022
-FS_ESL_PASSWORD=ClueCon
+# Credentials come from the repo's .env (see .env.example), never this file.
+# Read as literal KEY=value (like start_local.sh), never sourced: a value with
+# spaces must not run as a command. A value already in the shell wins.
+_dotenv() { [[ -f "$REPO_ROOT/.env" ]] && grep "^$1=" "$REPO_ROOT/.env" | cut -d= -f2- || true; }
+FREESWITCH_ESL_PORT="${FREESWITCH_ESL_PORT:-$(_dotenv FREESWITCH_ESL_PORT)}"
+FREESWITCH_ESL_PASSWORD="${FREESWITCH_ESL_PASSWORD:-$(_dotenv FREESWITCH_ESL_PASSWORD)}"
+KAMAILIO_DB_URL="${KAMAILIO_DB_URL:-$(_dotenv KAMAILIO_DB_URL)}"
+FS_ESL_PORT="${FREESWITCH_ESL_PORT:-8022}"
+FS_ESL_PASSWORD="${FREESWITCH_ESL_PASSWORD:?set FREESWITCH_ESL_PASSWORD in .env}"
+KAMAILIO_DB_URL="${KAMAILIO_DB_URL:?set KAMAILIO_DB_URL in .env}"
+
+# Escapes a value for the replacement side of sed "s|...|...|".
+sed_escape() { printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'; }
 
 # UDP "connect" doesn't send a packet (no handshake) — the OS just resolves
 # which local interface/IP would be used to reach that destination, which is
@@ -90,6 +100,13 @@ else
 fi
 echo ""
 
+# The Gateway (warm transfer) and Campaigns (outbound) dial Kamailio at
+# SIP_PROXY_HOST, so keep it on the same LAN IP. Restart them to pick it up.
+if [[ -f "$REPO_ROOT/.env" ]] && ! grep -q "^SIP_PROXY_HOST=${LAN_IP}$" "$REPO_ROOT/.env"; then
+  sed -i.bak "s|^SIP_PROXY_HOST=.*|SIP_PROXY_HOST=${LAN_IP}|" "$REPO_ROOT/.env" && rm -f "$REPO_ROOT/.env.bak"
+  echo "  .env: SIP_PROXY_HOST=${LAN_IP} (restart the Gateway and Campaigns)"
+fi
+
 # ── Step 1: regenerate Kamailio config from templates ───────────────────────
 echo "=== Step 1/3: Kamailio config ==="
 
@@ -108,7 +125,7 @@ for name in kamailio.cfg dispatcher.list; do
   # unchanged file look "different" from the on-disk original on every run.
   tmp="$(mktemp)"
   trap 'rm -f "$tmp"' EXIT
-  sed "s/__LAN_IP__/$LAN_IP/g" "$tpl" > "$tmp"
+  sed -e "s/__LAN_IP__/$LAN_IP/g" -e "s|__KAMAILIO_DB_URL__|$(sed_escape "$KAMAILIO_DB_URL")|g" "$tpl" > "$tmp"
 
   if sudo diff -q "$tmp" "$target" > /dev/null 2>&1; then
     echo "  $name: already up to date (IP unchanged)"

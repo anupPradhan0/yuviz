@@ -144,7 +144,7 @@ async def upload_contacts(
     skipped_dnc = len(contacts) - len(allowed)
 
     inserted = await campaign_contacts.bulk_insert_contacts(
-        campaign_id, allowed, platform_scoped=is_platform_scoped(current_user),
+        campaign_id, allowed, platform_scoped=is_platform_scoped(current_user), tenant_id=campaign["tenant_id"],
     )
     return {"inserted": inserted, "skipped_dnc": skipped_dnc}
 

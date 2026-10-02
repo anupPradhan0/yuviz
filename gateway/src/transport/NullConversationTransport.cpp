@@ -99,8 +99,8 @@ void NullConversationTransport::send_transfer_failed(const std::string& session_
 }
 
 void NullConversationTransport::send_dtmf(const std::string& session_id,
-                                          const std::string& digit) {
-    logger_.debug("NullConversationTransport::send_dtmf session={} digit={}", session_id, digit);
+                                          const std::string& /*digit*/) {
+    logger_.debug("NullConversationTransport::send_dtmf session={}", session_id);
 }
 
 void NullConversationTransport::set_callbacks(ConversationTransportCallbacks cbs) {

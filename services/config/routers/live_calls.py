@@ -126,26 +126,34 @@ async def request_intervention(
     # WRITE: 403 outright on a demoted/deleted/re-tenanted actor (AC9)
     # rather than silently rescoping it the way _resolve_scope's branch
     # selection does for the read-only GET route.
-    await deps.assert_current_authority(user)
+    fresh = await deps.assert_current_authority(user)
 
     ip_address = _extract_client_ip(request)
     tenant_slug = body.tenant_slug
-    scope_key = tenant_slug or "self"
 
     try:
         slug, tenant_id, effective_user = await _resolve_scope(request, user, tenant_slug)
+        if (effective_user.tenant_id, effective_user.role) != (fresh.tenant_id, fresh.role):
+            # _resolve_scope answered from a memo entry that predates a
+            # re-tenant or role change (the memo outlives both for its TTL,
+            # and a PATCH /users served by another process can't evict this
+            # process's copy). A write must act on the row just read, so drop
+            # every entry for this user and resolve again from the DB: the
+            # same outcome as a cold memo, so no new status or body.
+            deps.forget_user(request.app.state, user.id)
+            slug, tenant_id, effective_user = await _resolve_scope(request, user, tenant_slug)
+            if (effective_user.tenant_id, effective_user.role) != (fresh.tenant_id, fresh.role):
+                # Changed again between the two reads: the same refusal
+                # assert_current_authority gives a re-tenanted actor.
+                raise HTTPException(status_code=403, detail="account tenant has changed; sign in again")
     except HTTPException as exc:
         if exc.status_code == 404:
-            # _resolve_scope's own branch-selection 404 was previously
-            # unaudited (security finding #5) — audit it as a denial too,
-            # attributed to the caller's own resolved tenant. fresh_authority
-            # here is a memo hit (or a no-op re-read for a role that already
-            # passed): it does not re-run tenant resolution.
-            effective_user = await deps.fresh_authority(request.app.state, user, scope_key)
-            if effective_user.tenant_id is not None:
+            # Audit _resolve_scope's 404 as a denial under the tenant just read
+            # from the DB, never a memo entry that may predate a re-tenant.
+            if fresh.tenant_id is not None:
                 await live_calls_service.record_denied_intervention(
-                    tenant_id=uuid.UUID(effective_user.tenant_id), session_id=session_id,
-                    user=effective_user, ip_address=ip_address,
+                    tenant_id=uuid.UUID(fresh.tenant_id), session_id=session_id,
+                    user=fresh, ip_address=ip_address,
                 )
         raise
 

@@ -113,6 +113,14 @@ struct FakeEslEventServer {
         if (fd >= 0) send_all(fd, frame);
     }
 
+    void send_dtmf(const std::string& uuid, const std::string& digit) {
+        const std::string body  = "Event-Name: DTMF\nUnique-ID: " + uuid + "\nDTMF-Digit: " + digit + "\n";
+        const std::string frame = "Content-Type: text/event-plain\nContent-Length: "
+            + std::to_string(body.size()) + "\n\n" + body;
+        const int fd = client_fd.load();
+        if (fd >= 0) send_all(fd, frame);
+    }
+
     // BACKGROUND_JOB's real doubly-framed shape (no Unique-ID header, an
     // inner header block of its own, then the job's result text) — see
     // EslEventListener.cpp's parse_background_job_result() doc comment.
@@ -162,6 +170,8 @@ bool wait_until(Pred pred, std::chrono::milliseconds timeout = 2s) {
     return true;
 }
 
+const EslEventListener::DtmfHandler kNoDtmf = [](const std::string&, const std::string&) {};
+
 } // namespace
 
 TEST(EslEventListenerTest, SubscribesToBothChannelHangupAndChannelBridge) {
@@ -172,12 +182,12 @@ TEST(EslEventListenerTest, SubscribesToBothChannelHangupAndChannelBridge) {
     TransferCorrelator correlator;
     TransferCorrelator job_correlator;
     EslEventListener listener{make_cfg(server.port), logger,
-                              [](const std::string&) {}, correlator, job_correlator};
+                              [](const std::string&) {}, kNoDtmf, correlator, job_correlator};
     ASSERT_TRUE(listener.start());
     ASSERT_TRUE(server.wait_for_client());
 
     EXPECT_EQ(server.subscribe_command,
-              "event plain CHANNEL_HANGUP CHANNEL_BRIDGE CHANNEL_ANSWER BACKGROUND_JOB");
+              "event plain CHANNEL_HANGUP CHANNEL_BRIDGE CHANNEL_ANSWER BACKGROUND_JOB DTMF");
     listener.stop();
 }
 
@@ -191,7 +201,7 @@ TEST(EslEventListenerTest, ChannelBridgeResolvesPendingTransferAsSuccess) {
     std::atomic<bool> hangup_fired{false};
     EslEventListener listener{make_cfg(server.port), logger,
                               [&](const std::string&) { hangup_fired.store(true); },
-                              correlator, job_correlator};
+                              kNoDtmf, correlator, job_correlator};
     ASSERT_TRUE(listener.start());
     ASSERT_TRUE(server.wait_for_client());
 
@@ -221,7 +231,7 @@ TEST(EslEventListenerTest, ChannelHangupResolvesPendingTransferAsFailureAndSkips
     std::atomic<bool> hangup_fired{false};
     EslEventListener listener{make_cfg(server.port), logger,
                               [&](const std::string&) { hangup_fired.store(true); },
-                              correlator, job_correlator};
+                              kNoDtmf, correlator, job_correlator};
     ASSERT_TRUE(listener.start());
     ASSERT_TRUE(server.wait_for_client());
 
@@ -265,7 +275,7 @@ TEST(EslEventListenerTest, ChannelHangupWithNoPendingTransferFiresGenericHangupH
                                   { std::lock_guard lock{uuid_mutex}; hangup_uuid = uuid; }
                                   hangup_fired.store(true);
                               },
-                              correlator, job_correlator};
+                              kNoDtmf, correlator, job_correlator};
     ASSERT_TRUE(listener.start());
     ASSERT_TRUE(server.wait_for_client());
 
@@ -292,7 +302,7 @@ TEST(EslEventListenerTest, ChannelBridgeWithNoPendingTransferIsIgnored) {
     std::atomic<bool> hangup_fired{false};
     EslEventListener listener{make_cfg(server.port), logger,
                               [&](const std::string&) { hangup_fired.store(true); },
-                              correlator, job_correlator};
+                              kNoDtmf, correlator, job_correlator};
     ASSERT_TRUE(listener.start());
     ASSERT_TRUE(server.wait_for_client());
 
@@ -320,7 +330,7 @@ TEST(EslEventListenerTest, BackgroundJobSuccessStripsOkPrefixToBareUuid) {
     TransferCorrelator correlator;
     TransferCorrelator job_correlator;
     EslEventListener listener{make_cfg(server.port), logger,
-                              [](const std::string&) {}, correlator, job_correlator};
+                              [](const std::string&) {}, kNoDtmf, correlator, job_correlator};
     ASSERT_TRUE(listener.start());
     ASSERT_TRUE(server.wait_for_client());
 
@@ -355,7 +365,7 @@ TEST(EslEventListenerTest, BackgroundJobFailureKeepsErrTextUnstripped) {
     TransferCorrelator correlator;
     TransferCorrelator job_correlator;
     EslEventListener listener{make_cfg(server.port), logger,
-                              [](const std::string&) {}, correlator, job_correlator};
+                              [](const std::string&) {}, kNoDtmf, correlator, job_correlator};
     ASSERT_TRUE(listener.start());
     ASSERT_TRUE(server.wait_for_client());
 
@@ -378,5 +388,36 @@ TEST(EslEventListenerTest, BackgroundJobFailureKeepsErrTextUnstripped) {
         EXPECT_EQ(detail, "-ERR NO_ANSWER");
     }
 
+    listener.stop();
+}
+
+TEST(EslEventListenerTest, DtmfEventReachesTheDtmfHandler) {
+    FakeEslEventServer server;
+    server.start();
+
+    Logger logger = Logger::make_null();
+    TransferCorrelator correlator;
+    TransferCorrelator job_correlator;
+    std::mutex  got_mutex;
+    std::string got_uuid, got_digit;
+    std::atomic<bool> fired{false};
+    EslEventListener listener{make_cfg(server.port), logger,
+                              [](const std::string&) {},
+                              [&](const std::string& uuid, const std::string& digit) {
+                                  { std::lock_guard lock{got_mutex}; got_uuid = uuid; got_digit = digit; }
+                                  fired.store(true);
+                              },
+                              correlator, job_correlator};
+    ASSERT_TRUE(listener.start());
+    ASSERT_TRUE(server.wait_for_client());
+
+    server.send_dtmf("call-uuid-7", "5");
+
+    ASSERT_TRUE(wait_until([&] { return fired.load(); }));
+    {
+        std::lock_guard lock{got_mutex};
+        EXPECT_EQ(got_uuid, "call-uuid-7");
+        EXPECT_EQ(got_digit, "5");
+    }
     listener.stop();
 }

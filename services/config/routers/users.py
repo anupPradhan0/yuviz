@@ -78,7 +78,11 @@ async def update_user(
         row_tenant_id=row["tenant_id"],
         **fields,
     )
-    if "password" in fields:
+    # A password change revokes older tokens (token_version bump). A role or
+    # tenant move does not, by design: the live-calls and console gates
+    # re-read the row instead. Either way, drop this process's memoized
+    # authority so those re-reads see the new row now, not after the TTL.
+    if fields.keys() & {"password", "role", "tenant_id"}:
         forget_user(request.app.state, str(user["id"]))
     return users_service.to_public_dict(user)
 
