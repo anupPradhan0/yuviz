@@ -38,11 +38,10 @@ public:
     void hangup(const std::string& uuid, const std::string& reason);
 
     // Cold-transfer the FreeSWITCH channel identified by `req.call_id` to
-    // `req.destination` — either a plain phone number/extension (routed
-    // through FreeSWITCH's default XML dialplan, e.g. "1005") or a SIP URI
-    // ("sip:"/"sips:" prefix, bridged directly via mod_sofia's external
-    // profile using the "inline" dialplan, which needs no matching dialplan
-    // extension to exist for the destination).
+    // `req.destination` — a plain phone number/extension (bridged inline
+    // through the SIP proxy, e.g. "1005") or a SIP URI ("sip:"/"sips:",
+    // bridged inline via mod_sofia's external profile). Never routed through
+    // a dialplan context (see dial_string_for).
     //
     // Cold only: this redirects the channel and does not bridge/three-way
     // anything — the AI leg is expected to already be torn down by the
