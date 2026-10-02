@@ -209,6 +209,12 @@ These two are the entire cost of the VM split:
 `config/gateway.yaml`'s `esl.host`/`esl.sip_proxy_host` are only fallbacks:
 the `.env` values above override them.
 
+After `update_kamailio_ip.sh` changes `SIP_PROXY_HOST`, start the Gateway and
+Campaigns from a new terminal tab on the host (or `unset SIP_PROXY_HOST` and
+re-source `scripts/start_local.sh`). A tab that sourced it earlier keeps the
+old exported value, because `_load_env` never overrides the shell;
+`start_gateway` and `start_campaigns_service` warn when the two differ.
+
 `gateway.websocket.host` is already 0.0.0.0, so it accepts the VM's
 connection with no change.
 
@@ -242,7 +248,8 @@ Triage order when it fails:
   - SIP_PROXY_HOST in .env must be VM_IP. update_kamailio_ip.sh writes it;
     while it is blank the Gateway refuses transfers to numbers and
     Campaigns refuses to originate, both with an explicit error. An old
-    .env holding 127.0.0.1 is wrong here: rerun the script.
+    .env holding 127.0.0.1 is wrong here: rerun the script, then restart
+    from a new tab (see section 8).
   - scripts/start_local.sh:148-151 runs `cd $REPO && ./freeswitch`, but no
     such file is in the repo. Presumably an uncommitted local wrapper.
 

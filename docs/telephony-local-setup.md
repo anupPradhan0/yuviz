@@ -419,13 +419,14 @@ SIP_IP=<lan-ip> ./scripts/update_kamailio_ip.sh
 ```
 
 Then register the phone as `1001@<lan-ip>`. Rerun both commands whenever the
-IP changes. Don't use a VPN address.
+IP changes, then restart the Gateway and Campaigns from a new tab. Don't use
+a VPN address.
 
 Cold transfer to a number, warm transfer and outbound campaigns all dial
 through the SIP proxy (Kamailio) at `SIP_PROXY_HOST` in `.env`, which both the
 Gateway and Campaigns read. `update_kamailio_ip.sh` writes it (adding the line
 if it is missing) with the same IP it renders Kamailio with; restart the
-Gateway and Campaigns after running it. `esl.sip_proxy_host` in
+Gateway and Campaigns after running it, from a new tab (see below). `esl.sip_proxy_host` in
 `config/gateway.yaml` is only a fallback that a non-blank `.env` value
 overrides, so editing the yaml does nothing while `.env` has a value. If
 `SIP_PROXY_HOST` is blank, the Gateway logs `esl.sip_proxy_host is not set` at
@@ -438,3 +439,12 @@ An `.env` created before this change may hold `SIP_PROXY_HOST=127.0.0.1`
 (the old `.env.example` default), which `start_local.sh` never overwrites.
 That is only right with `SIP_IP=127.0.0.1`. Rerun `update_kamailio_ip.sh` to
 replace it with the address Kamailio really listens on.
+
+**Restart from a new terminal tab.** A tab that already sourced
+`scripts/start_local.sh` keeps the `SIP_PROXY_HOST` it exported then:
+`_load_env` never replaces a variable the shell already has, so
+`start_gateway`/`start_campaigns_service` in that tab would still dial the old
+host. Open a new tab and source `start_local.sh` there, or run
+`unset SIP_PROXY_HOST` and source it again. `update_kamailio_ip.sh`,
+`start_gateway` and `start_campaigns_service` print a warning when the shell's
+value differs from `.env`.

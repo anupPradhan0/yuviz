@@ -107,7 +107,7 @@ Fill these yourself; nothing can generate them:
 | `TELEPHONY_PUBLIC_BASE_URL` | Public tunnel URL for Vobiz/Cloudonix callbacks. |
 | `SMTP_*`, `GOOGLE_*`, provider API keys | Optional features. |
 
-`SIP_PROXY_HOST` ships blank: `update_kamailio_ip.sh` writes the IP Kamailio listens on. Until it does, the Gateway and Campaigns refuse to dial numbers.
+`SIP_PROXY_HOST` ships blank: `update_kamailio_ip.sh` writes the IP Kamailio listens on. Until it does, the Gateway and Campaigns refuse to dial numbers. After it changes, restart them from a new terminal tab (or `unset SIP_PROXY_HOST` and source `start_local.sh` again): `_load_env` never replaces a value the shell already exports, so an older tab keeps dialing the old host. `start_gateway` and `start_campaigns_service` warn when the shell and `.env` disagree.
 
 ## 5. Service-account credentials
 

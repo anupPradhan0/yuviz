@@ -22,7 +22,7 @@ ENV_SH = REPO / "scripts" / "lib" / "env.sh"
 SHELLS = [s for s in ("bash", "zsh") if shutil.which(s)]
 
 
-def _run(shell: str, repo: Path, script: str, **env: str) -> str:
+def _proc(shell: str, repo: Path, script: str, **env: str) -> subprocess.CompletedProcess:
     clean = {k: v for k, v in os.environ.items() if k != "SIP_PROXY_HOST"}
     clean.update(env)
     clean["REPO"] = str(repo)
@@ -31,7 +31,11 @@ def _run(shell: str, repo: Path, script: str, **env: str) -> str:
         env=clean, capture_output=True, text=True, timeout=30, check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    return proc.stdout
+    return proc
+
+
+def _run(shell: str, repo: Path, script: str, **env: str) -> str:
+    return _proc(shell, repo, script, **env).stdout
 
 
 @pytest.fixture
@@ -79,3 +83,47 @@ def test_env_put_writes_special_characters_literally(shell, scratch_repo, presen
     value = r"a&b|c\d$e`f"
     _run(shell, scratch_repo, '_env_put SIP_PROXY_HOST "$V"', V=value)
     assert f"SIP_PROXY_HOST={value}" in (scratch_repo / ".env").read_text().splitlines()
+
+
+# _load_env never replaces a variable the shell already exports, so a tab that
+# sourced start_local.sh before update_kamailio_ip.sh rewrote .env keeps the
+# old host. Whatever starts from it must say so instead of dialing it silently.
+@pytest.mark.parametrize("shell", SHELLS)
+def test_warn_env_drift_flags_a_stale_exported_sip_proxy_host(shell, scratch_repo):
+    (scratch_repo / ".env").write_text("SIP_PROXY_HOST=10.1.2.3\n")
+    proc = _proc(shell, scratch_repo, "_warn_env_drift SIP_PROXY_HOST", SIP_PROXY_HOST="127.0.0.1")
+    assert "SIP_PROXY_HOST=127.0.0.1" in proc.stderr
+    assert "SIP_PROXY_HOST=10.1.2.3" in proc.stderr
+    assert "new tab" in proc.stderr and "unset SIP_PROXY_HOST" in proc.stderr
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("exported", [None, "10.1.2.3"])
+def test_warn_env_drift_is_silent_when_the_shell_agrees_or_has_nothing(shell, scratch_repo, exported):
+    (scratch_repo / ".env").write_text("SIP_PROXY_HOST=10.1.2.3\n")
+    env = {"SIP_PROXY_HOST": exported} if exported else {}
+    proc = _proc(shell, scratch_repo, "_warn_env_drift SIP_PROXY_HOST", **env)
+    assert proc.stderr == "" and proc.stdout == ""
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_warn_env_drift_flags_an_export_when_env_is_blank(shell, scratch_repo):
+    (scratch_repo / ".env").write_text("SIP_PROXY_HOST=\n")
+    proc = _proc(shell, scratch_repo, "_warn_env_drift SIP_PROXY_HOST", SIP_PROXY_HOST="127.0.0.1")
+    assert "WARNING" in proc.stderr
+
+
+@pytest.mark.parametrize("path, func", [
+    ("scripts/start_local.sh", "start_gateway"),
+    ("scripts/start_local.sh", "start_campaigns_service"),
+])
+def test_launchers_check_for_a_stale_sip_proxy_host(path, func):
+    text = (REPO / path).read_text()
+    body = text[text.index(f"{func}() {{"):]
+    body = body[: body.index("\n}\n")]
+    assert "_warn_env_drift SIP_PROXY_HOST" in body
+
+
+def test_update_kamailio_ip_warns_about_the_calling_shell():
+    text = (REPO / "scripts" / "update_kamailio_ip.sh").read_text()
+    assert text.index("_warn_env_drift SIP_PROXY_HOST") > text.index("_env_put SIP_PROXY_HOST")

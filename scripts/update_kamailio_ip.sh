@@ -23,8 +23,11 @@
 # missing, replaced if present). The Gateway dials every transfer to a number
 # through it (cold transfer and warm transfer's agent leg) and Campaigns
 # dials outbound calls through it, so it must be Kamailio's IP. Restart the
-# Gateway and Campaigns afterwards. config/gateway.yaml's esl.sip_proxy_host
-# is only a fallback and is not touched.
+# Gateway and Campaigns afterwards from a NEW tab (or `unset SIP_PROXY_HOST`
+# and re-source start_local.sh first): a shell that already sourced
+# start_local.sh keeps its old exported value, and the script warns if the
+# shell it was run from has one. config/gateway.yaml's esl.sip_proxy_host is
+# only a fallback and is not touched.
 #
 # Idempotent: safe to run any time, even if the IP hasn't changed. Each of the
 # three steps independently detects "already correct" and skips.
@@ -117,10 +120,16 @@ if [[ ! -f "$REPO_ROOT/.env" ]]; then
 elif [[ "$(_env_get SIP_PROXY_HOST || true)" == "$LAN_IP" ]]; then
   echo "  .env: SIP_PROXY_HOST already $LAN_IP"
 elif _env_put SIP_PROXY_HOST "$LAN_IP" && written="$(_env_get SIP_PROXY_HOST)" && [[ "$written" == "$LAN_IP" ]]; then
-  echo "  .env: SIP_PROXY_HOST=$written (restart the Gateway and Campaigns)"
+  echo "  .env: SIP_PROXY_HOST=$written (restart the Gateway and Campaigns from a new tab)"
 else
   echo "ERROR: could not write SIP_PROXY_HOST=$LAN_IP to $REPO_ROOT/.env" >&2
   exit 1
+fi
+# This script runs as a child of the operator's shell, so this is the value
+# that shell exports. If it sourced start_local.sh before, it keeps the old
+# value (_load_env never overrides) and a restart from it would still dial it.
+if [[ -f "$REPO_ROOT/.env" ]]; then
+  _warn_env_drift SIP_PROXY_HOST
 fi
 echo ""
 
