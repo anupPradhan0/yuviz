@@ -1198,6 +1198,23 @@ CREATE INDEX IF NOT EXISTS idx_cfv_flow ON call_flow_versions (call_flow_id, ver
 -- agent pointing at it — they just go back to answering directly.
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS call_flow_id UUID REFERENCES call_flows(id) ON DELETE SET NULL;
 
+-- Guided agent creation: which shipped template (and version) built the agent,
+-- plus the one-deep prompt undo slot. All nullable, no backfill.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS template_id                 TEXT;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS template_version            INT;
+-- Undo slot: prompt in force before the latest accepted revision, and the
+-- sha256 hex of the prompt that Accept wrote. Never returned by the API.
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS prompt_undo_previous        TEXT;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS prompt_undo_accepted_sha256 TEXT;
+DO $$ BEGIN
+    ALTER TABLE agents ADD CONSTRAINT agents_template_pair_check
+        CHECK ((template_id IS NULL) = (template_version IS NULL));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER TABLE agents ADD CONSTRAINT agents_prompt_undo_pair_check
+        CHECK ((prompt_undo_previous IS NULL) = (prompt_undo_accepted_sha256 IS NULL));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- Same-tenant constraint on agents.call_flow_id (lesson 31's remedy,
 -- applied here where it was missing): the plain REFERENCES call_flows(id)
 -- above lets any agent point at ANY tenant's call flow, with nothing but

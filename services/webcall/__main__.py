@@ -72,6 +72,7 @@ log = logging.getLogger("webcall")
 
 PROTOCOL_VERSION = "1.0"
 SAMPLE_RATE = 16000
+FIRST_FRAME_TIMEOUT_S = 5.0
 
 
 def _parse_query(path: str) -> dict[str, str]:
@@ -129,7 +130,7 @@ async def _browser_to_grpc(
         try:
             control = json.loads(message)
         except json.JSONDecodeError:
-            log.warning("webcall: malformed control message=%r", message)
+            log.warning("webcall: malformed control message (type=%s, len=%d)", type(message).__name__, len(message))
             continue
 
         kind = control.get("type")
@@ -199,7 +200,9 @@ class ResponseWatchdog:
             log.exception("webcall: failed to send no_response message")
 
 
-async def _grpc_to_browser(ws: ServerConnection, call, response_watchdog: ResponseWatchdog) -> None:
+async def _grpc_to_browser(
+    ws: ServerConnection, call, session_id: str, response_watchdog: ResponseWatchdog,
+) -> None:
     """Reads ServiceMessages from the gRPC stream and forwards them to the
     browser — TTS audio payloads as binary frames, everything else as a
     small JSON text frame."""
@@ -216,7 +219,7 @@ async def _grpc_to_browser(ws: ServerConnection, call, response_watchdog: Respon
             if msg.tts_chunk.is_final:
                 await ws.send(json.dumps({"type": "tts_chunk_final"}))
         elif which == "service_ready":
-            await ws.send(json.dumps({"type": "service_ready"}))
+            await ws.send(json.dumps({"type": "service_ready", "session_id": session_id}))
         elif which == "stt_result":
             await ws.send(json.dumps({
                 "type": "stt_result", "text": msg.stt_result.text,
@@ -245,6 +248,27 @@ async def _grpc_to_browser(ws: ServerConnection, call, response_watchdog: Respon
         # exists in a browser test call — deliberately not forwarded.
 
 
+async def _read_test_credential(ws: ServerConnection) -> str | None:
+    """Waits for the first frame of a test=1 connection, which must be
+    {"type":"test_credential","credential":"..."}. Returns None for anything
+    else. The frame is never logged — it carries the credential, or is
+    something that was meant to."""
+    try:
+        frame = await asyncio.wait_for(ws.recv(), FIRST_FRAME_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return None
+    if isinstance(frame, bytes):
+        return None
+    try:
+        control = json.loads(frame)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(control, dict) or control.get("type") != "test_credential":
+        return None
+    credential = control.get("credential")
+    return credential if isinstance(credential, str) and credential else None
+
+
 async def _handle_connection(ws: ServerConnection) -> None:
     params = _parse_query(ws.request.path)
     tenant_slug = params.get("tenant")
@@ -252,6 +276,17 @@ async def _handle_connection(ws: ServerConnection) -> None:
     if not tenant_slug or not agent_slug:
         await ws.close(code=1008, reason="missing tenant/agent query params")
         return
+
+    test_credential = ""
+    if params.get("test") == "1":
+        try:
+            credential = await _read_test_credential(ws)
+        except websockets.exceptions.ConnectionClosed:
+            return
+        if credential is None:
+            await ws.close(code=1008, reason="expected test_credential first frame")
+            return
+        test_credential = credential
 
     # Default to Envoy's gRPC proxy (config/gateway.yaml uses the same
     # target) so this bridge load-balances across both ConvSvc instances
@@ -274,13 +309,14 @@ async def _handle_connection(ws: ServerConnection) -> None:
             sample_rate=SAMPLE_RATE,
             channels=1,
             direction="test",
+            test_credential=test_credential,
         )))
 
         response_watchdog = ResponseWatchdog(ws)
         try:
             await asyncio.gather(
                 _browser_to_grpc(ws, call, session_id, response_watchdog),
-                _grpc_to_browser(ws, call, response_watchdog),
+                _grpc_to_browser(ws, call, session_id, response_watchdog),
             )
         except websockets.exceptions.ConnectionClosed:
             log.info("webcall: browser closed session=%s", session_id)

@@ -6,18 +6,19 @@ provider_configs.list_elevenlabs_voices()'s pattern: resolve api_key_ref via
 the already-injected SecretResolver, make one outbound httpx call, never
 return the resolved key or the raw vendor body to the caller.
 
-The wizard's own deterministic template (admin-ui's systemPromptBuilder.ts)
-still owns the actual anti-hallucination guardrail wording — this endpoint's
-meta-prompt requires the model to reproduce it near-verbatim rather than
-trusting the model to invent equivalent wording, so a paraphrase can't
-quietly drop a guardrail. Only openai/anthropic engines are supported today;
-anything else is a clear 400, not a silent fallback.
+The guardrail and speech wording lives here as constants — the meta-prompts
+require the model to copy them exactly, and enforce_prompt_structure() puts
+back any block the model dropped, so a paraphrase can't quietly lose a
+guardrail. Only openai/anthropic engines are supported today; anything else
+is a clear 400, not a silent fallback.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+import re
+import uuid
+from typing import Any, Literal
 
 import httpx
 
@@ -27,19 +28,119 @@ from .secret_resolver import SecretResolver
 log = logging.getLogger(__name__)
 
 _TIMEOUT_S = 20.0
+_PROMPT_MAX_TOKENS = 1500
+_CHAT_MAX_TOKENS = 300
+_TRANSCRIPT_TURNS = 30
+_TRANSCRIPT_CHARS = 8000
 
-# The guardrail sentences the model is required to reproduce close to
-# verbatim — kept identical to admin-ui/lib/systemPromptBuilder.ts's fixed
-# lines, so a from-scratch LLM draft carries the same non-negotiable rules
-# as the deterministic one.
+# Bare lines, no markdown — the speech rules forbid markdown in spoken output.
+HEADING_SPEAK = "How you speak"
+HEADING_GUARDRAILS = "Guardrails"
+HEADING_JOB = "Doing your job well"
+_HEADINGS = (HEADING_SPEAK, HEADING_GUARDRAILS, HEADING_JOB)
+_MIN_JOB_LINES = 3
+
+# Blocks the model must copy exactly and enforce_prompt_structure() restores.
 _GUARDRAILS = (
     "Never invent facts, prices, policies, order details, or availability. If you do not have "
     "verified information to answer something, say so plainly and offer to check or transfer the "
     "caller — do not guess or make up an answer."
 )
-_SPOKEN_STYLE = (
+HUMAN_SPEECH_VOICE = (
     "Answer in at most 2-3 short spoken sentences. Plain conversational speech only — no markdown, "
     "no lists, no headings."
+)
+HUMAN_SPEECH_CHAT = (
+    "Answer in at most 2-3 short sentences. Plain conversational text only — no markdown, "
+    "no lists, no headings."
+)
+_SPEECH_BLOCK = {"voice": HUMAN_SPEECH_VOICE, "chat": HUMAN_SPEECH_CHAT}
+
+
+class PromptStructureError(ValueError):
+    """A prompt is missing its headings or job lines, or a model proposal is unusable."""
+
+
+class CustomerDataError(PromptStructureError):
+    """A model proposal copied caller data into the prompt."""
+
+
+def _heading_indices(lines: list[str]) -> list[int] | None:
+    """First-occurrence line index of each heading, or None if any is missing or out of order."""
+    stripped = [ln.strip() for ln in lines]
+    if any(h not in stripped for h in _HEADINGS):
+        return None
+    idx = [stripped.index(h) for h in _HEADINGS]
+    return idx if idx == sorted(idx) else None
+
+
+def check_prompt_structure(text: str) -> bool:
+    lines = text.splitlines()
+    idx = _heading_indices(lines)
+    if idx is None:
+        return False
+    return sum(1 for ln in lines[idx[2] + 1:] if ln.strip()) >= _MIN_JOB_LINES
+
+
+def enforce_prompt_structure(text: str, *, channel: Literal["voice", "chat"]) -> str:
+    if not check_prompt_structure(text):
+        raise PromptStructureError("prompt is missing its sections or job lines")
+    lines = text.splitlines()
+    speak, guard, job = _heading_indices(lines)
+    # Later section first, so the earlier indices stay valid after an insert.
+    for block, start, end in (
+        (_GUARDRAILS, guard, job),
+        (_SPEECH_BLOCK[channel], speak, guard),
+    ):
+        if block in "\n".join(lines[start + 1:end]):
+            continue
+        while not lines[end - 1].strip():
+            end -= 1
+        lines.insert(end, block)
+    return "\n".join(lines)
+
+
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_PHONE = re.compile(r"\+?\(?\d[\d\s\-()]{5,}\d")
+_LONG_DIGITS = re.compile(r"\d{6,}")
+_DOB = re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b")
+_CALLER_WINDOW = 40
+
+
+def _data_tokens(text: str) -> set[str]:
+    tokens = {m.lower() for m in _EMAIL.findall(text)}
+    phone_digits = (re.sub(r"\D", "", m) for m in _PHONE.findall(text))
+    tokens |= {d for d in phone_digits if len(d) >= 7}
+    tokens.update(_LONG_DIGITS.findall(text))
+    tokens.update(_DOB.findall(text))
+    return tokens
+
+
+def find_customer_data(proposed: str, *, base: str, problem: str, caller_lines: list[str]) -> bool:
+    """True when a proposed prompt carries caller data that neither the base prompt nor the
+    problem statement already contained."""
+    known = f"{base}\n{problem}"
+    if _data_tokens(proposed) - _data_tokens(known):
+        return True
+    for line in caller_lines:
+        line = line.strip()
+        for i in range(len(line) - _CALLER_WINDOW + 1):
+            window = line[i:i + _CALLER_WINDOW]
+            if window in proposed and window not in known:
+                return True
+    return False
+
+
+def adds_template_braces(proposed: str, base: str) -> bool:
+    """The runtime renderer evaluates or deletes {{...}}, so a proposal may not add any."""
+    return proposed.count("{{") > base.count("{{") or proposed.count("}}") > base.count("}}")
+
+
+_META_RULES = (
+    "Write it as instructions addressed to the agent (second person), as plain text with exactly "
+    "these three section headings, each on its own line with no markdown, in this order:\n"
+    f"{HEADING_SPEAK}\n{HEADING_GUARDRAILS}\n{HEADING_JOB}\n"
+    "Under each heading put short plain lines. "
 )
 
 
@@ -57,14 +158,14 @@ def _meta_prompt(inputs: dict[str, Any]) -> str:
     ]
     return (
         "Write a system prompt for a real-time voice AI agent, for the facts below. "
-        "Write it as instructions addressed to the agent (second person), in prose, one "
-        "paragraph, no headings or bullet points.\n\n"
+        + _META_RULES
+        + "Put at least three lines under the last heading.\n\n"
         + "\n".join(facts)
-        + "\n\nThe prompt you write MUST include, reproduced close to verbatim, these exact "
-        "rules (translate only if the target language is not English; do not paraphrase or "
+        + "\n\nThe prompt you write MUST include, copied exactly, these rules "
+        "(translate only if the target language is not English; do not paraphrase or "
         "soften them):\n"
-        f"1. {_GUARDRAILS}\n"
-        f"2. {_SPOKEN_STYLE}\n"
+        f"1. Under {HEADING_GUARDRAILS}: {_GUARDRAILS}\n"
+        f"2. Under {HEADING_SPEAK}: {HUMAN_SPEECH_VOICE}\n"
         + ("3. If a knowledge base is attached, add one sentence requiring every factual claim "
            "to be grounded in it, and to admit not knowing rather than improvising when it "
            "doesn't cover the question.\n" if inputs["has_knowledge_base"] else "")
@@ -76,38 +177,51 @@ def _meta_prompt(inputs: dict[str, Any]) -> str:
     )
 
 
-async def _call_openai(api_key: str, model: str, prompt: str) -> str:
+_Messages = list[dict[str, str]]
+
+
+async def _call_openai(
+    api_key: str, model: str, messages: _Messages, system: str | None, max_tokens: int,
+) -> str:
+    if system:
+        messages = [{"role": "system", "content": system}, *messages]
     async with httpx.AsyncClient(base_url="https://api.openai.com", timeout=_TIMEOUT_S) as client:
         resp = await client.post(
             "/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
             json={
                 "model": model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": messages,
                 "stream": False,
                 "temperature": 0.4,
+                "max_tokens": max_tokens,
             },
         )
     if resp.status_code != 200:
-        log.warning("OpenAI chat/completions returned %s: %s", resp.status_code, resp.text[:200])
+        log.warning("OpenAI chat/completions returned %s", resp.status_code)
         raise ValueError(f"OpenAI returned {resp.status_code}")
     return resp.json()["choices"][0]["message"]["content"].strip()
 
 
-async def _call_anthropic(api_key: str, model: str, prompt: str) -> str:
+async def _call_anthropic(
+    api_key: str, model: str, messages: _Messages, system: str | None, max_tokens: int,
+) -> str:
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    if system:
+        body["system"] = system
     async with httpx.AsyncClient(base_url="https://api.anthropic.com", timeout=_TIMEOUT_S) as client:
         resp = await client.post(
             "/v1/messages",
             headers={"x-api-key": api_key, "anthropic-version": "2023-06-01"},
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 400,
-                "stream": False,
-            },
+            json=body,
         )
     if resp.status_code != 200:
-        log.warning("Anthropic messages returned %s: %s", resp.status_code, resp.text[:200])
+        log.warning("Anthropic messages returned %s", resp.status_code)
         raise ValueError(f"Anthropic returned {resp.status_code}")
     return resp.json()["content"][0]["text"].strip()
 
@@ -116,28 +230,110 @@ _CALLERS = {"openai": _call_openai, "anthropic": _call_anthropic}
 _DEFAULT_MODEL = {"openai": "gpt-4o-mini", "anthropic": "claude-3-5-haiku-20241022"}
 
 
-async def generate_system_prompt(
-    tenant_id: Any, llm_config_id: Any, inputs: dict[str, Any], *, secret_resolver: SecretResolver,
-) -> str:
+async def _load_tenant_llm_config(tenant_id: Any, llm_config_id: Any) -> dict[str, Any]:
+    # One message for a malformed, missing or other-tenant id, so the response never
+    # reveals whether the id exists under another tenant.
+    try:
+        uuid.UUID(str(llm_config_id))
+    except ValueError:
+        raise LookupError("provider_config not found") from None
     cfg = await get_provider_config(llm_config_id)
-    if cfg is None:
-        raise LookupError(f"provider_config {llm_config_id} not found")
-    if str(cfg["tenant_id"]) != str(tenant_id):
-        raise ValueError(f"llm_config_id={llm_config_id!r} belongs to a different tenant")
+    if cfg is None or str(cfg["tenant_id"]) != str(tenant_id):
+        raise LookupError("provider_config not found")
     if cfg["role"] != "llm":
         raise ValueError(f"provider_config {llm_config_id} is role={cfg['role']!r}, expected 'llm'")
-    caller = _CALLERS.get(cfg["engine"])
-    if caller is None:
+    if cfg["engine"] not in _CALLERS:
         raise ValueError(
             f"system-prompt generation isn't supported for engine {cfg['engine']!r} yet — "
             f"supported: {sorted(_CALLERS)}"
         )
     if not cfg["api_key_ref"]:
         raise ValueError(f"provider_config {llm_config_id} has no api_key_ref configured")
+    return cfg
 
+
+async def _complete(
+    tenant_id: Any, llm_config_id: Any, messages: _Messages, *,
+    system: str | None = None, max_tokens: int, secret_resolver: SecretResolver,
+) -> str:
+    cfg = await _load_tenant_llm_config(tenant_id, llm_config_id)
     api_key = await secret_resolver.resolve(cfg["api_key_ref"])
-    prompt = _meta_prompt(inputs)
+    caller = _CALLERS[cfg["engine"]]
     try:
-        return await caller(api_key, cfg["model"] or _DEFAULT_MODEL[cfg["engine"]], prompt)
+        return await caller(
+            api_key, cfg["model"] or _DEFAULT_MODEL[cfg["engine"]], messages, system, max_tokens,
+        )
     except httpx.RequestError as exc:
         raise ValueError(f"could not reach the LLM provider: {exc.__class__.__name__}") from exc
+
+
+async def generate_system_prompt(
+    tenant_id: Any, llm_config_id: Any, inputs: dict[str, Any], *, secret_resolver: SecretResolver,
+) -> str:
+    text = await _complete(
+        tenant_id, llm_config_id, [{"role": "user", "content": _meta_prompt(inputs)}],
+        max_tokens=_PROMPT_MAX_TOKENS, secret_resolver=secret_resolver,
+    )
+    return enforce_prompt_structure(text, channel="voice")
+
+
+_REVISE_SYSTEM = (
+    "You revise the system prompt of a customer-facing AI agent. You are given the current "
+    "prompt, a description of what went wrong, and a transcript of a conversation. Return the "
+    "full revised prompt. " + _META_RULES + "Copy these two blocks exactly, unchanged:\n"
+    "{speech}\n" + _GUARDRAILS + "\n"
+    "Change only what the problem needs. Generalise from the transcript: never copy caller "
+    "names, addresses, phone numbers, ids or other personal details into the prompt. Do not "
+    "use double curly brackets. Return only the prompt text — no preamble, no quotes."
+)
+
+
+async def revise_system_prompt(
+    tenant_id: Any, llm_config_id: Any, *, base_prompt: str, problem: str,
+    transcript: list[tuple[str | None, str | None]], channel: Literal["voice", "chat"],
+    secret_resolver: SecretResolver,
+) -> str:
+    """Transcript turns are (caller text, agent text)."""
+    turns = transcript[-_TRANSCRIPT_TURNS:]
+    lines = [f"{who}: {text}" for caller, agent in turns
+             for who, text in (("Caller", caller), ("Agent", agent)) if text]
+    user = (
+        f"Current prompt:\n{base_prompt}\n\nWhat went wrong:\n{problem}\n\n"
+        f"Transcript:\n{chr(10).join(lines)[-_TRANSCRIPT_CHARS:]}"
+    )
+    text = await _complete(
+        tenant_id, llm_config_id, [{"role": "user", "content": user}],
+        system=_REVISE_SYSTEM.replace("{speech}", _SPEECH_BLOCK[channel]),
+        max_tokens=_PROMPT_MAX_TOKENS, secret_resolver=secret_resolver,
+    )
+    revised = enforce_prompt_structure(text, channel=channel)
+    if adds_template_braces(revised, base_prompt):
+        raise PromptStructureError("revised prompt adds template braces")
+    caller_lines = [caller for caller, _ in turns if caller]
+    if find_customer_data(revised, base=base_prompt, problem=problem, caller_lines=caller_lines):
+        raise CustomerDataError("revised prompt contains caller data")
+    return revised
+
+
+async def chat_test_reply(
+    tenant_id: Any, llm_config_id: Any, *, system_prompt: str,
+    history: list[tuple[str | None, str | None]], message: str, secret_resolver: SecretResolver,
+) -> str:
+    """History turns are (caller text, agent text)."""
+    messages: _Messages = [
+        {"role": role, "content": text}
+        for caller, agent in history
+        for role, text in (("user", caller), ("assistant", agent)) if text
+    ]
+    # Anthropic requires the first message to be from the user, so the agent's opening
+    # lines go into the system text instead.
+    opening = []
+    while messages and messages[0]["role"] == "assistant":
+        opening.append(messages.pop(0)["content"])
+    if opening:
+        system_prompt += "\n\nYou opened the conversation by saying: " + " ".join(opening)
+    messages.append({"role": "user", "content": message})
+    return await _complete(
+        tenant_id, llm_config_id, messages, system=system_prompt,
+        max_tokens=_CHAT_MAX_TOKENS, secret_resolver=secret_resolver,
+    )

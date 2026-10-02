@@ -39,9 +39,13 @@ async def resolve_handler_deps(
     agent_slug: str,
     registry: ProviderRegistry,
     config: IConfigProvider,
+    *,
+    include_inactive: bool = False,
 ) -> tuple[RuntimeConfig, ProviderBundle] | None:
     try:
-        runtime_config = await config.get_runtime_config(tenant_slug, agent_slug)
+        runtime_config = await config.get_runtime_config(
+            tenant_slug, agent_slug, include_inactive=include_inactive
+        )
         if runtime_config is None:
             # Covers every "not available" case in one signal: no agent row,
             # agent.status != 'active' (deactivated, not deleted), no tenant
