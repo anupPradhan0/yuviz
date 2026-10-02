@@ -309,13 +309,11 @@ bool EslClient::transfer(const TransferRequest& req, std::string& error_out) {
         return false;
     }
 
-    // Phone number/extension: normal XML dialplan extension lookup.
-    // SIP URI: "inline" dialplan lets the destination be a direct app:data
-    // string instead of an extension name — bridge straight to the URI via
-    // mod_sofia's external profile, with no dialplan entry required for it.
-    const std::string command = looks_like_sip_uri(destination)
-        ? "api uuid_transfer " + uuid + " 'bridge:sofia/external/" + destination + "' inline"
-        : "api uuid_transfer " + uuid + " " + destination + " XML default";
+    // Always an inline bridge, never a dialplan context: FreeSWITCH's stock
+    // "default" context maps numbers like 779 (eavesdrop all) and 886
+    // (intercept) to features that reach other tenants' calls.
+    const std::string command =
+        "api uuid_transfer " + uuid + " 'bridge:" + dial_string_for(destination) + "' inline";
 
     std::lock_guard lock{mutex_};
     std::string reply;
@@ -339,6 +337,13 @@ bool EslClient::transfer(const TransferRequest& req, std::string& error_out) {
     logger_.warn("EslClient: transfer command rejected uuid={} destination={} reason={} reply={}",
                  uuid, destination, reason, reply);
     return false;
+}
+
+std::string EslClient::dial_string_for(const std::string& destination) const {
+    return looks_like_sip_uri(destination)
+        ? "sofia/external/" + destination
+        : "sofia/external/sip:" + destination + "@" + cfg_.sip_proxy_host + ":" +
+              std::to_string(cfg_.sip_proxy_port);
 }
 
 bool EslClient::originate_async(const std::string& destination,
@@ -399,12 +404,8 @@ bool EslClient::originate_async(const std::string& destination,
     // FreeSWITCH's own directory knowing about the extension at all — the
     // proxy's registrar handles that, exactly as it already does for every
     // other call in this deployment.
-    const std::string dial_string = looks_like_sip_uri(destination)
-        ? "sofia/external/" + destination
-        : "sofia/external/sip:" + destination + "@" + cfg_.sip_proxy_host + ":" +
-              std::to_string(cfg_.sip_proxy_port);
-
-    const std::string command = "bgapi originate " + caller_id_vars + dial_string + " &park()";
+    const std::string command =
+        "bgapi originate " + caller_id_vars + dial_string_for(destination) + " &park()";
 
     std::lock_guard lock{mutex_};
     std::string reply;

@@ -105,6 +105,14 @@ fi
 
 cp "$HERE/00_voice_ai.xml" "$CONF/dialplan/public/00_voice_ai.xml"
 echo "  dialplan: public/00_voice_ai.xml (788, 5000-5009 -> start_voice_ai.lua)"
+
+# The stock "default" context is a demo dialplan with eavesdrop/intercept
+# extensions that reach every call on the switch. Keep the original once.
+if [[ ! -f "$CONF/dialplan/default.xml.stock" ]] && ! grep -q 'name="deny_all"' "$CONF/dialplan/default.xml"; then
+  mv "$CONF/dialplan/default.xml" "$CONF/dialplan/default.xml.stock"
+fi
+cp "$HERE/default_context.xml" "$CONF/dialplan/default.xml"
+echo "  dialplan: default context replaced with deny-all (stock kept as default.xml.stock)"
 echo ""
 
 # ── Step 3: sanity check ────────────────────────────────────────────────────

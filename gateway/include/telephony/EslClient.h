@@ -121,6 +121,8 @@ public:
     bool unhold(const std::string& uuid, std::string& error_out);
 
 private:
+    // A SIP URI as-is; a number via the SIP proxy (Kamailio), never a dialplan context.
+    std::string dial_string_for(const std::string& destination) const;
     bool ensure_connected_locked();
     bool send_command_locked(const std::string& command, std::string& reply_out);
     void disconnect_locked();

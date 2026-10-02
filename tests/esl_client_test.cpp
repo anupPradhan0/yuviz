@@ -140,13 +140,16 @@ EslConfig make_cfg(uint16_t port) {
 
 // ── uuid_transfer command construction ──────────────────────────────────────
 
-TEST(EslClientTransferTest, PhoneNumberDestinationUsesXmlDefaultDialplan) {
+TEST(EslClientTransferTest, PhoneNumberDestinationBridgesThroughTheSipProxy) {
     FakeEslServer server;
     server.start();
     server.next_reply_body = "+OK";
 
     Logger logger = Logger::make_null();
-    EslClient client{make_cfg(server.port), logger};
+    EslConfig cfg = make_cfg(server.port);
+    cfg.sip_proxy_host = "192.168.0.116";
+    cfg.sip_proxy_port = 5060;
+    EslClient client{cfg, logger};
 
     std::string error;
     const bool ok = client.transfer(make_req("call-uuid-1", "1005", "customer_requested"), error);
@@ -154,7 +157,27 @@ TEST(EslClientTransferTest, PhoneNumberDestinationUsesXmlDefaultDialplan) {
     EXPECT_TRUE(ok);
     EXPECT_TRUE(error.empty());
     ASSERT_EQ(server.received_commands.size(), 1u);
-    EXPECT_EQ(server.received_commands[0], "api uuid_transfer call-uuid-1 1005 XML default");
+    EXPECT_EQ(server.received_commands[0],
+              "api uuid_transfer call-uuid-1 'bridge:sofia/external/sip:1005@192.168.0.116:5060' inline");
+}
+
+// The stock "default" context maps 779 to eavesdrop-all and 886 to intercept:
+// a tenant-chosen number must never be looked up in any dialplan context.
+TEST(EslClientTransferTest, NoTransferDestinationReachesADialplanContext) {
+    for (const char* dest : {"779", "886", "5005", "+919876543210", "sip:agent@example.com"}) {
+        FakeEslServer server;
+        server.start();
+        server.next_reply_body = "+OK";
+        Logger logger = Logger::make_null();
+        EslClient client{make_cfg(server.port), logger};
+        std::string error;
+        ASSERT_TRUE(client.transfer(make_req("call-uuid-9", dest), error)) << dest;
+        ASSERT_EQ(server.received_commands.size(), 1u) << dest;
+        const std::string& cmd = server.received_commands[0];
+        EXPECT_EQ(cmd.find(" XML "), std::string::npos) << cmd;
+        EXPECT_EQ(cmd.rfind("api uuid_transfer call-uuid-9 'bridge:sofia/external/", 0), 0u) << cmd;
+        EXPECT_EQ(cmd.substr(cmd.size() - 8), "' inline") << cmd;
+    }
 }
 
 TEST(EslClientTransferTest, SipUriDestinationUsesInlineBridge) {
