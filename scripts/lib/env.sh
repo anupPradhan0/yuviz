@@ -4,8 +4,20 @@
 
 _rand() { head -c "$(( ${1:-32} * 3 ))" /dev/urandom | base64 | LC_ALL=C tr -cd 'A-Za-z0-9' | cut -c "1-${1:-32}"; }
 
-_env_set() {  # Replaces KEY's line in .env (value is alphanumeric/url-safe).
-  sed -i.bak "s|^$1=.*|$1=$2|" "$REPO/.env" && rm -f "$REPO/.env.bak"
+# Replaces KEY's line in .env with the value written literally: awk reads both
+# from ENVIRON, which (unlike sed's replacement or awk -v) interprets no `&`,
+# `\` or delimiter, so a secret exported in the shell lands byte for byte.
+# Returns 1 on failure; callers test it with `if`, so `set -e` never fires.
+_env_set() {
+  local tmp="$REPO/.env.tmp.$$"
+  if (umask 077; _ENV_SET_KEY="$1" _ENV_SET_VALUE="$2" awk '
+        index($0, ENVIRON["_ENV_SET_KEY"] "=") == 1 { print ENVIRON["_ENV_SET_KEY"] "=" ENVIRON["_ENV_SET_VALUE"]; next }
+        { print }' "$REPO/.env" > "$tmp") && mv -f "$tmp" "$REPO/.env"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  echo "could not write $1 to $REPO/.env" >&2
+  return 1
 }
 
 _env_get() { grep "^$1=" "$REPO/.env" | cut -d= -f2-; }
@@ -18,7 +30,8 @@ _env_init() {
   while IFS= read -r line; do
     key=${line%%=*}
     case "$line" in ''|'#'*) continue ;; esac
-    grep -q "^${key}=" "$REPO/.env" || { echo "$line" >> "$REPO/.env"; echo "✓ added $key to .env"; }
+    # printf, not echo: zsh's echo would expand a `\` in the line.
+    grep -q "^${key}=" "$REPO/.env" || { printf '%s\n' "$line" >> "$REPO/.env"; echo "✓ added $key to .env"; }
   done < "$REPO/.env.example"
   local spec name len current
   for spec in JWT_SECRET:48 CONFIG_SERVICE_PASSWORD:32 YUVIZ_APP_PASSWORD:32 TOOLEXEC_ARGS_HMAC_KEY:48 SECRET_ENCRYPTION_KEY:fernet; do
@@ -28,14 +41,15 @@ _env_init() {
     # tabs sourced later would get a different key.
     current=$(printenv "$name" || true)
     if [ -n "$current" ]; then
-      _env_set "$name" "$current"; echo "✓ saved $name from your shell to .env"
+      if _env_set "$name" "$current"; then echo "✓ saved $name from your shell to .env"; fi
     elif [ "$len" = fernet ]; then
       # Fernet: 32 random bytes, url-safe base64.
-      _env_set "$name" "$(head -c 32 /dev/urandom | base64 | LC_ALL=C tr '+/' '-_')"; echo "✓ generated $name"
+      if _env_set "$name" "$(head -c 32 /dev/urandom | base64 | LC_ALL=C tr '+/' '-_')"; then echo "✓ generated $name"; fi
     else
-      _env_set "$name" "$(_rand "$len")"; echo "✓ generated $name"
+      if _env_set "$name" "$(_rand "$len")"; then echo "✓ generated $name"; fi
     fi
   done
+  return 0
 }
 
 # Exports every non-blank .env value, except variables already set in the
