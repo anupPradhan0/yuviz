@@ -133,6 +133,19 @@ async def request_intervention(
 
     try:
         slug, tenant_id, effective_user = await _resolve_scope(request, user, tenant_slug)
+        if (effective_user.tenant_id, effective_user.role) != (fresh.tenant_id, fresh.role):
+            # _resolve_scope answered from a memo entry that predates a
+            # re-tenant or role change (the memo outlives both for its TTL,
+            # and a PATCH /users served by another process can't evict this
+            # process's copy). A write must act on the row just read, so drop
+            # every entry for this user and resolve again from the DB: the
+            # same outcome as a cold memo, so no new status or body.
+            deps.forget_user(request.app.state, user.id)
+            slug, tenant_id, effective_user = await _resolve_scope(request, user, tenant_slug)
+            if (effective_user.tenant_id, effective_user.role) != (fresh.tenant_id, fresh.role):
+                # Changed again between the two reads: the same refusal
+                # assert_current_authority gives a re-tenanted actor.
+                raise HTTPException(status_code=403, detail="account tenant has changed; sign in again")
     except HTTPException as exc:
         if exc.status_code == 404:
             # Audit _resolve_scope's 404 as a denial under the tenant just read

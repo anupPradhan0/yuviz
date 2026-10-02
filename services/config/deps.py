@@ -247,7 +247,8 @@ def _fresh_hit(cached: Any, token_user: CurrentUser, now: float, ttl_s: float) -
 
 def forget_user(app_state: Any, user_id: str) -> None:
     """Drops every memoized authority for this user so a password change
-    revokes older tokens immediately in this process."""
+    revokes older tokens, and a role or tenant move takes effect,
+    immediately in this process."""
     console = getattr(app_state, "_console_authority_memo", None)
     if console is not None:
         console.pop(user_id, None)
