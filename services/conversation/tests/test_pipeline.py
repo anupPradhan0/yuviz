@@ -1731,6 +1731,17 @@ def test_transfer_destination_problem_diagnoses():
     assert transfer_destination_problem("SIPS:agent@host.tld") is not None
 
 
+@pytest.mark.parametrize("dest", ["788", "5005"])
+def test_transfer_destination_problem_names_platform_ai_numbers(dest):
+    from ..pipeline import transfer_destination_problem
+    assert "own AI numbers" in transfer_destination_problem(dest)
+
+
+def test_transfer_destination_problem_names_loopback_uri():
+    from ..pipeline import transfer_destination_problem
+    assert "points at this host" in transfer_destination_problem("sip:3500@127.0.0.1:5080")
+
+
 # ---------------------------------------------------------------------------
 # Phase 5F — transfer_id generation (observability correlation)
 # ---------------------------------------------------------------------------

@@ -126,7 +126,10 @@ class AgentUpdate(BaseModel):
     @classmethod
     def _transfer_destination_shape(cls, value: str | None) -> str | None:
         if value and not is_transfer_destination(value):
-            raise ValueError("transfer_destination must be a phone number/extension or sip:user@host")
+            raise ValueError(
+                "transfer_destination must be a phone number/extension or sip:user@host, and not "
+                "one of this platform's own AI numbers (788, 5000-5009) or a loopback address"
+            )
         return value
 
     @field_validator("platform_did", "custom_caller_id")

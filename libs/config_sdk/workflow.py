@@ -365,7 +365,7 @@ def literal_destination_errors(graph: WorkflowGraph) -> list[WorkflowError]:
     return [
         WorkflowError("node", node.id, "transfer_destination",
                       f"{node.name!r} has an invalid destination — use a phone number/extension "
-                      "or sip:user@host")
+                      "or sip:user@host, not one of this platform's own AI numbers (788, 5000-5009)")
         for node in graph.nodes.values()
         if node.type == "transfer" and node.transfer_destination
         and "{{" not in node.transfer_destination and not is_transfer_destination(node.transfer_destination)
