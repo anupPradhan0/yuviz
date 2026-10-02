@@ -154,8 +154,9 @@ EslClient::EslClient(EslConfig cfg, Logger& logger)
 {
     if (cfg_.enabled && cfg_.sip_proxy_host.empty()) {
         logger_.error("EslClient: esl.sip_proxy_host is not set — every transfer to a number "
-                      "will be refused. Run scripts/update_kamailio_ip.sh, or set it in "
-                      "config/gateway.yaml to the IP Kamailio listens on.");
+                      "will be refused. Run scripts/update_kamailio_ip.sh, which writes "
+                      "SIP_PROXY_HOST (the IP Kamailio listens on) into .env, then restart "
+                      "the Gateway.");
     }
 }
 

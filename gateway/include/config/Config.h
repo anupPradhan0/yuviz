@@ -82,12 +82,13 @@ struct EslConfig {
     // "user/<id>" fails with USER_NOT_REGISTERED even when the destination is
     // genuinely online.
     //
-    // Must be the IP Kamailio listens on, which is host-specific:
-    // scripts/update_kamailio_ip.sh writes it into config/gateway.yaml. Empty
-    // (the default) means not configured: EslClient logs an error at startup
-    // and refuses every transfer to a number with "sip_proxy_host_unset",
-    // rather than sending the INVITE to a wrong host and leaving the caller in
-    // silence until SIP Timer B (~32 s) expires.
+    // Must be the IP Kamailio listens on, which is host-specific. The setting
+    // is SIP_PROXY_HOST in .env (scripts/update_kamailio_ip.sh writes it); a
+    // non-blank env value overrides config/gateway.yaml, which is only the
+    // fallback and ships empty. Empty (the default) means not configured:
+    // EslClient logs an error at startup and refuses every transfer to a
+    // number with "sip_proxy_host_unset", rather than sending the INVITE to a
+    // wrong host and leaving the caller in silence until SIP Timer B (~32 s).
     std::string sip_proxy_host{};
     uint16_t    sip_proxy_port{5060};
 };

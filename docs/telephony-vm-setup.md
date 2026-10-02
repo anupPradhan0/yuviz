@@ -199,15 +199,15 @@ Three details are load-bearing:
 
 ## 8. Host-side config changes
 
-These four are the entire cost of the VM split:
+These two are the entire cost of the VM split:
 
-    config/gateway.yaml
-      esl.host           127.0.0.1 -> VM_IP
-      esl.sip_proxy_host -> VM_IP  (written by update_kamailio_ip.sh in step 3,
-                                    since the repo is mounted; check it)
-    services/campaigns (env)
+    .env (repo root; read by both the Gateway and Campaigns)
       FREESWITCH_ESL_HOST=VM_IP
-      SIP_PROXY_HOST=VM_IP
+      SIP_PROXY_HOST=VM_IP   (written by update_kamailio_ip.sh in step 3,
+                              since the repo is mounted; check it)
+
+`config/gateway.yaml`'s `esl.host`/`esl.sip_proxy_host` are only fallbacks:
+the `.env` values above override them.
 
 `gateway.websocket.host` is already 0.0.0.0, so it accepts the VM's
 connection with no change.
@@ -239,11 +239,10 @@ Triage order when it fails:
     at /usr/bin, so step 3/3 silently prints "fs_cli not found — skipping"
     and never restarts FreeSWITCH after an IP change. Worth making
     overridable via env.
-  - services/campaigns/originate.py still defaults SIP_PROXY_HOST to a
-    literal 192.168.0.116, and update_kamailio_ip.sh does not set it.
-    Inbound keeps working while outbound campaigns break. (The Gateway's
-    esl.sip_proxy_host is rewritten by the script, and an empty value is
-    refused loudly rather than dialed.)
+  - SIP_PROXY_HOST in .env must be VM_IP. update_kamailio_ip.sh writes it;
+    while it is blank the Gateway refuses transfers to numbers and
+    Campaigns refuses to originate, both with an explicit error. An old
+    .env holding 127.0.0.1 is wrong here: rerun the script.
   - scripts/start_local.sh:148-151 runs `cd $REPO && ./freeswitch`, but no
     such file is in the repo. Presumably an uncommitted local wrapper.
 
