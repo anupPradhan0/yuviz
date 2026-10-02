@@ -129,7 +129,7 @@ RTP will not tolerate it.
 
 ## 6. FreeSWITCH config
 
-Four pieces. Every value here is pinned by host-side code — check the table
+Five pieces. Every value here is pinned by host-side code — check the table
 at the end before changing any of them.
 
 **autoload_configs/modules.conf.xml** — load `mod_sofia`,
@@ -153,6 +153,20 @@ and define `gateway_host` in autoload_configs/acl.conf.xml as HOST_IP/32.
 gateway/src/telephony/EslClient.cpp and services/campaigns/originate.py.
 
 **dialplan** — match `^(788|500\d)$`, answer, run the Lua below.
+
+**dialplan/default.xml** — replace the stock `default` context with the
+repo's deny-all one, exactly as `scripts/freeswitch/setup_macos.sh` does on
+macOS. Do not skip this. The stock context is a demo dialplan: `779` is
+eavesdrop-all, `886`/`*8`/`**<ext>` intercept another call, and the `35xx`
+conference rooms are shared by every tenant on the switch. The stock
+`public` context hands `10xx`, `35xx`-`38xx` and `5551212` on to it, so any
+call that reaches the `external` profile can end up there:
+
+    sudo /Users/<you>/yuviz/scripts/freeswitch/install_default_context.sh /etc/freeswitch
+    fs_cli -P 8022 -p <password> -x reloadxml
+
+The stock file is kept once as `dialplan/default.xml.stock`. Rerun it after
+any package upgrade that rewrites `/etc/freeswitch/dialplan/default.xml`.
 
 ## 7. The Lua dialplan script
 
@@ -189,7 +203,8 @@ These four are the entire cost of the VM split:
 
     config/gateway.yaml
       esl.host           127.0.0.1 -> VM_IP
-      esl.sip_proxy_host 192.168.0.116 -> VM_IP
+      esl.sip_proxy_host -> VM_IP  (written by update_kamailio_ip.sh in step 3,
+                                    since the repo is mounted; check it)
     services/campaigns (env)
       FREESWITCH_ESL_HOST=VM_IP
       SIP_PROXY_HOST=VM_IP
@@ -224,12 +239,11 @@ Triage order when it fails:
     at /usr/bin, so step 3/3 silently prints "fs_cli not found — skipping"
     and never restarts FreeSWITCH after an IP change. Worth making
     overridable via env.
-  - The same script's header claims everything outside Kamailio is
-    already 127.0.0.1/localhost. Not true: config/gateway.yaml and
-    services/campaigns/originate.py both carry a literal 192.168.0.116,
-    and neither is rewritten. Inbound keeps working while warm transfer and
-    outbound campaigns break — an asymmetric failure that is annoying to
-    diagnose.
+  - services/campaigns/originate.py still defaults SIP_PROXY_HOST to a
+    literal 192.168.0.116, and update_kamailio_ip.sh does not set it.
+    Inbound keeps working while outbound campaigns break. (The Gateway's
+    esl.sip_proxy_host is rewritten by the script, and an empty value is
+    refused loudly rather than dialed.)
   - scripts/start_local.sh:148-151 runs `cd $REPO && ./freeswitch`, but no
     such file is in the repo. Presumably an uncommitted local wrapper.
 

@@ -4,7 +4,8 @@
   **<ext> intercept, park/valet-park, conferences). Nothing on this platform
   routes calls here: transfers and originates bridge inline. Anything that
   lands here is refused.
-  Installed as dialplan/default.xml by scripts/freeswitch/setup_macos.sh.
+  Installed as dialplan/default.xml by scripts/freeswitch/install_default_context.sh
+  (called by setup_macos.sh; run by hand on Linux, docs/telephony-vm-setup.md).
 -->
 <include>
   <context name="default">
