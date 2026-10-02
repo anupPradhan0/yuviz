@@ -113,11 +113,14 @@ Fill these yourself; nothing can generate them:
 
 The Conversation Service authenticates to Config as a real user. Create it
 with the password the launcher generated into `.env` (sourcing it creates
-`.env` on first run and loads it):
+`.env` on first run and loads it). Run it in a `( ... )` subshell: the
+launcher turns on `set -euo pipefail`, and this one-off command fails on a
+re-run (the account already exists), which would otherwise close your
+terminal:
 
 ```bash
-source scripts/start_web_test.sh
-./venv/bin/python3 scripts/create_service_account.py "$CONFIG_SERVICE_EMAIL" "$CONFIG_SERVICE_PASSWORD"
+( source scripts/start_web_test.sh &&
+  ./venv/bin/python3 scripts/create_service_account.py "$CONFIG_SERVICE_EMAIL" "$CONFIG_SERVICE_PASSWORD" )
 ```
 
 `SECRET_ENCRYPTION_KEY` encrypts provider credentials pasted into the Admin
