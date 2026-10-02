@@ -69,7 +69,7 @@ struct EslConfig {
     bool        enabled{false};
     std::string host{"127.0.0.1"};
     uint16_t    port{8021};
-    std::string password{"ClueCon"};   // FreeSWITCH default; override in production
+    std::string password;              // FREESWITCH_ESL_PASSWORD (or esl.password); required when enabled
     uint32_t    connect_timeout_ms{2000};
 
     // Warm transfer's plain-extension destinations (e.g. "1001") are dialed

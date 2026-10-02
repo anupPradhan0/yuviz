@@ -5,9 +5,31 @@
 #include <nlohmann/json.hpp>
 #include <yaml-cpp/yaml.h>
 
+#include <cstdlib>
 #include <stdexcept>
 
 namespace voiceai {
+
+namespace {
+
+const char* env_value(const char* name) {
+    const char* v = std::getenv(name);
+    return (v != nullptr && *v != '\0') ? v : nullptr;
+}
+
+// Same variables Campaigns reads, so each value is set once in .env.
+void apply_esl_env(EslConfig& esl) {
+    if (const char* v = env_value("FREESWITCH_ESL_PASSWORD")) esl.password = v;
+    if (const char* v = env_value("FREESWITCH_ESL_HOST"))     esl.host = v;
+    if (const char* v = env_value("FREESWITCH_ESL_PORT"))     esl.port = static_cast<uint16_t>(std::stoul(v));
+    if (const char* v = env_value("SIP_PROXY_HOST"))          esl.sip_proxy_host = v;
+    if (const char* v = env_value("SIP_PROXY_PORT"))          esl.sip_proxy_port = static_cast<uint16_t>(std::stoul(v));
+    if (esl.enabled && esl.password.empty()) {
+        throw std::runtime_error("esl.enabled but no ESL password: set FREESWITCH_ESL_PASSWORD in .env");
+    }
+}
+
+}  // namespace
 
 void Config::load(const std::string& path) {
     YAML::Node root;
@@ -18,7 +40,10 @@ void Config::load(const std::string& path) {
     }
 
     const auto gw = root["gateway"];
-    if (!gw) return;
+    if (!gw) {
+        apply_esl_env(config_.esl);
+        return;
+    }
 
     if (const auto ws = gw["websocket"]) {
         if (ws["host"])            config_.websocket.host            = ws["host"].as<std::string>();
@@ -73,6 +98,8 @@ void Config::load(const std::string& path) {
         if (redis["command_timeout_ms"]) config_.redis.command_timeout_ms = redis["command_timeout_ms"].as<uint32_t>();
         if (redis["pool_size"])          config_.redis.pool_size          = redis["pool_size"].as<uint32_t>();
     }
+
+    apply_esl_env(config_.esl);
 }
 
 TenantConfig TenantConfig::from_default(const GatewayConfig& cfg) noexcept {

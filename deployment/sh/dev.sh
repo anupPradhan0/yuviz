@@ -393,7 +393,7 @@ fi
 
 # Blank counts as missing: auth.py's os.environ.get returns "" rather than its
 # fallback, so an empty JWT_SECRET silently becomes the signing key.
-for secret in CONFIG_SERVICE_PASSWORD:32 JWT_SECRET:48 YUVIZ_APP_PASSWORD:32; do
+for secret in POSTGRES_PASSWORD:32 CONFIG_SERVICE_PASSWORD:32 JWT_SECRET:48 YUVIZ_APP_PASSWORD:32; do
     key=${secret%:*}; len=${secret#*:}
     if [ -n "$(grep "^${key}=" "$ENV_FILE" | cut -d= -f2-)" ]; then continue; fi
     value=$(rand "$len")
@@ -408,6 +408,20 @@ for secret in CONFIG_SERVICE_PASSWORD:32 JWT_SECRET:48 YUVIZ_APP_PASSWORD:32; do
     rm -f "$ENV_FILE.bak"
     ok "generated ${key}"
 done
+
+# Built from the generated password, so it never carries a committed one.
+if [ -z "$(grep "^POSTGRES_DSN=" "$ENV_FILE" | cut -d= -f2-)" ]; then
+    pg_user=$(grep "^POSTGRES_USER=" "$ENV_FILE" | cut -d= -f2-)
+    pg_pass=$(grep "^POSTGRES_PASSWORD=" "$ENV_FILE" | cut -d= -f2-)
+    pg_db=$(grep "^POSTGRES_DB=" "$ENV_FILE" | cut -d= -f2-)
+    dsn="postgresql://${pg_user:-voiceai}:${pg_pass}@postgres:5432/${pg_db:-voiceai}"
+    if ! sed -i.bak "s|^POSTGRES_DSN=.*|POSTGRES_DSN=${dsn}|" "$ENV_FILE"; then
+        fail "could not write POSTGRES_DSN to ${ENV_FILE}"
+        exit 1
+    fi
+    rm -f "$ENV_FILE.bak"
+    ok "built POSTGRES_DSN"
+fi
 
 # SECRET_ENCRYPTION_KEY can't go through the loop above: it is a Fernet key,
 # which must be exactly 32 raw bytes in url-safe base64 (44 chars, trailing

@@ -289,3 +289,55 @@ TEST_F(ConfigTest, NoSpeechTimeoutDefaultIs30sWithSaneBounds) {
     EXPECT_LT(voiceai::CallFsmTimerConfig::no_speech_timeout_default,
               voiceai::CallFsmTimerConfig::no_speech_timeout_max);
 }
+
+// ── ESL settings from the environment (.env) ─────────────────────────────────
+namespace {
+
+class EslEnvConfigTest : public ConfigTest {
+protected:
+    void SetUp() override {
+        ConfigTest::SetUp();
+        for (const char* v : {"FREESWITCH_ESL_PASSWORD", "FREESWITCH_ESL_HOST", "FREESWITCH_ESL_PORT",
+                              "SIP_PROXY_HOST", "SIP_PROXY_PORT"}) {
+            ::unsetenv(v);
+        }
+    }
+    void TearDown() override {
+        SetUp();
+        ConfigTest::TearDown();
+    }
+};
+
+}  // namespace
+
+TEST_F(EslEnvConfigTest, PasswordAndSipProxyComeFromTheEnvironment) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "from-env-secret", 1);
+    ::setenv("SIP_PROXY_HOST", "10.1.2.3", 1);
+    ::setenv("SIP_PROXY_PORT", "5070", 1);
+    write_yaml("gateway:\n  esl:\n    enabled: true\n    sip_proxy_host: \"127.0.0.1\"\n");
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+    EXPECT_EQ(cfg.esl().password, "from-env-secret");
+    EXPECT_EQ(cfg.esl().sip_proxy_host, "10.1.2.3");
+    EXPECT_EQ(cfg.esl().sip_proxy_port, 5070);
+}
+
+TEST_F(EslEnvConfigTest, EnvironmentWinsOverYaml) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "from-env", 1);
+    write_yaml("gateway:\n  esl:\n    enabled: true\n    password: \"from-yaml\"\n");
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+    EXPECT_EQ(cfg.esl().password, "from-env");
+}
+
+TEST_F(EslEnvConfigTest, EnabledEslWithoutAPasswordRefusesToStart) {
+    write_yaml("gateway:\n  esl:\n    enabled: true\n");
+    voiceai::Config cfg;
+    EXPECT_THROW(cfg.load(tmp_yaml_.string()), std::runtime_error);
+}
+
+TEST_F(EslEnvConfigTest, DisabledEslNeedsNoPassword) {
+    write_yaml("gateway:\n  esl:\n    enabled: false\n");
+    voiceai::Config cfg;
+    EXPECT_NO_THROW(cfg.load(tmp_yaml_.string()));
+}
