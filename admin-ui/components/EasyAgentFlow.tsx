@@ -29,6 +29,14 @@ import { useActiveTenant } from "@/lib/useActiveTenant";
 import { LANGUAGES } from "@/lib/engineCatalog";
 import { easyCopy, easyErrorText } from "@/lib/easyCopy";
 import { EasyTestStep } from "@/components/EasyTestStep";
+import { EasyKnowledgePicker } from "@/components/EasyKnowledgePicker";
+import {
+  KnowledgeBase,
+  assignKnowledgeBase,
+  createKnowledgeBase,
+  listKnowledgeBases,
+  uploadDocument,
+} from "@/lib/knowledgeApi";
 
 type Role = "llm" | "stt" | "tts";
 
@@ -45,6 +53,19 @@ const MISSING_ROLE_TEXT: Record<Role, string> = {
 };
 const ADD_CONFIG_HREF = "/ai-voice";
 const MAX_FACTS = 1000;
+
+// Document work still to do for a new receptionist: files not yet uploaded, the
+// collection made for them, and collections not yet attached.
+interface DocumentWork {
+  files: File[];
+  created: KnowledgeBase | null;
+  attach: KnowledgeBase[];
+}
+
+const NO_DOCUMENT_WORK: DocumentWork = { files: [], created: null, attach: [] };
+
+const slugify = (text: string) =>
+  text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40).replace(/-$/, "");
 
 const STEP_JOB = 0;
 const STEP_BUSINESS = 1;
@@ -69,6 +90,9 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
   const [facts, setFacts] = useState("");
   const [fieldError, setFieldError] = useState<string | null>(null);
   const [language, setLanguage] = useState("");
+  const [collections, setCollections] = useState<KnowledgeBase[]>([]);
+  const [tickedIds, setTickedIds] = useState<string[]>([]);
+  const [files, setFiles] = useState<File[]>([]);
   const [picked, setPicked] = useState<Partial<Record<Role, string>>>({});
 
   const [agent, setAgent] = useState<Agent | null>(null);
@@ -81,6 +105,10 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
   const [fixError, setFixError] = useState<string | null>(null);
   const [fixNote, setFixNote] = useState<string | null>(null);
   const [exampleShown, setExampleShown] = useState(false);
+
+  const [docWork, setDocWork] = useState<DocumentWork>(NO_DOCUMENT_WORK);
+  const [attached, setAttached] = useState<KnowledgeBase[]>([]);
+  const [docsBusy, setDocsBusy] = useState(false);
 
   const [live, setLive] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
@@ -98,6 +126,10 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
     listProviders(tenant.id)
       .then(setProviders)
       .catch((e) => setLoadError(easyErrorText(e)));
+    // Optional: without the list the picker simply offers no collections.
+    listKnowledgeBases(tenant.id)
+      .then(setCollections)
+      .catch(() => setCollections([]));
     listAgents(tenant.slug)
       .then((agents) => {
         const newest = [...agents].sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
@@ -120,6 +152,7 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
     const fromRecent = recentAgent?.[`${role}_config_id`] ?? "";
     return picked[role] ?? (configs.some((c) => c.id === fromRecent) ? fromRecent : "");
   };
+  const embeddingId = providers?.find((p) => p.role === "embedding")?.id ?? null;
   const dropdownRoles = template ? rolesNeeded(template).filter((r) => configsFor(r).length > 1) : [];
   const speaksComplete = dropdownRoles.every((r) => chosen(r) !== "");
 
@@ -134,6 +167,52 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
     const error = validateBusiness();
     setFieldError(error);
     if (!error) setStep(STEP_SPEAKS);
+  };
+
+  // Runs the remaining document work in order: create the collection, upload
+  // each file one at a time, then attach. A failure stops that part and leaves
+  // it in docWork for "Try again"; nothing the server says is shown.
+  const syncDocuments = async (agentId: string, work: DocumentWork) => {
+    if (!tenant) return;
+    let { files: todo, created, attach } = work;
+    try {
+      if (todo.length > 0) {
+        created ??= await createKnowledgeBase(tenant.id, {
+          slug: `${slugify(businessName) || "business"}-documents-${Math.random().toString(36).slice(2, 8)}`,
+          name: `${businessName.trim()} documents`,
+          embedding_config_id: embeddingId,
+        });
+        while (todo.length > 0) {
+          await uploadDocument(created.id, todo[0], todo[0].name);
+          todo = todo.slice(1);
+        }
+      }
+    } catch {
+      // Left in `todo` / `created` below so Try again picks up where this stopped.
+    }
+    if (created && todo.length === 0) {
+      attach = [...attach, created];
+      created = null;
+    }
+    const failed: KnowledgeBase[] = [];
+    const done: KnowledgeBase[] = [];
+    for (const kb of attach) {
+      try {
+        await assignKnowledgeBase(agentId, kb.id, true);
+        done.push(kb);
+      } catch {
+        failed.push(kb);
+      }
+    }
+    setAttached((prev) => [...prev, ...done]);
+    setDocWork({ files: todo, created, attach: failed });
+  };
+
+  const handleRetryDocuments = async () => {
+    if (!agent) return;
+    setDocsBusy(true);
+    await syncDocuments(agent.id, docWork);
+    setDocsBusy(false);
   };
 
   const handleCreate = async () => {
@@ -161,8 +240,14 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
     setBusy(true);
     setCreateError(null);
     try {
-      setAgent(await createAgentFromTemplate(tenant.slug, body));
+      const created = await createAgentFromTemplate(tenant.slug, body);
+      setAgent(created);
       setStep(STEP_TEST);
+      await syncDocuments(created.id, {
+        files,
+        created: null,
+        attach: collections.filter((kb) => tickedIds.includes(kb.id)),
+      });
     } catch (e) {
       setCreateError(e instanceof ApiError && e.status === 409 ? easyCopy.nameTaken : easyErrorText(e));
     } finally {
@@ -301,6 +386,15 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
 
       {loadError && <div role="alert" className="error-banner">{loadError}</div>}
 
+      {agent && (docWork.files.length > 0 || docWork.created !== null || docWork.attach.length > 0) && (
+        <div role="alert" className="error-banner" style={{ marginBottom: 10 }}>
+          {easyCopy.documentsWarning}{" "}
+          <button className="btn btn-ghost btn-sm" onClick={handleRetryDocuments} disabled={docsBusy}>
+            {docsBusy ? easyCopy.documentsRetrying : easyCopy.documentsTryAgain}
+          </button>
+        </div>
+      )}
+
       {step === STEP_JOB && (
         <>
           <div style={{ display: "grid", gap: 10 }}>
@@ -365,6 +459,17 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
               />
               <div className="form-hint">{facts.length} / {MAX_FACTS}</div>
             </div>
+            {providers !== null && (
+              <EasyKnowledgePicker
+                collections={collections}
+                ticked={tickedIds}
+                onToggle={(id) => setTickedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))}
+                canUpload={embeddingId !== null}
+                files={files}
+                onAddFiles={(added) => setFiles((prev) => [...prev, ...added])}
+                onRemoveFile={(i) => setFiles((prev) => prev.filter((_, j) => j !== i))}
+              />
+            )}
             {fieldError && <div role="alert" className="error-banner" style={{ marginTop: 10 }}>{fieldError}</div>}
           </div>
         </div>
@@ -487,6 +592,11 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
       {step === STEP_LIVE && agent && tenant && (
         <div className="card">
           <div className="card-body">
+            {attached.length > 0 && (
+              <p>
+                {easyCopy.documentsAttachedLabel}: {attached.length} ({attached.map((kb) => kb.name).join(", ")})
+              </p>
+            )}
             {live ? (
               <>
                 <strong>{easyCopy.liveTitle}</strong>

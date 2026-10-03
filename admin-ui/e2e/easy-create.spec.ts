@@ -27,6 +27,7 @@ let tenantB = "";
 let tenantNoSpeech = "";
 let tenantEmpty = "";
 let tenantPreselect = "";
+let tenantDocs = "";
 const configIds: Record<string, string> = {};
 let nameCounter = 0;
 const uniqueName = (prefix: string) => `${prefix} ${suffix}${++nameCounter}`;
@@ -79,6 +80,17 @@ test.beforeAll(async () => {
     data: { slug: "existing", name: "Existing", tts_config_id: configIds[`${tenantPreselect}:Back Voice`] },
   });
   expect(existing.ok()).toBeTruthy();
+  // F is A plus an embedding setup, which is what turns file uploads on.
+  tenantDocs = await seed(`e2e-f-${suffix}`, 1);
+  const docsTenantId = (await (await api.get(`/tenants/${tenantDocs}`, { headers })).json()).id;
+  const embedding = {
+    role: "embedding",
+    engine: "openai",
+    model: "text-embedding-3-small",
+    api_key: "sk-e2e-not-a-real-key",
+    name: "Main Search",
+  };
+  expect((await api.post(`/tenants/${docsTenantId}/providers`, { headers, data: embedding })).ok()).toBeTruthy();
   tenantNoSpeech = await seedPartial(`e2e-c-${suffix}`, true);
   tenantEmpty = await seedPartial(`e2e-d-${suffix}`, false);
   await api.dispose();
@@ -634,4 +646,152 @@ test("Stop, Start, then Back: a fresh mint each time, Fix waits for the new sess
   await page.getByRole("button", { name: easyCopy.acceptFix }).waitFor();
   await expect(page.getByRole("button", { name: easyCopy.back })).toHaveCount(0);
   expect(creates).toHaveLength(createdBefore);
+});
+
+// ---- documents the receptionist can look up --------------------------------------------------
+
+const KNOWLEDGE_URL = process.env.E2E_KNOWLEDGE_URL ?? "http://localhost:8110";
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-headers": "*",
+  "access-control-allow-methods": "*",
+};
+
+// Stands in for the knowledge service. `calls` records "METHOD path" in order;
+// `failAttach` makes that many attach calls fail before they succeed.
+async function stubKnowledge(page: Page, existing: { id: string; name: string }[], failAttach = 0) {
+  const calls: string[] = [];
+  const bodies: Record<string, unknown>[] = [];
+  let attachFailures = failAttach;
+  await page.route(`${KNOWLEDGE_URL}/**`, async (route) => {
+    const req = route.request();
+    if (req.method() === "OPTIONS") return route.fulfill({ status: 204, headers: CORS });
+    const path = new URL(req.url()).pathname;
+    const reply = (status: number, json: unknown) => route.fulfill({ status, headers: CORS, json });
+    if (req.method() === "GET" && path.endsWith("/knowledge-bases")) {
+      return reply(200, existing.map((k) => ({ ...k, slug: k.id, description: "", status: "active" })));
+    }
+    calls.push(`${req.method()} ${path.replace(/\/(tenants|agents)\/[^/]+/, "/$1/<id>").replace(/\/knowledge-bases\/[^/]+/, "/knowledge-bases/<id>")}`);
+    if (req.method() === "POST" && /^\/tenants\/[^/]+\/knowledge-bases$/.test(path)) {
+      bodies.push(req.postDataJSON());
+      return reply(201, { id: "kb-new", name: req.postDataJSON().name, slug: req.postDataJSON().slug });
+    }
+    if (req.method() === "POST" && path.endsWith("/documents")) return reply(201, { id: "doc-1" });
+    if (req.method() === "POST" && /\/agents\/[^/]+\/knowledge-bases$/.test(path)) {
+      bodies.push(req.postDataJSON());
+      if (attachFailures-- > 0) return reply(500, { detail: "vector store exploded" });
+      return reply(201, { ...req.postDataJSON(), agent_id: "a" });
+    }
+    return reply(404, { detail: "unexpected" });
+  });
+  return { calls, bodies };
+}
+
+const textFile = (name: string) => ({ name, mimeType: "text/plain", buffer: Buffer.from("We open at nine.") });
+
+async function toBusinessStep(page: Page, name: string, business = "Acme Dental") {
+  await pickJob(page, CHAT_JOB);
+  await next(page);
+  await fillBusiness(page, name, business);
+}
+
+test("a collection the account already has can be ticked, and is attached after the receptionist is created", async ({
+  page,
+}) => {
+  const stub = await stubKnowledge(page, [
+    { id: "kb-hours", name: "Opening hours" },
+    { id: "kb-menu", name: "Price list" },
+  ]);
+  await openEasy(page, tenantA);
+  await toBusinessStep(page, uniqueName("Tick"));
+  await expect(page.getByText(easyCopy.documentsLabel)).toBeVisible();
+  await scan(page, "documents section");
+  await page.getByLabel("Price list").check();
+  await next(page);
+  await next(page);
+  await expectStep(page, 3);
+  await expect.poll(() => stub.calls).toEqual(["POST /agents/<id>/knowledge-bases"]);
+  expect(stub.bodies).toEqual([{ kb_id: "kb-menu", enabled: true }]);
+  await next(page);
+  await next(page);
+  await expectStep(page, 5);
+  await expect(page.getByText(`${easyCopy.documentsAttachedLabel}: 1 (Price list)`)).toBeVisible();
+  await scan(page, "documents attached summary");
+});
+
+test("without document search set up, uploads are replaced by a plain line and a link", async ({ page }) => {
+  await stubKnowledge(page, []);
+  await openEasy(page, tenantA);
+  await toBusinessStep(page, uniqueName("NoSearch"));
+  await expect(page.getByText(easyCopy.uploadNeedsSetup)).toBeVisible();
+  await expect(page.getByRole("link", { name: easyCopy.uploadNeedsSetupLink })).toHaveAttribute("href", "/knowledge-bases");
+  await expect(page.getByLabel(easyCopy.uploadFilesLabel)).toHaveCount(0);
+  await scan(page, "uploads unavailable");
+});
+
+test("uploaded files create a collection, are uploaded one by one, then attached, in that order", async ({ page }) => {
+  const stub = await stubKnowledge(page, []);
+  await openEasy(page, tenantDocs);
+  await toBusinessStep(page, uniqueName("Upload"), "Acme Dental");
+  await page.getByLabel(easyCopy.uploadFilesLabel).setInputFiles([textFile("hours.txt"), textFile("prices.md")]);
+  await expect(page.getByRole("list", { name: easyCopy.filesChosenLabel }).getByRole("listitem")).toHaveCount(2);
+  await scan(page, "files chosen");
+  await next(page);
+  await next(page);
+  await expectStep(page, 3);
+  await expect
+    .poll(() => stub.calls)
+    .toEqual([
+      "POST /tenants/<id>/knowledge-bases",
+      "POST /knowledge-bases/<id>/documents",
+      "POST /knowledge-bases/<id>/documents",
+      "POST /agents/<id>/knowledge-bases",
+    ]);
+  const [created, attach] = stub.bodies;
+  expect(created.name).toBe("Acme Dental documents");
+  expect(created.slug).toMatch(/^acme-dental-documents-[a-z0-9]{1,6}$/);
+  expect(created.embedding_config_id).toEqual(expect.any(String));
+  expect(attach).toEqual({ kb_id: "kb-new", enabled: true });
+  await next(page);
+  await next(page);
+  await expect(page.getByText(`${easyCopy.documentsAttachedLabel}: 1 (Acme Dental documents)`)).toBeVisible();
+});
+
+test("a file that is not .txt or .md shows a plain message and nothing is uploaded", async ({ page }) => {
+  const stub = await stubKnowledge(page, []);
+  await openEasy(page, tenantDocs);
+  await toBusinessStep(page, uniqueName("Wrong"));
+  await page
+    .getByLabel(easyCopy.uploadFilesLabel)
+    .setInputFiles({ name: "brochure.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF") });
+  await expect(page.getByText(easyCopy.wrongFileType)).toBeVisible();
+  await expect(page.getByRole("list", { name: easyCopy.filesChosenLabel })).toHaveCount(0);
+  await scan(page, "wrong file type");
+  await next(page);
+  await next(page);
+  await expectStep(page, 3);
+  expect(stub.calls).toEqual([]);
+});
+
+test("a failed attach keeps the receptionist, shows a plain warning, and Try again retries only that", async ({
+  page,
+}) => {
+  const stub = await stubKnowledge(page, [{ id: "kb-hours", name: "Opening hours" }], 1);
+  await openEasy(page, tenantA);
+  await toBusinessStep(page, uniqueName("Retry"));
+  await page.getByLabel("Opening hours").check();
+  await next(page);
+  await next(page);
+  await expectStep(page, 3);
+  await expect(page.getByText(easyCopy.documentsWarning)).toBeVisible();
+  expect(await flow(page).innerText()).not.toContain("vector store exploded");
+  await scan(page, "documents warning");
+  expect(stub.calls).toEqual(["POST /agents/<id>/knowledge-bases"]);
+
+  await page.getByRole("button", { name: easyCopy.documentsTryAgain }).click();
+  await expect(page.getByText(easyCopy.documentsWarning)).toHaveCount(0);
+  expect(stub.calls).toEqual(["POST /agents/<id>/knowledge-bases", "POST /agents/<id>/knowledge-bases"]);
+  await next(page);
+  await next(page);
+  await expect(page.getByText(`${easyCopy.documentsAttachedLabel}: 1 (Opening hours)`)).toBeVisible();
 });

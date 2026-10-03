@@ -61,6 +61,22 @@ export const easyCopy = {
   factsTooLong: "Business facts can be at most 1,000 characters.",
   nameTaken: "You already have one with that name. Please pick a different name.",
 
+  // Step 2: optional documents the receptionist can look up.
+  documentsLabel: "Documents your receptionist can look up (optional)",
+  documentsHint: "It searches these when a caller asks something.",
+  collectionsLabel: "Collections you already have",
+  uploadFilesLabel: "Upload files",
+  uploadFilesHint: "Text (.txt) or Markdown (.md) files only.",
+  filesChosenLabel: "Files to upload",
+  removeFile: "Remove",
+  wrongFileType: "Only .txt and .md files can be uploaded. Other files were skipped.",
+  uploadNeedsSetup: "File uploads need document search set up first.",
+  uploadNeedsSetupLink: "Set it up",
+  documentsWarning: "Your receptionist was created, but some documents didn't get attached.",
+  documentsTryAgain: "Try again",
+  documentsRetrying: "Trying again...",
+  documentsAttachedLabel: "Documents it can look up",
+
   // Step 3
   languageLabel: "Language",
   languageAutomatic: "Choose automatically",
