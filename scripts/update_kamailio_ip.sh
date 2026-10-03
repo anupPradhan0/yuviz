@@ -173,16 +173,37 @@ else
     echo "  freeswitch: local_ip_v4 pinned to $IP in $vars"
   fi
   fs_cli="$(_fs_prefix)/bin/fs_cli"
-  running="$("$fs_cli" -H 127.0.0.1 -P "$FS_ESL_PORT" -p "$FS_ESL_PASSWORD" -x 'eval ${local_ip_v4}' 2>/dev/null || true)"
+  _fs() { "$fs_cli" -H 127.0.0.1 -P "$FS_ESL_PORT" -p "$FS_ESL_PASSWORD" -x "$1" 2>/dev/null || true; }
+  running="$(_fs 'eval ${local_ip_v4}')"
   if [[ -z "$running" ]]; then
     echo "  freeswitch: not running"
   elif [[ "$running" == "$IP" ]]; then
     echo "  freeswitch: already on $IP"
   else
-    "$fs_cli" -H 127.0.0.1 -P "$FS_ESL_PORT" -p "$FS_ESL_PASSWORD" -x 'fsctl shutdown' >/dev/null 2>&1 || true
+    _fs 'fsctl shutdown' >/dev/null
     _stop 20 $(pgrep -u "$(id -u)" -x freeswitch || true)
     (cd "$REPO" && _fs_start -nc >>"$YUVIZ_LOGS/freeswitch.log" 2>&1) || true
+    for _ in $(seq 1 30); do [[ "$(_fs 'eval ${local_ip_v4}')" == "$IP" ]] && break; sleep 1; done
     echo "  freeswitch: restarted ($running -> $IP)"
+  fi
+  # Sofia gives up after three tries, and a just-assigned address refuses binds
+  # for a few seconds, so a profile can stay down after a network change.
+  if [[ -n "$running" ]]; then
+    for f in "$(dirname "$vars")"/sip_profiles/*.xml; do
+      p="$(basename "$f" .xml)"
+      [[ "$p" == *ipv6* ]] && continue
+      for _ in $(seq 1 15); do
+        _fs 'sofia status' | grep -qE "^ +$p[[:space:]]+profile[[:space:]]+sip:[^ ]*@$IP:" && break
+        _fs "sofia profile $p start" >/dev/null
+        sleep 2
+      done
+      if _fs 'sofia status' | grep -qE "^ +$p[[:space:]]+profile[[:space:]]+sip:[^ ]*@$IP:"; then
+        echo "  freeswitch: profile $p up on $IP"
+      else
+        echo "  WARNING: freeswitch profile $p is not up on $IP; the next sync retries" >&2
+        ok=0
+      fi
+    done
   fi
 fi
 
