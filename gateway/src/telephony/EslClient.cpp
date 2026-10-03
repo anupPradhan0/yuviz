@@ -233,7 +233,7 @@ bool EslClient::ensure_connected_locked() {
     std::string auth_reply;
     if (!read_until_blank_line(fd, carry, auth_reply, timeout) ||
         auth_reply.find("+OK") == std::string::npos) {
-        logger_.warn("EslClient: auth rejected by {}:{} (check esl.password in gateway.yaml)",
+        logger_.warn("EslClient: auth rejected by {}:{} (check FREESWITCH_ESL_PASSWORD in .env)",
                      cfg_.host, cfg_.port);
         ::close(fd);
         return false;

@@ -376,7 +376,7 @@ modparam("http_client", "keep_connections", 1)
 
 # ----- dispatcher params -----
 loadmodule "dispatcher.so"
-modparam("dispatcher", "list_file", "/usr/local/etc/kamailio/dispatcher.list")
+modparam("dispatcher", "list_file", "__KAMAILIO_DIR__/dispatcher.list")
 modparam("dispatcher", "flags", 2)
 #modparam("dispatcher", "dst_avp", "$avp(ds_dst)")
 #modparam("dispatcher", "grp_avp", "$avp(ds_grp)")

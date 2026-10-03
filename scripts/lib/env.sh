@@ -89,6 +89,7 @@ _load_env() {
     [ -n "$value" ] && [ -z "$(printenv "$key")" ] && export "$key=$value"
   done < "$REPO/.env"
   export POSTGRES_DSN="${POSTGRES_DSN:-postgresql://$USER@localhost:5432/voiceai}"
+  export LISTEN_HOST="${LISTEN_HOST:-127.0.0.1}"
 }
 
 # Returns 1 with a pointer to .env when a setting is blank. Callers use

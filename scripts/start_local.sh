@@ -15,8 +15,12 @@ elif [ -n "${ZSH_VERSION:-}" ]; then eval '_start_local_self=${(%):-%x}'
 else _start_local_self="$0"; fi
 REPO="$(cd "$(dirname "$_start_local_self")/.." && pwd)"
 
+# Every python3 below is the repo's venv, whatever the calling shell activated.
+[ -x "$REPO/venv/bin/python3" ] && case ":$PATH:" in *":$REPO/venv/bin:"*) ;; *) export PATH="$REPO/venv/bin:$PATH" ;; esac
+
 # ── Settings: everything comes from $REPO/.env (template: .env.example) ──────
 . "$REPO/scripts/lib/env.sh"
+. "$REPO/scripts/lib/sip.sh"
 _env_init
 _load_env
 
@@ -28,9 +32,25 @@ start_mysql() {
 
 # ── Block 2: Kamailio — SIP proxy, must be up before FreeSWITCH registers ───
 start_kamailio() {
-  # -Y: user-owned runtime dir so this runs without sudo.
-  mkdir -p "$HOME/.yuviz/kamailio/run"
-  kamailio -f /usr/local/etc/kamailio/kamailio.cfg -D -E -Y "$HOME/.yuviz/kamailio/run"
+  # Renders the config for SIP_IP (and fixes anything stale) before starting.
+  "$REPO/scripts/update_kamailio_ip.sh" || return 0
+  _kamailio_start
+}
+
+# ── Network sync: reruns update_kamailio_ip.sh whenever the network changes ──
+install_network_sync() {
+  [ "$(uname)" = Darwin ] || { echo "install_network_sync is macOS only" >&2; return 0; }
+  local plist="$HOME/Library/LaunchAgents/$NETWORK_SYNC_LABEL.plist"
+  mkdir -p "$(dirname "$plist")" "$YUVIZ_LOGS"
+  _network_sync_plist > "$plist"
+  launchctl bootout "gui/$(id -u)/$NETWORK_SYNC_LABEL" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$plist"
+  echo "✓ network sync installed (log $YUVIZ_LOGS/network-sync.log)"
+}
+remove_network_sync() {
+  launchctl bootout "gui/$(id -u)/$NETWORK_SYNC_LABEL" 2>/dev/null || true
+  rm -f "$HOME/Library/LaunchAgents/$NETWORK_SYNC_LABEL.plist"
+  echo "✓ network sync removed"
 }
 
 # ── Block 3: Data layer (Postgres/Redis; run once, may already be running) ──
@@ -70,14 +90,14 @@ start_config_service() {
   # are saved with a "not synced" warning (number_sync.py).
   _require SECRET_ENCRYPTION_KEY JWT_SECRET || return 0
   cd "$REPO"
-  python3 -m uvicorn services.config.app:app --host 0.0.0.0 --port 8000
+  python3 -m uvicorn services.config.app:app --host "$LISTEN_HOST" --port 8000
 }
 
 # ── Block 6: Knowledge Service (REST API, port 8100) ──────────────────────────
 start_knowledge_service() {
   _require JWT_SECRET || return 0
   cd "$REPO"
-  python3 -m uvicorn services.knowledge.app:app --host 0.0.0.0 --port 8100
+  python3 -m uvicorn services.knowledge.app:app --host "$LISTEN_HOST" --port 8100
 }
 
 # ── Block 7: Knowledge ingestion worker (background job-queue poller) ────────
@@ -92,7 +112,7 @@ start_campaigns_service() {
   _require JWT_SECRET FREESWITCH_ESL_PASSWORD || return 0
   _warn_env_drift SIP_PROXY_HOST
   cd "$REPO"
-  python3 -m uvicorn services.campaigns.app:app --host 0.0.0.0 --port 8400
+  python3 -m uvicorn services.campaigns.app:app --host "$LISTEN_HOST" --port 8400
 }
 
 # ── Block 8b: Tool Execution Service (REST API, port 8600) — custom API chains ─
@@ -143,18 +163,15 @@ start_gateway() {
 
 # ── Block 13: FreeSWITCH (registers with Kamailio from Block 2) ──────────────
 start_freeswitch() {
-  # Homebrew FreeSWITCH, configured by scripts/freeswitch/setup_macos.sh.
-  # -scripts points at the repo so start_voice_ai.lua is never a stale copy.
-  local fs_home="${FS_HOME:-$HOME/.yuviz/freeswitch}"
-  "$(brew --prefix freeswitch)/bin/freeswitch" -nonat \
-    -conf "$fs_home/conf" -log "$fs_home/log" -db "$fs_home/db" -run "$fs_home/run" \
-    -scripts "$REPO/scripts/freeswitch"
+  # Homebrew FreeSWITCH (scripts/freeswitch/setup_macos.sh), else the source install.
+  cd "$REPO"
+  _fs_start || return 0
 }
 
 # ── Block 14: Admin UI (Next.js, port 3000) ───────────────────────────────────
 start_admin_ui() {
   cd "$REPO/admin-ui"
-  npm run dev
+  npm run dev -- -H "$LISTEN_HOST"
 }
 
 # ── Verify: check all services are healthy ───────────────────────────────────
@@ -209,4 +226,4 @@ portmap() {
 EOF
 }
 
-echo "start_local.sh loaded. Functions: start_mysql, start_kamailio, start_data, start_ollama, start_config_service, start_knowledge_service, start_knowledge_worker, start_campaigns_service, start_toolexec_service, start_telephony_service, start_conv1, start_conv2, start_envoy, start_gateway, start_freeswitch, start_admin_ui, verify, portmap"
+echo "start_local.sh loaded. Functions: start_mysql, start_kamailio, start_data, start_ollama, start_config_service, start_knowledge_service, start_knowledge_worker, start_campaigns_service, start_toolexec_service, start_telephony_service, start_conv1, start_conv2, start_envoy, start_gateway, start_freeswitch, start_admin_ui, install_network_sync, remove_network_sync, verify, portmap"

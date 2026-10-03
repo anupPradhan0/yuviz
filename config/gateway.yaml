@@ -1,6 +1,7 @@
+# Addresses and secrets come from .env (CONVERSATION_SVC_TARGET, REDIS_URL,
+# FREESWITCH_ESL_*, SIP_PROXY_*); this file only tunes behaviour.
 gateway:
   websocket:
-    host: "0.0.0.0"
     port: 8080
     max_connections: 1000
     timeout_ms: 30000
@@ -15,7 +16,6 @@ gateway:
 
   conversation:
     type: "grpc"
-    endpoint: "localhost:10000"    # Envoy gRPC proxy, LEAST_REQUEST across :50051/:50052
     connect_timeout_ms: 5000
 
   media:
@@ -33,20 +33,13 @@ gateway:
     # FreeSWITCH Event Socket: lets the gateway hang up the SIP leg when the agent ends the call.
     # Off means the SIP call lingers until the caller hangs up.
     enabled: true
-    host: "127.0.0.1"
-    port: 8022    # FreeSWITCH event_socket.conf.xml uses 8022, not the ESL default 8021
     # password: from FREESWITCH_ESL_PASSWORD in .env — never committed here
     connect_timeout_ms: 2000
-    # Kamailio proxy for all transfer dials. Set via SIP_PROXY_HOST/PORT in .env; keep empty
-    # here so a missing value refuses transfers instead of dialing a wrong host.
-    sip_proxy_host: ""
-    sip_proxy_port: 5060
+    # Transfer dials go via Kamailio at SIP_PROXY_HOST/PORT in .env; blank refuses them.
 
   redis:
     # Tenant config cache written by services/config (tenant:{tenant_id}).
     # Off or unreachable falls back to process-level defaults.
     enabled: true
-    host: "127.0.0.1"
-    port: 6379
     connect_timeout_ms: 200
     command_timeout_ms: 100

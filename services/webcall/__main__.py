@@ -231,8 +231,9 @@ async def _handle_connection(ws: ServerConnection) -> None:
 async def main() -> None:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
     port = int(os.environ.get("PORT", "8300"))
-    async with serve(_handle_connection, "0.0.0.0", port):
-        log.info("Webcall bridge listening on ws://0.0.0.0:%d", port)
+    host = os.environ.get("LISTEN_HOST", "127.0.0.1")
+    async with serve(_handle_connection, host, port):
+        log.info("Webcall bridge listening on ws://%s:%d", host, port)
         await asyncio.get_running_loop().create_future()
 
 

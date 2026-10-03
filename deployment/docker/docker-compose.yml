@@ -159,6 +159,7 @@ services:
       CONFIG_SERVICE_EMAIL: ${CONFIG_SERVICE_EMAIL}
       CONFIG_SERVICE_PASSWORD: ${CONFIG_SERVICE_PASSWORD}
       KNOWLEDGE_SERVICE_URL: http://knowledge:8100
+      LISTEN_HOST: "0.0.0.0"   # inside the container; the host port is bounded by BIND_ADDR
       # pipeline_config.py defaults to "macos", which needs the macOS `say` binary.
       VOICEAI_TTS_ENGINE: kokoro
       VOICEAI_TTS_VOICE: af_sarah
@@ -201,6 +202,7 @@ services:
       # Direct to conversation — this stack runs no Envoy, which webcall's :10000 default expects.
       CONVERSATION_SVC_TARGET: conversation:50051
       LOG_LEVEL: INFO
+      LISTEN_HOST: "0.0.0.0"   # inside the container; the host port is bounded by BIND_ADDR
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${WEBCALL_PORT:-8300}:8300"
     depends_on:
@@ -219,6 +221,7 @@ services:
     command: ["python", "-m", "services.telephony"]
     environment:
       PORT: "8750"
+      LISTEN_HOST: "0.0.0.0"   # inside the container; the host port is bounded by BIND_ADDR
       TELEPHONY_PUBLIC_BASE_URL: ${TELEPHONY_PUBLIC_BASE_URL:-}
       JWT_SECRET: ${JWT_SECRET}
       REDIS_URL: ${REDIS_URL}

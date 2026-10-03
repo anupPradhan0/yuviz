@@ -390,7 +390,8 @@ async def serve(port: int, args: argparse.Namespace) -> None:
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
     health_servicer.set(SERVICE_NAME, health_pb2.HealthCheckResponse.NOT_SERVING)
 
-    listen_addr = f"[::]:{port}"
+    host = os.environ.get("LISTEN_HOST", "127.0.0.1")
+    listen_addr = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
     server.add_insecure_port(listen_addr)
     await server.start()
     log.info("ConversationService listening on %s mode=%s (NOT_SERVING — loading model)",

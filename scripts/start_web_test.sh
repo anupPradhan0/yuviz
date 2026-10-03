@@ -43,7 +43,7 @@ start_ollama() {
 start_config_service() {
   _require SECRET_ENCRYPTION_KEY JWT_SECRET || return 0
   cd "$REPO"
-  ./venv/bin/python3 -m uvicorn services.config.app:app --host 0.0.0.0 --port 8000
+  ./venv/bin/python3 -m uvicorn services.config.app:app --host "$LISTEN_HOST" --port 8000
 }
 
 # ── Block 4: Knowledge Service (REST API, port 8100) — optional, only
@@ -51,7 +51,7 @@ start_config_service() {
 start_knowledge_service() {
   _require JWT_SECRET || return 0
   cd "$REPO"
-  ./venv/bin/python3 -m uvicorn services.knowledge.app:app --host 0.0.0.0 --port 8100
+  ./venv/bin/python3 -m uvicorn services.knowledge.app:app --host "$LISTEN_HOST" --port 8100
 }
 
 # ── Block 5: ConversationService (gRPC, port 50051); conv2 is optional ─────
@@ -81,7 +81,7 @@ start_webcall() {
 start_admin_ui() {
   cd "$REPO/admin-ui"
   npm install
-  npm run dev
+  npm run dev -- -H "$LISTEN_HOST"
 }
 
 # ── Verify: check the web-testing services are up ─────────────────────────

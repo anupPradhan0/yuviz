@@ -65,6 +65,8 @@ bool WebSocketServer::start() {
 
     lws_context_creation_info info{};
     info.port      = static_cast<int>(config_.port);
+    // Without iface lws binds every interface whatever websocket.host says.
+    info.iface     = (config_.host.empty() || config_.host == "0.0.0.0") ? nullptr : config_.host.c_str();
     info.protocols = protocols;
     info.options   = LWS_SERVER_OPTION_HTTP_HEADERS_SECURITY_BEST_PRACTICES_ENFORCE;
     info.user      = this;
