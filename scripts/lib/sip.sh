@@ -105,6 +105,8 @@ _network_sync_plist() {
     <string>/var/run/resolv.conf</string>
     <string>/Library/Preferences/SystemConfiguration</string>
   </array>
+  <!-- Unset, launchd throttles the job's CPU, and the services it restarts inherit it. -->
+  <key>ProcessType</key><string>Interactive</string>
   <key>StartInterval</key><integer>300</integer>
   <key>RunAtLoad</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>

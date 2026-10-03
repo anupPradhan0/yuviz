@@ -73,6 +73,9 @@ if [[ "${1:-}" == --if-changed && -f "$KAMAILIO_DIR/kamailio.cfg" && "$(cat "$AP
   exit 0
 fi
 echo "[$(date '+%F %T')] SIP_IP=${SIP_IP:-127.0.0.1} -> $IP"
+# Restarted services inherit this process's priority; a niced one slows call audio.
+own_nice="$(ps -o nice= -p $$ | tr -d ' ')"
+[[ "${own_nice:-0}" -gt 0 ]] && echo "  WARNING: running at nice $own_nice; services restarted from here inherit it" >&2
 
 # ── 1. SIP_PROXY_HOST ────────────────────────────────────────────────────────
 if [[ ! -f "$REPO/.env" ]]; then

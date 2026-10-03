@@ -119,3 +119,5 @@ def test_network_sync_agent_is_a_valid_plist(tmp_path):
     assert lint.returncode == 0, lint.stdout
     assert f"{REPO}/scripts/update_kamailio_ip.sh" in out and "--if-changed" in out
     assert "/var/run/resolv.conf" in out and "<key>AbandonProcessGroup</key><true/>" in out
+    # Seen live: without it, FreeSWITCH restarted by the agent ran at nice 19 and audio crawled.
+    assert "<key>ProcessType</key><string>Interactive</string>" in out
