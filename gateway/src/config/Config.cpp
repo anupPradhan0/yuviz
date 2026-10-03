@@ -42,6 +42,38 @@ void apply_esl_env(EslConfig& esl) {
     }
 }
 
+// redis://host[:port][/0]. The Gateway uses db 0 and no auth, so anything else is refused.
+void apply_redis_url(RedisConfig& redis, const std::string& url) {
+    const std::string scheme = "redis://";
+    if (url.rfind(scheme, 0) != 0) {
+        throw std::runtime_error("REDIS_URL must start with redis://, got '" + url + "'");
+    }
+    std::string rest = url.substr(scheme.size());
+    if (rest.find('@') != std::string::npos) {
+        throw std::runtime_error("REDIS_URL: the Gateway does not support Redis auth");
+    }
+    std::string db;
+    if (const auto slash = rest.find('/'); slash != std::string::npos) {
+        db = rest.substr(slash + 1);
+        rest = rest.substr(0, slash);
+    }
+    if (!db.empty() && db != "0") {
+        throw std::runtime_error("REDIS_URL: the Gateway only uses db 0, got /" + db);
+    }
+    const auto colon = rest.rfind(':');
+    const std::string host = colon == std::string::npos ? rest : rest.substr(0, colon);
+    if (host.empty()) throw std::runtime_error("REDIS_URL has no host: '" + url + "'");
+    redis.host = host;
+    redis.port = colon == std::string::npos ? 6379 : parse_port("REDIS_URL port", rest.substr(colon + 1).c_str());
+}
+
+// .env owns every address and secret; gateway.yaml only tunes behaviour.
+void apply_env(GatewayConfig& cfg) {
+    apply_esl_env(cfg.esl);
+    if (const char* v = env_value("CONVERSATION_SVC_TARGET")) cfg.conversation.endpoint = v;
+    if (const char* v = env_value("REDIS_URL"))               apply_redis_url(cfg.redis, v);
+}
+
 }  // namespace
 
 void Config::load(const std::string& path) {
@@ -54,7 +86,7 @@ void Config::load(const std::string& path) {
 
     const auto gw = root["gateway"];
     if (!gw) {
-        apply_esl_env(config_.esl);
+        apply_env(config_);
         return;
     }
 
@@ -112,7 +144,7 @@ void Config::load(const std::string& path) {
         if (redis["pool_size"])          config_.redis.pool_size          = redis["pool_size"].as<uint32_t>();
     }
 
-    apply_esl_env(config_.esl);
+    apply_env(config_);
 }
 
 TenantConfig TenantConfig::from_default(const GatewayConfig& cfg) noexcept {

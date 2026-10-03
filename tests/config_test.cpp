@@ -302,7 +302,7 @@ protected:
     void SetUp() override {
         ConfigTest::SetUp();
         for (const char* v : {"FREESWITCH_ESL_PASSWORD", "FREESWITCH_ESL_HOST", "FREESWITCH_ESL_PORT",
-                              "SIP_PROXY_HOST", "SIP_PROXY_PORT"}) {
+                              "SIP_PROXY_HOST", "SIP_PROXY_PORT", "CONVERSATION_SVC_TARGET", "REDIS_URL"}) {
             ::unsetenv(v);
         }
     }
@@ -332,6 +332,40 @@ TEST_F(EslEnvConfigTest, EnvironmentWinsOverYaml) {
     voiceai::Config cfg;
     cfg.load(tmp_yaml_.string());
     EXPECT_EQ(cfg.esl().password, "from-env");
+}
+
+TEST_F(EslEnvConfigTest, ConversationTargetAndRedisComeFromTheEnvironment) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "p", 1);
+    ::setenv("CONVERSATION_SVC_TARGET", "localhost:50051", 1);
+    ::setenv("REDIS_URL", "redis://10.0.0.5:6380/0", 1);
+    write_yaml("gateway:\n  conversation:\n    type: \"grpc\"\n    endpoint: \"localhost:10000\"\n"
+               "  redis:\n    host: \"127.0.0.1\"\n    port: 6379\n");
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+    EXPECT_EQ(cfg.conversation().endpoint, "localhost:50051");
+    EXPECT_EQ(cfg.gateway().redis.host, "10.0.0.5");
+    EXPECT_EQ(cfg.gateway().redis.port, 6380);
+}
+
+TEST_F(EslEnvConfigTest, RedisUrlWithoutPortOrDbUsesDefaults) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "p", 1);
+    ::setenv("REDIS_URL", "redis://localhost", 1);
+    write_yaml("gateway:\n  esl:\n    enabled: true\n");
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+    EXPECT_EQ(cfg.gateway().redis.host, "localhost");
+    EXPECT_EQ(cfg.gateway().redis.port, 6379);
+}
+
+TEST_F(EslEnvConfigTest, UnsupportedRedisUrlRefusesToStart) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "p", 1);
+    write_yaml("gateway:\n  esl:\n    enabled: true\n");
+    for (const char* bad : {"http://localhost:6379", "redis://:secret@localhost:6379", "redis://localhost:6379/2",
+                            "redis://localhost:99999", "redis://:6379"}) {
+        ::setenv("REDIS_URL", bad, 1);
+        voiceai::Config cfg;
+        EXPECT_THROW(cfg.load(tmp_yaml_.string()), std::runtime_error) << bad;
+    }
 }
 
 TEST_F(EslEnvConfigTest, OutOfRangeOrMalformedPortRefusesToStart) {

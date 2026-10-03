@@ -68,7 +68,7 @@ struct ConversationTransportConfig {
 struct EslConfig {
     bool        enabled{false};
     std::string host{"127.0.0.1"};
-    uint16_t    port{8021};
+    uint16_t    port{8022};          // FREESWITCH_ESL_PORT
     std::string password;              // FREESWITCH_ESL_PASSWORD (or esl.password); required when enabled
     uint32_t    connect_timeout_ms{2000};
 
