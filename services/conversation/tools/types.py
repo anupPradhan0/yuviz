@@ -108,6 +108,10 @@ class ToolExecutionContext:
     # can take it as a `caller` param, so the agent never has to ask for a
     # number the call already knows.
     caller_number:                 str = ""
+    # The call's other leg and its direction, passed through unchanged for
+    # toolexec, which alone decides which party is the remote one.
+    called_number:                 str = ""
+    call_direction:                str = ""
     conversation_history_snapshot: list[dict[str, Any]] = field(default_factory=list)
     # ResolvedToolPolicy.max_chain_depth for THIS agent's execute_api policy
     # row (NULL = no override, use the platform default) — only

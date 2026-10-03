@@ -449,7 +449,9 @@ class PipelineConversationHandler:
         transcripts:   TranscriptBuilder | None = None,
         tenant_id:     str = "",
         call_id:       str = "",
-        direction:     str = "inbound",
+        # No default direction: a construction site that omits it must fail closed
+        # in toolexec's caller-id resolution, not be treated as an inbound call.
+        direction:     str = "",
         caller_number: str = "",
         called_number: str = "",
         knowledge:     IKnowledgeProvider | None = None,
@@ -1479,7 +1481,8 @@ class PipelineConversationHandler:
 
         async for event in self._tool_orchestrator.run_turn(
             self._agent_id or "", self._tenant_id, self._call_id, session_id, history,
-            caller_number=self._caller_number, cancel_event=cancel_event,
+            caller_number=self._caller_number, called_number=self._called_number,
+            call_direction=self._direction, cancel_event=cancel_event,
             local_tools=local_tools, only_tools=only_tools,
         ):
             if isinstance(event, ToolCallStartedEvent):

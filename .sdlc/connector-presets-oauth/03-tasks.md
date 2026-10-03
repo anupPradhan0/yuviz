@@ -293,7 +293,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
 
 ## Phase 5: Presets, executor, conversation
 
-- [ ] T18 Let `custom_apis` write preset-only fields and lock preset rows — `services/toolexec/custom_apis.py`, `services/toolexec/schemas.py`, tests. Requires T2, T10.
+- [x] T18 Let `custom_apis` write preset-only fields and lock preset rows — `services/toolexec/custom_apis.py`, `services/toolexec/schemas.py`, tests. Requires T2, T10.
   - Extract the transaction body of `create_custom_api` into `_insert_custom_api(conn, …)` (create calls it).
     - It writes `oauth_connection_id`, `preset_key`, `response_transform`, `idempotency_body_field`, `confirmation_template`, `session_send_cap`, and per-param `body_path`, `value_prefix` and `value_digits_only`.
     - `_replace_params` writes the same param columns.
@@ -306,7 +306,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - `CustomApiCreate(auth_scheme="oauth2_authorization_code")` gives 422.
     - A hand-registered API round-trips unchanged.
 
-- [ ] T19 Write the preset definitions and pure functions — `services/toolexec/presets.py` (new, pure part only), `services/toolexec/tests/test_presets.py` (new). Requires T18. MUST PRECEDE T20, T22, T23.
+- [x] T19 Write the preset definitions and pure functions — `services/toolexec/presets.py` (new, pure part only), `services/toolexec/tests/test_presets.py` (new). Requires T18. MUST PRECEDE T20, T22, T23.
   - `PRESETS`: the five calendar rows, the three WhatsApp rows and the Sheets row, with the exact param tables from the design.
     - Every `caller_id` param has `sensitive=true`.
     - The WhatsApp rows have `session_send_cap=3` and a `caller_id` recipient: `value_digits_only=true` for Gupshup and Meta, and Interakt's `fullPhoneNumber` keeps the `+`.
@@ -322,7 +322,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - The lookup transform drops an event with a matching phone but no `yuviz_preset`, and one with a non-UUID id.
     - Planted PII sentinels do not survive the projection.
 
-- [ ] T20 Add the executor argument-plumbing and idempotency changes — `services/toolexec/executor.py`, `services/toolexec/tests/` (extend the executor tests). Requires T14, T18, T19.
+- [x] T20 Add the executor argument-plumbing and idempotency changes — `services/toolexec/executor.py`, `services/toolexec/tests/` (extend the executor tests). Requires T14, T18, T19.
   - (b) `except auth_schemes.ReconnectRequired: raise _StepFailure("unavailable","reconnect_required")` immediately before the existing `except ValueError`.
   - (c) `_claim_side_effect` returns the claim row id (`uuid.UUID | None`). After a successful claim, if `idempotency_body_field` is set, `body_fields[field] = claimed.hex`.
   - (d) `body_path` nested placement, with JSON-encoding of non-scalar form values.
@@ -339,7 +339,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - two cancels of different `event_id` hash differently;
     - `reconnect_required` surfaces as `unavailable`.
 
-- [ ] T21 Plumb call direction and numbers through Conversation — `services/conversation/tools/types.py`, `services/conversation/tools/orchestrator.py`, `services/conversation/pipeline.py`, tests. Requires T18. MUST PRECEDE T22 and T24.
+- [x] T21 Plumb call direction and numbers through Conversation — `services/conversation/tools/types.py`, `services/conversation/tools/orchestrator.py`, `services/conversation/pipeline.py`, tests. Requires T18. MUST PRECEDE T22 and T24.
   - `types.py`: `ToolExecutionContext` gains `called_number: str = ""` and `call_direction: str = ""`.
   - `orchestrator.py`: `run_turn` gains the two keywords and passes them into the context (`:227-234`).
   - `pipeline.py`: the `run_turn` call (`:1486-1489`) passes `called_number=self._called_number, call_direction=self._direction`. Change the constructor default `direction: str = "inbound"` (`:458`) to `""`, so an omitting construction site fails closed. Check `transcript_builder` still maps `""` to `"inbound"`.
@@ -349,7 +349,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - The existing conversation tests are green.
     - Mid-state is safe: `call_direction=""` makes every caller_id step fail closed (T22), because toolexec treats it as unknown.
 
-- [ ] T22 Add the `caller_id` param source and the `_remote_party` gate — `services/toolexec/executor.py`, `services/conversation/tools/executors/api_exec_executor.py`, tests. Requires T2 (the `value_digits_only` column), T19, T20, T21. This is the pair: the `caller_id` recipient param needs the `value_digits_only` column. Verify both ends.
+- [x] T22 Add the `caller_id` param source and the `_remote_party` gate — `services/toolexec/executor.py`, `services/conversation/tools/executors/api_exec_executor.py`, tests. Requires T2 (the `value_digits_only` column), T19, T20, T21. This is the pair: the `caller_id` recipient param needs the `value_digits_only` column. Verify both ends.
   - `api_exec_executor.py`: add `caller_number`, `called_number` and `call_direction` to the `/execute` body (`:64-76`), straight from `request.context`. Conversation never picks the remote party.
   - `executor.py`:
     - Add `_remote_party(tenant_id, request)`, which calls `presets.remote_party_number` and then rejects any number that is one of THIS tenant's own DIDs via `SELECT 1 FROM phone_numbers WHERE tenant_id=$1 AND '+'||regexp_replace(did,'\D','','g')=$2 LIMIT 1` (explicit predicate, UUID from `_resolve_tenant_uuid`).
@@ -367,7 +367,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - `api_exec_executor` posts three distinct values, with swapped fields going red.
   - Half-applied state: an old Conversation sends no direction, so every `caller_id` step fails closed.
 
-- [ ] T23 Add the confirmation gate, send cap, claim release and Conversation-side handling — `services/toolexec/executor.py`, `services/conversation/tools/executors/api_exec_executor.py`, `services/conversation/tools/policy_resolver.py`, tests. Requires T19, T20, T22. MUST PRECEDE T24.
+- [x] T23 Add the confirmation gate, send cap, claim release and Conversation-side handling — `services/toolexec/executor.py`, `services/conversation/tools/executors/api_exec_executor.py`, `services/conversation/tools/policy_resolver.py`, tests. Requires T19, T20, T22. MUST PRECEDE T24.
   - `executor.py`:
     - (f) After `arguments_hash` and before `_claim_side_effect`: if `confirmation_template` is set and `_confirmed_in_prior_turn(...)` is false, raise `_ConfirmationRequired(presets.render_confirmation(template, arguments_redacted, upstream_responses))`.
       - Use the design's SQL, with the explicit `tenant_id`, the `r.turn_id <> $5` predicate, the 10-minute window and the `NOT EXISTS` retire clause.
@@ -390,7 +390,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - Cross-tenant cancel releases nothing (red with predicates deleted), and a release error still reports the cancel as a success.
     - A disconnected connection's APIs are absent from the policy resolver, and another tenant's connected row does not re-enable them.
 
-- [ ] T24 Add preset apply and remove and mount them — `services/toolexec/presets.py` (apply and remove part), `services/toolexec/routers/connector_presets.py` (new), `services/toolexec/app.py`, tests. Requires T17, T21, T22, T23 (nothing gated can be applied before the gate, the cap and the caller-id plumbing exist).
+- [x] T24 Add preset apply and remove and mount them — `services/toolexec/presets.py` (apply and remove part), `services/toolexec/routers/connector_presets.py` (new), `services/toolexec/app.py`, tests. Requires T17, T21, T22, T23 (nothing gated can be applied before the gate, the cap and the caller-id plumbing exist).
   - `apply_preset`:
     - Pre-transaction: `resolve_and_validate_endpoint` on every step. For OAuth presets, `get_connected(conn, tenant_id, provider)` with an explicit predicate (`PresetConnectorRequired`, which becomes 409 `connector_required` or `connector_scope_required`).
     - WhatsApp: seal `key_ref` via `encrypt_tenant_secret(tenant_id, …)` (for Interakt the plaintext is `"Basic "+key`), then run `_validate_credential_ref`.

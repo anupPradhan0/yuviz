@@ -67,7 +67,8 @@ class ToolCallOrchestrator:
 
     async def run_turn(
         self, agent_id: str, tenant_id: str, call_id: str, session_id: str, history: list[ChatMessage],
-        caller_number: str = "", cancel_event: "asyncio.Event | None" = None,
+        caller_number: str = "", called_number: str = "", call_direction: str = "",
+        cancel_event: "asyncio.Event | None" = None,
         force_tool_name: str | None = None,
         local_tools: LocalToolsSource = None,
         only_tools: list[str] | Callable[[], list[str] | None] | None = None,
@@ -168,7 +169,7 @@ class ToolCallOrchestrator:
                     # of prepending to it.
                     execute_task = asyncio.ensure_future(self._execute_tool_call(
                         event, policies_by_name, tenant_id, agent_id, call_id, session_id, turn_id,
-                        iteration, caller_number, cancel_event,
+                        iteration, caller_number, called_number, call_direction, cancel_event,
                     ))
                     try:
                         yield ToolCallStartedEvent(tool_name=event.tool_name)
@@ -195,7 +196,7 @@ class ToolCallOrchestrator:
     async def _execute_tool_call(
         self, event: ToolCallEvent, policies_by_name: dict, tenant_id: str, agent_id: str,
         call_id: str, session_id: str, turn_id: str, iteration: int, caller_number: str = "",
-        cancel_event: "asyncio.Event | None" = None,
+        called_number: str = "", call_direction: str = "", cancel_event: "asyncio.Event | None" = None,
     ) -> ToolResult:
         policy = policies_by_name.get(event.tool_name)
         if policy is None:
@@ -230,6 +231,8 @@ class ToolCallOrchestrator:
                 deadline=time.monotonic() + timeout_ms / 1000,
                 request_id=str(uuid.uuid4()),
                 caller_number=caller_number,
+                called_number=called_number,
+                call_direction=call_direction,
                 max_chain_depth=policy.max_chain_depth,
             ),
         )

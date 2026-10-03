@@ -8,8 +8,11 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from pydantic import ValidationError
 
+from libs.tenancy import tenant_conn
 from services.toolexec import custom_apis
+from services.toolexec.schemas import CustomApiCreate, CustomApiParamSpec, CustomApiUpdate
 
 
 def _api_kwargs(tenant_id, name: str, **overrides) -> dict:
@@ -455,3 +458,103 @@ async def test_write_audit_redacts_auth_config(pool, tenant_agent):
     finally:
         await pool.execute("DELETE FROM audit_log WHERE entity_type = 'custom_api' AND entity_id = $1", api["id"])
         await _cleanup_tenant_apis(pool, tenant["id"])
+
+
+async def _insert_preset_row(pool, tenant_id, name: str, **overrides) -> dict:
+    """What preset apply does: _insert_custom_api inside the per-tenant lock."""
+    kwargs = dict(
+        tenant_id=tenant_id, name=name, description="d", endpoint_url="https://example.com/api",
+        method="POST", body_style="json", auth_scheme="none", auth_config={}, side_effecting=True,
+        idempotency_header=None, timeout_ms=None, sensitive_response_paths=[], success_template=None,
+        params=[], preset_key="calendar_booking",
+    )
+    kwargs.update(overrides)
+    async with tenant_conn(pool) as conn:
+        async with conn.transaction():
+            return await custom_apis._insert_custom_api(conn, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_insert_writes_every_preset_only_column(pool, tenant_agent):
+    tenant, _agent = tenant_agent
+    try:
+        row = await _insert_preset_row(
+            pool, tenant["id"], "gcal_book",
+            response_transform={"kind": "google_event_projection"}, idempotency_body_field="id",
+            confirmation_template="Book it?", session_send_cap=3,
+            params=[{
+                "name": "caller_phone", "location": "query", "json_type": "string", "source": "caller_id",
+                "sensitive": True, "body_path": None, "value_prefix": "yuviz_phone=", "value_digits_only": False,
+            }, {
+                "name": "to", "location": "body", "json_type": "string", "source": "caller_id",
+                "sensitive": True, "body_path": "message.to", "value_digits_only": True,
+            }],
+        )
+        stored = await custom_apis.get_custom_api(row["id"])
+        assert stored["preset_key"] == "calendar_booking"
+        assert stored["response_transform"] == {"kind": "google_event_projection"}
+        assert stored["idempotency_body_field"] == "id"
+        assert stored["confirmation_template"] == "Book it?"
+        assert stored["session_send_cap"] == 3
+        params = {p["name"]: p for p in stored["params"]}
+        assert params["caller_phone"]["value_prefix"] == "yuviz_phone="
+        assert params["caller_phone"]["value_digits_only"] is False
+        assert params["to"]["body_path"] == "message.to"
+        assert params["to"]["value_digits_only"] is True
+    finally:
+        await _cleanup_tenant_apis(pool, tenant["id"])
+
+
+@pytest.mark.asyncio
+async def test_patch_on_a_preset_row_is_refused_and_changes_nothing(pool, tenant_agent):
+    tenant, _agent = tenant_agent
+    try:
+        row = await _insert_preset_row(pool, tenant["id"], "gcal_book", description="original")
+
+        with pytest.raises(ValueError, match="^preset_managed$"):
+            await custom_apis.update_custom_api(row["id"], description="hijacked")
+        with pytest.raises(ValueError, match="^preset_managed$"):
+            await custom_apis.update_custom_api(row["id"], params=[])
+
+        stored = await custom_apis.get_custom_api(row["id"])
+        assert stored["description"] == "original"
+
+        # Deletion stays open: removing a preset must always be possible.
+        await custom_apis.soft_delete_custom_api(row["id"])
+        assert await custom_apis.get_custom_api(row["id"]) is None
+    finally:
+        await _cleanup_tenant_apis(pool, tenant["id"])
+
+
+@pytest.mark.asyncio
+async def test_hand_registered_api_round_trips_with_every_new_column_empty(pool, tenant_agent):
+    tenant, _agent = tenant_agent
+    try:
+        api = await custom_apis.create_custom_api(**_api_kwargs(
+            tenant["id"], "plain_api",
+            params=[{"name": "q", "location": "query", "json_type": "string", "source": "caller"}],
+        ))
+        stored = await custom_apis.get_custom_api(api["id"])
+        for column in ("oauth_connection_id", "preset_key", "response_transform", "idempotency_body_field",
+                       "confirmation_template", "session_send_cap"):
+            assert stored[column] is None, column
+        assert stored["params"][0]["body_path"] is None
+        assert stored["params"][0]["value_prefix"] is None
+        assert stored["params"][0]["value_digits_only"] is False
+
+        updated = await custom_apis.update_custom_api(api["id"], description="y")
+        assert updated["description"] == "y"
+    finally:
+        await _cleanup_tenant_apis(pool, tenant["id"])
+
+
+def test_raw_editor_cannot_reach_preset_only_fields():
+    for model in (CustomApiCreate, CustomApiUpdate):
+        assert not {"confirmation_template", "session_send_cap", "response_transform", "preset_key",
+                    "oauth_connection_id", "idempotency_body_field"} & set(model.model_fields)
+    assert not {"value_prefix", "value_digits_only", "body_path"} & set(CustomApiParamSpec.model_fields)
+    with pytest.raises(ValidationError):
+        CustomApiCreate(name="n", description="d", endpoint_url="https://e.example", method="GET",
+                        auth_scheme="oauth2_authorization_code")
+    with pytest.raises(ValidationError):
+        CustomApiParamSpec(name="n", location="body", json_type="string", source="caller_id")

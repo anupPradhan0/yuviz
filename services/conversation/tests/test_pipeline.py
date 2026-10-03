@@ -156,7 +156,7 @@ def _make_handler(
     tool_orchestrator=None, max_call_duration_s: int | None = None,
     has_booking_tool: bool = False,
     workflow: dict | None = None, node_tools: list[str] | None = None,
-    node_knowledge: list[str] | None = None, transcripts=None,
+    node_knowledge: list[str] | None = None, transcripts=None, **handler_kwargs,
 ) -> PipelineConversationHandler:
     """Builds the minimal (RuntimeConfig, ProviderBundle) pair these tests
     need — PipelineConversationHandler's real constructor contract now (see
@@ -214,7 +214,7 @@ def _make_handler(
     bundle = ProviderBundle(stt=stt, llm=llm, tts=tts)
     return PipelineConversationHandler(
         runtime_config, bundle, knowledge=knowledge, tool_orchestrator=tool_orchestrator,
-        has_booking_tool=has_booking_tool, transcripts=transcripts,
+        has_booking_tool=has_booking_tool, transcripts=transcripts, **handler_kwargs,
     )
 
 
@@ -2165,14 +2165,16 @@ class _FakeToolOrchestrator:
 
     async def run_turn(
         self, agent_id, tenant_id, call_id, session_id, history,
-        caller_number="", cancel_event=None, force_tool_name=None, phone_number_confirmed=False,
-        local_tools=None, only_tools=None,
+        caller_number="", called_number="", call_direction="", cancel_event=None, force_tool_name=None,
+        phone_number_confirmed=False, local_tools=None, only_tools=None,
     ):
         self.seen_force_tool_name = force_tool_name
         self.seen_phone_number_confirmed = phone_number_confirmed
         self.seen_agent_id = agent_id
         self.seen_history = list(history)
         self.seen_caller_number = caller_number
+        self.seen_called_number = called_number
+        self.seen_call_direction = call_direction
         self.seen_local_tools = local_tools
         self.seen_only_tools = only_tools
         for e in self._events:
@@ -2195,6 +2197,37 @@ async def test_pipeline_uses_tool_orchestrator_when_provided():
     assert orchestrator.seen_history is not None
     # System prompt + this turn's user message reached the orchestrator.
     assert orchestrator.seen_history[-1].content == "book me tomorrow at 3"
+
+
+async def _tool_orchestrator_after_one_turn(**handler_kwargs) -> _FakeToolOrchestrator:
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+
+    orchestrator = _FakeToolOrchestrator([ToolTokenEvent(text="ok")])
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(["unused"]), _make_tts(b"\x00" * 640),
+        system_prompt="You are a scheduler.", tool_orchestrator=orchestrator, **handler_kwargs,
+    )
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+    return orchestrator
+
+
+@pytest.mark.asyncio
+async def test_pipeline_passes_the_calls_direction_and_both_numbers_to_the_orchestrator():
+    orchestrator = await _tool_orchestrator_after_one_turn(
+        direction="outbound", caller_number="+14155550100", called_number="+919812345678",
+    )
+
+    assert orchestrator.seen_call_direction == "outbound"
+    assert orchestrator.seen_caller_number == "+14155550100"
+    assert orchestrator.seen_called_number == "+919812345678"
+
+
+@pytest.mark.asyncio
+async def test_a_handler_built_without_a_direction_carries_none_so_toolexec_fails_closed():
+    orchestrator = await _tool_orchestrator_after_one_turn(caller_number="+14155550100")
+
+    assert orchestrator.seen_call_direction == ""
 
 
 @pytest.mark.asyncio

@@ -389,8 +389,9 @@ async def _replace_params(conn, custom_api_id: Any, params: list[dict]) -> None:
         await conn.execute(
             "INSERT INTO custom_api_params "
             "(custom_api_id, name, location, json_type, description, required, source, "
-            " literal_value, upstream_api_id, upstream_json_path, sensitive) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)",
+            " literal_value, upstream_api_id, upstream_json_path, sensitive, "
+            " body_path, value_prefix, value_digits_only) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14)",
             custom_api_id,
             param["name"],
             param["location"],
@@ -402,6 +403,9 @@ async def _replace_params(conn, custom_api_id: Any, params: list[dict]) -> None:
             param.get("upstream_api_id"),
             param.get("upstream_json_path"),
             param.get("sensitive", False),
+            param.get("body_path"),
+            param.get("value_prefix"),
+            param.get("value_digits_only", False),
         )
 
 
@@ -416,6 +420,7 @@ def _decode_custom_api_row(row: Any) -> dict[str, Any]:
     result = dict(row)
     result["auth_config"] = db.json_col(result["auth_config"])
     result["sensitive_response_paths"] = db.json_col(result["sensitive_response_paths"])
+    result["response_transform"] = db.json_col(result["response_transform"])
     return result
 
 
@@ -549,6 +554,56 @@ async def list_custom_apis(tenant_id: Any) -> list[dict[str, Any]]:
     return apis
 
 
+async def _insert_custom_api(
+    conn,
+    *,
+    tenant_id: Any,
+    name: str,
+    description: str,
+    endpoint_url: str,
+    method: str,
+    body_style: str,
+    auth_scheme: str,
+    auth_config: dict,
+    side_effecting: bool,
+    idempotency_header: str | None,
+    timeout_ms: int | None,
+    sensitive_response_paths: list[str],
+    success_template: str | None,
+    params: list[dict],
+    oauth_connection_id: Any | None = None,
+    preset_key: str | None = None,
+    response_transform: dict | None = None,
+    idempotency_body_field: str | None = None,
+    confirmation_template: str | None = None,
+    session_send_cap: int | None = None,
+) -> dict[str, Any]:
+    """The row and its params, inside the caller's per-tenant advisory-locked
+    transaction. The preset-only fields (the last six) are written only from
+    presets.py; CustomApiCreate exposes none of them. The caller recomputes
+    chain_levels and writes the audit row."""
+    await _validate_upstream_params(conn, tenant_id, params)
+
+    row = await conn.fetchrow(
+        "INSERT INTO custom_apis "
+        "(tenant_id, name, description, endpoint_url, method, body_style, auth_scheme, "
+        " auth_config, side_effecting, idempotency_header, timeout_ms, "
+        " sensitive_response_paths, success_template, oauth_connection_id, preset_key, "
+        " response_transform, idempotency_body_field, confirmation_template, session_send_cap) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12::jsonb, $13, "
+        "        $14, $15, $16::jsonb, $17, $18, $19) "
+        "RETURNING *",
+        tenant_id, name, description, endpoint_url, method, body_style, auth_scheme,
+        _json_or_none(auth_config) or "{}", side_effecting, idempotency_header, timeout_ms,
+        _json_or_none(sensitive_response_paths) or "[]", success_template, oauth_connection_id,
+        preset_key, _json_or_none(response_transform), idempotency_body_field, confirmation_template,
+        session_send_cap,
+    )
+    result = _decode_custom_api_row(row)
+    await _replace_params(conn, result["id"], params)
+    return result
+
+
 async def create_custom_api(
     *,
     tenant_id: Any,
@@ -587,21 +642,13 @@ async def create_custom_api(
             # one atomic section per tenant, not two independent reads).
             await conn.execute("SELECT pg_advisory_xact_lock(hashtext('custom_apis:' || $1::text))", str(tenant_id))
 
-            await _validate_upstream_params(conn, tenant_id, params)
-
-            row = await conn.fetchrow(
-                "INSERT INTO custom_apis "
-                "(tenant_id, name, description, endpoint_url, method, body_style, auth_scheme, "
-                " auth_config, side_effecting, idempotency_header, timeout_ms, "
-                " sensitive_response_paths, success_template) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12::jsonb, $13) "
-                "RETURNING *",
-                tenant_id, name, description, endpoint_url, method, body_style, auth_scheme,
-                _json_or_none(auth_config) or "{}", side_effecting, idempotency_header, timeout_ms,
-                _json_or_none(sensitive_response_paths) or "[]", success_template,
+            result = await _insert_custom_api(
+                conn, tenant_id=tenant_id, name=name, description=description, endpoint_url=endpoint_url,
+                method=method, body_style=body_style, auth_scheme=auth_scheme, auth_config=auth_config,
+                side_effecting=side_effecting, idempotency_header=idempotency_header, timeout_ms=timeout_ms,
+                sensitive_response_paths=sensitive_response_paths, success_template=success_template,
+                params=params,
             )
-            result = _decode_custom_api_row(row)
-            await _replace_params(conn, result["id"], params)
 
             # Recomputes chain_levels for this row and every transitive
             # dependent (there are none yet for a brand-new row, but this
@@ -670,6 +717,12 @@ async def update_custom_api(
                 raise LookupError(f"custom_api {custom_api_id} not found")
             old = _decode_custom_api_row(old_row)
             tenant_id = old["tenant_id"]
+
+            # A preset's rows are read-only (the design's OQ2): to change one the
+            # tenant removes the preset and applies it again. Before the lock or
+            # any write, so nothing about the row or its params can move.
+            if old["preset_key"] is not None:
+                raise ValueError("preset_managed")
 
             # Serialized per tenant — see create_custom_api's comment (lesson 8).
             await conn.execute("SELECT pg_advisory_xact_lock(hashtext('custom_apis:' || $1::text))", str(tenant_id))

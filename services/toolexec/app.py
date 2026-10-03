@@ -23,8 +23,10 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from . import custom_apis, db, executor
-from .routers import agent_apis, chain_runs, custom_apis as custom_apis_router, execute, oauth_connections
+from . import custom_apis, db, executor, presets
+from .routers import (
+    agent_apis, chain_runs, connector_presets, custom_apis as custom_apis_router, execute, oauth_connections,
+)
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +61,8 @@ app.include_router(custom_apis_router.tenant_scoped_router)
 app.include_router(custom_apis_router.router)
 app.include_router(oauth_connections.tenant_scoped_router)
 app.include_router(oauth_connections.router)
+app.include_router(connector_presets.tenant_scoped_router)
+app.include_router(connector_presets.router)
 app.include_router(agent_apis.router)
 app.include_router(chain_runs.router)
 app.include_router(execute.router)
@@ -66,6 +70,11 @@ app.include_router(execute.router)
 
 @app.exception_handler(custom_apis.DependentApiExists)
 async def dependent_api_exists_handler(request: Request, exc: custom_apis.DependentApiExists) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(presets.PresetConnectorRequired)
+async def preset_connector_required_handler(request: Request, exc: presets.PresetConnectorRequired) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 

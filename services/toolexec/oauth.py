@@ -27,6 +27,7 @@ import os
 import secrets
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from starlette.background import BackgroundTasks
@@ -107,16 +108,6 @@ PROVIDERS: dict[str, OAuthProvider] = {
     ),
 }
 
-# Scopes a preset needs beyond the identity scopes. Tenant input never adds to this.
-_PRESET_SCOPES: dict[str, frozenset[str]] = {
-    "calendar_booking": frozenset({
-        "https://www.googleapis.com/auth/calendar.events",
-        "https://www.googleapis.com/auth/calendar.freebusy",
-    }),
-    "sheets_lead_capture": frozenset({"https://www.googleapis.com/auth/drive.file"}),
-}
-
-
 def _client_id(provider: OAuthProvider) -> str | None:
     return os.environ.get(f"TOOLEXEC_OAUTH_{provider.key.upper()}_CLIENT_ID")
 
@@ -144,13 +135,15 @@ def _provider_transport(allowed_ips: list[str]) -> httpx.AsyncHTTPTransport:
 
 
 async def _provider_call(
-    method: str, url: str, *, data: dict[str, str] | None = None, headers: dict[str, str] | None = None,
+    method: str, url: str, *, data: dict[str, str] | None = None, json_body: Any = None,
+    headers: dict[str, str] | None = None,
 ) -> httpx.Response:
-    """The only outbound path to a provider. `data` is a form body; there is
-    deliberately no `params=`, so a secret cannot reach the URL."""
+    """The only outbound path to a provider. `data` is a form body and
+    `json_body` a JSON one; there is deliberately no `params=`, so a secret
+    cannot reach the URL."""
     _hostname, allowed_ips = await resolve_and_validate_endpoint(url)
     async with httpx.AsyncClient(transport=_provider_transport(allowed_ips), timeout=_PROVIDER_TIMEOUT_S) as client:
-        return await client.request(method, url, data=data, headers=headers)
+        return await client.request(method, url, data=data, json=json_body, headers=headers)
 
 
 def _expires_at(body: dict[str, Any]) -> datetime.datetime:
@@ -170,9 +163,13 @@ async def start_authorization(*, tenant_id: str, user_id: str, provider: str, pr
     spec = PROVIDERS[provider]
     preset_scopes = frozenset()
     if preset_key is not None:
-        if preset_key not in _PRESET_SCOPES:
+        from . import presets  # function-local: presets imports this module
+
+        # Scopes come only from the preset definitions, never from tenant input.
+        preset = presets.PRESETS.get(preset_key)
+        if preset is None or preset.provider != provider:
             raise ValueError("unknown_preset")
-        preset_scopes = _PRESET_SCOPES[preset_key]
+        preset_scopes = preset.scopes
 
     state = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
@@ -296,6 +293,27 @@ async def list_connections(tenant_id: str) -> list[dict[str, Any]]:
             tenant_id,
         )
     return [dict(r) for r in rows]
+
+
+async def get_connected(conn, tenant_id: str, provider: str) -> dict[str, Any] | None:
+    row = await conn.fetchrow(
+        "SELECT id, scopes FROM oauth_connections "
+        "WHERE tenant_id = $1 AND provider = $2 AND deleted_at IS NULL AND status = 'connected'",
+        tenant_id, provider,
+    )
+    return dict(row) if row is not None else None
+
+
+async def post_json(tenant_id: str, connection_id: Any, url: str, body: Any) -> Any:
+    """One authenticated JSON POST to a connected provider's API, for a preset's
+    setup calls (creating the leads sheet). The token goes only in the
+    Authorization header and only to one of the provider's own API hosts."""
+    token, provider = await access_token_for(tenant_id, connection_id)
+    if urlsplit(url).hostname not in provider.api_hosts:
+        raise ValueError("credential_unavailable")
+    resp = await _provider_call("POST", url, json_body=body, headers={"Authorization": f"Bearer {token}"})
+    resp.raise_for_status()
+    return resp.json()
 
 
 async def access_token_for(tenant_id: str, connection_id: str) -> tuple[str, OAuthProvider]:
