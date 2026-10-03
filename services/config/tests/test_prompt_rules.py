@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 
@@ -279,6 +280,19 @@ async def test_caller_data_in_revision_raises_customer_data_error(provider, vend
             channel="voice", secret_resolver=_Resolver(),
         )
     assert type(exc.value) is PromptStructureError
+
+
+async def test_revise_instructs_the_model_to_generalise_rather_than_copy_caller_details(
+    provider, vendor,
+):
+    vendor.body = _prompt()
+    await sp.revise_system_prompt(
+        TENANT, CONFIG_ID, base_prompt=_prompt(), problem="x", transcript=[("hi", "hello")],
+        channel="voice", secret_resolver=_Resolver(),
+    )
+    sent = json.dumps(vendor.requests[0])
+    assert "Generalise from the transcript" in sent
+    assert "never copy caller names, addresses, phone numbers, ids" in sent
 
 
 async def test_generate_restores_dropped_blocks(provider, vendor):

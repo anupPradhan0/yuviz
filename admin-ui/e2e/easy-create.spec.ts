@@ -24,6 +24,10 @@ const suffix = Math.random().toString(36).slice(2, 8);
 let token = "";
 let tenantA = "";
 let tenantB = "";
+let tenantNoSpeech = "";
+let tenantEmpty = "";
+let tenantPreselect = "";
+const configIds: Record<string, string> = {};
 let nameCounter = 0;
 const uniqueName = (prefix: string) => `${prefix} ${suffix}${++nameCounter}`;
 
@@ -48,12 +52,35 @@ test.beforeAll(async () => {
       for (const data of configs) {
         const res = await api.post(`/tenants/${id}/providers`, { headers, data });
         expect(res.ok()).toBeTruthy();
+        configIds[`${slug}:${data.name}`] = (await res.json()).id;
       }
     }
     return slug;
   };
   tenantA = await seed(`e2e-a-${suffix}`, 1);
   tenantB = await seed(`e2e-b-${suffix}`, 2);
+
+  // C has an AI service only (no speech recognition, no voice); D has nothing.
+  const seedPartial = async (slug: string, withAi: boolean) => {
+    const created = await api.post("/tenants", { headers, data: { name: `E2E ${slug}`, slug } });
+    expect(created.ok()).toBeTruthy();
+    const { id } = await created.json();
+    if (withAi) {
+      const ai = { role: "llm", engine: "openai", model: "gpt-4o-mini", api_key: "sk-e2e-not-a-real-key", name: "Main AI" };
+      expect((await api.post(`/tenants/${id}/providers`, { headers, data: ai })).ok()).toBeTruthy();
+    }
+    return slug;
+  };
+  // E has two of each, plus one receptionist already using its second voice, so
+  // Easy should preselect that voice (and only that).
+  tenantPreselect = await seed(`e2e-e-${suffix}`, 2);
+  const existing = await api.post(`/tenants/${tenantPreselect}/agents`, {
+    headers,
+    data: { slug: "existing", name: "Existing", tts_config_id: configIds[`${tenantPreselect}:Back Voice`] },
+  });
+  expect(existing.ok()).toBeTruthy();
+  tenantNoSpeech = await seedPartial(`e2e-c-${suffix}`, true);
+  tenantEmpty = await seedPartial(`e2e-d-${suffix}`, false);
   await api.dispose();
 });
 
@@ -455,4 +482,156 @@ test("voice test: every Start mints a fresh one-use credential, sent as the firs
     expect(first.type).toBe("test_credential");
     expect(first.credential).toBe(minted[i]);
   }
+});
+
+test("a tenant missing a setup sees the plain message and link, and no create request is sent", async ({ page }) => {
+  const creates: string[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "POST" && r.url().includes("/agents")) creates.push(r.url());
+  });
+
+  // Only an AI service: the chat job is open, every phone job is closed with the
+  // speech-recognition message.
+  await page.addInitScript(
+    ([t, slug, tokenKey, tenantKey]) => {
+      localStorage.setItem(tokenKey, t);
+      localStorage.setItem(tenantKey, slug);
+    },
+    [token, tenantNoSpeech, TOKEN_KEY, ACTIVE_TENANT_KEY],
+  );
+  await page.goto("/agents/new");
+  await page.locator("button[aria-pressed]:not([disabled])").first().waitFor();
+  await expect(page.locator("button[aria-pressed]", { hasText: CHAT_JOB })).toBeEnabled();
+  const voiceJob = page.locator("button[aria-pressed]", { hasText: VOICE_JOB });
+  await expect(voiceJob).toBeDisabled();
+  await expect(page.getByText(easyCopy.setUpSpeechRecognition).first()).toBeVisible();
+  await expect(page.getByRole("link", { name: easyCopy.addItLink }).first()).toHaveAttribute("href", "/ai-voice");
+  await scan(page, "missing speech recognition");
+
+  // Nothing at all: every job is closed and the AI-service message shows.
+  const other = await page.context().newPage();
+  await other.addInitScript(
+    ([t, slug, tokenKey, tenantKey]) => {
+      localStorage.setItem(tokenKey, t);
+      localStorage.setItem(tenantKey, slug);
+    },
+    [token, tenantEmpty, TOKEN_KEY, ACTIVE_TENANT_KEY],
+  );
+  other.on("request", (r) => {
+    if (r.method() === "POST" && r.url().includes("/agents")) creates.push(r.url());
+  });
+  await other.goto("/agents/new");
+  await expect(other.getByText(easyCopy.connectAiService).first()).toBeVisible();
+  await expect(other.locator("button[aria-pressed]")).not.toHaveCount(0);
+  await expect(other.locator("button[aria-pressed]:not([disabled])")).toHaveCount(0);
+  await scan(other, "missing AI service");
+  expect(creates).toEqual([]);
+});
+
+test("business facts over 1,000 characters show an inline error and send no create request", async ({ page }) => {
+  const creates: string[] = [];
+  page.on("request", (r) => {
+    if (r.method() === "POST" && r.url().includes("/agents")) creates.push(r.url());
+  });
+  await openEasy(page, tenantA);
+  await pickJob(page, CHAT_JOB);
+  await next(page);
+  await page.getByLabel(easyCopy.nameLabel, { exact: true }).fill(uniqueName("Long facts"));
+  await page.getByLabel(easyCopy.businessNameLabel).fill("Acme");
+  await page.getByLabel(easyCopy.businessFactsLabel).fill("x".repeat(1001));
+  await next(page);
+  await expect(page.getByText(easyCopy.factsTooLong)).toBeVisible();
+  await expectStep(page, 1);
+  expect(creates).toEqual([]);
+});
+
+test("the voice dropdown preselects the voice of the newest existing receptionist", async ({ page }) => {
+  await openEasy(page, tenantPreselect);
+  await pickJob(page, VOICE_JOB);
+  await next(page);
+  await fillBusiness(page, uniqueName("Preselect"));
+  await next(page);
+  await expectStep(page, 2);
+  const voice = page.getByLabel(easyCopy.voiceLabel, { exact: true });
+  await expect(voice).toHaveValue(configIds[`${tenantPreselect}:Back Voice`]);
+  // Only the voice is carried over: the other two choices stay open.
+  await expect(page.getByLabel(easyCopy.aiServiceLabel, { exact: true })).toHaveValue("");
+  await expect(page.getByLabel(easyCopy.speechRecognitionLabel, { exact: true })).toHaveValue("");
+  await expect(page.getByRole("button", { name: easyCopy.continue, exact: true })).toBeDisabled();
+});
+
+test("Stop, Start, then Back: a fresh mint each time, Fix waits for the new session, Back creates nothing", async ({ page }) => {
+  const sockets: WebSocketRoute[] = [];
+  const frames: string[][] = [];
+  await page.routeWebSocket(/\/webcall/, (ws) => {
+    const mine: string[] = [];
+    sockets.push(ws);
+    frames.push(mine);
+    ws.onMessage((m) => mine.push(typeof m === "string" ? m : "<binary>"));
+  });
+  const minted: string[] = [];
+  const creates: string[] = [];
+  page.on("response", async (res) => {
+    if (res.request().method() === "POST" && res.url().endsWith("/test-sessions") && res.ok()) {
+      minted.push((await res.json()).credential);
+    }
+  });
+  page.on("request", (r) => {
+    if (r.method() === "POST" && /\/agents(\/from-template)?$/.test(r.url())) creates.push(r.url());
+  });
+
+  await openEasy(page, tenantA);
+  await createThrough(page, VOICE_JOB, uniqueName("Back"));
+  const createdBefore = creates.length;
+  expect(createdBefore).toBe(1);
+
+  // Start 1 with a full session, Stop, then Start 2: no session yet.
+  const startTalking = page.getByRole("button", { name: easyCopy.startTalking });
+  await startTalking.click();
+  await expect.poll(() => sockets.length).toBe(1);
+  sockets[0].send(JSON.stringify({ type: "service_ready", session_id: "back-session-1" }));
+  sockets[0].send(JSON.stringify({ type: "tts_result", text: "First line." }));
+  await expect(page.getByText("First line.")).toBeVisible();
+  await page.getByRole("button", { name: easyCopy.stop }).click();
+  await expect(startTalking).toBeVisible();
+  await startTalking.click();
+  await expect.poll(() => sockets.length).toBe(2);
+  await expect.poll(() => frames[1].length).toBeGreaterThan(0);
+  expect(minted).toHaveLength(2);
+  expect(new Set(minted).size).toBe(2);
+  expect(JSON.parse(frames[1][0]).credential).toBe(minted[1]);
+
+  // Fix stays shut for the second session, whatever the first one said.
+  await next(page);
+  await expectStep(page, 4);
+  await expect(page.getByText(easyCopy.testFirst)).toBeVisible();
+  await expect(flow(page).locator("textarea")).toHaveCount(0);
+
+  // Back returns to Test and creates nothing.
+  await page.getByRole("button", { name: easyCopy.back }).click();
+  await expectStep(page, 3);
+  expect(creates).toHaveLength(createdBefore);
+
+  // Coming back leaves a dead call, so Start mints again; that session's id and a line open Fix.
+  await startTalking.click();
+  await expect.poll(() => sockets.length).toBe(3);
+  expect(minted).toHaveLength(3);
+  expect(new Set(minted).size).toBe(3);
+  sockets[2].send(JSON.stringify({ type: "service_ready", session_id: "back-session-3" }));
+  sockets[2].send(JSON.stringify({ type: "tts_result", text: "Second line." }));
+  await expect(page.getByText("Second line.")).toBeVisible();
+  await next(page);
+  await expectStep(page, 4);
+  await expect(page.getByLabel(easyCopy.problemLabel)).toBeVisible();
+
+  // With a proposal on screen, Back is gone.
+  await page.route("**/prompt/revise", (route) =>
+    route.fulfill({ status: 200, json: { before: "Old text.", after: "New text.", base_prompt_sha256: "x" } }),
+  );
+  await expect(page.getByRole("button", { name: easyCopy.back })).toHaveCount(1);
+  await page.getByLabel(easyCopy.problemLabel).fill("It was slow to answer.");
+  await page.getByRole("button", { name: easyCopy.suggestFix }).click();
+  await page.getByRole("button", { name: easyCopy.acceptFix }).waitFor();
+  await expect(page.getByRole("button", { name: easyCopy.back })).toHaveCount(0);
+  expect(creates).toHaveLength(createdBefore);
 });

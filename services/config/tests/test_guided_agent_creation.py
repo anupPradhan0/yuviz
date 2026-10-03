@@ -470,6 +470,46 @@ class TestFromTemplate:
         assert await pool.fetchval(
             "SELECT count(*) FROM agents WHERE tenant_id = $1", test_tenant["id"]) == 0
 
+    async def test_an_advanced_create_stays_active_with_no_template(
+        self, pool, client, test_tenant, configs,
+    ):
+        resp = await client.post(
+            _url(test_tenant),
+            json={"slug": "adv", "name": "Adv", "llm_config_id": configs["llm"]},
+        )
+        assert resp.status_code == 201, resp.text
+        row = await _agent_row(pool, resp.json()["id"])
+        assert (row["status"], row["template_id"], row["template_version"]) == ("active", None, None)
+
+    async def test_a_superadmin_acts_only_inside_the_path_tenant(
+        self, pool, test_tenant, tenant_b, configs, test_superadmin,
+    ):
+        async with _client_for(test_superadmin["token"]) as su:
+            agent = await _create_agent(su, test_tenant, configs)
+            assert (await _agent_row(pool, agent["id"]))["tenant_id"] == test_tenant["id"]
+            # Tenant A's agent id named under tenant B's path is a missing agent.
+            other = await su.post(
+                _url(tenant_b["tenant"], f"/{agent['id']}/test-sessions"), json={"channel": "chat"})
+            missing = await su.post(
+                _url(tenant_b["tenant"], f"/{uuid.uuid4()}/test-sessions"), json={"channel": "chat"})
+            assert (other.status_code, _shape(other)) == (404, _shape(missing))
+            # Tenant B's config named under tenant A's path creates nothing.
+            before = await pool.fetchval(
+                "SELECT count(*) FROM agents WHERE tenant_id = $1", test_tenant["id"])
+            foreign = await su.post(
+                _url(test_tenant, "/from-template"),
+                json=_template_body("faq-support", configs, name="Other",
+                                    llm_config_id=tenant_b["configs"]["llm"]))
+            assert foreign.status_code == 400
+            # Per-caller invariance: the same caller, a random id, the same answer.
+            random_id = await su.post(
+                _url(test_tenant, "/from-template"),
+                json=_template_body("faq-support", configs, name="Other",
+                                    llm_config_id=str(uuid.uuid4())))
+            assert _shape(foreign) == _shape(random_id)
+            assert await pool.fetchval(
+                "SELECT count(*) FROM agents WHERE tenant_id = $1", test_tenant["id"]) == before
+
     async def test_a_name_collision_is_the_existing_409(self, client, test_tenant, configs):
         await _create_agent(client, test_tenant, configs)
         resp = await client.post(
@@ -568,6 +608,36 @@ class TestAcceptAndUndo:
         again = await client.post(_url(test_tenant, f"/{agent['id']}/prompt/undo"))
         assert again.status_code == 409
         assert (await _agent_row(pool, agent["id"]))["system_prompt"] == p1
+
+    async def test_no_test_revise_accept_or_undo_step_ever_activates_the_agent(
+        self, pool, client, test_tenant, configs, model,
+    ):
+        agent = await _create_agent(client, test_tenant, configs)
+        assert (await _agent_row(pool, agent["id"]))["status"] == "inactive"
+
+        async def status() -> str:
+            return (await _agent_row(pool, agent["id"]))["status"]
+
+        session = await _chat_session(client, test_tenant, agent)
+        assert await status() == "inactive"  # test-sessions
+        turn = await client.post(
+            _url(test_tenant, f"/{agent['id']}/test-chat"),
+            json={"credential": session["credential"], "session_id": session["session_id"],
+                  "message": "hi"})
+        assert turn.status_code == 200, turn.text
+        assert await status() == "inactive"  # test-chat
+        base = agent["system_prompt"]
+        model.reply = _extend(base, "Offer a callback.")
+        revised = await _revise(client, test_tenant, agent["id"], session["session_id"])
+        assert revised.status_code == 200, revised.text
+        assert await status() == "inactive"  # revise
+        accepted = await _accept(
+            client, test_tenant, agent["id"], session["session_id"], model.reply, base)
+        assert accepted.status_code == 200, accepted.text
+        assert await status() == "inactive"  # accept
+        undone = await client.post(_url(test_tenant, f"/{agent['id']}/prompt/undo"))
+        assert undone.status_code == 200, undone.text
+        assert await status() == "inactive"  # undo
 
     async def test_a_hand_edit_after_accept_makes_undo_a_409_and_clears_can_undo(
         self, pool, client, test_tenant, configs,
