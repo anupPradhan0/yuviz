@@ -325,6 +325,16 @@ def test_no_banned_word_in_easy_copy():
     assert [s for s in scanned if BANNED.search(s)] == []
 
 
+E2E_SPEC = REPO / "admin-ui/e2e/easy-create.spec.ts"
+
+
+def test_e2e_banned_list_matches():
+    # the Playwright spec keeps its own copy of the banned list; it must not drift
+    m = re.search(r"^const BANNED = /(.+)/gi;$", E2E_SPEC.read_text(), re.M)
+    assert m is not None
+    assert m.group(1) == BANNED.pattern
+
+
 def test_easy_copy_has_the_messages_the_design_fixes_verbatim():
     scanned = _easy_copy_strings()
     assert "Please remove double curly brackets {{ }} from this text." in scanned
