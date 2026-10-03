@@ -40,7 +40,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
 
 ## Phase 2: Config credential tables, four-table pair (all-or-nothing)
 
-- [ ] T3 Make `resolve_api_key_input` fail closed and repair its callers in the provider and tool-provider paths — `services/config/provider_configs.py`, `services/config/tool_provider_configs.py`, `scripts/seed_default_config.py` — MUST PRECEDE T4, T5, T6.
+- [x] T3 Make `resolve_api_key_input` fail closed and repair its callers in the provider and tool-provider paths — `services/config/provider_configs.py`, `services/config/tool_provider_configs.py`, `scripts/seed_default_config.py` — MUST PRECEDE T4, T5, T6.
   - `provider_configs.py`:
     - Add `STORED_SENTINEL`, `mask_enc`, `ref_mask_required(user)` and `public_provider_config(cfg, *, masked)`.
     - `mask_enc` maps `enc:…` to `"[stored]"` and `"quarantined"` to `""`. `env:`, `k8s:` and `None` are unchanged.
@@ -62,7 +62,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - A mechanical grep-based test asserts every call of `resolve_api_key_input` in the repo passes `allow_pointer_schemes=` and asserts the call count. It must include the seed script, and must go red if the seed keyword is removed.
     - Mid-phase state: routers not yet passing the keyword raise `TypeError` on writes (refusal). That is accepted until T6.
 
-- [ ] T4 Apply the same rules to carriers, the fourth ref table — `services/config/carriers.py`, `services/config/schemas.py`, `services/config/audit.py`.
+- [x] T4 Apply the same rules to carriers, the fourth ref table — `services/config/carriers.py`, `services/config/schemas.py`, `services/config/audit.py`.
   - `carriers.py`:
     - `create_carrier` and `update_carrier` gain a required `allow_pointer_schemes` keyword and a plaintext `auth_token`.
     - They run `auth_token_ref = resolve_api_key_input(auth_token, auth_token_ref, current_ref=<old row's auth_token_ref on update, None on create>, allow_pointer_schemes=…)`.
@@ -78,7 +78,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - A byte-identical round-trip and `"[stored]"` both keep the stored value.
     - An audit row for a carrier create contains no plaintext token.
 
-- [ ] T5 Apply the rules to telephony credentials — `services/config/telephony_configs.py`, `services/config/tests/test_telephony_configs.py`.
+- [x] T5 Apply the rules to telephony credentials — `services/config/telephony_configs.py`, `services/config/tests/test_telephony_configs.py`.
   - `_normalize_credentials(provider, credentials, old_credentials=None, *, allow_pointer_schemes: bool)` and `_normalize_one(field_name, entry, old_entry, *, allow_pointer_schemes: bool)`. The keyword is required.
   - For a list field, `old_entry` is the old list's entry at the same index.
   - `"[stored]"` maps to `old_entry`, or raises when there is none. An `enc:` entry is kept only if `== old_entry`; otherwise it raises `ValueError(f"{field_name}: credential_ref_not_accepted")`.
@@ -93,7 +93,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - `public_telephony_config(masked=True)` leaves no `enc:` string in a `native` row.
     - Call sites that omit the keyword raise `TypeError`.
 
-- [ ] T6 Wire the four Config routers: literal pointer predicate and response masking — `services/config/routers/provider_configs.py`, `routers/tool_provider_configs.py`, `routers/telephony_configs.py`, `routers/carriers.py` (four small, mechanical edits, one pattern). Requires T3, T4, T5.
+- [x] T6 Wire the four Config routers: literal pointer predicate and response masking — `services/config/routers/provider_configs.py`, `routers/tool_provider_configs.py`, `routers/telephony_configs.py`, `routers/carriers.py` (four small, mechanical edits, one pattern). Requires T3, T4, T5.
   - Every create and update route passes the literal `allow_pointer_schemes=is_platform_scoped(current_user)`. It must be this exact expression, `tenant_id is None`, not a role test (lesson 24, lesson 32).
   - Every route that returns a row wraps it:
     - `public_provider_config(..., masked=ref_mask_required(current_user))`
@@ -107,7 +107,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - A viewer's GET shows `"[stored]"`.
     - The Conversation service account (`is_service_account` AND `tenant_id IS NULL`) still reads the sealed `enc:`.
 
-- [ ] T7 Add the route-walking masking and call-site tripwire tests — `services/config/tests/test_credential_masking.py` (new), `services/config/tests/test_carriers.py`. Requires T6.
+- [x] T7 Add the route-walking masking and call-site tripwire tests — `services/config/tests/test_credential_masking.py` (new), `services/config/tests/test_carriers.py`. Requires T6.
   - Walk `app.routes` mechanically (lesson 29) for every route returning a row from the four tables.
   - For each of superadmin, admin, supervisor and viewer, assert no string in the body starts with `enc:` and the credential fields equal `"[stored]"`.
   - Assert the walked-route count, so a new route breaks the test.

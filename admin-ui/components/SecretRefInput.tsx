@@ -7,7 +7,10 @@ import { useState } from "react";
 // live key in plaintext. Pasting a key is the default; the
 // pointer is behind a link for deployments with a secret manager.
 
-const isStored = (v: string) => v.startsWith("enc:");
+// The server never returns an `enc:` ref to the console: it sends "[stored]"
+// in its place. Both mean "a saved credential the browser cannot see", and
+// both must travel back as a ref, never as a typed key.
+const isStored = (v: string) => v.startsWith("enc:") || v === "[stored]";
 
 export function SecretRefInput({
   value,
@@ -149,6 +152,9 @@ export function secretPayload(
   original = "",
 ): { api_key_ref?: string; api_key?: string } {
   const v = value.trim();
+  // A saved credential echoed back untouched. Sent as api_key, the mask
+  // itself would be encrypted and stored as the credential.
+  if (isStored(v)) return { api_key_ref: v };
   // Empty clears only when there was something to clear (the Remove button);
   // otherwise the field is untouched and must not be sent.
   if (!v) return original ? { api_key_ref: "" } : {};

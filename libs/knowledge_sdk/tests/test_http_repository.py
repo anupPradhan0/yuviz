@@ -68,6 +68,7 @@ async def test_has_enabled_kb_true_after_assignment(service_account, tenant_agen
     tenant, agent = tenant_agent
     embedding_cfg = await provider_configs.create_provider_config(
         tenant_id=tenant["id"], name="Embed", role="embedding", engine="ollama",
+        allow_pointer_schemes=False,
     )
     kb = await pool.fetchrow(
         "INSERT INTO knowledge_bases (tenant_id, slug, name, embedding_config_id) "

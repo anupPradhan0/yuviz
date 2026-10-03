@@ -100,7 +100,12 @@ async def main() -> None:
             if any(have_extra.get(k) != v for k, v in want_extra.items()):
                 drift["extra"] = {**have_extra, **want_extra}
             if drift:
-                await provider_configs.update_provider_config(match["id"], **drift)
+                # The seed supplies no key and no ref, so it needs no pointer
+                # scheme. Literal False on purpose: never add a default to the
+                # service functions to quiet this call.
+                await provider_configs.update_provider_config(
+                    match["id"], allow_pointer_schemes=False, **drift,
+                )
                 print(f"updated provider_config: {spec['role']}/{spec['engine']} {drift}")
             else:
                 print(f"provider_config already exists: {spec['role']}/{spec['engine']} ({match['id']})")
@@ -108,6 +113,7 @@ async def main() -> None:
         created = await provider_configs.create_provider_config(
             tenant_id=tenant["id"], name=spec["name"], role=spec["role"], engine=spec["engine"],
             model=spec.get("model"), voice=spec.get("voice"), extra=spec.get("extra"),
+            allow_pointer_schemes=False,  # see the update call above
         )
         provider_ids[spec["role"]] = created["id"]
         print(f"created provider_config: {spec['role']}/{spec['engine']} ({created['id']})")

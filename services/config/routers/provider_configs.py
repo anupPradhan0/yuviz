@@ -20,6 +20,7 @@ from ..deps import (
     require_role,
     validate_id_exists,
 )
+from ..provider_configs import public_provider_config, ref_mask_required
 from ..schemas import ProviderConfigCreate, ProviderConfigUpdate, VoicePreview
 from ..secret_resolver import CompositeSecretResolver
 
@@ -51,9 +52,10 @@ async def list_provider_configs(
     # the credential itself rather than a pointer to one. Without this any
     # authenticated user could list another tenant's provider rows by id.
     await assert_tenant_access(tenant_id, current_user)
-    return await provider_configs_service.list_provider_configs(
+    rows = await provider_configs_service.list_provider_configs(
         tenant_id, role=role, environment=environment,
     )
+    return [public_provider_config(r, masked=ref_mask_required(current_user)) for r in rows]
 
 
 @tenant_scoped_router.post("", status_code=201)
@@ -63,7 +65,7 @@ async def create_provider_config(
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
     await _resolve_tenant_id(tenant_id)
-    return await provider_configs_service.create_provider_config(
+    created = await provider_configs_service.create_provider_config(
         tenant_id=tenant_id,
         name=body.name,
         role=body.role,
@@ -76,9 +78,11 @@ async def create_provider_config(
         api_key_ref=body.api_key_ref,
         api_key=body.api_key,
         extra=body.extra,
+        allow_pointer_schemes=is_platform_scoped(current_user),
         user_id=current_user.id,
         user_email=current_user.email,
     )
+    return public_provider_config(created, masked=ref_mask_required(current_user))
 
 
 async def _authorize_provider(provider_id: str, current_user: CurrentUser) -> dict:
@@ -114,7 +118,8 @@ async def _authorize_provider(provider_id: str, current_user: CurrentUser) -> di
 
 @router.get("/{provider_id}")
 async def get_provider_config(provider_id: str, current_user: CurrentUser = Depends(get_current_user)):
-    return await _authorize_provider(provider_id, current_user)
+    cfg = await _authorize_provider(provider_id, current_user)
+    return public_provider_config(cfg, masked=ref_mask_required(current_user))
 
 
 @router.patch("/{provider_id}")
@@ -133,9 +138,14 @@ async def update_provider_config(
     if "api_key_ref" in fields and not (fields["api_key_ref"] or "").strip() and not (fields.get("api_key") or "").strip():
         raise HTTPException(status_code=400, detail="api_key_ref must not be blank")
     set_target_tenant(cfg["tenant_id"])
-    return await provider_configs_service.update_provider_config(
-        provider_id, user_id=current_user.id, user_email=current_user.email, **fields,
+    updated = await provider_configs_service.update_provider_config(
+        provider_id,
+        allow_pointer_schemes=is_platform_scoped(current_user),
+        user_id=current_user.id,
+        user_email=current_user.email,
+        **fields,
     )
+    return public_provider_config(updated, masked=ref_mask_required(current_user))
 
 
 @router.delete("/{provider_id}", status_code=204)

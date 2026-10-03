@@ -82,6 +82,7 @@ async def test_fetch_agent_and_provider_config(service_account, pool):
     )
     provider = await provider_configs.create_provider_config(
         tenant_id=tenant["id"], name="STT", role="stt", engine="deepgram",
+        allow_pointer_schemes=False,
     )
 
     repo = _repo(service_account)

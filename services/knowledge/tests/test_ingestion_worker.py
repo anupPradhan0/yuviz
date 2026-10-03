@@ -22,6 +22,7 @@ async def test_process_one_job_success_produces_ready_document_and_chunks(tenant
     set_caller_tenant(str(tenant["id"]))
     embedding_cfg = await provider_configs.create_provider_config(
         tenant_id=tenant["id"], name="Embed", role="embedding", engine="ollama",
+        allow_pointer_schemes=False,
     )
     kb = await kb_service.create_knowledge_base(
         tenant_id=tenant["id"], slug="policies", name="Policies", embedding_config_id=embedding_cfg["id"],
@@ -67,6 +68,7 @@ async def test_tiny_document_auto_inlines_and_skips_embedding(tenant_agent, pool
     set_caller_tenant(str(tenant["id"]))
     embedding_cfg = await provider_configs.create_provider_config(
         tenant_id=tenant["id"], name="Embed", role="embedding", engine="ollama",
+        allow_pointer_schemes=False,
     )
     kb = await kb_service.create_knowledge_base(
         tenant_id=tenant["id"], slug="tiny-kb", name="Tiny KB", embedding_config_id=embedding_cfg["id"],
@@ -95,6 +97,7 @@ async def test_manual_prompt_override_survives_reingestion_of_large_document(ten
     set_caller_tenant(str(tenant["id"]))
     embedding_cfg = await provider_configs.create_provider_config(
         tenant_id=tenant["id"], name="Embed", role="embedding", engine="ollama",
+        allow_pointer_schemes=False,
     )
     kb = await kb_service.create_knowledge_base(
         tenant_id=tenant["id"], slug="override-kb", name="Override KB", embedding_config_id=embedding_cfg["id"],
@@ -121,6 +124,7 @@ async def test_process_one_job_unsupported_content_type_marks_failed(tenant_agen
     set_caller_tenant(str(tenant["id"]))
     embedding_cfg = await provider_configs.create_provider_config(
         tenant_id=tenant["id"], name="Embed", role="embedding", engine="ollama",
+        allow_pointer_schemes=False,
     )
     kb = await kb_service.create_knowledge_base(
         tenant_id=tenant["id"], slug="policies2", name="Policies2", embedding_config_id=embedding_cfg["id"],

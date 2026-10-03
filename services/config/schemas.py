@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from libs.config_sdk.dial_targets import is_dial_number, is_transfer_destination
 
@@ -349,6 +349,7 @@ class CarrierCreate(BaseModel):
     provider:             Literal["twilio", "plivo", "vonage"]
     auth_id:              str | None = None
     auth_token_ref:       str | None = None
+    auth_token:           SecretStr | None = None
     carrier_account_ref:  str | None = None
 
 
@@ -356,6 +357,7 @@ class CarrierUpdate(BaseModel):
     name:                 str | None = None
     auth_id:              str | None = None
     auth_token_ref:       str | None = None
+    auth_token:           SecretStr | None = None
     carrier_account_ref:  str | None = None
 
 

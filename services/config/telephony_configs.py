@@ -4,13 +4,13 @@ provider_configs.py. `credentials` is validated against the registered
 provider (libs.telephony_sdk.registry.TelephonyProviderRegistry) before
 insert, so a malformed/incomplete credential set never reaches Postgres.
 
-Returning `credentials` to a caller is intentionally NOT redacted here —
-unlike provider_configs.api_key_ref (a reference path, never a secret
-itself), telephony credentials ARE the actual secret (auth_id/auth_token).
-Callers of get/list must be trusted admin/superadmin routes only (see
-routers/telephony_configs.py's require_role guards) — this mirrors how
-phone_numbers/provider_configs already assume router-level auth is the
-only gate, not a second field-level redaction layer.
+Sensitive credential fields hold an `enc:` ciphertext, which is a bearer
+capability (lesson 43): the shared resolvers decrypt it for whichever tenant
+presents it. So a client can never submit one it did not already hold
+(_normalize_one compares against the row read under FOR UPDATE), and
+public_telephony_config() masks every `enc:` string in a browser-facing
+response. The service getters and the cache keep the sealed value for the
+platform service accounts (vobiz, telephony) that read it.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from libs.telephony_sdk.registry import TelephonyProviderRegistry
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import audit, cache, db
+from .provider_configs import STORED_SENTINEL, mask_enc
 
 _UPDATABLE_FIELDS = {"name", "credentials", "is_default_outbound"}
 _PLATFORM_MANAGED_CREDENTIAL_FIELDS = ("inbound_application_id",)
@@ -57,30 +58,55 @@ def _cache_key(config_id: Any) -> str:
     return f"telephony_config:{config_id}"
 
 
-def _normalize_scalar_or_list(field_name: str, value: Any) -> Any:
+def _normalize_scalar_or_list(
+    field_name: str, value: Any, old_value: Any, *, allow_pointer_schemes: bool,
+) -> Any:
     """Seals a scalar sensitive field (Vobiz's auth_token) or every entry
-    of a list-valued one (Cloudonix's api_keys): a plaintext value is
-    encrypted, an existing `enc:` token is kept verbatim, and anything
-    else — including `env:`/`k8s:` — is rejected. `telephony_configs.
-    credentials` is tenant-writable JSONB, and `CompositeSecretResolver`'s
-    `env:`/`k8s:` schemes were built for admin-entered infra config, not
-    tenant input (lesson 37)."""
+    of a list-valued one (Cloudonix's api_keys): plaintext is encrypted,
+    `"[stored]"` or a byte-identical `enc:` entry keeps what the row already
+    holds, and any other `enc:` is refused. `telephony_configs.credentials`
+    is tenant-writable JSONB, and the shared resolvers' `env:`/`k8s:` schemes
+    were built for admin-entered infra config, not tenant input (lesson 37)."""
     if isinstance(value, list):
-        return [_normalize_one(field_name, entry) for entry in value]
-    return _normalize_one(field_name, value)
+        old_list = old_value if isinstance(old_value, list) else []
+        return [
+            _normalize_one(
+                field_name, entry, old_list[i] if i < len(old_list) else None,
+                allow_pointer_schemes=allow_pointer_schemes,
+            )
+            for i, entry in enumerate(value)
+        ]
+    old_entry = old_value if isinstance(old_value, str) else None
+    return _normalize_one(field_name, value, old_entry, allow_pointer_schemes=allow_pointer_schemes)
 
 
-def _normalize_one(field_name: str, entry: Any) -> str:
+def _normalize_one(
+    field_name: str, entry: Any, old_entry: str | None, *, allow_pointer_schemes: bool,
+) -> str:
     if not isinstance(entry, str) or not entry:
         raise ValueError(f"{field_name} entries must be non-empty strings")
+    if entry == STORED_SENTINEL:
+        if old_entry is None:
+            raise ValueError(f"{field_name}: credential_ref_not_accepted")
+        return old_entry
     if is_encrypted(entry):
-        return entry
+        if entry == old_entry:
+            return entry
+        raise ValueError(f"{field_name}: credential_ref_not_accepted")
     if entry.startswith(("env:", "k8s:")):
-        raise ValueError(f"{field_name} must be the credential itself, not an env:/k8s: reference")
+        if allow_pointer_schemes:
+            return entry
+        raise ValueError(f"{field_name}: credential_ref_not_accepted")
     return encrypt_secret(entry)
 
 
-def _normalize_credentials(provider: str, credentials: dict[str, Any]) -> dict[str, Any]:
+def _normalize_credentials(
+    provider: str,
+    credentials: dict[str, Any],
+    old_credentials: dict[str, Any] | None = None,
+    *,
+    allow_pointer_schemes: bool,
+) -> dict[str, Any]:
     """Provider-agnostic over `sensitive_credential_fields()` — scalar and
     list-valued fields both seal the same way. `provider in
     _NON_REST_PROVIDERS` (native's 5000-5009 rows) is returned verbatim:
@@ -88,11 +114,29 @@ def _normalize_credentials(provider: str, credentials: dict[str, Any]) -> dict[s
     if provider in _NON_REST_PROVIDERS:
         return credentials
     provider_cls = TelephonyProviderRegistry.get(provider)
+    old = old_credentials or {}
     sealed = dict(credentials)
     for field_name in provider_cls.sensitive_credential_fields():
         if field_name in sealed:
-            sealed[field_name] = _normalize_scalar_or_list(field_name, sealed[field_name])
+            sealed[field_name] = _normalize_scalar_or_list(
+                field_name, sealed[field_name], old.get(field_name),
+                allow_pointer_schemes=allow_pointer_schemes,
+            )
     return sealed
+
+
+def public_telephony_config(cfg: dict[str, Any], *, masked: bool) -> dict[str, Any]:
+    """Registry-independent: masks every `enc:` string in credentials, scalar
+    or list entry, so `native` rows and any field a provider adds later are
+    covered without a list to keep in sync."""
+    if not masked:
+        return cfg
+    credentials = {
+        key: [mask_enc(e) if isinstance(e, str) else e for e in value] if isinstance(value, list)
+        else mask_enc(value) if isinstance(value, str) else value
+        for key, value in cfg["credentials"].items()
+    }
+    return {**cfg, "credentials": credentials}
 
 
 def validate_credentials(provider: str, credentials: dict[str, Any]) -> None:
@@ -220,10 +264,11 @@ async def create_telephony_config(
     provider: str,
     credentials: dict[str, Any],
     is_default_outbound: bool = False,
+    allow_pointer_schemes: bool,
     user_id: Any | None = None,
     user_email: str | None = None,
 ) -> dict[str, Any]:
-    credentials = _normalize_credentials(provider, credentials)
+    credentials = _normalize_credentials(provider, credentials, allow_pointer_schemes=allow_pointer_schemes)
     validate_credentials(provider, credentials)
 
     pool = await db.get_pool()
@@ -269,6 +314,7 @@ def _account_identity(provider: str, credentials: dict[str, Any]) -> tuple:
 async def update_telephony_config(
     config_id: Any,
     *,
+    allow_pointer_schemes: bool,
     user_id: Any | None = None,
     user_email: str | None = None,
     **fields: Any,
@@ -289,12 +335,15 @@ async def update_telephony_config(
         old = dict(old_row)
 
         if "credentials" in fields and fields["credentials"] is not None:
-            new_credentials = _normalize_credentials(old["provider"], fields["credentials"])
+            old_credentials = db.json_col(old["credentials"]) or {}
+            new_credentials = _normalize_credentials(
+                old["provider"], fields["credentials"], old_credentials,
+                allow_pointer_schemes=allow_pointer_schemes,
+            )
             validate_credentials(old["provider"], new_credentials)
             # Ids the platform created at the provider (number_sync.py) aren't
             # in the admin's form; dropping them would orphan that resource.
             # Only within the same provider account: another account can't use them.
-            old_credentials = db.json_col(old["credentials"]) or {}
             if _account_identity(old["provider"], old_credentials) == _account_identity(old["provider"], new_credentials):
                 for key in _PLATFORM_MANAGED_CREDENTIAL_FIELDS:
                     if key in old_credentials and key not in new_credentials:

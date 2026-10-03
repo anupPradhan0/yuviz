@@ -331,10 +331,12 @@ async def test_tier3_provider_configs(two_tenants, superadmin, tenant_admin_a):
     with _as_tenant(two_tenants["a"]["id"]):
         cfg_a = await provider_configs_service.create_provider_config(
             tenant_id=two_tenants["a"]["id"], name="A LLM", role="llm", engine="openai",
+            allow_pointer_schemes=False,
         )
     with _as_tenant(two_tenants["b"]["id"]):
         cfg_b = await provider_configs_service.create_provider_config(
             tenant_id=two_tenants["b"]["id"], name="B LLM", role="llm", engine="openai",
+            allow_pointer_schemes=False,
         )
     await _assert_tier3_matrix(
         config_app, f"/providers/{cfg_b['id']}", f"/providers/{cfg_a['id']}",
@@ -347,10 +349,12 @@ async def test_tier3_telephony_configs(two_tenants, superadmin, tenant_admin_a):
     with _as_tenant(two_tenants["a"]["id"]):
         cfg_a = await telephony_configs_service.create_telephony_config(
             tenant_id=two_tenants["a"]["id"], name="A Telephony", provider="vobiz", credentials=creds,
+            allow_pointer_schemes=False,
         )
     with _as_tenant(two_tenants["b"]["id"]):
         cfg_b = await telephony_configs_service.create_telephony_config(
             tenant_id=two_tenants["b"]["id"], name="B Telephony", provider="vobiz", credentials=creds,
+            allow_pointer_schemes=False,
         )
     await _assert_tier3_matrix(
         config_app, f"/telephony-configs/{cfg_b['id']}", f"/telephony-configs/{cfg_a['id']}",
@@ -360,9 +364,9 @@ async def test_tier3_telephony_configs(two_tenants, superadmin, tenant_admin_a):
 
 async def test_tier3_carriers(two_tenants, superadmin, tenant_admin_a):
     with _as_tenant(two_tenants["a"]["id"]):
-        carrier_a = await carriers_service.create_carrier(tenant_id=two_tenants["a"]["id"], name="A Carrier", provider="twilio")
+        carrier_a = await carriers_service.create_carrier(tenant_id=two_tenants["a"]["id"], name="A Carrier", provider="twilio", allow_pointer_schemes=False)
     with _as_tenant(two_tenants["b"]["id"]):
-        carrier_b = await carriers_service.create_carrier(tenant_id=two_tenants["b"]["id"], name="B Carrier", provider="twilio")
+        carrier_b = await carriers_service.create_carrier(tenant_id=two_tenants["b"]["id"], name="B Carrier", provider="twilio", allow_pointer_schemes=False)
     await _assert_tier3_matrix(
         config_app, f"/carriers/{carrier_b['id']}", f"/carriers/{carrier_a['id']}",
         superadmin["token"], tenant_admin_a["token"], cross_tenant_status=403,
@@ -384,10 +388,12 @@ async def test_tier3_tool_provider_configs(two_tenants, superadmin, tenant_admin
     with _as_tenant(two_tenants["a"]["id"]):
         tp_a = await tool_provider_configs_service.create_tool_provider_config(
             tenant_id=two_tenants["a"]["id"], name="A Tool", tool_name="weather", engine="http",
+            allow_pointer_schemes=False,
         )
     with _as_tenant(two_tenants["b"]["id"]):
         tp_b = await tool_provider_configs_service.create_tool_provider_config(
             tenant_id=two_tenants["b"]["id"], name="B Tool", tool_name="weather", engine="http",
+            allow_pointer_schemes=False,
         )
     await _assert_tier3_matrix(
         config_app, f"/tool-providers/{tp_b['id']}", f"/tool-providers/{tp_a['id']}",
@@ -695,7 +701,7 @@ from services.config import db as config_db  # noqa: E402
 
 async def test_ac6_case1_superadmin_sees_target_tenants_rows(pool, two_tenants, superadmin):
     with _as_tenant(two_tenants["b"]["id"]):
-        carrier_b = await carriers_service.create_carrier(tenant_id=two_tenants["b"]["id"], name="Case1 Carrier", provider="twilio")
+        carrier_b = await carriers_service.create_carrier(tenant_id=two_tenants["b"]["id"], name="Case1 Carrier", provider="twilio", allow_pointer_schemes=False)
     baseline = await pool.fetch("SELECT id FROM carriers WHERE tenant_id = $1", two_tenants["b"]["id"])
     assert {r["id"] for r in baseline} == {carrier_b["id"]}
 
@@ -715,7 +721,7 @@ async def test_ac6_case2_superadmin_write_lands_under_target_tenant(two_tenants,
 
 async def test_ac6_case3_tenant_admin_refused_read_and_write_on_foreign_tenant(two_tenants, superadmin, tenant_admin_a):
     with _as_tenant(two_tenants["b"]["id"]):
-        await carriers_service.create_carrier(tenant_id=two_tenants["b"]["id"], name="Case3 Carrier", provider="twilio")
+        await carriers_service.create_carrier(tenant_id=two_tenants["b"]["id"], name="Case3 Carrier", provider="twilio", allow_pointer_schemes=False)
 
     async with _client(config_app, tenant_admin_a["token"]) as c:
         read_resp = await c.get(f"/tenants/{two_tenants['b']['id']}/carriers")
@@ -745,7 +751,7 @@ async def test_ac6_case3b_rls_alone_independent_of_the_app_layer(pool, two_tenan
     from services.config import deps as config_deps
 
     with _as_tenant(two_tenants["b"]["id"]):
-        carrier_b = await carriers_service.create_carrier(tenant_id=two_tenants["b"]["id"], name="Case3b Carrier", provider="twilio")
+        carrier_b = await carriers_service.create_carrier(tenant_id=two_tenants["b"]["id"], name="Case3b Carrier", provider="twilio", allow_pointer_schemes=False)
 
     await pool.execute("ALTER ROLE yuviz_app PASSWORD 'rls-test-only-password'")
     app_pool = await asyncpg.create_pool(_yuviz_app_dsn(), min_size=1, max_size=2)
@@ -762,6 +768,7 @@ async def test_ac6_case3b_rls_alone_independent_of_the_app_layer(pool, two_tenan
             with pytest.raises(asyncpg.InsufficientPrivilegeError):
                 await carriers_service.create_carrier(
                     tenant_id=two_tenants["b"]["id"], name="Hostile write", provider="twilio",
+                    allow_pointer_schemes=False,
                 )
     finally:
         config_app.dependency_overrides.pop(config_deps.require_path_tenant_access, None)
@@ -777,7 +784,7 @@ async def test_ac6_case5_negative_control_bind_path_tenant_is_what_makes_case1_p
     from services.config import deps as config_deps
 
     with _as_tenant(two_tenants["b"]["id"]):
-        await carriers_service.create_carrier(tenant_id=two_tenants["b"]["id"], name="Case5 Carrier", provider="twilio")
+        await carriers_service.create_carrier(tenant_id=two_tenants["b"]["id"], name="Case5 Carrier", provider="twilio", allow_pointer_schemes=False)
 
     from libs.tenancy import TenantUnresolved
 

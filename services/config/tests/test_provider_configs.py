@@ -9,6 +9,7 @@ async def test_create_and_get_provider_config(test_tenant, scoped):
     created = await provider_configs.create_provider_config(
         tenant_id=test_tenant["id"], name="Deepgram Nova-3", role="stt", engine="deepgram",
         environment="prod", model="nova-3", api_key_ref="k8s:voiceai/deepgram-api-key",
+        allow_pointer_schemes=True,
     )
     assert created["role"] == "stt"
     assert created["environment"] == "prod"
@@ -22,12 +23,15 @@ async def test_create_and_get_provider_config(test_tenant, scoped):
 async def test_list_provider_configs_filters_by_role_and_environment(test_tenant, scoped):
     await provider_configs.create_provider_config(
         tenant_id=test_tenant["id"], name="Deepgram", role="stt", engine="deepgram", environment="prod",
+        allow_pointer_schemes=False,
     )
     await provider_configs.create_provider_config(
         tenant_id=test_tenant["id"], name="Whisper", role="stt", engine="faster_whisper", environment="dev",
+        allow_pointer_schemes=False,
     )
     await provider_configs.create_provider_config(
         tenant_id=test_tenant["id"], name="GPT-4o", role="llm", engine="openai", environment="prod",
+        allow_pointer_schemes=False,
     )
 
     stt_only = await provider_configs.list_provider_configs(test_tenant["id"], role="stt")
@@ -42,11 +46,12 @@ async def test_list_provider_configs_filters_by_role_and_environment(test_tenant
 async def test_update_provider_config_invalidates_cache(test_tenant, scoped):
     created = await provider_configs.create_provider_config(
         tenant_id=test_tenant["id"], name="Deepgram", role="stt", engine="deepgram",
+        allow_pointer_schemes=False,
     )
     await provider_configs.get_provider_config(created["id"])  # warm cache
     assert await cache.get_json(f"provider:{created['id']}") is not None
 
-    updated = await provider_configs.update_provider_config(created["id"], model="nova-3-medical")
+    updated = await provider_configs.update_provider_config(created["id"], model="nova-3-medical", allow_pointer_schemes=False)
     assert updated["model"] == "nova-3-medical"
     assert await cache.get_json(f"provider:{created['id']}") is None
 
@@ -59,13 +64,14 @@ async def test_update_provider_config_publishes_change_notification(test_tenant,
     mock — this is the actual cross-process contract."""
     created = await provider_configs.create_provider_config(
         tenant_id=test_tenant["id"], name="Deepgram", role="stt", engine="deepgram",
+        allow_pointer_schemes=False,
     )
 
     subscriber = cache.get_client().pubsub()
     await subscriber.subscribe(provider_configs.PROVIDER_CONFIG_CHANGED_CHANNEL)
     await subscriber.get_message(timeout=1)  # the subscribe confirmation itself
 
-    await provider_configs.update_provider_config(created["id"], model="nova-3-medical")
+    await provider_configs.update_provider_config(created["id"], model="nova-3-medical", allow_pointer_schemes=False)
 
     message = await subscriber.get_message(timeout=2)
     assert message is not None
@@ -80,6 +86,7 @@ async def test_provider_config_role_check_constraint_rejects_bad_role(test_tenan
     with pytest.raises(Exception):
         await provider_configs.create_provider_config(
             tenant_id=test_tenant["id"], name="Bad", role="not-a-real-role", engine="x",
+            allow_pointer_schemes=False,
         )
 
 
@@ -87,6 +94,7 @@ async def test_audit_log_redacts_api_key_ref(test_tenant, scoped, pool):
     created = await provider_configs.create_provider_config(
         tenant_id=test_tenant["id"], name="Deepgram", role="stt", engine="deepgram",
         api_key_ref="k8s:voiceai/deepgram-api-key",
+        allow_pointer_schemes=True,
     )
     row = await pool.fetchrow(
         "SELECT * FROM audit_log WHERE entity_type = 'provider_config' AND entity_id = $1 "
