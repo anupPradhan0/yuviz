@@ -17,6 +17,9 @@ elif [ -n "${ZSH_VERSION:-}" ]; then eval '_start_local_self=${(%):-%x}'
 else _start_local_self="$0"; fi
 REPO="$(cd "$(dirname "$_start_local_self")/.." && pwd)"
 
+# Every python3 below is the repo's venv, whatever the calling shell activated.
+[ -x "$REPO/venv/bin/python3" ] && case ":$PATH:" in *":$REPO/venv/bin:"*) ;; *) export PATH="$REPO/venv/bin:$PATH" ;; esac
+
 # ── Settings: everything comes from $REPO/.env (template: .env.example) ──────
 . "$REPO/scripts/lib/env.sh"
 _env_init
