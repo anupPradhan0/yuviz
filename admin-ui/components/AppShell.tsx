@@ -107,6 +107,11 @@ const ICONS: Record<string, React.ReactNode> = {
       <path d="M8 8V5M8 5H4.5M8 5h3.5M4.5 5V2.5M11.5 5V2.5" />
     </svg>
   ),
+  integrations: (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M5.5 2v3M10.5 2v3M4 5h8v3a4 4 0 0 1-8 0zM8 12v2.5" />
+    </svg>
+  ),
   billing: (
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
       <rect x="2" y="1.5" width="12" height="13" rx="1.5" />
@@ -140,6 +145,8 @@ const MANAGEMENT_ITEMS = [
   { href: "/ai-voice", label: "AI & Voice", icon: "ai-voice" },
   // Provider configurations and every number on them, add to remove.
   { href: "/telephony", label: "Telephony", icon: "telephony" },
+  // Connected CRM/calendar accounts and the presets built on them.
+  { href: "/integrations", label: "Integrations", icon: "integrations" },
 ];
 
 // Superadmin's cross-account user view; admins manage their team under

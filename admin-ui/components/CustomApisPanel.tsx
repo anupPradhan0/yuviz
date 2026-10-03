@@ -11,6 +11,7 @@ import {
   createCustomApi,
   deleteCustomApi,
   listCustomApis,
+  listOAuthConnections,
   updateCustomApi,
 } from "@/lib/toolexecApi";
 import { SecretRefInput, secretPayload } from "./SecretRefInput";
@@ -31,6 +32,7 @@ const AUTH_REF_FIELDS: Record<CustomApiAuthScheme, AuthRefField[]> = {
   api_key: ["key_ref"],
   bearer: ["token_ref"],
   oauth2_client_credentials: ["client_id_ref", "client_secret_ref"],
+  oauth2_authorization_code: [], // the credential lives on the connection, not the row
 };
 
 interface ApiForm {
@@ -142,6 +144,8 @@ function estimateChainLevels(params: ParamForm[], allApis: CustomApi[]): number 
 export function CustomApisPanel({ tenantId }: { tenantId: string }) {
   const [customApis, setCustomApis] = useState<CustomApi[]>([]);
   const [customApisError, setCustomApisError] = useState<string | null>(null);
+  // Ids of connections that are not usable, to flag the APIs that depend on them.
+  const [brokenConnectionIds, setBrokenConnectionIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
 
   const [editing, setEditing] = useState<CustomApi | null>(null);
@@ -155,6 +159,9 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
     try {
       setCustomApis(await listCustomApis(tenantId));
       setCustomApisError(null);
+      // The badge is a hint; the list stays usable without it.
+      const connections = await listOAuthConnections(tenantId).catch(() => []);
+      setBrokenConnectionIds(new Set(connections.filter((c) => c.status !== "connected").map((c) => c.id)));
     } catch (e) {
       setCustomApisError(e instanceof ApiError ? e.detail : String(e));
     } finally {
@@ -334,14 +341,22 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
           {customApis.map((api) => (
             <div key={api.id} className="kb-row">
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 500 }}>{api.name}</div>
+                <div style={{ fontWeight: 500 }}>
+                  {api.name}
+                  {api.preset_key && <span className="badge gray" style={{ marginLeft: 8 }}>Managed by preset</span>}
+                  {api.oauth_connection_id && brokenConnectionIds.has(api.oauth_connection_id) && (
+                    <span className="badge amber" style={{ marginLeft: 8 }}>Disabled: reconnect the account</span>
+                  )}
+                </div>
                 <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>
                   {api.method} {api.endpoint_url} · chain_levels={api.chain_levels}
                 </div>
               </div>
-              <button className="btn btn-ghost btn-sm" onClick={() => openEdit(api)}>
-                Edit
-              </button>
+              {!api.preset_key && (
+                <button className="btn btn-ghost btn-sm" onClick={() => openEdit(api)}>
+                  Edit
+                </button>
+              )}
               <button className="btn btn-danger btn-sm" onClick={() => handleDelete(api)}>
                 Delete
               </button>

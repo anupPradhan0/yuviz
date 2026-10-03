@@ -360,7 +360,8 @@ async def start_authorization(*, tenant_id: str, user_id: str, provider: str,
 async def complete_authorization(*, tenant_id: str, user_id: str, user_email: str | None,
                                  state: str, code: str, accounts_server: str | None) -> dict
 async def disconnect(*, tenant_id: str, connection_id: str,
-                     user_id: str, user_email: str | None) -> dict   # {"revoked": bool}
+                     user_id: str, user_email: str | None,
+                     background: BackgroundTasks) -> dict            # {"disconnected": true}, always
 async def list_connections(tenant_id: str) -> list[dict]             # explicit column list; no *_ref, no provider_sub
 async def get_connected(conn, tenant_id: str, provider: str) -> dict | None
 async def access_token_for(tenant_id: str, connection_id: str) -> tuple[str, OAuthProvider]
@@ -440,7 +441,7 @@ def _provider_transport(allowed_ips: list[str]) -> httpx.AsyncHTTPTransport   # 
   RETURNING o.old_ref
   ```
   - Zero rows raises `LookupError`, which `app.py` turns into a 404 with a fixed body. The body is identical for an absent id and for another tenant's id (lesson 2).
-  - An already-disconnected own row returns `old_ref = NULL`, so the call succeeds with `{"revoked": false}`.
+  - An already-disconnected own row returns `old_ref = NULL`, so the call succeeds with the same constant body; nothing is queued.
   - **Shared-grant check before the upstream revoke (round-4 finding 4).** After commit and before the revoke, on a `platform_conn(pool)` (`libs/tenancy`, the same helper `carriers.get_carrier_by_id` already uses for a deliberately cross-tenant read):
     ```sql
     SELECT EXISTS (SELECT 1 FROM oauth_connections
@@ -448,8 +449,8 @@ def _provider_transport(allowed_ips: list[str]) -> httpx.AsyncHTTPTransport   # 
                       AND deleted_at IS NULL AND tenant_id <> $3)
     ```
     `$2` is the **disconnecting row's own** `provider_sub`, read from the `FOR UPDATE` row in the statement above, never a request field (lesson 31); `$3` is the path tenant that already passed awaited `assert_tenant_access`. If it is true, the upstream revoke is skipped, and `log.info("oauth_revoke_skipped_shared_grant", extra={"connection_id": connection_id})` records why — no other tenant's id, slug or label is logged. A NULL `provider_sub` (a row connected before this change, or a provider that returned no subject) is treated as **not** shared, so the revoke still runs: for this control, failing closed means revoking, not leaving a grant alive.
-  - **Why the response does not say the revoke was skipped.** It returns the same `{"revoked": false}` the design already returns for Microsoft and for a failed revoke, and the UI message is unchanged. A distinct `shared_grant` field would tell tenant A's admin that some other Yuviz tenant has the same provider account connected — a cross-tenant inference drawn from a response that varies with another tenant's state (lesson 2). The one principal who needs the detail is the platform operator, who has the log line.
-  - After that, the function makes a best-effort `POST revoke_url` with the old refresh token and a 10s timeout, then returns `{"revoked": bool}`. The DB is cleared first on purpose: a revoke failure must never leave a usable credential in our storage.
+  - **Why the response does not say the revoke was skipped.** The body is the constant `{"disconnected": true}` in every case, and the UI message is unchanged. A distinct `shared_grant` field would tell tenant A's admin that some other Yuviz tenant has the same provider account connected — a cross-tenant inference drawn from a response that varies with another tenant's state (lesson 2). The one principal who needs the detail is the platform operator, who has the log line.
+  - After that, the function makes a best-effort `POST revoke_url` with the old refresh token and a 10s timeout, but only after the response has been sent, so neither the body nor the latency varies with another tenant's state. The DB is cleared first on purpose: a revoke failure must never leave a usable credential in our storage.
   - `audit action="updated"`.
 
 **`auth_schemes.apply()` new branch.** It runs inside the existing `try`, after `except ReconnectRequired: raise`:
@@ -463,7 +464,7 @@ def _provider_transport(allowed_ips: list[str]) -> httpx.AsyncHTTPTransport   # 
 - It then opens `httpx.AsyncClient(transport=_provider_transport(ips), timeout=10.0)` (AC12, lesson 18).
 - Exceptions are re-raised as bare `ValueError("oauth_connection_failed")` or `ValueError("credential_unavailable")` with `from None`. The `ValueError` handler in `app.py` logs `str(exc)`, so no provider response body or request data can reach a log line (AC11).
 - The authorization URL is only ever opened by the browser and is not SSRF-checked, because the backend never dials it.
-- **Request encoding (finding 3).** The code exchange, refresh and revoke are all `client.post(url, data={...})`. `grant_type`, `client_id`, `client_secret`, `code`, `code_verifier`, `redirect_uri`, `refresh_token` and `token` are form fields only. `params=` is never passed, and the URL is the registry constant with no query string (for Zoho, the allow-listed `accounts_server` plus a fixed path). That holds for Zoho's refresh and revoke and for Google's revoke too, even though their docs show query strings. If a provider rejects the form body, the call fails closed (`oauth_connection_failed`, or `{"revoked": false}` on disconnect) and is never retried with a query string. Test 10 confirms that the live endpoints accept it. User-info and Sheets calls send the access token only in the `Authorization` header.
+- **Request encoding (finding 3).** The code exchange, refresh and revoke are all `client.post(url, data={...})`. `grant_type`, `client_id`, `client_secret`, `code`, `code_verifier`, `redirect_uri`, `refresh_token` and `token` are form fields only. `params=` is never passed, and the URL is the registry constant with no query string (for Zoho, the allow-listed `accounts_server` plus a fixed path). That holds for Zoho's refresh and revoke and for Google's revoke too, even though their docs show query strings. If a provider rejects the form body, the call fails closed (`oauth_connection_failed`, or a logged `oauth_revoke_failed` on disconnect) and is never retried with a query string. Test 10 confirms that the live endpoints accept it. User-info and Sheets calls send the access token only in the `Authorization` header.
 - **Logging (finding 3).** `__main__.configure_logging()` sets `httpx` and `httpcore` to WARNING right after `basicConfig`. httpx's INFO `HTTP Request: <METHOD> <full URL>` line is the only place outbound URLs are logged today, so this one setting also keeps the executor's URLs, with their `event_id`, `spreadsheetId` and `sensitive` path values, out of logs. Toolexec's own log lines never include a URL. The only line this design adds, `booking_claim_release_failed`, carries just `custom_api_id`.
 
 **Routes** (tenant-scoped routers carry `bind_path_tenant` and `require_path_tenant_access`, and every handler first awaits `await assert_tenant_access(tenant_id, current_user)`, lesson 38):
@@ -474,7 +475,7 @@ def _provider_transport(allowed_ips: list[str]) -> httpx.AsyncHTTPTransport   # 
 | `GET /tenants/{tenant_id}/oauth-connections` | `get_current_user` | → `[{id, provider, status, account_label, scopes, updated_at}]` |
 | `POST /tenants/{tenant_id}/oauth-connections/{provider}/authorize` | `require_role("superadmin","admin")` | `{"preset_key": str \| null}` → `{"authorize_url"}` |
 | `POST /tenants/{tenant_id}/oauth-connections/callback` | `require_role("superadmin","admin")` | `{"state","code","accounts_server"?}` → connection (as in GET) |
-| `DELETE /tenants/{tenant_id}/oauth-connections/{connection_id}` | `require_role("superadmin","admin")` | → `{"revoked": bool}` |
+| `DELETE /tenants/{tenant_id}/oauth-connections/{connection_id}` | `require_role("superadmin","admin")` | → `{"disconnected": true}` (always; the revoke runs after the response) |
 | `GET /connector-presets` | `get_current_user` | → static list: `key, title, provider, setup fields + defaults` |
 | `POST /tenants/{tenant_id}/connector-presets/{preset_key}/apply` | `require_role("superadmin","admin")` | `PresetApplyRequest` → `[custom_api]` (201) |
 | `DELETE /tenants/{tenant_id}/connector-presets/{preset_key}` | `require_role("superadmin","admin")` | → 204 |
@@ -638,7 +639,7 @@ async def executor._remote_party(tenant_id: uuid.UUID, request: ChainExecuteRequ
 - **Storing `provider_sub` adds a provider-account identifier to our database.** Mitigation: it is an opaque provider-issued subject, not an email or a name; no route returns it (`list_connections` has an explicit column list); and it is strictly less identifying than `account_label`, which the design already stores and displays.
 - **A connection made before this change has a NULL `provider_sub`, so its disconnect still revokes a shared grant.** Mitigation: the fail-closed direction for a *revoke* is to revoke, so the pre-existing behaviour is preserved rather than silently weakened, and the next reconnect in either tenant fills `provider_sub` in. The CRM feature that extends this design will connect every agency account after this deploy.
 - **Two callers booking the same slot.** Nothing re-checks free/busy at book time. Mitigation: out of this PRD's ACs; noted for the follow-up scheduler PRD.
-- **Microsoft has no refresh-token revoke endpoint.** Disconnect clears our copy only. Mitigation: `{"revoked": false}` makes the UI tell the admin to remove Yuviz in their Microsoft account. Google revoke failures (provider unreachable) are handled the same way.
+- **Microsoft has no refresh-token revoke endpoint.** Disconnect clears our copy only. Mitigation: the fixed Disconnect message tells the admin to also remove Yuviz in their Microsoft account. Google revoke failures (provider unreachable) are handled the same way.
 - **Zoho is multi-data-centre.** A tenant on `.in` has a different token host. Mitigation: `accounts_server` is checked against a fixed allowlist and stored per connection. The Zoho app must be registered with multi-DC enabled (runbook).
 - **`body_path` and the form JSON-encoding rule change `_resolve_arguments`, which every custom API uses.** Mitigation: `body_path` is NULL on every existing row, so their placement is unchanged. The form rule only affects non-scalar form values, which today are sent as a Python `repr` and are already broken. The executor tests pin the existing flat behaviour.
 - **Moving `PinnedResolverTransport` into `custom_apis.py`.** Mitigation: `executor` re-imports it under the same name, and `_step_transport` stays in `executor`, so the existing monkeypatch seam is untouched.
@@ -670,6 +671,7 @@ async def executor._remote_party(tenant_id: uuid.UUID, request: ChainExecuteRequ
 - **New `custom_api_params` column `value_prefix` and source value `caller_id`.** Justification: the find-booking query value has to be the literal `yuviz_phone=` joined with a server-side value, and no existing source can express that. Both are preset-only, because `CustomApiParamSpec` does not expose them.
 - **Providers whose docs show query-string secrets (Zoho refresh/revoke, Google revoke) must accept the form body.** Mitigation: if a provider rejects it, the call fails closed and is never retried with a query string. Test 10 verifies the live endpoints.
 - **Conversation's `policy_resolver` now reads `oauth_connections`.** Mitigation: an explicit `oc.tenant_id = ca.tenant_id` join predicate plus RLS. A test proves another tenant's `connected` row does not re-enable this tenant's API.
+- **`oauth.disconnect` contract changed in T16: it takes a `BackgroundTasks` argument and returns the constant `{"disconnected": true}`.** The shared-grant probe and the upstream revoke now run in a post-response callback, so neither the body nor the latency depends on whether another tenant holds the same grant (lesson 2). Consequences: the Interfaces text above that describes a `{"revoked": ...}` field is superseded, and the console cannot know whether the upstream revoke happened. Mitigation: the Disconnect UI message is fixed and tells the admin to also remove Yuviz in the provider account. The route handler passes FastAPI's `BackgroundTasks` through, so any other caller of `oauth.disconnect` must supply one or the revoke never runs.
 
 ## Test plan
 Integration tests run against real Postgres under the superuser DSN, the only DB role anyone actually runs (lesson 36). Provider HTTP goes through the `_provider_transport` and `_step_transport` MockTransport seams.
@@ -825,7 +827,7 @@ Integration tests run against real Postgres under the superuser DSN, the only DB
    - Set `session_send_cap` to NULL on the row in a scratch run and all four sends must succeed, proving the cap is what refused the fourth and not some unrelated guard (lesson 12).
 20. **Shared Google grant across tenants (round-4 finding 4, integration).**
    - Connect the same Google account in A and B (both token-endpoint mocks return the same `sub`). Both rows carry the same `provider_sub`.
-   - A's admin disconnects: A's row is `disconnected` with NULL refs, the revoke mock recorded **zero** requests, the response body is exactly `{"revoked": false}` with no extra key, and B's row is still `connected`. A `gcal_book` on B's agent still succeeds.
+   - A's admin disconnects: A's row is `disconnected` with NULL refs, the revoke mock recorded **zero** requests, the response body is exactly `{"disconnected": true}` with no extra key, and B's row is still `connected`. A `gcal_book` on B's agent still succeeds.
    - Disconnect B as well: now the revoke mock **is** called, with B's old refresh token in the form body.
    - A connection whose `provider_sub` is NULL (simulating a pre-deploy row) revokes on disconnect.
    - Two different Google accounts in A and B: A's disconnect revokes, because the subjects differ. Delete the `provider_sub = $2` predicate in a scratch run and this case must go red (lesson 12).

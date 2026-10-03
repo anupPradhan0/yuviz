@@ -115,7 +115,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
   - The tripwire greps the call sites of `resolve_api_key_input`, `_normalize_credentials`, `create_carrier` and `update_carrier` and asserts the keyword and the count.
   - Done when the tests pass, and with the `public_carrier` wrap deleted in a scratch run the role cases go red.
 
-- [ ] T8 Make the admin UI handle masked values — `admin-ui/components/SecretRefInput.tsx`, `admin-ui/app/(console)/telephony/page.tsx`. MUST LAND IN THE SAME RELEASE as T6 (lesson 11). Read `admin-ui/AGENTS.md` first.
+- [x] T8 Make the admin UI handle masked values — `admin-ui/components/SecretRefInput.tsx`, `admin-ui/app/(console)/telephony/page.tsx`. MUST LAND IN THE SAME RELEASE as T6 (lesson 11). Read `admin-ui/AGENTS.md` first.
   - `SecretRefInput.tsx`:
     - `isStored` also returns true for `"[stored]"`.
     - `secretPayload` gets a first rule, `if (isStored(v)) return { api_key_ref: v }`, placed before the scheme regex at `:162`.
@@ -161,7 +161,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - Pasting A's real `key_ref` on B's `bearer` row gives 400 `credential_ref_outside_tenant_namespace`.
     - A route-count tripwire covers the custom-API dict-returning routes.
 
-- [ ] T11 Make the Custom APIs panel use `auth_secrets` — `admin-ui/components/CustomApisPanel.tsx`, `admin-ui/lib/toolexecApi.ts`. Requires T10, T8.
+- [x] T11 Make the Custom APIs panel use `auth_secrets` — `admin-ui/components/CustomApisPanel.tsx`, `admin-ui/lib/toolexecApi.ts`. Requires T10, T8.
   - In the auth form (`:238-243`), a pasted key goes out as `auth_secrets[<field>]`. A scheme-shaped value goes as the ref, via `secretPayload`. `"[stored]"` is sent back unchanged. An empty quarantined field shows as required.
   - `toolexecApi.ts`: add `auth_secrets` to the create and update payloads, and add `preset_key` and `oauth_connection_id` to `CustomApi`.
   - Done when, in a browser, saving an unrelated edit to a `bearer` API keeps its credential working, and a stored credential shows hidden with Replace.
@@ -407,7 +407,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - A WhatsApp ref copied to B fails at write time AND at call time with zero attacker-host requests.
     - The Sheets append uses `RAW` and the body is unchanged.
 
-- [ ] T25 Build the integrations UI — `admin-ui/components/ConnectorsPanel.tsx` (new), `admin-ui/app/(console)/integrations/page.tsx` (new), `admin-ui/app/(console)/integrations/callback/page.tsx` (new). Requires T17, T24, T11 (`toolexecApi.ts` gains the provider, connection, authorize, callback, disconnect and preset functions here or in T11). Read `admin-ui/AGENTS.md` and `node_modules/next/dist/docs/` first.
+- [x] T25 Build the integrations UI — `admin-ui/components/ConnectorsPanel.tsx` (new), `admin-ui/app/(console)/integrations/page.tsx` (new), `admin-ui/app/(console)/integrations/callback/page.tsx` (new). Requires T17, T24, T11 (`toolexecApi.ts` gains the provider, connection, authorize, callback, disconnect and preset functions here or in T11). Read `admin-ui/AGENTS.md` and `node_modules/next/dist/docs/` first.
   - Connector cards: Connect, Reconnect and Disconnect, with status and account label. The Disconnect UI message is generic, and tells the admin to also remove Yuviz in the provider account, since the response is now `{"disconnected": true}` (T16).
   - Preset cards: Apply with defaults prefilled, and timezone from `Intl.DateTimeFormat().resolvedOptions().timeZone`.
   - The callback page reads `code`, `state`, `error` and `accounts-server`, calls `history.replaceState` IMMEDIATELY to strip them, reads `{tenantId, provider, returnTo}` from `sessionStorage`, POSTs the callback, and shows a fixed generic message on failure. It sets `<meta name="referrer" content="no-referrer">`.
@@ -417,7 +417,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
 
 ## Phase 6: Runbook and join
 
-- [ ] T26 Document the runbook, then verify the merged result — `docs/setup.md`. Requires all above.
+- [x] T26 Document the runbook, then verify the merged result — `docs/setup.md`. Requires all above.
   - Document `TOOLEXEC_OAUTH_REDIRECT_URI` (console origin plus `/integrations/callback`) and `TOOLEXEC_OAUTH_{GOOGLE,ZOHO,MICROSOFT}_CLIENT_ID` / `_CLIENT_SECRET_REF`, with the per-provider registration steps (Zoho multi-DC).
   - Document the release step `python -m services.toolexec.reencrypt_tenant_refs --dry-run`, then the real run with `--report <path>`, straight after the toolexec rollout. Include the T13 ceiling flags and defaults, and the exit code 2 meaning.
   - Say that `env:`/`k8s:` refs are platform-operator-only input and a tenant admin enters the plaintext key, and what a quarantined credential means for a tenant.

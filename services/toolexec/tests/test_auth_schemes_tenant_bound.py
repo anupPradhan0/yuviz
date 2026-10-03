@@ -77,6 +77,9 @@ async def test_resolve_still_reads_a_preexisting_env_row():
 
 # ── end to end: a row that already holds a bad ref executes to credential_unavailable ──
 
+_ENC_BOUND = "custom_apis_auth_config_enc_bound"
+
+
 async def _bearer_api(pool, tenant, agent, auth_config: dict) -> dict:
     name = f"t9_{uuid.uuid4().hex[:8]}"
     api = await custom_apis.create_custom_api(
@@ -84,10 +87,21 @@ async def _bearer_api(pool, tenant, agent, auth_config: dict) -> dict:
         endpoint_url=f"https://{name}.example.com/api", method="GET", side_effecting=False,
         auth_scheme="bearer", auth_config={"token_ref": encrypt_tenant_secret(tenant["id"], "seed")},
     )
-    # Direct write: the state a row is in when it predates the write-side refusal.
-    await pool.execute(
-        "UPDATE custom_apis SET auth_config = $2::jsonb WHERE id = $1", api["id"], json.dumps(auth_config),
-    )
+    # Direct write: the state a row is in when it predates the write-side
+    # refusal. custom_apis_auth_config_enc_bound is NOT VALID, so it tolerates
+    # rows that already hold a legacy enc: ref but still rejects a new write of
+    # one — including this seed. Dropping it for the write is what lets the
+    # test reach the row state it is about; re-added NOT VALID, exactly as
+    # schema.sql declares it, so nothing else in the session sees a difference.
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(f"ALTER TABLE custom_apis DROP CONSTRAINT {_ENC_BOUND}")
+        await conn.execute(
+            "UPDATE custom_apis SET auth_config = $2::jsonb WHERE id = $1", api["id"], json.dumps(auth_config),
+        )
+        await conn.execute(
+            f"ALTER TABLE custom_apis ADD CONSTRAINT {_ENC_BOUND} "
+            "CHECK (auth_config::text !~ '\"enc:(?!t1\\.)') NOT VALID"
+        )
     admin = CurrentUser(id=str(uuid.uuid4()), email="a@test.example", role="admin", tenant_id=str(tenant["id"]))
     await agent_apis.set_enabled(agent["id"], api["id"], enabled=True, current_user=admin)
     return api
