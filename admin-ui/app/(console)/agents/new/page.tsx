@@ -29,6 +29,7 @@ import { ElevenLabsVoicePicker } from "@/components/ElevenLabsVoicePicker";
 import { LANGUAGES, OTHER, asBrowsableTtsEngine } from "@/lib/engineCatalog";
 import { buildSystemPrompt } from "@/lib/systemPromptBuilder";
 import { templateByKey } from "@/lib/agentTemplates";
+import { EasyAgentFlow } from "@/components/EasyAgentFlow";
 
 type Step = "identity" | "voice" | "limits" | "advanced" | "knowledge" | "review";
 
@@ -57,6 +58,9 @@ export default function NewAgentPage() {
   // field stays freely editable afterwards.
   const template = templateByKey(searchParams.get("template"));
 
+  // Easy is the default; a quick-start link (?template=) carries advanced-wizard
+  // fields, so it opens the wizard it was written for.
+  const [mode, setMode] = useState<"easy" | "advanced">(template ? "advanced" : "easy");
   const [step, setStep] = useState<Step>("identity");
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
@@ -261,6 +265,8 @@ export default function NewAgentPage() {
       setCreating(false);
     }
   };
+
+  if (mode === "easy") return <EasyAgentFlow onAdvanced={() => setMode("advanced")} />;
 
   return (
     <>

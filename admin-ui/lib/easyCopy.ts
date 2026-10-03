@@ -40,6 +40,82 @@ export const easyCopy = {
   notAllowed: "You don't have permission to do that.",
   notFound: "We couldn't find that. Reload the page and try again.",
   generic: "Something went wrong. Please try again.",
+
+  // Step 1
+  loading: "Loading...",
+  advancedLink: "Advanced setup",
+  chooseAccount: "Choose an account from the switcher at the top to continue.",
+  channelLabels: { phone_in: "Answers calls", phone_out: "Makes calls", chat: "Chats" },
+  whatItDoes: "What it does",
+  whatItWontDo: "What it won't do",
+  whenItHandsOff: "When it passes the call to a person",
+  addItLink: "Add it",
+
+  // Step 2
+  nameLabel: "Name",
+  businessNameLabel: "Business name",
+  businessFactsLabel: "Business facts",
+  businessFactsHint: "Hours, address, prices, anything callers often ask. Optional.",
+  nameRequired: "Please enter a name.",
+  businessNameRequired: "Please enter your business name.",
+  factsTooLong: "Business facts can be at most 1,000 characters.",
+  nameTaken: "You already have one with that name. Please pick a different name.",
+
+  // Step 3
+  languageLabel: "Language",
+  languageAutomatic: "Choose automatically",
+  chooseOne: "Choose one",
+
+  // Navigation
+  cancel: "Cancel",
+  back: "Back",
+  continue: "Continue",
+  creating: "Setting it up...",
+
+  // Step 4
+  startTalking: "Start talking",
+  stop: "Stop",
+  youSaid: "You",
+  itSaid: "Your receptionist",
+  statusIdle: "Ready when you are.",
+  statusConnecting: "Connecting...",
+  statusReady: "Listening. Go ahead and speak.",
+  statusTalking: "Hearing you...",
+  statusThinking: "Thinking...",
+  statusSpeaking: "Speaking...",
+  statusEnded: "The test has ended.",
+  statusError: "The test could not start. Check your microphone and try again.",
+  transcriptEmpty: "What you say and what it answers will show up here.",
+  chatPlaceholder: "Type what a caller would say",
+  send: "Send",
+  startChatTest: "Start a test chat",
+  startOver: "Start a new test",
+  testHint: "Try it like a real caller would. When you are done, continue to fix anything that sounded wrong.",
+
+  // Step 5
+  testFirst: "Run a test first. Then you can tell us what went wrong and we will fix it.",
+  problemLabel: "What went wrong?",
+  problemPlaceholder: "For example: it kept asking the same question twice.",
+  suggestFix: "Suggest a fix",
+  working: "Working on it...",
+  beforeLabel: "Before",
+  afterLabel: "After",
+  acceptFix: "Accept this fix",
+  discardFix: "Discard",
+  undoFix: "Undo last change",
+  fixAccepted: "The fix is saved. Test it again to check it.",
+  fixUndone: "The last change was undone.",
+  acceptRefused: "That change can't be saved. Try describing the problem differently.",
+
+  // Step 6
+  putToWork: "Put it to work",
+  activating: "Turning it on...",
+  liveTitle: "It's on.",
+  liveNoteCalls: "It won't answer calls until a phone number is assigned to it.",
+  liveNoteChat: "It won't answer chats until a chat channel is assigned to it.",
+  assignNumberLink: "Assign a phone number",
+  assignChatLink: "Assign a chat channel",
+  passedOnCallsLink: "Choose who takes passed-on calls",
 } as const;
 
 export function easyErrorText(err: unknown): string {
