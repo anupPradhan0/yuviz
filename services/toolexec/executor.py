@@ -46,7 +46,7 @@ from libs.tenancy import tenant_conn
 
 from . import admission, agent_apis, auth_schemes, db, graph, redaction
 from . import custom_apis as custom_apis_module
-from .custom_apis import resolve_and_validate_endpoint
+from .custom_apis import PinnedResolverTransport, resolve_and_validate_endpoint
 from .schemas import ChainExecuteRequest, ChainExecuteResponse, ChainStepReport
 
 log = logging.getLogger(__name__)
@@ -284,30 +284,6 @@ async def _response_from_existing_run(run: dict) -> ChainExecuteResponse:
 
 
 # ── step 4: pinned outbound transport + capped response read ─────────────
-
-class PinnedResolverTransport(httpx.AsyncHTTPTransport):
-    """Connects to one of resolve_and_validate_endpoint()'s own
-    already-validated allowed_ips rather than letting the transport
-    re-resolve DNS itself at connect time (finding 6 — DNS rebinding): a
-    validate-then-connect design whose connect step does its own fresh
-    lookup can still land on a different, unvalidated address if the
-    record changes in between the two. SNI and certificate verification
-    stay on the ORIGINAL HOSTNAME via httpcore's `sni_hostname` request
-    extension; the Host header httpx already set from the original URL at
-    Request-construction time is untouched here. TLS therefore still
-    validates a real certificate against the real hostname — verify=False
-    is never used and is forbidden outright."""
-
-    def __init__(self, allowed_ips: list[str], **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._allowed_ips = allowed_ips
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        original_hostname = request.url.host
-        request.extensions["sni_hostname"] = original_hostname
-        request.url = request.url.copy_with(host=self._allowed_ips[0])
-        return await super().handle_async_request(request)
-
 
 def _step_transport(allowed_ips: list[str]) -> httpx.AsyncHTTPTransport:
     """Isolated call site so tests can monkeypatch this to inject an

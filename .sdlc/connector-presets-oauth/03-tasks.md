@@ -216,7 +216,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
 
 ## Phase 4: OAuth core (the disabled-by-default connector surface)
 
-- [ ] T14 Move the transport and quiet the httpx loggers — `services/toolexec/custom_apis.py`, `services/toolexec/executor.py`, `services/toolexec/__main__.py`, plus a test. Requires T10.
+- [x] T14 Move the transport and quiet the httpx loggers — `services/toolexec/custom_apis.py`, `services/toolexec/executor.py`, `services/toolexec/__main__.py`, plus a test. Requires T10.
   - Move `PinnedResolverTransport` (`executor.py:287-309`) into `custom_apis.py`. `executor` re-imports it under the same name. `_step_transport` and its monkeypatch seam stay in `executor`.
   - Extract `configure_logging()` in `__main__.py`: the existing `basicConfig`, plus `httpx` and `httpcore` set to WARNING. `main()` calls it.
   - Done when:
@@ -224,7 +224,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - A test calls `configure_logging()` with caplog at INFO, runs a request whose URL path carries a sentinel, and asserts zero `httpx`/`httpcore` records.
     - That test goes red with the WARNING lines removed. Restore the logger levels in teardown.
 
-- [ ] T15 Add the OAuth provider registry and the authorize/redeem flow — `services/toolexec/oauth.py` (new), `services/toolexec/tests/test_oauth.py` (new). Requires T1, T2, T9, T14. MUST PRECEDE T16.
+- [x] T15 Add the OAuth provider registry and the authorize/redeem flow — `services/toolexec/oauth.py` (new), `services/toolexec/tests/test_oauth.py` (new). Requires T1, T2, T9, T14. MUST PRECEDE T16.
   - Provider registry (Google, Microsoft, Zoho), with `configured_providers()` hiding any provider whose env is unset. `client_secret` resolves via a module-level platform `CompositeSecretResolver`.
   - `start_authorization`:
     - Deletes this tenant's expired states.
@@ -249,7 +249,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - every recorded request has `url.query == b""`;
     - with the tenant predicate deleted in a scratch run the isolation test goes red.
 
-- [ ] T16 Add token access, refresh, and a side-channel-free disconnect — `services/toolexec/oauth.py`, `services/toolexec/auth_schemes.py`, `services/toolexec/tests/test_oauth.py`. Requires T15. Includes round-5 low 2.
+- [x] T16 Add token access, refresh, and a side-channel-free disconnect — `services/toolexec/oauth.py`, `services/toolexec/auth_schemes.py`, `services/toolexec/tests/test_oauth.py`. Requires T15. Includes round-5 low 2.
   - `access_token_for`:
     - Read with `WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL`.
     - No row, or a non-`connected` status, raises `ReconnectRequired`.
@@ -281,7 +281,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - the off-provider-host row gets `credential_unavailable` with zero requests to that host;
     - a fresh-interpreter import of `apply()` resolves the function-local import.
 
-- [ ] T17 Mount the connector routes — `services/toolexec/routers/oauth_connections.py` (new), `services/toolexec/app.py`, `services/toolexec/tests/test_oauth_routes.py` (new). Requires T16.
+- [x] T17 Mount the connector routes — `services/toolexec/routers/oauth_connections.py` (new), `services/toolexec/app.py`, `services/toolexec/tests/test_oauth_routes.py` (new). Requires T16.
   - Routes: `GET /oauth-providers`, `GET /tenants/{t}/oauth-connections` (explicit column list, no `*_ref`, no `provider_sub`), authorize, callback, and `DELETE …/{connection_id}`.
   - Each handler first awaits `await assert_tenant_access(...)`. Writes sit behind `require_role("superadmin","admin")`. Models use `extra="forbid"` and have no redirect field.
   - Every callback failure returns the same `400 {"detail":"oauth_connection_failed"}`.

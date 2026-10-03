@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import custom_apis, db, executor
-from .routers import agent_apis, chain_runs, custom_apis as custom_apis_router, execute
+from .routers import agent_apis, chain_runs, custom_apis as custom_apis_router, execute, oauth_connections
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +57,8 @@ app.add_middleware(
 
 app.include_router(custom_apis_router.tenant_scoped_router)
 app.include_router(custom_apis_router.router)
+app.include_router(oauth_connections.tenant_scoped_router)
+app.include_router(oauth_connections.router)
 app.include_router(agent_apis.router)
 app.include_router(chain_runs.router)
 app.include_router(execute.router)

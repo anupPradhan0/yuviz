@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from . import graph
 
@@ -70,6 +70,22 @@ class CustomApiUpdate(BaseModel):
 
 class AgentCustomApiEnable(BaseModel):
     enabled: bool = True
+
+
+class OAuthAuthorizeRequest(BaseModel):
+    # No redirect field: the only redirect URI ever sent to a provider is the
+    # platform's own, from env.
+    model_config = ConfigDict(extra="forbid")
+
+    preset_key: str | None = None
+
+
+class OAuthCallbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: str
+    code: str
+    accounts_server: str | None = None
 
 
 class ChainExecuteRequest(BaseModel):

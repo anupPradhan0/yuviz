@@ -39,6 +39,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -190,7 +191,8 @@ async def apply(api: dict, headers: dict[str, Any], query_params: dict[str, Any]
     `query_params` (mutated in place), resolving every ref through
     resolve_tenant_ref() at call time — never the bare
     CompositeSecretResolver, and never once at registration and reused.
-    Raises ValueError("credential_unavailable") — with no ref, no
+    Raises ReconnectRequired when an OAuth connection needs an admin to
+    reconnect it. Otherwise raises ValueError("credential_unavailable") — with no ref, no
     auth_config value, and no partial credential in the message — if the
     ref cannot be resolved (out-of-namespace, missing platform/tenant
     secret, decrypt failure, or an unreachable OAuth2 token endpoint).
@@ -223,6 +225,17 @@ async def apply(api: dict, headers: dict[str, Any], query_params: dict[str, Any]
             token = await _oauth2_client_credentials_token(tenant_id, custom_api_id, config)
             headers["Authorization"] = f"Bearer {token}"
             return {"Authorization"}
+        elif scheme == "oauth2_authorization_code":
+            from . import oauth  # function-local: oauth imports this module
+
+            token, provider = await oauth.access_token_for(tenant_id, api["oauth_connection_id"])
+            # A connector token goes only to its own provider's API hosts.
+            if urlsplit(api["endpoint_url"]).hostname not in provider.api_hosts:
+                raise ValueError("credential_unavailable")
+            headers["Authorization"] = f"Bearer {token}"
+            return {"Authorization"}
+    except ReconnectRequired:
+        raise
     except Exception as exc:
         raise ValueError("credential_unavailable") from exc
     return set()

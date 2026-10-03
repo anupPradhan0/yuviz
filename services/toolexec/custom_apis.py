@@ -31,6 +31,8 @@ import socket
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
+
 from libs.config_sdk.secrets import QUARANTINED, encrypt_tenant_secret
 from libs.tenancy import platform_conn, tenant_conn
 
@@ -143,6 +145,30 @@ async def resolve_and_validate_endpoint(url: str) -> tuple[str, list[str]]:
         allowed_ips.append(str(ip))
 
     return hostname, allowed_ips
+
+
+class PinnedResolverTransport(httpx.AsyncHTTPTransport):
+    """Connects to one of resolve_and_validate_endpoint()'s own
+    already-validated allowed_ips rather than letting the transport
+    re-resolve DNS itself at connect time (finding 6 — DNS rebinding): a
+    validate-then-connect design whose connect step does its own fresh
+    lookup can still land on a different, unvalidated address if the
+    record changes in between the two. SNI and certificate verification
+    stay on the ORIGINAL HOSTNAME via httpcore's `sni_hostname` request
+    extension; the Host header httpx already set from the original URL at
+    Request-construction time is untouched here. TLS therefore still
+    validates a real certificate against the real hostname — verify=False
+    is never used and is forbidden outright."""
+
+    def __init__(self, allowed_ips: list[str], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._allowed_ips = allowed_ips
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        original_hostname = request.url.host
+        request.extensions["sni_hostname"] = original_hostname
+        request.url = request.url.copy_with(host=self._allowed_ips[0])
+        return await super().handle_async_request(request)
 
 
 class DependentApiExists(Exception):
