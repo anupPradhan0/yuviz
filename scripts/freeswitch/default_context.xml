@@ -1,0 +1,19 @@
+<!--
+  Replaces FreeSWITCH's stock "default" context, a demo dialplan whose
+  extensions reach other calls on the switch (779 eavesdrop all, 886 / *8 /
+  **<ext> intercept, park/valet-park, conferences). Nothing on this platform
+  routes calls here: transfers and originates bridge inline. Anything that
+  lands here is refused.
+  Installed as dialplan/default.xml by scripts/freeswitch/install_default_context.sh
+  (called by setup_macos.sh; run by hand on Linux, docs/telephony-vm-setup.md).
+-->
+<include>
+  <context name="default">
+    <extension name="deny_all">
+      <condition field="destination_number" expression="^.*$">
+        <action application="log" data="WARNING default context is disabled; refused ${destination_number}"/>
+        <action application="hangup" data="CALL_REJECTED"/>
+      </condition>
+    </extension>
+  </context>
+</include>

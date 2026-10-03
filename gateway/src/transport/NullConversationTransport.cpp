@@ -64,8 +64,6 @@ void NullConversationTransport::send_playback_finished(const std::string& sessio
 void NullConversationTransport::send_speech_ended(const std::string& session_id,
                                                   uint32_t /*duration_ms*/,
                                                   float    /*energy_db*/) {
-    // Echo mode drives the pipeline via send_audio() — no explicit speech_ended
-    // handling needed.  The real pipeline uses GrpcConversationTransport.
     logger_.debug("NullConversationTransport::send_speech_ended session={}", session_id);
 }
 
@@ -99,8 +97,8 @@ void NullConversationTransport::send_transfer_failed(const std::string& session_
 }
 
 void NullConversationTransport::send_dtmf(const std::string& session_id,
-                                          const std::string& digit) {
-    logger_.debug("NullConversationTransport::send_dtmf session={} digit={}", session_id, digit);
+                                          const std::string& /*digit*/) {
+    logger_.debug("NullConversationTransport::send_dtmf session={}", session_id);
 }
 
 void NullConversationTransport::set_callbacks(ConversationTransportCallbacks cbs) {

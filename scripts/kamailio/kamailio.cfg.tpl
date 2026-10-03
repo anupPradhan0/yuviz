@@ -146,7 +146,7 @@ import_file "kamailio-local.cfg"
 #!ifdef WITH_MYSQL
 # - database URL - used to connect to database server by modules such
 #       as: auth_db, acc, usrloc, a.s.o.
-#!trydef DBURL "mysql://kamailio:kamailiorw@localhost/kamailio"
+#!trydef DBURL "__KAMAILIO_DB_URL__"
 #!endif
 
 #!ifdef WITH_MULTIDOMAIN
@@ -662,10 +662,17 @@ if (is_method("INVITE")) {
         # for BOTH SIPp and Linphone.
         record_route();
     
-    if ($rU == "788" || $rU =~ "500[0-9]") {
+    # Anchored: unanchored, "500[0-9]" also matched any number merely
+    # containing 5000-5009 (e.g. +14155005555), and a transfer to one from
+    # FreeSWITCH hit the loop guard below. Same set as 00_voice_ai.xml.
+    if ($rU == "788" || $rU =~ "^500[0-9]$") {
     # 1. Double check to prevent loops if FreeSWITCH ever sends this back
+    #    (e.g. a transfer to an AI number). Reply, never just exit: with no
+    #    final response FreeSWITCH retransmits until SIP Timer B (~32 s) and
+    #    the caller hears dead air the whole time.
     if (src_ip == __LAN_IP__ && src_port == 5080) {
-        xlog("L_WARN", "Loop prevention triggered for 788: dropping request\n");
+        xlog("L_WARN", "Loop prevention triggered for $rU: refusing request\n");
+        sl_send_reply("482", "Loop Detected");
         exit;
     }
 

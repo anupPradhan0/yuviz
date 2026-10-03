@@ -1,16 +1,7 @@
-"""
-generate_system_prompt() — one-shot LLM call that turns the agent-creation
-wizard's structured inputs (identity/purpose/tone/transfer rule) into prose,
-using the tenant's own configured LLM provider_config. Modeled directly on
-provider_configs.list_elevenlabs_voices()'s pattern: resolve api_key_ref via
-the already-injected SecretResolver, make one outbound httpx call, never
-return the resolved key or the raw vendor body to the caller.
+"""One-shot LLM call turning the agent wizard's inputs into a system prompt, via the tenant's LLM config.
 
-The guardrail and speech wording lives here as constants — the meta-prompts
-require the model to copy them exactly, and enforce_prompt_structure() puts
-back any block the model dropped, so a paraphrase can't quietly lose a
-guardrail. Only openai/anthropic engines are supported today; anything else
-is a clear 400, not a silent fallback.
+The model must copy the guardrail and speech blocks near-verbatim; enforce_prompt_structure()
+restores any block it dropped. Only openai/anthropic engines are supported; others are a 400.
 """
 
 from __future__ import annotations
@@ -40,7 +31,7 @@ HEADING_JOB = "Doing your job well"
 _HEADINGS = (HEADING_SPEAK, HEADING_GUARDRAILS, HEADING_JOB)
 _MIN_JOB_LINES = 3
 
-# Blocks the model must copy exactly and enforce_prompt_structure() restores.
+# Keep identical to admin-ui/lib/systemPromptBuilder.ts's fixed lines.
 _GUARDRAILS = (
     "Never invent facts, prices, policies, order details, or availability. If you do not have "
     "verified information to answer something, say so plainly and offer to check or transfer the "

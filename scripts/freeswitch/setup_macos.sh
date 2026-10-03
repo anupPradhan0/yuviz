@@ -105,6 +105,10 @@ fi
 
 cp "$HERE/00_voice_ai.xml" "$CONF/dialplan/public/00_voice_ai.xml"
 echo "  dialplan: public/00_voice_ai.xml (788, 5000-5009 -> start_voice_ai.lua)"
+
+# The stock "default" context is a demo dialplan with eavesdrop/intercept
+# extensions that reach every call on the switch. Keep the original once.
+"$HERE/install_default_context.sh" "$CONF"
 echo ""
 
 # ── Step 3: sanity check ────────────────────────────────────────────────────

@@ -5,9 +5,44 @@
 #include <nlohmann/json.hpp>
 #include <yaml-cpp/yaml.h>
 
+#include <cstdlib>
 #include <stdexcept>
+#include <string>
 
 namespace voiceai {
+
+namespace {
+
+const char* env_value(const char* name) {
+    const char* v = std::getenv(name);
+    return (v != nullptr && *v != '\0') ? v : nullptr;
+}
+
+uint16_t parse_port(const char* name, const char* v) {
+    const std::string s(v);
+    if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos || s.size() > 5) {
+        throw std::runtime_error(std::string(name) + " is not a port number: '" + s + "'");
+    }
+    const unsigned long port = std::stoul(s);
+    if (port < 1 || port > 65535) {
+        throw std::runtime_error(std::string(name) + " must be 1-65535, got " + s);
+    }
+    return static_cast<uint16_t>(port);
+}
+
+// Same variables Campaigns reads, so each value is set once in .env.
+void apply_esl_env(EslConfig& esl) {
+    if (const char* v = env_value("FREESWITCH_ESL_PASSWORD")) esl.password = v;
+    if (const char* v = env_value("FREESWITCH_ESL_HOST"))     esl.host = v;
+    if (const char* v = env_value("FREESWITCH_ESL_PORT"))     esl.port = parse_port("FREESWITCH_ESL_PORT", v);
+    if (const char* v = env_value("SIP_PROXY_HOST"))          esl.sip_proxy_host = v;
+    if (const char* v = env_value("SIP_PROXY_PORT"))          esl.sip_proxy_port = parse_port("SIP_PROXY_PORT", v);
+    if (esl.enabled && esl.password.empty()) {
+        throw std::runtime_error("esl.enabled but no ESL password: set FREESWITCH_ESL_PASSWORD in .env");
+    }
+}
+
+}  // namespace
 
 void Config::load(const std::string& path) {
     YAML::Node root;
@@ -18,7 +53,10 @@ void Config::load(const std::string& path) {
     }
 
     const auto gw = root["gateway"];
-    if (!gw) return;
+    if (!gw) {
+        apply_esl_env(config_.esl);
+        return;
+    }
 
     if (const auto ws = gw["websocket"]) {
         if (ws["host"])            config_.websocket.host            = ws["host"].as<std::string>();
@@ -73,6 +111,8 @@ void Config::load(const std::string& path) {
         if (redis["command_timeout_ms"]) config_.redis.command_timeout_ms = redis["command_timeout_ms"].as<uint32_t>();
         if (redis["pool_size"])          config_.redis.pool_size          = redis["pool_size"].as<uint32_t>();
     }
+
+    apply_esl_env(config_.esl);
 }
 
 TenantConfig TenantConfig::from_default(const GatewayConfig& cfg) noexcept {
@@ -92,8 +132,6 @@ TenantConfig TenantConfig::from_default(const GatewayConfig& cfg) noexcept {
     t.transport = cfg.conversation;
 
     t.backpressure.max_outbound_queue_frames = cfg.media.playback_max_frames;
-    // Derive inbound frame cap from ring_buffer_ms ÷ frame_ms so operators
-    // can tune one field in config and both queues scale together.
     t.backpressure.max_inbound_queue_frames =
         (cfg.media.frame_ms > 0) ? cfg.media.ring_buffer_ms / cfg.media.frame_ms : 25u;
 
@@ -113,10 +151,7 @@ TenantConfig TenantConfig::from_redis(
 
         const auto j = nlohmann::json::parse(*raw);
 
-        // Every field is optional and independently overlaid onto the
-        // from_default() baseline — a tenant row with only vad_hold_ms set
-        // (the common case: everything else still NULL from a freshly
-        // created row) must not zero out timers/VAD fields it never touched.
+        // Each field is optional and overlaid independently; absent fields keep defaults.
         if (j.contains("vad_engine") && j["vad_engine"].is_string())
             t.vad_engine = j["vad_engine"].get<std::string>();
 
@@ -175,8 +210,6 @@ TenantConfig TenantConfig::from_redis(
             }
         }
     } catch (const nlohmann::json::exception&) {
-        // Malformed cache entry — degrade to from_default() rather than
-        // propagate a parse error into session creation.
         return from_default(cfg);
     }
 
@@ -198,8 +231,6 @@ PhoneRoute PhoneRoute::from_redis(RedisClient& redis, const std::string& did) no
         if (j.contains("version") && j["version"].is_number())
             route.version = j["version"].get<uint32_t>();
     } catch (const nlohmann::json::exception&) {
-        // Malformed cache entry — degrade to the {"default","default"}
-        // baseline rather than propagate a parse error into session setup.
         return PhoneRoute{};
     }
 
@@ -219,8 +250,6 @@ CallMetadata CallMetadata::parse(const std::optional<std::string>& raw) noexcept
         if (j.contains("direction") && j["direction"].is_string())
             md.direction = j["direction"].get<std::string>();
     } catch (const nlohmann::json::exception&) {
-        // Malformed metadata frame — degrade to the full default rather than
-        // propagate a parse error into session creation.
         return CallMetadata{};
     }
 

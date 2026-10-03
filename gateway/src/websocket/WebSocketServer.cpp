@@ -83,6 +83,8 @@ bool WebSocketServer::start() {
 void WebSocketServer::stop() {
     if (!running_.exchange(false)) return;
 
+    // lws_service() ignores its timeout and can block in poll() for many seconds; wake it.
+    if (context_) lws_cancel_service(context_);
     if (service_thread_.joinable()) service_thread_.join();
 
     if (context_) {

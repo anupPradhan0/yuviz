@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # start_local.sh — Starts the full native macOS Voice AI stack.
 # Run each block in a SEPARATE terminal tab, in order (mysql -> kamailio ->
-# freeswitch is a hard dependency chain: kamailio's dispatcher/routing
-# tables live in MySQL, and FreeSWITCH registers with Kamailio as its
-# upstream SIP proxy).
+# freeswitch is a hard dependency chain).
 #
 # Prerequisites (already installed):
 #   MySQL, Kamailio, FreeSWITCH, Redis, PostgreSQL, Ollama, faster-whisper
@@ -11,7 +9,16 @@
 # Usage: source this file to get helper functions, or copy individual blocks.
 
 set -euo pipefail
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# This file is sourced (zsh or bash), so $0 is the shell, not this script.
+if [ -n "${BASH_SOURCE:-}" ]; then _start_local_self="${BASH_SOURCE[0]}"
+elif [ -n "${ZSH_VERSION:-}" ]; then eval '_start_local_self=${(%):-%x}'
+else _start_local_self="$0"; fi
+REPO="$(cd "$(dirname "$_start_local_self")/.." && pwd)"
+
+# ── Settings: everything comes from $REPO/.env (template: .env.example) ──────
+. "$REPO/scripts/lib/env.sh"
+_env_init
+_load_env
 
 # ── Block 1: MySQL — Kamailio's dispatcher/routing tables live here ─────────
 start_mysql() {
@@ -21,8 +28,7 @@ start_mysql() {
 
 # ── Block 2: Kamailio — SIP proxy, must be up before FreeSWITCH registers ───
 start_kamailio() {
-  # -Y: a user-owned runtime dir, so this runs without sudo (the default
-  # /var/run/kamailio is root-only).
+  # -Y: user-owned runtime dir so this runs without sudo.
   mkdir -p "$HOME/.yuviz/kamailio/run"
   kamailio -f /usr/local/etc/kamailio/kamailio.cfg -D -E -Y "$HOME/.yuviz/kamailio/run"
 }
@@ -32,25 +38,13 @@ start_data() {
   brew services start postgresql@14 2>/dev/null || true
   brew services start redis         2>/dev/null || true
 
-  # ON_ERROR_STOP=1 (lesson 13) turns a tripped guard — e.g. schema.sql's
-  # case-insensitive email-collision check — into psql exit status 3, which
-  # must reach the operator and stop this launcher: swallowing it (the old
-  # `2>/dev/null || echo "...applied..."`) would have printed a false
-  # success and started every service against a half-applied schema, with
-  # no user_invites table and no invite-onboarding at all. The one case
-  # that old fallback genuinely needed to catch is exit status 2 — psql's
-  # own "could not connect", which is what happens on a fresh checkout
-  # before `createdb voiceai` has ever been run — checked here explicitly,
-  # verified empirically (`psql <missing db>` -> 2, a tripped `RAISE
-  # EXCEPTION` guard under ON_ERROR_STOP=1 -> 3, not 2).
+  # psql exits 2 when it can't connect (db missing) and 3 when a schema guard
+  # trips under ON_ERROR_STOP; the latter must stop the launcher.
   local schema_rc=0
   psql voiceai -v ON_ERROR_STOP=1 -f "$REPO/database/schema.sql" || schema_rc=$?
   if [ "$schema_rc" -eq 2 ]; then
     echo "voiceai db missing — run: psql postgres -c 'CREATE DATABASE voiceai;'" >&2
-    # return 0, not 1: this file is source-d into the operator's shell (docs/setup.md:158)
-    # under `set -euo pipefail`, where a nonzero return from a sourced function
-    # terminates the interactive shell. The hint above is the whole point of
-    # this branch, so it must survive to be read.
+    # return 0: a nonzero return under `set -e` in a sourced file closes the shell.
     return 0
   elif [ "$schema_rc" -ne 0 ]; then
     echo "schema.sql failed to apply — see the error above; PostgreSQL/Redis were NOT started for use" >&2
@@ -59,11 +53,9 @@ start_data() {
 
   psql voiceai -f "$REPO/database/knowledge_schema.sql" 2>/dev/null || true
   psql voiceai -f "$REPO/database/telephony_schema.sql" 2>/dev/null || true
-  # rls.sql is the 4th schema file: creates yuviz_app/yuviz_platform and the
-  # per-table policies. Every start_* block below stays on the superuser
-  # POSTGRES_DSN — RLS is live but inert until a later DSN cutover.
-  psql voiceai -v yuviz_app_password="${YUVIZ_APP_PASSWORD:?set this in your shell — see docs/setup.md, never commit the real value}" \
-    -f "$REPO/database/rls.sql" 2>/dev/null || true
+  # RLS is inert here: every start_* block uses the superuser POSTGRES_DSN.
+  _require YUVIZ_APP_PASSWORD || return 0
+  psql voiceai -v yuviz_app_password="$YUVIZ_APP_PASSWORD" -f "$REPO/database/rls.sql" 2>/dev/null || true
   echo "✓ PostgreSQL + Redis running"
 }
 
@@ -74,98 +66,63 @@ start_ollama() {
 
 # ── Block 5: Config Service (REST API, port 8000) ────────────────────────────
 start_config_service() {
-  export POSTGRES_DSN="postgresql://satish@localhost:5432/voiceai"
-  # Decrypts/encrypts provider_configs.api_key_ref's enc: scheme (Vault's
-  # replacement — see libs/config_sdk/secrets.py). Same "fail loudly, never
-  # a hardcoded fallback" posture as CONFIG_SERVICE_PASSWORD below: generate
-  # one with `./venv/bin/python3 -c "from libs.config_sdk.secrets import
-  # generate_key; print(generate_key())"` and export the SAME value here
-  # and in _conv_env() — a mismatch between the two just means whichever
-  # service didn't encrypt a given secret can't decrypt it either.
-  export SECRET_ENCRYPTION_KEY="${SECRET_ENCRYPTION_KEY:?set this in your shell — see docs/setup.md, never commit the real value}"
-  # Signs the login JWTs; same value every service below must export.
-  export JWT_SECRET="${JWT_SECRET:?set this in your shell — see docs/setup.md, never commit the real value}"
-  # Optional: the same public URL the telephony service uses. With it, adding a
-  # Vobiz number points it at this platform automatically (number_sync.py);
-  # without it, numbers are saved with a "not synced" warning.
-  export TELEPHONY_PUBLIC_BASE_URL="${TELEPHONY_PUBLIC_BASE_URL:-}"
+  # TELEPHONY_PUBLIC_BASE_URL is optional here: without it, new Vobiz numbers
+  # are saved with a "not synced" warning (number_sync.py).
+  _require SECRET_ENCRYPTION_KEY JWT_SECRET || return 0
   cd "$REPO"
   python3 -m uvicorn services.config.app:app --host 0.0.0.0 --port 8000
 }
 
 # ── Block 6: Knowledge Service (REST API, port 8100) ──────────────────────────
 start_knowledge_service() {
-  export POSTGRES_DSN="postgresql://satish@localhost:5432/voiceai"
-  export REDIS_URL="redis://localhost:6379/0"
-  export KNOWLEDGE_STORAGE_ROOT="$REPO/data/knowledge_documents"
-  export JWT_SECRET="${JWT_SECRET:?set this in your shell — see docs/setup.md, never commit the real value}"
+  _require JWT_SECRET || return 0
   cd "$REPO"
   python3 -m uvicorn services.knowledge.app:app --host 0.0.0.0 --port 8100
 }
 
 # ── Block 7: Knowledge ingestion worker (background job-queue poller) ────────
 start_knowledge_worker() {
-  export POSTGRES_DSN="postgresql://satish@localhost:5432/voiceai"
-  export KNOWLEDGE_STORAGE_ROOT="$REPO/data/knowledge_documents"
   cd "$REPO"
   python3 -m services.knowledge --log-level INFO
 }
 
 # ── Block 8: Campaigns Service (REST API, port 8400) — outbound calling ──────
-# worker.py's pacing loop runs inside this same process (see its own
-# docstring), not a separate process like the Knowledge worker — no extra
-# block needed for it.
+# The pacing worker runs in-process; no separate block.
 start_campaigns_service() {
-  export POSTGRES_DSN="postgresql://satish@localhost:5432/voiceai"
-  export JWT_SECRET="${JWT_SECRET:?set this in your shell — see docs/setup.md, never commit the real value}"
+  _require JWT_SECRET FREESWITCH_ESL_PASSWORD || return 0
+  _warn_env_drift SIP_PROXY_HOST
   cd "$REPO"
   python3 -m uvicorn services.campaigns.app:app --host 0.0.0.0 --port 8400
 }
 
 # ── Block 8b: Tool Execution Service (REST API, port 8600) — custom API chains ─
 start_toolexec_service() {
-  export POSTGRES_DSN="postgresql://satish@localhost:5432/voiceai"
-  export JWT_SECRET="${JWT_SECRET:?set this in your shell — see docs/setup.md, never commit the real value}"
-  # Tenant-namespaced credential refs resolve under this root, NOT the
-  # platform k8s secret mount — see services/toolexec/auth_schemes.py.
-  export TOOLEXEC_TENANT_SECRET_ROOT="${TOOLEXEC_TENANT_SECRET_ROOT:-$REPO/data/toolexec_tenant_secrets}"
-  mkdir -p "$TOOLEXEC_TENANT_SECRET_ROOT"
+  # Tenant credential refs resolve under TOOLEXEC_TENANT_SECRET_ROOT, not the platform mount.
+  _require JWT_SECRET TOOLEXEC_TENANT_SECRET_ROOT TOOLEXEC_ARGS_HMAC_KEY_REF || return 0
   cd "$REPO"
+  mkdir -p "$TOOLEXEC_TENANT_SECRET_ROOT"
   python3 -m services.toolexec
 }
 
 # ── Block 8c: Telephony Service (REST API, port 8750) — Vobiz/Cloudonix webhooks + outbound ─
 start_telephony_service() {
-  export POSTGRES_DSN="postgresql://satish@localhost:5432/voiceai"
-  export REDIS_URL="redis://localhost:6379/0"
-  export JWT_SECRET="${JWT_SECRET:?set this in your shell — see docs/setup.md, never commit the real value}"
-  export SECRET_ENCRYPTION_KEY="${SECRET_ENCRYPTION_KEY:?set this in your shell — see docs/setup.md, never commit the real value}"
-  export CONFIG_SERVICE_URL="http://localhost:8000"
-  export CAMPAIGNS_SERVICE_URL="http://localhost:8400"
-  export TELEPHONY_PUBLIC_BASE_URL="${TELEPHONY_PUBLIC_BASE_URL:?set this to your public tunnel URL — see docs/telephony.md}"
+  # TELEPHONY_PUBLIC_BASE_URL: your public tunnel URL — see docs/telephony.md.
+  _require JWT_SECRET SECRET_ENCRYPTION_KEY TELEPHONY_PUBLIC_BASE_URL || return 0
   cd "$REPO"
   python3 -m services.telephony
 }
 
 # ── Block 9/10: Python ConversationService instances (ports 50051/50052) ─────
 _conv_env() {
-  export POSTGRES_DSN="postgresql://satish@localhost:5432/voiceai"
-  export REDIS_URL="redis://localhost:6379/0"
-  export CONFIG_SERVICE_URL="http://localhost:8000"
-  export CONFIG_SERVICE_EMAIL="conversation-service@internal.yuviz.ai"
-  export CONFIG_SERVICE_PASSWORD="${CONFIG_SERVICE_PASSWORD:?set this in your shell — see docs/setup.md §4, never commit the real value}"
-  export KNOWLEDGE_SERVICE_URL="http://localhost:8100"
-  # Must be the SAME value start_config_service() exports — see its own
-  # comment on this variable.
-  export SECRET_ENCRYPTION_KEY="${SECRET_ENCRYPTION_KEY:?set this in your shell — see docs/setup.md, never commit the real value}"
+  _require CONFIG_SERVICE_EMAIL CONFIG_SERVICE_PASSWORD SECRET_ENCRYPTION_KEY
 }
 start_conv1() {
-  _conv_env
+  _conv_env || return 0
   cd "$REPO"
   python3 -m services.conversation --port 50051 --mode pipeline --log-level INFO
 }
 start_conv2() {
-  _conv_env
+  _conv_env || return 0
   cd "$REPO"
   python3 -m services.conversation --port 50052 --mode pipeline --log-level INFO
 }
@@ -178,6 +135,8 @@ start_envoy() {
 
 # ── Block 12: C++ Gateway ──────────────────────────────────────────────────────
 start_gateway() {
+  _require FREESWITCH_ESL_PASSWORD || return 0
+  _warn_env_drift SIP_PROXY_HOST
   cd "$REPO"
   ./build/gateway/voice_ai_gateway config/gateway.yaml
 }
