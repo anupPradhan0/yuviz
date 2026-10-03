@@ -14,6 +14,8 @@ import hashlib
 import inspect
 import json
 import logging
+import pathlib
+import re
 import uuid
 
 import httpx
@@ -182,7 +184,7 @@ def _url(tenant: dict, suffix: str = "") -> str:
 
 def _template_body(template_id: str, configs: dict, **overrides) -> dict:
     body = {
-        "template_id": template_id, "template_version": 1, "name": "Front Desk",
+        "template_id": template_id, "template_version": 2, "name": "Front Desk",
         "business_name": "Acme Dental", "business_facts": "Open 9 to 5.",
         "llm_config_id": configs["llm"],
     }
@@ -419,7 +421,7 @@ class TestFromTemplate:
         agent = await _create_agent(client, test_tenant, configs, "inbound-triage")
         row = await _agent_row(pool, agent["id"])
         assert row["status"] == "inactive"
-        assert (row["template_id"], row["template_version"]) == ("inbound-triage", 1)
+        assert (row["template_id"], row["template_version"]) == ("inbound-triage", 2)
         assert row["slug"] == "front-desk"
         assert row["tenant_id"] == test_tenant["id"]
         assert "Acme Dental" in row["greeting"] + row["system_prompt"]
@@ -430,7 +432,7 @@ class TestFromTemplate:
 
     @pytest.mark.parametrize(("overrides", "why"), [
         ({"template_id": "nope"}, "unknown template"),
-        ({"template_version": 2}, "version that is not the shipped one"),
+        ({"template_version": 3}, "version that is not the shipped one"),
         ({"stt_config_id": None}, "a needed role is null"),
         ({"llm_config_id": None}, "llm is null"),
         ({"name": "!!!"}, "a name with no letter or digit"),
@@ -737,6 +739,20 @@ class TestRevise:
         assert resp.json() == {
             "before": base, "after": model.reply, "base_prompt_sha256": _sha(base)}
         assert await _agent_row(pool, agent["id"]) == row_before
+
+    async def test_an_agent_made_from_an_older_template_version_keeps_its_channel(
+        self, pool, client, test_tenant, configs, model,
+    ):
+        agent = await _create_agent(client, test_tenant, configs)
+        session = await _chat_session(client, test_tenant, agent)
+        await pool.execute("UPDATE agents SET template_version = 1 WHERE id = $1", agent["id"])
+        model.reply = _extend(agent["system_prompt"], "Offer a callback.")
+
+        resp = await _revise(client, test_tenant, agent["id"], session["session_id"])
+        assert resp.status_code == 200, resp.text
+        system = model.calls[-1][1]
+        assert sp.HUMAN_SPEECH_CHAT in system
+        assert sp.HUMAN_SPEECH_VOICE not in system
 
     async def test_a_hand_edited_prompt_is_422_before_the_session_or_model_is_touched(
         self, client, test_tenant, configs, model,
@@ -1192,3 +1208,19 @@ class TestNothingSensitiveIsLogged:
         assert "api.openai.com" in logged  # the vendor path itself was exercised and logged
         for secret in secrets:
             assert secret not in logged
+
+
+# ── the Advanced wizard's client-side builder mirrors the prompt blocks ──
+
+def _ts_block(source: str, name: str) -> str:
+    """The lines of `const NAME = [ "...", ... ].join("\\n");`, as the string it builds."""
+    match = re.search(rf"const {name} = \[\n(.*?)\n\]\.join\(\"\\n\"\);", source, re.S)
+    assert match, name
+    return "\n".join(json.loads(line.strip().removesuffix(",")) for line in match.group(1).splitlines())
+
+
+def test_the_admin_ui_prompt_builder_mirrors_the_speech_and_guardrail_blocks():
+    path = pathlib.Path(__file__).parents[3] / "admin-ui" / "lib" / "systemPromptBuilder.ts"
+    source = path.read_text()
+    assert _ts_block(source, "HUMAN_SPEECH_VOICE") == sp.HUMAN_SPEECH_VOICE
+    assert _ts_block(source, "GUARDRAILS") == sp._GUARDRAILS

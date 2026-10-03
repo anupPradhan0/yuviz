@@ -72,10 +72,8 @@ async def _load_agent(tenant: dict, agent_id: str) -> dict:
 
 
 def _agent_channel(agent: dict) -> Literal["voice", "chat"]:
-    template = (
-        agent_templates.get_template(agent["template_id"], agent["template_version"])
-        if agent["template_id"] else None
-    )
+    # Channel belongs to the job, not the version, so an agent made from an older version keeps it.
+    template = next((t for t in agent_templates.CATALOG if t.id == agent["template_id"]), None)
     return "chat" if template is not None and template.channel == "chat" else "voice"
 
 
