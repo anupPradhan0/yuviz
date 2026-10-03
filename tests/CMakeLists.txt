@@ -8,6 +8,7 @@ add_executable(gateway_tests
     thread_pool_test.cpp
     pending_metadata_test.cpp
     esl_client_test.cpp
+    websocket_bind_test.cpp
     transfer_correlator_test.cpp
     esl_event_listener_test.cpp
     cold_transfer_coordinator_test.cpp
