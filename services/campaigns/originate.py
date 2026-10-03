@@ -21,7 +21,7 @@ implement fresh without a dependency, mirroring the same "thin bridge
 alongside the existing system" pattern already used for services/webcall/.
 
 What a real test call revealed by reading Kamailio's OWN active routing
-rules (/usr/local/etc/kamailio/kamailio.cfg — a file with a lot of dead,
+rules (~/.yuviz/kamailio/kamailio.cfg, rendered from scripts/kamailio/kamailio.cfg.tpl — a file with a lot of dead,
 commented-out history, so grep with care): a call whose SIP Request-URI
 is `788` or `5000`-`5009` gets relayed unconditionally straight to
 FreeSWITCH's port 5080 (`if ($rU == "788" || $rU =~ "500[0-9]") { ...

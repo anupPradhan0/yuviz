@@ -55,9 +55,9 @@ Record two addresses now; nearly every step below needs one of them:
 
 ## 2. Kamailio (build from source, prefix /usr/local)
 
-Debian's `kamailio` package installs config to /etc/kamailio, but every
-script in this repo hardcodes /usr/local/etc/kamailio. Building from source
-keeps scripts/update_kamailio_ip.sh working untouched.
+Debian's `kamailio` package lacks modules the config needs, so build from
+source. The repo renders its own config into ~/.yuviz/kamailio, so the
+installed one is unused.
 
     apt update && apt install -y git build-essential cmake bison flex \
       libssl-dev libmariadb-dev libmariadb-dev-compat default-mysql-server \
@@ -81,14 +81,14 @@ mounts $HOME), then run the generator **inside the VM** so it picks up the
 VM's IP rather than the Mac's:
 
     cd /Users/<you>/yuviz
-    ./scripts/update_kamailio_ip.sh
+    SIP_IP=VM_IP ./scripts/update_kamailio_ip.sh   # or SIP_IP=VM_IP in .env
 
 Add a softphone extension. The domain must equal VM_IP — ha1/ha1b are MD5
 digests with the domain baked in, and a stale domain surfaces as a generic
 403 "call rejected" that looks nothing like an auth problem:
 
     kamctl add 1001 <password>
-    kamailio -f /usr/local/etc/kamailio/kamailio.cfg -D -E
+    kamailio -f ~/.yuviz/kamailio/kamailio.cfg -D -E -Y ~/.yuviz/kamailio/run
 
 Dialable numbers are fixed by the cfg: `788` and `5000`-`5009` route to
 FreeSWITCH; `1000`-`1002` are registered softphones (kamailio.cfg.tpl).
@@ -248,18 +248,11 @@ Triage order when it fails:
 
 ## Known repo gaps this setup runs into
 
-  - scripts/update_kamailio_ip.sh:44-45 hardcodes
-    /usr/local/freeswitch/bin/{fs_cli,freeswitch}. Debian packages put those
-    at /usr/bin, so step 3/3 silently prints "fs_cli not found — skipping"
-    and never restarts FreeSWITCH after an IP change. Worth making
-    overridable via env.
   - SIP_PROXY_HOST in .env must be VM_IP. update_kamailio_ip.sh writes it;
     while it is blank the Gateway refuses transfers to numbers and
     Campaigns refuses to originate, both with an explicit error. An old
     .env holding 127.0.0.1 is wrong here: rerun the script, then restart
     from a new tab (see section 8).
-  - scripts/start_local.sh:148-151 runs `cd $REPO && ./freeswitch`, but no
-    such file is in the repo. Presumably an uncommitted local wrapper.
 
 ## Values pinned by host-side code
 

@@ -22,6 +22,7 @@ REPO="$(cd "$(dirname "$_start_local_self")/.." && pwd)"
 
 # ── Settings: everything comes from $REPO/.env (template: .env.example) ──────
 . "$REPO/scripts/lib/env.sh"
+. "$REPO/scripts/lib/sip.sh"
 _env_init
 _load_env
 
@@ -33,10 +34,25 @@ start_mysql() {
 
 # ── Block 2: Kamailio — SIP proxy, must be up before FreeSWITCH registers ───
 start_kamailio() {
-  # -Y: a user-owned runtime dir, so this runs without sudo (the default
-  # /var/run/kamailio is root-only).
-  mkdir -p "$HOME/.yuviz/kamailio/run"
-  kamailio -f /usr/local/etc/kamailio/kamailio.cfg -D -E -Y "$HOME/.yuviz/kamailio/run"
+  # Renders the config for SIP_IP (and fixes anything stale) before starting.
+  "$REPO/scripts/update_kamailio_ip.sh" || return 0
+  _kamailio_start
+}
+
+# ── Network sync: reruns update_kamailio_ip.sh whenever the network changes ──
+install_network_sync() {
+  [ "$(uname)" = Darwin ] || { echo "install_network_sync is macOS only" >&2; return 0; }
+  local plist="$HOME/Library/LaunchAgents/$NETWORK_SYNC_LABEL.plist"
+  mkdir -p "$(dirname "$plist")" "$YUVIZ_LOGS"
+  _network_sync_plist > "$plist"
+  launchctl bootout "gui/$(id -u)/$NETWORK_SYNC_LABEL" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$plist"
+  echo "✓ network sync installed (log $YUVIZ_LOGS/network-sync.log)"
+}
+remove_network_sync() {
+  launchctl bootout "gui/$(id -u)/$NETWORK_SYNC_LABEL" 2>/dev/null || true
+  rm -f "$HOME/Library/LaunchAgents/$NETWORK_SYNC_LABEL.plist"
+  echo "✓ network sync removed"
 }
 
 # ── Block 3: Data layer (Postgres/Redis; run once, may already be running) ──
@@ -166,12 +182,9 @@ start_gateway() {
 
 # ── Block 13: FreeSWITCH (registers with Kamailio from Block 2) ──────────────
 start_freeswitch() {
-  # Homebrew FreeSWITCH, configured by scripts/freeswitch/setup_macos.sh.
-  # -scripts points at the repo so start_voice_ai.lua is never a stale copy.
-  local fs_home="${FS_HOME:-$HOME/.yuviz/freeswitch}"
-  "$(brew --prefix freeswitch)/bin/freeswitch" -nonat \
-    -conf "$fs_home/conf" -log "$fs_home/log" -db "$fs_home/db" -run "$fs_home/run" \
-    -scripts "$REPO/scripts/freeswitch"
+  # Homebrew FreeSWITCH (scripts/freeswitch/setup_macos.sh), else the source install.
+  cd "$REPO"
+  _fs_start || return 0
 }
 
 # ── Block 14: Admin UI (Next.js, port 3000) ───────────────────────────────────
@@ -232,4 +245,4 @@ portmap() {
 EOF
 }
 
-echo "start_local.sh loaded. Functions: start_mysql, start_kamailio, start_data, start_ollama, start_config_service, start_knowledge_service, start_knowledge_worker, start_campaigns_service, start_toolexec_service, start_telephony_service, start_conv1, start_conv2, start_envoy, start_gateway, start_freeswitch, start_admin_ui, verify, portmap"
+echo "start_local.sh loaded. Functions: start_mysql, start_kamailio, start_data, start_ollama, start_config_service, start_knowledge_service, start_knowledge_worker, start_campaigns_service, start_toolexec_service, start_telephony_service, start_conv1, start_conv2, start_envoy, start_gateway, start_freeswitch, start_admin_ui, install_network_sync, remove_network_sync, verify, portmap"
