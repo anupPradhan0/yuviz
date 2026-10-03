@@ -49,6 +49,7 @@ const STATUS_TEXT: Record<CallState, string> = {
 function VoiceTest({ tenantSlug, agent, onSession }: Omit<Props, "channel">) {
   const [credential, setCredential] = useState<string | undefined>(undefined);
   const [startRequested, setStartRequested] = useState(false);
+  const [minting, setMinting] = useState(false);
   const [mintError, setMintError] = useState<string | null>(null);
   const call = useWebCall(tenantSlug, agent.slug, credential);
   const { start, sessionId, transcript } = call;
@@ -60,21 +61,27 @@ function VoiceTest({ tenantSlug, agent, onSession }: Omit<Props, "channel">) {
     if (!startRequested || credential === undefined) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStartRequested(false);
+    setMinting(false);
+    onSession(null);
     void start();
-  }, [startRequested, credential, start]);
+  }, [startRequested, credential, start, onSession]);
 
+  // Fix is offered only once this session has a spoken turn. Not reported null
+  // on mount: coming back to this step keeps the session already under test.
   useEffect(() => {
-    onSession(sessionId !== null && transcript.length > 0 ? sessionId : null);
+    if (sessionId !== null && transcript.length > 0) onSession(sessionId);
   }, [sessionId, transcript.length, onSession]);
 
   const handleStart = async () => {
     setMintError(null);
+    setMinting(true);
     try {
       const minted = await createTestSession(tenantSlug, agent.id, "voice");
       setCredential(minted.credential);
       setStartRequested(true);
     } catch (e) {
       setMintError(easyErrorText(e));
+      setMinting(false);
     }
   };
 
@@ -86,7 +93,7 @@ function VoiceTest({ tenantSlug, agent, onSession }: Omit<Props, "channel">) {
         <div className="form-hint" style={{ marginBottom: 10 }}>{easyCopy.testHint}</div>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
           {idle ? (
-            <button className="btn btn-primary btn-sm" onClick={handleStart}>
+            <button className="btn btn-primary btn-sm" onClick={handleStart} disabled={minting}>
               {easyCopy.startTalking}
             </button>
           ) : (
@@ -96,7 +103,7 @@ function VoiceTest({ tenantSlug, agent, onSession }: Omit<Props, "channel">) {
           )}
           <span className="form-hint" role="status">{STATUS_TEXT[call.state]}</span>
         </div>
-        {mintError && <div className="error-banner">{mintError}</div>}
+        {mintError && <div role="alert" className="error-banner">{mintError}</div>}
         <Transcript turns={transcript} />
       </div>
     </div>
@@ -182,7 +189,7 @@ function ChatTest({ tenantSlug, agent, onSession }: Omit<Props, "channel">) {
             </button>
           </>
         )}
-        {error && <div className="error-banner" style={{ marginTop: 10 }}>{error}</div>}
+        {error && <div role="alert" className="error-banner" style={{ marginTop: 10 }}>{error}</div>}
       </div>
     </div>
   );

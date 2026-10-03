@@ -418,6 +418,18 @@ test("voice test: every Start mints a fresh one-use credential, sent as the firs
   await scan(page, "transcript");
   await fixGatedOff();
 
+  // A second call must not inherit the first call's transcript: Fix stays
+  // gated until the new session's own first line.
+  await start();
+  sockets[starts - 1].send(JSON.stringify({ type: "service_ready", session_id: "e2e-session-1" }));
+  sockets[starts - 1].send(JSON.stringify({ type: "tts_result", text: "First call line." }));
+  await expect(page.getByText("First call line.")).toBeVisible();
+  await page.getByRole("button", { name: easyCopy.stop }).click();
+  await start();
+  sockets[starts - 1].send(JSON.stringify({ type: "service_ready", session_id: "e2e-session-2" }));
+  await expect(page.getByText("First call line.")).toHaveCount(0);
+  await fixGatedOff();
+
   // The session id arrives: Fix opens.
   await start();
   sockets[starts - 1].send(JSON.stringify({ type: "service_ready", session_id: "e2e-session" }));
@@ -432,8 +444,8 @@ test("voice test: every Start mints a fresh one-use credential, sent as the firs
   await expect(page.locator(".error-banner")).toHaveText(easyCopy.aiUnavailable);
   await scan(page, "voice revise 502");
 
-  // Five Starts, five mints, all different, none in a URL.
-  expect(starts).toBe(5);
+  // Every Start, one mint, all different, none in a URL.
+  expect(starts).toBe(7);
   expect(minted).toHaveLength(starts);
   expect(new Set(minted).size).toBe(starts);
   for (let i = 0; i < starts; i++) {

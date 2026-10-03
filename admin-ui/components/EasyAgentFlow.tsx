@@ -299,7 +299,7 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
         ))}
       </div>
 
-      {loadError && <div className="error-banner">{loadError}</div>}
+      {loadError && <div role="alert" className="error-banner">{loadError}</div>}
 
       {step === STEP_JOB && (
         <>
@@ -365,7 +365,7 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
               />
               <div className="form-hint">{facts.length} / {MAX_FACTS}</div>
             </div>
-            {fieldError && <div className="error-banner" style={{ marginTop: 10 }}>{fieldError}</div>}
+            {fieldError && <div role="alert" className="error-banner" style={{ marginTop: 10 }}>{fieldError}</div>}
           </div>
         </div>
       )}
@@ -403,7 +403,7 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
                 </select>
               </div>
             ))}
-            {createError && <div className="error-banner" style={{ marginTop: 10 }}>{createError}</div>}
+            {createError && <div role="alert" className="error-banner" style={{ marginTop: 10 }}>{createError}</div>}
           </div>
         </div>
       )}
@@ -478,7 +478,7 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
               </button>
             )}
             {fixNote && <div className="form-hint" style={{ marginTop: 10 }} role="status">{fixNote}</div>}
-            {fixError && <div className="error-banner" style={{ marginTop: 10 }}>{fixError}</div>}
+            {fixError && <div role="alert" className="error-banner" style={{ marginTop: 10 }}>{fixError}</div>}
             {exampleShown && <div className="form-hint">{easyCopy.customerDataExample}</div>}
           </div>
         </div>
@@ -503,13 +503,13 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
                 {busy ? easyCopy.activating : easyCopy.putToWork}
               </button>
             )}
-            {liveError && <div className="error-banner" style={{ marginTop: 10 }}>{liveError}</div>}
+            {liveError && <div role="alert" className="error-banner" style={{ marginTop: 10 }}>{liveError}</div>}
           </div>
         </div>
       )}
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
-        {step !== STEP_JOB && step !== STEP_TEST && !live && (
+        {step !== STEP_JOB && step !== STEP_TEST && !live && !(step === STEP_FIX && revision !== null) && (
           <button className="btn btn-ghost btn-sm" onClick={() => setStep(step - 1)} disabled={busy}>
             {easyCopy.back}
           </button>

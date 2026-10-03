@@ -99,7 +99,11 @@ export function useWebCall(tenantSlug: string, agentSlug: string, testCredential
     recordingRef.current = false;
     agentSpeakingRef.current = false;
     stopAgentPlayback();
-    wsRef.current?.close();
+    if (wsRef.current) {
+      // A closing socket must not report "ended" over whatever state follows.
+      wsRef.current.onclose = null;
+      wsRef.current.close();
+    }
     wsRef.current = null;
     workletRef.current?.disconnect();
     workletRef.current = null;
@@ -182,10 +186,13 @@ export function useWebCall(tenantSlug: string, agentSlug: string, testCredential
   };
 
   const handleStart = useCallback(async () => {
+    // A previous call's socket and mic must not outlive this one's refs.
+    teardown();
     sessionGenRef.current += 1;
     mutedRef.current = false;
     setMutedState(false);
     setSessionId(null);
+    setTranscript([]);
     const credential = testCredentialRef.current;
     if (credential === "") {
       setState("error");
