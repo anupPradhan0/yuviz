@@ -1,14 +1,12 @@
-# SIP-side helpers shared by start_local.sh and update_kamailio_ip.sh.
-# Source after setting REPO. Every path is user-owned: nothing here runs as root.
+# SIP helpers for start_local.sh and update_kamailio_ip.sh. Needs REPO.
 
 KAMAILIO_DIR="${KAMAILIO_DIR:-$HOME/.yuviz/kamailio}"
 YUVIZ_LOGS="${YUVIZ_LOGS:-$HOME/.yuviz/logs}"
-# Where Kamailio's config lived before it moved to KAMAILIO_DIR; a process
-# still running from it is restarted onto the new one.
+# Pre-KAMAILIO_DIR config; a Kamailio still using it gets moved over.
 KAMAILIO_LEGACY_CFG="${KAMAILIO_LEGACY_CFG-/usr/local/etc/kamailio/kamailio.cfg}"
 NETWORK_SYNC_LABEL=ai.yuviz.network-sync
 
-# The address the default route leaves from. A UDP connect sends no packet.
+# Default-route address; a UDP connect sends nothing.
 _detect_lan_ip() {
   python3 -c "
 import socket
@@ -23,15 +21,13 @@ finally:
 "
 }
 
-# SIP_IP: 127.0.0.1 (default; this Mac only, never changes), auto (follow the
-# LAN IP, so phones on the same Wi-Fi can register), or a fixed address.
+# SIP_IP: 127.0.0.1 (default), auto (LAN IP) or a fixed address.
 _sip_target_ip() {
   local mode="${SIP_IP:-127.0.0.1}"
   if [ "$mode" = auto ]; then _detect_lan_ip; else echo "$mode"; fi
 }
 
-# FS_PREFIX, when set, is the only candidate; otherwise Homebrew, the source
-# install, then Debian's /usr.
+# FS_PREFIX if set; else Homebrew, source install, then /usr.
 _fs_prefix() {
   if [ -n "${FS_PREFIX:-}" ]; then
     [ -x "$FS_PREFIX/bin/freeswitch" ] && echo "$FS_PREFIX"
@@ -62,7 +58,6 @@ _fs_start() {
   prefix=$(_fs_prefix) || { echo "FreeSWITCH not found — run scripts/freeswitch/setup_macos.sh" >&2; return 1; }
   fs_home=$(_fs_home)
   if [ -d "$fs_home/conf" ]; then
-    # -scripts points at the repo so start_voice_ai.lua is never a stale copy.
     "$prefix/bin/freeswitch" "$@" -nonat -conf "$fs_home/conf" -log "$fs_home/log" \
       -db "$fs_home/db" -run "$fs_home/run" -scripts "$REPO/scripts/freeswitch"
   else
@@ -105,7 +100,7 @@ _network_sync_plist() {
     <string>/var/run/resolv.conf</string>
     <string>/Library/Preferences/SystemConfiguration</string>
   </array>
-  <!-- Unset, launchd throttles the job's CPU, and the services it restarts inherit it. -->
+  <!-- Else launchd throttles the CPU of everything it restarts. -->
   <key>ProcessType</key><string>Interactive</string>
   <key>StartInterval</key><integer>300</integer>
   <key>RunAtLoad</key><true/>

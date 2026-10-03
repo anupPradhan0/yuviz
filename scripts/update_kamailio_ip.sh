@@ -1,31 +1,7 @@
 #!/usr/bin/env bash
-# Points the SIP side of the local stack at the address SIP_IP in .env names,
-# and fixes whatever went stale. Runs on its own after a network change when
-# install_network_sync (start_local.sh) is installed; safe to run any time.
-#
-#   SIP_IP=127.0.0.1  (default) Kamailio and FreeSWITCH SIP on loopback: only a
-#                     softphone on this Mac can call, and nothing changes when
-#                     the Wi-Fi does.
-#   SIP_IP=auto       follow the LAN IP, so a phone on the same Wi-Fi can
-#                     register. Port 5060 and 5080 are then open to everyone
-#                     on that network (a café or hotspot too).
-#   SIP_IP=<address>  a fixed address, e.g. the VM's own in the VM split.
-#
-# Five things carry the address, and all of them are fixed together:
-#   1. SIP_PROXY_HOST in .env, which the Gateway (transfers) and Campaigns
-#      (outbound) dial through.
-#   2. Kamailio's config, rendered from scripts/kamailio/*.tpl into
-#      $KAMAILIO_DIR (~/.yuviz/kamailio); Kamailio is restarted if running.
-#   3. The kamailio.subscriber rows: ha1/ha1b digests bake the domain in, and a
-#      stale one gives a 403 that looks like a generic call rejection.
-#   4. FreeSWITCH's local_ip_v4, pinned in vars.xml. FreeSWITCH reads it only
-#      at startup, so a running one on the old address is restarted.
-#   5. A running Gateway or Campaigns from this checkout whose SIP_PROXY_HOST
-#      differs is restarted (logs in ~/.yuviz/logs).
-#
-# --if-changed: exit at once when the address is the one last applied (the
-# network-sync agent passes it).
-#
+# Applies SIP_IP (.env) to Kamailio, FreeSWITCH, subscriber digests and
+# SIP_PROXY_HOST, and restarts what still uses the old address.
+#   SIP_IP=127.0.0.1 (default) | auto (LAN IP) | <fixed IPv4>
 # Usage: scripts/update_kamailio_ip.sh [--if-changed]
 
 set -euo pipefail
@@ -38,7 +14,7 @@ source "$REPO/scripts/lib/env.sh"
 source "$REPO/scripts/lib/sip.sh"
 MYSQL="${MYSQL:-mysql}"
 
-# Literal KEY=value from .env, never sourced. A value already in the shell wins.
+# Literal .env value, never sourced; the shell's value wins.
 _dotenv() { [[ -f "$REPO/.env" ]] && grep "^$1=" "$REPO/.env" | cut -d= -f2- || true; }
 SIP_IP="${SIP_IP:-$(_dotenv SIP_IP)}"
 FS_ESL_PORT="${FREESWITCH_ESL_PORT:-$(_dotenv FREESWITCH_ESL_PORT)}"
@@ -52,7 +28,7 @@ mkdir -p "$KAMAILIO_DIR/run" "$YUVIZ_LOGS"
 APPLIED="$KAMAILIO_DIR/.applied_ip"
 ok=1
 
-# One run at a time: a network change fires the agent several times.
+# One run at a time.
 LOCK="$KAMAILIO_DIR/.sync.lock"
 find "$LOCK" -maxdepth 0 -mmin +10 -exec rmdir {} \; 2>/dev/null || true
 mkdir "$LOCK" 2>/dev/null || { echo "another network sync is running"; exit 0; }
@@ -64,7 +40,7 @@ if [[ -z "$IP" ]]; then
   echo "ERROR: SIP_IP=auto but no network address was found — is Wi-Fi/Ethernet connected?" >&2
   exit 1
 fi
-# The address lands in a config, SQL and vars.xml, and must name one interface.
+# One interface only; the value lands in config, SQL and vars.xml.
 if [[ ! "$IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$IP" == 0.0.0.0 ]]; then
   echo "ERROR: SIP_IP must be 127.0.0.1, auto or one IPv4 address (not 0.0.0.0); got '$IP'" >&2
   exit 1
@@ -73,7 +49,7 @@ if [[ "${1:-}" == --if-changed && -f "$KAMAILIO_DIR/kamailio.cfg" && "$(cat "$AP
   exit 0
 fi
 echo "[$(date '+%F %T')] SIP_IP=${SIP_IP:-127.0.0.1} -> $IP"
-# Restarted services inherit this process's priority; a niced one slows call audio.
+# Restarted services inherit this priority.
 own_nice="$(ps -o nice= -p $$ | tr -d ' ')"
 [[ "${own_nice:-0}" -gt 0 ]] && echo "  WARNING: running at nice $own_nice; services restarted from here inherit it" >&2
 
@@ -89,7 +65,6 @@ else
   echo "ERROR: could not write SIP_PROXY_HOST=$IP to $REPO/.env" >&2
   exit 1
 fi
-# A tab that sourced start_local.sh earlier keeps its old value for manual restarts.
 [[ -f "$REPO/.env" ]] && _warn_env_drift SIP_PROXY_HOST
 
 # Stops pids with SIGTERM, then SIGKILL after $1 seconds.
@@ -147,7 +122,7 @@ else
   if [[ -z "$stale_rows" ]]; then
     echo "  mysql: subscribers already on $IP"
   else
-    # MySQL 9 dropped MD5(), so the digests are computed here.
+    # MySQL 9 has no MD5().
     STALE_ROWS="$stale_rows" NEW_DOMAIN="$IP" python3 -c "
 import hashlib, os
 d = os.environ['NEW_DOMAIN']
@@ -186,8 +161,7 @@ else
     for _ in $(seq 1 30); do [[ "$(_fs 'eval ${local_ip_v4}')" == "$IP" ]] && break; sleep 1; done
     echo "  freeswitch: restarted ($running -> $IP)"
   fi
-  # Sofia gives up after three tries, and a just-assigned address refuses binds
-  # for a few seconds, so a profile can stay down after a network change.
+  # A new address refuses binds briefly and sofia gives up after 3 tries.
   if [[ -n "$running" ]]; then
     for f in "$(dirname "$vars")"/sip_profiles/*.xml; do
       p="$(basename "$f" .xml)"
@@ -208,24 +182,23 @@ else
 fi
 
 # ── 5. Gateway and Campaigns ─────────────────────────────────────────────────
-# Restarts <label>'s processes from this checkout whose SIP_PROXY_HOST is stale.
+# Restarts this checkout's <label> processes with a stale SIP_PROXY_HOST.
 _restart_stale() {
   local label=$1 pattern=$2 start=$3 pid cwd current stale=()
   for pid in $(pgrep -u "$(id -u)" -f "$pattern" || true); do
     cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
     [[ "$cwd" == "$REPO" ]] || continue
-    # Only this one variable is read out of the process environment.
     current="$(ps eww -o command= -p "$pid" | tr ' ' '\n' | sed -n 's/^SIP_PROXY_HOST=//p' | head -1)"
     [[ "$current" == "$IP" ]] || stale+=("$pid")
   done
   [[ ${#stale[@]} -gt 0 ]] || return 0
   _stop 40 "${stale[@]}"
-  # env -u: an old SIP_PROXY_HOST in this shell would win over .env.
+  # env -u: else this shell's old value wins over .env.
   (cd "$REPO" && env -u SIP_PROXY_HOST nohup bash -c ". scripts/start_local.sh >/dev/null && $start" \
     >>"$YUVIZ_LOGS/$label.log" 2>&1 &)
   echo "  $label: restarted for SIP_PROXY_HOST=$IP (log $YUVIZ_LOGS/$label.log)"
 }
-# Anchored to the program itself: a shell whose arguments mention it must not match.
+# Anchored, so a shell merely mentioning the program never matches.
 _restart_stale gateway '^[^ ]*build/gateway/voice_ai_gateway( |$)' start_gateway
 _restart_stale campaigns '^[^ ]*[Pp]ython[0-9.]* -m uvicorn services\.campaigns\.app:app' start_campaigns_service
 

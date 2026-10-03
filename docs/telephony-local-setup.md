@@ -37,12 +37,9 @@ patched `mod_audio_fork` plays them into the call. The Gateway also connects
 to FreeSWITCH's event socket (ESL, `127.0.0.1:8022`) to receive DTMF and
 hangups and to send hangup and transfer commands.
 
-Everything binds to **127.0.0.1** by default (`SIP_IP=127.0.0.1` in `.env`).
-That address never changes when your Wi-Fi or VPN does, and it avoids a real
-failure seen on macOS, where a VPN interface (`utun`) silently drops packets a
-host sends to its own VPN address. The catch: only a softphone on the same
-machine can call in. To use a phone on your LAN, see
-[Using your LAN IP instead](#using-your-lan-ip-instead).
+Everything binds to **127.0.0.1** by default (`SIP_IP` in `.env`), which never
+changes with your Wi-Fi or VPN. Only a softphone on this Mac can call in; for
+a phone on your LAN, see [Using your LAN IP instead](#using-your-lan-ip-instead).
 
 ## What's in the repo
 
@@ -53,7 +50,7 @@ machine can call in. To use a phone on your LAN, see
 | `scripts/freeswitch/start_voice_ai.lua` | Dialplan script: answers, starts the fork with `{"did","ani","direction"}` metadata, then plays endless silence while the Gateway drives the call. |
 | `scripts/freeswitch/00_voice_ai.xml` | Dialplan entry: routes `788` and `5000`-`5009` to the Lua script. |
 | `scripts/kamailio/*.tpl` | Kamailio config templates (`__LAN_IP__` gets replaced). |
-| `scripts/update_kamailio_ip.sh` | Applies `SIP_IP`: renders the Kamailio config into `~/.yuviz/kamailio`, writes `SIP_PROXY_HOST`, fixes subscriber digests, pins FreeSWITCH's IP, and restarts whatever was on the old address. No sudo. |
+| `scripts/update_kamailio_ip.sh` | Applies `SIP_IP` to Kamailio, FreeSWITCH and `.env`, and restarts what is stale. |
 | `scripts/start_local.sh` | `start_*` helpers for every service. |
 
 ## Before you start
@@ -91,8 +88,8 @@ Rerun it after every `brew upgrade freeswitch`, which deletes the built module.
 
 ### 2. Kamailio
 
-Build Kamailio from source into `/usr/local`. The repo renders its own config
-into `~/.yuviz/kamailio`, so the installed one is unused. It needs `db_mysql` and `http_client`,
+Build Kamailio from source into `/usr/local` (its config is rendered into
+`~/.yuviz/kamailio`). It needs `db_mysql` and `http_client`,
 and **both are excluded from a default build**. Build them explicitly:
 
 ```bash
@@ -273,7 +270,7 @@ Only `1000`-`1002` are routed as softphones, a limit set in `kamailio.cfg.tpl`.
 **Render and deploy the config:**
 
 ```bash
-./scripts/update_kamailio_ip.sh     # applies SIP_IP from .env; start_kamailio also runs it
+./scripts/update_kamailio_ip.sh     # start_kamailio also runs it
 kamailio -c -f ~/.yuviz/kamailio/kamailio.cfg -Y ~/.yuviz/kamailio/run   # should print "config file ok"
 ```
 
@@ -403,51 +400,26 @@ Logs:
 |---|---|
 | FreeSWITCH (macOS) | `~/.yuviz/freeswitch/log/freeswitch.log` |
 | FreeSWITCH (Linux) | `/var/log/freeswitch/freeswitch.log` |
-| Kamailio | stderr of `start_kamailio`, or `~/.yuviz/logs/kamailio.log` after a network sync |
+| Kamailio | stderr of `start_kamailio`, or `~/.yuviz/logs/kamailio.log` |
 | Gateway | stdout of `start_gateway` |
 
 ## Using your LAN IP instead
 
-To call from a phone on your Wi-Fi, set `SIP_IP=auto` in `.env`, then run
-`start_kamailio` (or `scripts/update_kamailio_ip.sh` if it is already running)
-and, once, `install_network_sync` from `scripts/start_local.sh`. Register the
-phone as `1001@<lan-ip>`; the script prints the address. Don't use a VPN address.
+To call from a phone on your Wi-Fi, set `SIP_IP=auto` in `.env`, run
+`start_kamailio`, and once run `install_network_sync`. Register the phone as
+`1001@<lan-ip>`. Don't use a VPN address.
 
-With `auto`, Kamailio (5060) and FreeSWITCH SIP (5080) are reachable by
-everyone on that network: on a café or hotspot Wi-Fi, switch back to
-`127.0.0.1`. Some hotspots also block device-to-device traffic, so a phone on
-them cannot reach the Mac at all.
+With `auto`, SIP (5060, 5080) is open to everyone on that network. On a café
+or hotspot Wi-Fi, use `127.0.0.1`.
 
-**Changing networks.** `install_network_sync` adds a launchd agent
-(`ai.yuviz.network-sync`) that reruns `update_kamailio_ip.sh --if-changed` when
-the network changes and every 5 minutes; it exits at once when the address
-is unchanged. On a change it rewrites the config and `.env`, and restarts
-Kamailio, FreeSWITCH, the Gateway and Campaigns where they ran on the old
-address. Calls in progress drop, as they would anyway. Restarted services log
-to `~/.yuviz/logs/`, and the agent to `~/.yuviz/logs/network-sync.log`.
-`remove_network_sync` uninstalls it.
+**Changing networks.** `install_network_sync` adds a launchd agent that reruns
+`update_kamailio_ip.sh` on every network change. It updates the config and
+`.env`, and restarts Kamailio, FreeSWITCH, the Gateway and Campaigns. Log:
+`~/.yuviz/logs/network-sync.log`. `remove_network_sync` uninstalls it.
 
-Cold transfer to a number, warm transfer and outbound campaigns all dial
-through the SIP proxy (Kamailio) at `SIP_PROXY_HOST` in `.env`, which both the
-Gateway and Campaigns read. `update_kamailio_ip.sh` writes it (adding the line
-if it is missing) with the same IP it renders Kamailio with, and restarts a
-running Gateway or Campaigns that still has the old value. `SIP_PROXY_HOST` is
-set only in `.env`; `config/gateway.yaml` carries no addresses. If
-`SIP_PROXY_HOST` is blank, the Gateway logs `esl.sip_proxy_host is not set` at
-startup and refuses every transfer to a number (`sip_proxy_host_unset`), so
-the agent apologises and carries on instead of the caller sitting through
-~32 s of silence. Campaigns likewise refuses to originate
-(`SIP_PROXY_HOST is not set`).
+Transfers and campaigns dial through Kamailio at `SIP_PROXY_HOST`, which the
+script writes. While it is blank, the Gateway and Campaigns refuse to dial
+numbers instead of sending calls to a wrong host.
 
-An `.env` created before `SIP_IP` existed gets `SIP_IP=127.0.0.1` added the
-next time `start_local.sh` is sourced. If you were on your LAN IP, set
-`SIP_IP=auto` before running `start_kamailio`.
-
-**Restarting by hand: use a new terminal tab.** A tab that already sourced
-`scripts/start_local.sh` keeps the `SIP_PROXY_HOST` it exported then:
-`_load_env` never replaces a variable the shell already has, so
-`start_gateway`/`start_campaigns_service` in that tab would still dial the old
-host. Open a new tab and source `start_local.sh` there, or run
-`unset SIP_PROXY_HOST` and source it again. `update_kamailio_ip.sh`,
-`start_gateway` and `start_campaigns_service` print a warning when the shell's
-value differs from `.env`.
+**Restarting by hand:** use a new terminal tab. An old tab keeps the
+`SIP_PROXY_HOST` it exported, and `start_gateway` warns about it.
