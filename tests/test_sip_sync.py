@@ -78,12 +78,65 @@ def test_refuses_anything_but_one_ipv4_interface(repo, bad):
 
 def test_auto_follows_the_lan_address(repo):
     proc = _sync(repo, SIP_IP="auto")
-    if "no network address" in proc.stderr:
-        pytest.skip("offline")
+    if "no usable address" in proc.stderr or "VPN interface" in proc.stderr:
+        pytest.skip("offline or VPN default route")
     assert proc.returncode == 0, proc.stderr
     ip = next(l.split("=", 1)[1] for l in _env(repo) if l.startswith("SIP_PROXY_HOST="))
     assert ip not in ("127.0.0.1", "0.0.0.0")
     assert f"listen=udp:{ip}:5060" in _rendered(repo)
+
+
+def test_auto_keeps_applied_ip_when_egress_is_vpn(repo):
+    assert _sync(repo, SIP_IP="10.9.8.7").returncode == 0
+    proc = _sync(repo, SIP_IP="auto", YUVIZ_TEST_EGRESS_IFACE="utun3")
+    assert proc.returncode == 0, proc.stderr
+    assert "VPN interface utun3" in proc.stderr
+    assert "keeping SIP on 10.9.8.7" in proc.stderr
+    assert "listen=udp:10.9.8.7:5060" in _rendered(repo)
+    # --if-changed must not restart onto the tunnel address either.
+    again = _sync(repo, "--if-changed", SIP_IP="auto", YUVIZ_TEST_EGRESS_IFACE="utun3")
+    assert again.returncode == 0
+    assert again.stdout == ""
+    assert "listen=udp:10.9.8.7:5060" in _rendered(repo)
+
+
+def test_auto_refuses_vpn_when_nothing_applied_yet(repo):
+    proc = _sync(repo, SIP_IP="auto", YUVIZ_TEST_EGRESS_IFACE="ppp0")
+    assert proc.returncode == 1
+    assert "VPN interface ppp0" in proc.stderr
+    assert not (repo.parent / "home/kamailio/kamailio.cfg").exists()
+    # launchd path: stay quiet until a non-VPN route appears.
+    quiet = _sync(repo, "--if-changed", SIP_IP="auto", YUVIZ_TEST_EGRESS_IFACE="ipsec0")
+    assert quiet.returncode == 0
+    assert quiet.stdout == ""
+
+
+def test_if_changed_repairs_literal_auto_in_vars_xml(repo):
+    home = repo.parent / "home"
+    fs = home / "fake-fs"
+    (fs / "bin").mkdir(parents=True)
+    (fs / "bin" / "freeswitch").write_text("#!/bin/sh\n")
+    (fs / "bin" / "freeswitch").chmod(0o755)
+    conf = home / "fs-home" / "conf"
+    conf.mkdir(parents=True)
+    (conf / "vars.xml").write_text(
+        '<include>\n  <X-PRE-PROCESS cmd="set" data="local_ip_v4=auto"/>\n</include>\n')
+    assert _sync(repo, SIP_IP="10.9.8.7", FS_PREFIX=str(fs), FS_HOME=str(home / "fs-home")).returncode == 0
+    # Stale pin after a setup_macos.sh that wrote the literal "auto".
+    (conf / "vars.xml").write_text(
+        '<include>\n  <X-PRE-PROCESS cmd="set" data="local_ip_v4=auto"/>\n</include>\n')
+    proc = _sync(repo, "--if-changed", SIP_IP="10.9.8.7",
+                 FS_PREFIX=str(fs), FS_HOME=str(home / "fs-home"))
+    assert proc.returncode == 0, proc.stderr
+    assert 'data="local_ip_v4=10.9.8.7"' in (conf / "vars.xml").read_text()
+    assert "local_ip_v4 pinned to 10.9.8.7" in proc.stdout
+
+
+def test_setup_macos_resolves_sip_ip_before_pinning():
+    text = (REPO / "scripts/freeswitch/setup_macos.sh").read_text()
+    assert 'data="local_ip_v4=$SIP_IP"' not in text
+    assert "_sip_target_ip" in text
+    assert "PIN_IP" in text
 
 
 def test_a_shell_that_only_mentions_a_service_is_never_restarted(repo):

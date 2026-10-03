@@ -34,10 +34,10 @@ find "$LOCK" -maxdepth 0 -mmin +10 -exec rmdir {} \; 2>/dev/null || true
 mkdir "$LOCK" 2>/dev/null || { echo "another network sync is running"; exit 0; }
 trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 
-IP="$(_sip_target_ip)"
+IP="$(_sip_target_ip "$APPLIED")" || true
 if [[ -z "$IP" ]]; then
-  [[ "${1:-}" == --if-changed ]] && exit 0   # offline; the next change reruns this
-  echo "ERROR: SIP_IP=auto but no network address was found — is Wi-Fi/Ethernet connected?" >&2
+  [[ "${1:-}" == --if-changed ]] && exit 0   # offline or VPN; the next change reruns this
+  echo "ERROR: SIP_IP=auto but no usable address was found — is Wi-Fi/Ethernet connected (not a VPN)?" >&2
   exit 1
 fi
 # One interface only; the value lands in config, SQL and vars.xml.
@@ -45,7 +45,16 @@ if [[ ! "$IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$IP" == 0.0.0.0 ]]; then
   echo "ERROR: SIP_IP must be 127.0.0.1, auto or one IPv4 address (not 0.0.0.0); got '$IP'" >&2
   exit 1
 fi
-if [[ "${1:-}" == --if-changed && -f "$KAMAILIO_DIR/kamailio.cfg" && "$(cat "$APPLIED" 2>/dev/null)" == "$IP" ]]; then
+# Also re-run when vars.xml still has a literal "auto" (or other stale pin) from
+# setup_macos.sh before it resolved SIP_IP.
+_fs_local_ip_pin_matches() {
+  local vars
+  vars="$(_fs_vars_xml)" || return 0
+  grep -qF "data=\"local_ip_v4=$1\"" "$vars"
+}
+if [[ "${1:-}" == --if-changed && -f "$KAMAILIO_DIR/kamailio.cfg" \
+      && "$(cat "$APPLIED" 2>/dev/null)" == "$IP" ]] \
+   && _fs_local_ip_pin_matches "$IP"; then
   exit 0
 fi
 echo "[$(date '+%F %T')] SIP_IP=${SIP_IP:-127.0.0.1} -> $IP"

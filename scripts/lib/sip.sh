@@ -21,10 +21,51 @@ finally:
 "
 }
 
+# Interface the default route egresses on (empty if unknown).
+# YUVIZ_TEST_EGRESS_IFACE overrides for tests.
+_egress_iface() {
+  if [ -n "${YUVIZ_TEST_EGRESS_IFACE+x}" ]; then
+    echo "$YUVIZ_TEST_EGRESS_IFACE"
+    return 0
+  fi
+  if command -v route >/dev/null 2>&1; then
+    # macOS: `route -n get 8.8.8.8`
+    route -n get 8.8.8.8 2>/dev/null | awk '/interface:/{print $2; exit}'
+  elif command -v ip >/dev/null 2>&1; then
+    ip route get 8.8.8.8 2>/dev/null \
+      | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit }}'
+  fi
+}
+
+# Full-tunnel VPN ifaces drop packets a host sends to their own address.
+_is_vpn_iface() {
+  case "$1" in
+    utun*|ppp*|ipsec*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # SIP_IP: 127.0.0.1 (default), auto (LAN IP) or a fixed address.
+# Optional $1: path to the last applied IP. With auto over a VPN tunnel, print
+# that applied address (or nothing) instead of the tunnel address.
 _sip_target_ip() {
-  local mode="${SIP_IP:-127.0.0.1}"
-  if [ "$mode" = auto ]; then _detect_lan_ip; else echo "$mode"; fi
+  local mode="${SIP_IP:-127.0.0.1}" iface applied_file="${1:-}" applied
+  if [ "$mode" != auto ]; then
+    echo "$mode"
+    return 0
+  fi
+  iface=$(_egress_iface)
+  if _is_vpn_iface "$iface"; then
+    if [ -n "$applied_file" ] && [ -s "$applied_file" ]; then
+      applied=$(cat "$applied_file")
+      echo "WARNING: default route is on VPN interface $iface; keeping SIP on $applied" >&2
+      echo "$applied"
+      return 0
+    fi
+    echo "WARNING: default route is on VPN interface $iface; not moving SIP onto it" >&2
+    return 1
+  fi
+  _detect_lan_ip
 }
 
 # FS_PREFIX if set; else Homebrew, source install, then /usr.

@@ -407,7 +407,9 @@ Logs:
 
 To call from a phone on your Wi-Fi, set `SIP_IP=auto` in `.env`, run
 `start_kamailio`, and once run `install_network_sync`. Register the phone as
-`1001@<lan-ip>`. Don't use a VPN address.
+`1001@<lan-ip>`. Don't use a VPN address: with `auto`, a full-tunnel VPN
+(`utun*`, `ppp*`, `ipsec*`) keeps the last applied LAN address instead of
+rebinding onto the tunnel (and dropping calls).
 
 With `auto`, SIP (5060, 5080) is open to everyone on that network. On a café
 or hotspot Wi-Fi, use `127.0.0.1`.
