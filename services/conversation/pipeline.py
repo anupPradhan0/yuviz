@@ -678,9 +678,15 @@ class PipelineConversationHandler:
 
     async def greeting(self, session_id: str) -> list[bytes]:
         if self._transcripts is not None:
+            # One field, two sinks with opposite fail-closed directions. The
+            # empty direction that makes toolexec refuse to guess a remote
+            # party is not a value calls.direction accepts — its CHECK is
+            # ('inbound','outbound','test'), so writing "" here loses the call
+            # row and its whole transcript. The transcript's safe reading of
+            # an unset direction is the common case, inbound.
             self._transcripts.begin_call(
                 session_id, self._tenant_id, self._call_id,
-                self._direction, self._caller_number, self._called_number,
+                self._direction or "inbound", self._caller_number, self._called_number,
                 self._agent_id, self._agent_config_version,
             )
         # Speaking the instant the line opens gets the first syllable

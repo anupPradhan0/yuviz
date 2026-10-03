@@ -643,35 +643,45 @@ async def apply_preset(
         connection_id = connection["id"]
 
     async with tenant_conn(pool) as conn:
-        have = {row["name"] for row in await conn.fetch(
-            "SELECT name FROM custom_apis WHERE tenant_id = $1 AND preset_key = $2 AND deleted_at IS NULL",
-            tenant_id, preset_key,
-        )}
-
-    steps_kwargs = {}
-    if preset_key == "sheets_lead_capture":
-        # Only when the row it belongs to is missing: re-applying must not leave a spreadsheet nobody uses.
-        steps_kwargs["spreadsheet_id"] = (
-            "" if "sheets_capture_lead" in have else await _create_lead_sheet(tenant_id, connection_id, setup.title)
-        )
-    steps = preset.steps(setup, **steps_kwargs)
-
-    for step in steps:
-        await resolve_and_validate_endpoint(step.endpoint_url)
-
-    secret_ref = None
-    if preset_key == "whatsapp_confirmation":
-        key = setup.api_key.get_secret_value()
-        # Sealed to this tenant: the same ciphertext pasted into another tenant's row cannot be opened.
-        secret_ref = encrypt_tenant_secret(tenant_id, "Basic " + key if setup.provider == "interakt" else key)
-        for step in steps:
-            custom_apis._validate_credential_ref(
-                tenant_id, step.auth_scheme, {_SECRET_REF_FIELD[step.auth_scheme]: secret_ref},
-            )
-
-    async with tenant_conn(pool) as conn:
         async with conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock(hashtext('custom_apis:' || $1::text))", str(tenant_id))
+
+            # Everything that can create something external happens under the
+            # lock, not before it. Reading `have` outside meant two overlapping
+            # applies both saw the row missing and both created a spreadsheet,
+            # of which only one ends up referenced — and a Google Sheet is not
+            # something a rolled-back transaction takes back. The lock is per
+            # tenant and preset apply is a rare console action, so serializing
+            # the provider call inside it costs nothing worth having.
+            have = {row["name"] for row in await conn.fetch(
+                "SELECT name FROM custom_apis WHERE tenant_id = $1 AND preset_key = $2 AND deleted_at IS NULL",
+                tenant_id, preset_key,
+            )}
+
+            steps_kwargs = {}
+            if preset_key == "sheets_lead_capture":
+                # Only when the row it belongs to is missing: re-applying must not leave a spreadsheet nobody uses.
+                steps_kwargs["spreadsheet_id"] = (
+                    "" if "sheets_capture_lead" in have
+                    else await _create_lead_sheet(tenant_id, connection_id, setup.title)
+                )
+            steps = preset.steps(setup, **steps_kwargs)
+
+            for step in steps:
+                await resolve_and_validate_endpoint(step.endpoint_url)
+
+            secret_ref = None
+            if preset_key == "whatsapp_confirmation":
+                key = setup.api_key.get_secret_value()
+                # Sealed to this tenant: the same ciphertext pasted into another tenant's row cannot be opened.
+                secret_ref = encrypt_tenant_secret(
+                    tenant_id, "Basic " + key if setup.provider == "interakt" else key
+                )
+                for step in steps:
+                    custom_apis._validate_credential_ref(
+                        tenant_id, step.auth_scheme, {_SECRET_REF_FIELD[step.auth_scheme]: secret_ref},
+                    )
+
             created = await _insert_missing_steps(
                 conn, tenant_id, preset_key, steps, oauth_connection_id=connection_id, secret_ref=secret_ref,
             )
