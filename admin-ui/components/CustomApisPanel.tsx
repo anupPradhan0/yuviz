@@ -5,6 +5,7 @@ import { ApiError } from "@/lib/api";
 import {
   CustomApi,
   CustomApiAuthScheme,
+  CustomApiAuthSecrets,
   CustomApiMethod,
   CustomApiParamSpec,
   createCustomApi,
@@ -12,7 +13,7 @@ import {
   listCustomApis,
   updateCustomApi,
 } from "@/lib/toolexecApi";
-import { SecretRefInput } from "./SecretRefInput";
+import { SecretRefInput, secretPayload } from "./SecretRefInput";
 import { Modal } from "@/components/Modal";
 
 // A per-step budget floor consistent with services/toolexec's own default
@@ -22,6 +23,15 @@ import { Modal } from "@/components/Modal";
 const DEFAULT_STEP_TIMEOUT_MS = 6000;
 
 type ParamForm = CustomApiParamSpec;
+
+type AuthRefField = keyof CustomApiAuthSecrets;
+
+const AUTH_REF_FIELDS: Record<CustomApiAuthScheme, AuthRefField[]> = {
+  none: [],
+  api_key: ["key_ref"],
+  bearer: ["token_ref"],
+  oauth2_client_credentials: ["client_id_ref", "client_secret_ref"],
+};
 
 interface ApiForm {
   name: string;
@@ -233,18 +243,26 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
   const removeParam = (index: number) =>
     setForm((f) => ({ ...f, params: f.params.filter((_, i) => i !== index) }));
 
-  const authConfigFor = (f: ApiForm): Record<string, unknown> => {
-    switch (f.auth_scheme) {
-      case "api_key":
-        return { key_ref: f.key_ref };
-      case "bearer":
-        return { token_ref: f.token_ref };
-      case "oauth2_client_credentials":
-        return { client_id_ref: f.client_id_ref, client_secret_ref: f.client_secret_ref };
-      default:
-        return {};
+  // A typed key goes out as auth_secrets for the server to seal; "[stored]"
+  // and a pointer go back as the ref. The ref itself never reaches the
+  // browser, so a saved credential can only be echoed, not re-sent.
+  const authPayloadFor = (f: ApiForm) => {
+    const auth_config: Record<string, unknown> = {};
+    const auth_secrets: CustomApiAuthSecrets = {};
+    for (const field of AUTH_REF_FIELDS[f.auth_scheme]) {
+      const sent = secretPayload(f[field], (editing?.auth_config[field] as string) ?? "");
+      if (sent.api_key !== undefined) auth_secrets[field] = sent.api_key;
+      else if (sent.api_key_ref !== undefined) auth_config[field] = sent.api_key_ref;
     }
+    return Object.keys(auth_secrets).length > 0 ? { auth_config, auth_secrets } : { auth_config };
   };
+
+  // The server blanks a credential it quarantined, so an edit of a saved
+  // API shows the field empty and required.
+  const quarantinedHint = (field: AuthRefField) =>
+    editing && editing.auth_config[field] === "" ? (
+      <span className="hint"> was revoked by a security cleanup — enter it again</span>
+    ) : null;
 
   const handleSave = async () => {
     setSaving(true);
@@ -256,7 +274,7 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
         endpoint_url: form.endpoint_url,
         method: form.method,
         auth_scheme: form.auth_scheme,
-        auth_config: authConfigFor(form),
+        ...authPayloadFor(form),
         side_effecting: form.side_effecting,
         timeout_ms: form.timeout_ms.trim() ? Number(form.timeout_ms) : null,
         sensitive_response_paths: form.sensitive_response_paths
@@ -442,7 +460,7 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
           <div className="form-group">
             <label className="form-label">
               Key ref <span className="required">*</span>
-              <span className="hint"> tenant-namespaced only — enc:/env:/k8s:</span>
+              {quarantinedHint("key_ref")}
             </label>
             <SecretRefInput value={form.key_ref} onChange={(v) => setForm({ ...form, key_ref: v })} canEncrypt />
           </div>
@@ -451,6 +469,7 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
           <div className="form-group">
             <label className="form-label">
               Token ref <span className="required">*</span>
+              {quarantinedHint("token_ref")}
             </label>
             <SecretRefInput value={form.token_ref} onChange={(v) => setForm({ ...form, token_ref: v })} canEncrypt />
           </div>
@@ -460,6 +479,7 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
             <div className="form-group">
               <label className="form-label">
                 Client ID ref <span className="required">*</span>
+                {quarantinedHint("client_id_ref")}
               </label>
               <SecretRefInput
                 value={form.client_id_ref}
@@ -470,6 +490,7 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
             <div className="form-group">
               <label className="form-label">
                 Client secret ref <span className="required">*</span>
+                {quarantinedHint("client_secret_ref")}
               </label>
               <SecretRefInput
                 value={form.client_secret_ref}

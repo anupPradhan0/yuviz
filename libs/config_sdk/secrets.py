@@ -22,6 +22,18 @@ ENCRYPTED_PREFIX = "enc:"
 TENANT_BOUND_PREFIX = "enc:t1."
 _ENV_VAR = "SECRET_ENCRYPTION_KEY"
 
+# What reencrypt_tenant_refs.py writes over a ciphertext it found under more
+# than one tenant. It lives here, not in each service, because every reader of
+# a credential column has to recognise it and there are four of them — a copy
+# per service is how one of them gets missed (lesson 42). Deliberately not
+# NULL: NULL reads as "no credential configured" and is passed through
+# silently, whereas this has no scheme, so every resolver rejects it.
+QUARANTINED = "quarantined"
+
+
+def is_quarantined(ref: str | None) -> bool:
+    return ref == QUARANTINED
+
 
 class SecretEncryptionUnavailable(RuntimeError):
     """Raised rather than falling back to plaintext: a credential store that

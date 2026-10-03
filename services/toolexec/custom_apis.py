@@ -31,11 +31,13 @@ import socket
 from typing import Any
 from urllib.parse import urlsplit
 
+from libs.config_sdk.secrets import QUARANTINED, encrypt_tenant_secret
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import audit, auth_schemes, db, graph
 
 log = logging.getLogger(__name__)
+
 
 # Absolute deny-list, checked against EVERY resolved A/AAAA record — not
 # just the first one a caller happens to control the order of.
@@ -150,23 +152,74 @@ class DependentApiExists(Exception):
     tenant-owned data, not a bad request or a missing id."""
 
 
-# auth_scheme -> the auth_config field name(s) that must be a tenant-
-# namespaced ref (enc:/env:/k8s:), per custom_apis.auth_config's shape
-# (see database/schema.sql's custom_apis comment). 'none' needs nothing.
+# auth_scheme -> the auth_config field name(s) that must be a tenant-bound
+# `enc:t1.` ref, per custom_apis.auth_config's shape (see database/schema.sql's
+# custom_apis comment). 'none' needs nothing; the authorization-code scheme
+# keeps its tokens on the oauth_connections row, not here.
 _CREDENTIAL_REF_FIELDS = {
     "api_key": ("key_ref",),
     "bearer": ("token_ref",),
     "oauth2_client_credentials": ("client_id_ref", "client_secret_ref"),
+    "oauth2_authorization_code": (),
 }
+
+STORED_SENTINEL = "[stored]"
+
+
+def _seal_auth_secrets(
+    tenant_id: Any, auth_scheme: str, auth_config: dict, auth_secrets: dict[str, str] | None,
+    old_auth_config: dict | None,
+) -> dict:
+    """Turns what the client sent into the auth_config to store. No response
+    ever carries a ref, so every new credential arrives as plaintext in
+    `auth_secrets` and is sealed to `tenant_id` here. `old_auth_config` is
+    passed only on an update that keeps the row's scheme: it is the only
+    source `"[stored]"` may be copied from."""
+    fields = _CREDENTIAL_REF_FIELDS.get(auth_scheme, ())
+    auth_secrets = auth_secrets or {}
+    unknown = set(auth_secrets) - set(fields)
+    if unknown:
+        raise ValueError(f"credential_ref_not_a_reference: {sorted(unknown)[0]}")
+
+    sealed = dict(auth_config)
+    for field in fields:
+        current = auth_config.get(field)
+        if field in auth_secrets:
+            if current is not None and current != STORED_SENTINEL:
+                raise ValueError(f"credential_ref_ambiguous: {field}")
+            sealed[field] = encrypt_tenant_secret(tenant_id, auth_secrets[field])
+        elif current == STORED_SENTINEL:
+            if old_auth_config is None or field not in old_auth_config:
+                raise ValueError(f"credential_ref_not_a_reference: {field}")
+            sealed[field] = old_auth_config[field]
+    return sealed
+
+
+def _mask_ref(value: Any) -> Any:
+    if value == QUARANTINED:
+        return ""
+    return STORED_SENTINEL if value else value
+
+
+def public_custom_api(api: dict) -> dict:
+    """The registry view every console role may read: no `*_ref` value leaves
+    the service, pointers included. A quarantined credential reads as empty
+    so the panel asks for it again."""
+    config = {
+        key: _mask_ref(value) if key.endswith("_ref") else value
+        for key, value in (api.get("auth_config") or {}).items()
+    }
+    return {**api, "auth_config": config}
 
 
 def _validate_credential_ref(tenant_id: Any, auth_scheme: str, auth_config: dict) -> None:
     """Raises ValueError('credential_ref_not_a_reference: <field>') if a
     required field is missing or a literal secret (no enc:/env:/k8s:
     scheme), or ValueError('credential_ref_outside_tenant_namespace:
-    <field>') if auth_schemes.validate_tenant_ref() rejects it — the same
-    control T4 built, called again here at registration (and again by
-    resolve_tenant_ref at call time, T15 — never only here)."""
+    <field>') if auth_schemes.validate_tenant_ref() rejects it — only a
+    tenant-bound ref for this tenant passes, called again here at
+    registration (and again by resolve_tenant_ref at call time — never
+    only here)."""
     for field in _CREDENTIAL_REF_FIELDS.get(auth_scheme, ()):
         value = auth_config.get(field)
         if not isinstance(value, str) or not value.startswith(("enc:", "env:", "k8s:")):
@@ -480,6 +533,7 @@ async def create_custom_api(
     body_style: str = "json",
     auth_scheme: str = "none",
     auth_config: dict | None = None,
+    auth_secrets: dict[str, str] | None = None,
     side_effecting: bool = True,
     idempotency_header: str | None = None,
     timeout_ms: int | None = None,
@@ -489,7 +543,7 @@ async def create_custom_api(
     user_id: Any | None = None,
     user_email: str | None = None,
 ) -> dict[str, Any]:
-    auth_config = auth_config or {}
+    auth_config = _seal_auth_secrets(tenant_id, auth_scheme, auth_config or {}, auth_secrets, None)
     sensitive_response_paths = sensitive_response_paths or []
     params = params or []
 
@@ -553,6 +607,7 @@ async def update_custom_api(
     *,
     platform_scoped: bool = False,
     params: list[dict] | None = None,
+    auth_secrets: dict[str, str] | None = None,
     user_id: Any | None = None,
     user_email: str | None = None,
     **fields: Any,
@@ -599,7 +654,12 @@ async def update_custom_api(
             # already-stored success_template against it (the
             # PATCH-after-the-fact case).
             final_auth_scheme = fields.get("auth_scheme", old["auth_scheme"])
-            final_auth_config = fields.get("auth_config", old["auth_config"])
+            final_auth_config = _seal_auth_secrets(
+                tenant_id, final_auth_scheme, fields.get("auth_config", old["auth_config"]), auth_secrets,
+                old["auth_config"] if final_auth_scheme == old["auth_scheme"] else None,
+            )
+            if auth_secrets or "auth_config" in fields:
+                fields["auth_config"] = final_auth_config
             final_endpoint_url = fields.get("endpoint_url", old["endpoint_url"])
             final_success_template = fields.get("success_template", old["success_template"])
             final_sensitive_paths = fields.get("sensitive_response_paths", old["sensitive_response_paths"])

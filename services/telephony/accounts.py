@@ -34,7 +34,7 @@ from typing import Any
 
 import httpx
 
-from libs.config_sdk.secrets import decrypt_secret, is_encrypted
+from libs.config_sdk.secrets import decrypt_secret, is_encrypted, is_quarantined
 from libs.telephony_sdk.interface import ITelephonyProvider
 from libs.telephony_sdk.registry import TelephonyProviderRegistry
 
@@ -130,6 +130,18 @@ class AccountStore:
 
     def _decrypt_scalar(self, account_ref: str, entry: Any) -> str | None:
         if not isinstance(entry, str) or not entry:
+            return None
+        if is_quarantined(entry):
+            # A ciphertext the re-encryption script found under more than one
+            # tenant. Skipping is what fails closed here: the pass-through
+            # below would hand the literal "quarantined" to the provider as
+            # the credential, which is a cross-tenant credential still in use
+            # as far as this process is concerned.
+            log.error(
+                "telephony: account %s has a quarantined credential field — "
+                "re-enter it in the console; skipping",
+                account_ref,
+            )
             return None
         if not is_encrypted(entry):
             log.warning("telephony: account %s has a non-enc credential field, passing through", account_ref)

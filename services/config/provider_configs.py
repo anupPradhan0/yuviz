@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from libs.config_sdk.secrets import ENCRYPTED_PREFIX, encrypt_secret
+from libs.config_sdk.secrets import ENCRYPTED_PREFIX, QUARANTINED as _QUARANTINED, encrypt_secret
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import audit, cache, db
@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 STORED_SENTINEL = "[stored]"
-_QUARANTINED = "quarantined"
 _POINTER_SCHEMES = ("env:", "k8s:")
 
 

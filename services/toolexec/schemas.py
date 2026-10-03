@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from . import graph
 
@@ -29,6 +29,11 @@ class CustomApiParamSpec(BaseModel):
     sensitive: bool = False
 
 
+# Plaintext credentials, sealed to the tenant on write. Responses never carry
+# one back; a stored credential is the string "[stored]" in auth_config.
+AuthSecrets = dict[Literal["key_ref", "token_ref", "client_id_ref", "client_secret_ref"], SecretStr]
+
+
 class CustomApiCreate(BaseModel):
     name: str
     description: str
@@ -37,6 +42,7 @@ class CustomApiCreate(BaseModel):
     body_style: Literal["json", "form"] = "json"
     auth_scheme: Literal["none", "api_key", "bearer", "oauth2_client_credentials"] = "none"
     auth_config: dict[str, Any] = {}
+    auth_secrets: AuthSecrets | None = None
     side_effecting: bool = True
     idempotency_header: str | None = None
     timeout_ms: int | None = None
@@ -53,6 +59,7 @@ class CustomApiUpdate(BaseModel):
     body_style: Literal["json", "form"] | None = None
     auth_scheme: Literal["none", "api_key", "bearer", "oauth2_client_credentials"] | None = None
     auth_config: dict[str, Any] | None = None
+    auth_secrets: AuthSecrets | None = None
     side_effecting: bool | None = None
     idempotency_header: str | None = None
     timeout_ms: int | None = None

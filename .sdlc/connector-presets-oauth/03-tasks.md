@@ -129,7 +129,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
 
 ## Phase 3: Toolexec tenant-bound refs and the quarantine pair (all-or-nothing)
 
-- [ ] T9 Refuse legacy and pointer refs in the toolexec reader and writer — `services/toolexec/auth_schemes.py`, `services/toolexec/tests/test_auth_schemes_tenant_bound.py` (new). Requires T1.
+- [x] T9 Refuse legacy and pointer refs in the toolexec reader and writer — `services/toolexec/auth_schemes.py`, `services/toolexec/tests/test_auth_schemes_tenant_bound.py` (new). Requires T1.
   - Add `class ReconnectRequired(ValueError)`.
   - `validate_tenant_ref`:
     - The `enc:` branch accepts only `is_tenant_bound(ref)` AND `decrypt_tenant_secret(tenant_id, ref)` succeeding, with the result discarded.
@@ -145,7 +145,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - A direct `env:` row still resolves until quarantined.
     - Half-applied state: legacy rows fail closed, never decrypt under the wrong tenant.
 
-- [ ] T10 Seal on write and mask on read for custom-API credentials — `services/toolexec/custom_apis.py`, `services/toolexec/schemas.py`, `services/toolexec/routers/custom_apis.py`, tests. Requires T9. Land with T11.
+- [x] T10 Seal on write and mask on read for custom-API credentials — `services/toolexec/custom_apis.py`, `services/toolexec/schemas.py`, `services/toolexec/routers/custom_apis.py`, tests. Requires T9. Land with T11.
   - `custom_apis.py`:
     - Add `_seal_auth_secrets(tenant_id, auth_scheme, auth_config, auth_secrets, old_auth_config)`, run before the unchanged `_validate_credential_ref`.
     - Per field in `_CREDENTIAL_REF_FIELDS[scheme]`: `auth_secrets` wins, and both a value and a secret raises `credential_ref_ambiguous`. `"[stored]"` is copied from the old config only on update with an unchanged scheme and an existing field. Anything else raises `credential_ref_not_a_reference`. An unknown `auth_secrets` key raises.
@@ -166,7 +166,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
   - `toolexecApi.ts`: add `auth_secrets` to the create and update payloads, and add `preset_key` and `oauth_connection_id` to `CustomApi`.
   - Done when, in a browser, saving an unrelated edit to a `bearer` API keeps its credential working, and a stored credential shows hidden with Replace.
 
-- [ ] T12 Write the re-encryption and quarantine script, with the `_CONFIG_REF_COLUMNS` pair — `services/toolexec/reencrypt_tenant_refs.py` (new), `services/toolexec/tests/test_reencrypt_tenant_refs.py` (new). Requires T1, T2, T10, and the Config work in T3-T6 so no new copies form. MUST PRECEDE T13.
+- [x] T12 Write the re-encryption and quarantine script, with the `_CONFIG_REF_COLUMNS` pair — `services/toolexec/reencrypt_tenant_refs.py` (new), `services/toolexec/tests/test_reencrypt_tenant_refs.py` (new). Requires T1, T2, T10, and the Config work in T3-T6 so no new copies form. MUST PRECEDE T13.
   - Declare `_CONFIG_REF_COLUMNS` once as `(table, column, kind)` tuples for `provider_configs.api_key_ref`, `tool_provider_configs.api_key_ref`, `telephony_configs.credentials` (`jsonb_credentials`) and `carriers.auth_token_ref`. BOTH the scan and the quarantine writes iterate that one tuple.
   - Transaction:
     - The first statement is `LOCK TABLE custom_apis, provider_configs, tool_provider_configs, telephony_configs, carriers IN SHARE ROW EXCLUSIVE MODE`. It runs under the superuser DSN.
@@ -199,7 +199,7 @@ Three round-5 low findings are folded in: T3 (seed call site), T13 (quarantine c
     - `convalidated=true` after the run, and a second run changing nothing.
   - Half-applied state: until it runs, legacy refs fail closed (T9).
 
-- [ ] T13 Add a blast-radius ceiling to the quarantine transaction (round-5 low 3) — `services/toolexec/reencrypt_tenant_refs.py`, `services/toolexec/tests/test_reencrypt_tenant_refs.py`. Requires T12.
+- [x] T13 Add a blast-radius ceiling to the quarantine transaction (round-5 low 3) — `services/toolexec/reencrypt_tenant_refs.py`, `services/toolexec/tests/test_reencrypt_tenant_refs.py`. Requires T12.
   - After the scan and classification, and BEFORE any rebind, quarantine or VALIDATE write, compute the planned quarantine set.
   - Abort (roll back, exit code 2, a message naming counts only) if EITHER of these holds:
     - the planned set exceeds N rows (propose `--max-quarantine`, default 25), or exceeds N% of all ref-bearing rows in the scanned tables (propose `--max-quarantine-pct`, default 10);

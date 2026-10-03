@@ -76,8 +76,17 @@ export interface CustomApi {
   chain_levels: number;
   created_at: string;
   updated_at: string;
+  preset_key: string | null;
+  oauth_connection_id: string | null;
   params: CustomApiParamSpec[];
 }
+
+// Plaintext credentials, sealed to the tenant by the server. The API never
+// returns one: a saved credential reads back as "[stored]" in auth_config,
+// and an empty string means it was quarantined and must be entered again.
+export type CustomApiAuthSecrets = Partial<
+  Record<"key_ref" | "token_ref" | "client_id_ref" | "client_secret_ref", string>
+>;
 
 export interface CustomApiCreate {
   name: string;
@@ -87,6 +96,7 @@ export interface CustomApiCreate {
   body_style?: "json" | "form";
   auth_scheme?: CustomApiAuthScheme;
   auth_config?: Record<string, unknown>;
+  auth_secrets?: CustomApiAuthSecrets;
   side_effecting?: boolean;
   idempotency_header?: string | null;
   timeout_ms?: number | null;

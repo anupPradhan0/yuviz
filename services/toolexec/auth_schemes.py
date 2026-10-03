@@ -11,11 +11,16 @@ Path(mount_root) / ref join, so a ref like "env:JWT_SECRET" or
 signing key / encryption key / arbitrary files to a tenant-chosen
 endpoint_url (finding 1).
 
-validate_tenant_ref() is the control. It is called both at registration
-(services/toolexec/custom_apis.py's _validate_credential_ref, T7) and again
-here, at resolution, keyed off the row's own tenant_id — never only at
-registration, so a future write path (bulk import, script) cannot bypass it
-(lesson 16, lesson 19).
+validate_tenant_ref() is the write-side control, called at registration
+(services/toolexec/custom_apis.py's _validate_credential_ref). It accepts
+only a tenant-bound `enc:t1.` ref that opens for the row's own tenant:
+a legacy `enc:` Fernet token is a bearer capability any tenant could paste
+into its own row, and `env:`/`k8s:` are platform-operator input a tenant
+must not author. resolve_tenant_ref() is the read-side control, keyed off
+the row's own tenant_id at call time — never only at registration, so a
+future write path (bulk import, script) cannot bypass it (lesson 16,
+lesson 19). It still reads `env:`/`k8s:` rows that predate the write-side
+refusal, inside the namespace check, until the quarantine script retires them.
 
 apply() (T15) is the runtime half: it places a resolved credential into an
 outbound step's headers/query, calling resolve_tenant_ref() — never the
@@ -38,6 +43,7 @@ from typing import Any
 import httpx
 
 from libs.config_sdk.secret_resolver import CompositeSecretResolver
+from libs.config_sdk.secrets import decrypt_tenant_secret, is_tenant_bound
 
 TENANT_ENV_PREFIX = "TENANT_"  # env:TENANT_<uuid-hex-upper>_<NAME>
 TENANT_SECRET_ROOT = os.environ["TOOLEXEC_TENANT_SECRET_ROOT"]  # NOT the platform k8s mount
@@ -50,12 +56,36 @@ _ENV_REF_RE = re.compile(rf"env:{TENANT_ENV_PREFIX}(?P<hex>[0-9A-F]{{32}})_[A-Z0
 _K8S_REF_RE = re.compile(r"k8s:tenants/(?P<tenant_id>[^/]+)/[A-Za-z0-9._-]+")
 
 
-def validate_tenant_ref(tenant_id: str, ref: str) -> None:
-    """Raises ValueError('credential_ref_outside_tenant_namespace') unless
-    `ref` resolves inside a namespace provably owned by `tenant_id`:
+class ReconnectRequired(ValueError):
+    """The tenant's OAuth connection cannot supply a token until an admin
+    reconnects it."""
 
-        enc:  always allowed — the ciphertext IS the secret, it names
-              nothing, so there is no namespace to escape.
+
+def validate_tenant_ref(tenant_id: str, ref: str) -> None:
+    """Write-side check. Raises ValueError('credential_ref_outside_tenant_namespace')
+    unless `ref` is an `enc:t1.` ciphertext that opens for `tenant_id`.
+
+        enc:t1.  allowed only if decrypt_tenant_secret(tenant_id, ref)
+                 succeeds (the result is discarded). Another tenant's
+                 ciphertext fails the AEAD tag.
+        enc:     (legacy Fernet) rejected: it names no tenant, so it opens
+                 for whoever pastes it.
+        env:/k8s: rejected outright: a tenant admin may not author a
+                 pointer into platform-operator namespaces.
+        anything else (including a literal): rejected.
+    """
+    if is_tenant_bound(ref):
+        try:
+            decrypt_tenant_secret(tenant_id, ref)
+        except ValueError:
+            raise ValueError("credential_ref_outside_tenant_namespace") from None
+        return
+    raise ValueError("credential_ref_outside_tenant_namespace")
+
+
+def _validate_pointer_ref(tenant_id: str, ref: str) -> None:
+    """Read-side namespace check for a pre-existing `env:`/`k8s:` row:
+
         env:  must fullmatch env:TENANT_<hex>_<NAME> where
               hex = uuid.UUID(tenant_id).hex.upper(). No platform variable
               (JWT_SECRET, SECRET_ENCRYPTION_KEY, POSTGRES_DSN, ...) can
@@ -67,7 +97,7 @@ def validate_tenant_ref(tenant_id: str, ref: str) -> None:
               relative_to (Path(TENANT_SECRET_ROOT).resolve() / 'tenants'
               / tenant_id), so a symlink inside the tenant's own directory
               cannot point outside it either.
-        anything else (including a literal): rejected.
+        anything else: rejected.
     """
     # Normalized once: update_custom_api's caller passes the DB row's own
     # tenant_id, an asyncpg.pgproto.pgproto.UUID object, not the str every
@@ -75,9 +105,6 @@ def validate_tenant_ref(tenant_id: str, ref: str) -> None:
     # instance outright (it expects str/bytes/int), and comparing/joining
     # a Path with the raw object would misbehave the same way below.
     tenant_id = str(tenant_id)
-
-    if ref.startswith("enc:"):
-        return
 
     if ref.startswith("env:"):
         expected_hex = uuid.UUID(tenant_id).hex.upper()
@@ -110,9 +137,16 @@ _tenant_secret_resolver = CompositeSecretResolver(k8s_mount_root=TENANT_SECRET_R
 
 async def resolve_tenant_ref(tenant_id: str, ref: str) -> str:
     """Re-validates from the row's own tenant_id at resolution time — not
-    only at registration — then resolves through the same
-    CompositeSecretResolver every other service uses."""
-    validate_tenant_ref(tenant_id, ref)
+    only at registration. `enc:t1.` opens only through
+    decrypt_tenant_secret for this tenant; any other `enc:` (legacy Fernet)
+    is refused here, never decrypted. `env:`/`k8s:` rows that predate the
+    write-side refusal resolve through the namespace check and the
+    tenant-rooted resolver."""
+    if ref.startswith("enc:"):
+        if not is_tenant_bound(ref):
+            raise ValueError("credential_ref_outside_tenant_namespace")
+        return decrypt_tenant_secret(tenant_id, ref)
+    _validate_pointer_ref(tenant_id, ref)
     return await _tenant_secret_resolver.resolve(ref)
 
 

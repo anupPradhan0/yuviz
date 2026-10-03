@@ -430,10 +430,9 @@ async def test_write_audit_redacts_auth_config(pool, tenant_agent):
     the finding names: enc:<fernet-token> IS the credential sealed at
     rest, not merely a pointer to one."""
     tenant, _agent = tenant_agent
-    tenant_hex = uuid.UUID(str(tenant["id"])).hex.upper()
-    ref = f"env:TENANT_{tenant_hex}_TOKEN"
-    import os
-    os.environ[f"TENANT_{tenant_hex}_TOKEN"] = "SENTINEL-DO-NOT-LEAK-INTO-AUDIT-LOG"
+    from libs.config_sdk.secrets import encrypt_tenant_secret
+
+    ref = encrypt_tenant_secret(tenant["id"], "SENTINEL-DO-NOT-LEAK-INTO-AUDIT-LOG")
     try:
         api = await custom_apis.create_custom_api(**_api_kwargs(
             str(tenant["id"]), "audited_api", auth_scheme="bearer", auth_config={"token_ref": ref},
