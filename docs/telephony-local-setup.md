@@ -171,7 +171,7 @@ REPO="$PWD"   # run from the repo root
 # load the module
 sudo sed -i 's|\(.*<load module="mod_lua"/>.*\)|\1\n    <load module="mod_audio_fork"/>|' $C/autoload_configs/modules.conf.xml
 
-# ESL on loopback, port 8022 (pinned by config/gateway.yaml)
+# ESL on loopback, port 8022 (FREESWITCH_ESL_PORT in .env)
 sudo sed -i -e 's|name="listen-ip" value="[^"]*"|name="listen-ip" value="127.0.0.1"|' \
             -e 's|name="listen-port" value="[^"]*"|name="listen-port" value="8022"|' \
             $C/autoload_configs/event_socket.conf.xml
@@ -426,9 +426,8 @@ Cold transfer to a number, warm transfer and outbound campaigns all dial
 through the SIP proxy (Kamailio) at `SIP_PROXY_HOST` in `.env`, which both the
 Gateway and Campaigns read. `update_kamailio_ip.sh` writes it (adding the line
 if it is missing) with the same IP it renders Kamailio with; restart the
-Gateway and Campaigns after running it, from a new tab (see below). `esl.sip_proxy_host` in
-`config/gateway.yaml` is only a fallback that a non-blank `.env` value
-overrides, so editing the yaml does nothing while `.env` has a value. If
+Gateway and Campaigns after running it, from a new tab (see below). `SIP_PROXY_HOST` is
+set only in `.env`; `config/gateway.yaml` carries no addresses. If
 `SIP_PROXY_HOST` is blank, the Gateway logs `esl.sip_proxy_host is not set` at
 startup and refuses every transfer to a number (`sip_proxy_host_unset`), so
 the agent apologises and carries on instead of the caller sitting through

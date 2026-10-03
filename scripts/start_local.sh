@@ -90,14 +90,14 @@ start_config_service() {
   # are saved with a "not synced" warning (number_sync.py).
   _require SECRET_ENCRYPTION_KEY JWT_SECRET || return 0
   cd "$REPO"
-  python3 -m uvicorn services.config.app:app --host 0.0.0.0 --port 8000
+  python3 -m uvicorn services.config.app:app --host "$LISTEN_HOST" --port 8000
 }
 
 # ── Block 6: Knowledge Service (REST API, port 8100) ──────────────────────────
 start_knowledge_service() {
   _require JWT_SECRET || return 0
   cd "$REPO"
-  python3 -m uvicorn services.knowledge.app:app --host 0.0.0.0 --port 8100
+  python3 -m uvicorn services.knowledge.app:app --host "$LISTEN_HOST" --port 8100
 }
 
 # ── Block 7: Knowledge ingestion worker (background job-queue poller) ────────
@@ -114,7 +114,7 @@ start_campaigns_service() {
   _require JWT_SECRET FREESWITCH_ESL_PASSWORD || return 0
   _warn_env_drift SIP_PROXY_HOST
   cd "$REPO"
-  python3 -m uvicorn services.campaigns.app:app --host 0.0.0.0 --port 8400
+  python3 -m uvicorn services.campaigns.app:app --host "$LISTEN_HOST" --port 8400
 }
 
 # ── Block 8b: Tool Execution Service (REST API, port 8600) — custom API chains ─
@@ -177,7 +177,7 @@ start_freeswitch() {
 # ── Block 14: Admin UI (Next.js, port 3000) ───────────────────────────────────
 start_admin_ui() {
   cd "$REPO/admin-ui"
-  npm run dev
+  npm run dev -- -H "$LISTEN_HOST"
 }
 
 # ── Verify: check all services are healthy ───────────────────────────────────

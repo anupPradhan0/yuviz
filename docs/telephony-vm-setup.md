@@ -137,11 +137,12 @@ at the end before changing any of them.
 
 **autoload_configs/event_socket.conf.xml** — port 8022 (not the 8021
 default), a random password (the same value as `FREESWITCH_ESL_PASSWORD` in
-`.env`), and `listen-ip 0.0.0.0` so the Gateway on the host can reach it. That last change matters for security: ESL is an
-unauthenticated-by-default remote control surface for the whole switch, so
-pin it to the host with an ACL and change the password:
+`.env`), and `listen-ip VM_IP` so the Gateway on the host can reach it. That last change matters for security: ESL is a
+remote control surface for the whole switch, so bind it to the one interface
+the host uses (never `0.0.0.0`), pin it to the host with an ACL, and change
+the password:
 
-    <param name="listen-ip" value="0.0.0.0"/>
+    <param name="listen-ip" value="VM_IP"/>
     <param name="listen-port" value="8022"/>
     <param name="password" value="<FREESWITCH_ESL_PASSWORD from .env>"/>
     <param name="apply-inbound-acl" value="gateway_host"/>
@@ -206,8 +207,8 @@ These two are the entire cost of the VM split:
       SIP_PROXY_HOST=VM_IP   (written by update_kamailio_ip.sh in step 3,
                               since the repo is mounted; check it)
 
-`config/gateway.yaml`'s `esl.host`/`esl.sip_proxy_host` are only fallbacks:
-the `.env` values above override them.
+These live only in `.env`; `config/gateway.yaml` no longer carries any
+address.
 
 After `update_kamailio_ip.sh` changes `SIP_PROXY_HOST`, start the Gateway and
 Campaigns from a new terminal tab on the host (or `unset SIP_PROXY_HOST` and
@@ -215,8 +216,15 @@ re-source `scripts/start_local.sh`). A tab that sourced it earlier keeps the
 old exported value, because `_load_env` never overrides the shell;
 `start_gateway` and `start_campaigns_service` warn when the two differ.
 
-`gateway.websocket.host` is already 0.0.0.0, so it accepts the VM's
-connection with no change.
+The Gateway's audio WebSocket listens on loopback by default. In this split
+FreeSWITCH connects from the VM, so set the host's VM-facing address in
+`.env`:
+
+      GATEWAY_LISTEN_HOST=HOST_IP
+
+The WebSocket is unauthenticated: whoever connects can stream a call as any
+DID. Use the host-only network address rather than `0.0.0.0`, and allow only
+the VM's IP to port 8080 in the host firewall.
 
 ## 9. Route a DID to an agent
 
@@ -261,7 +269,7 @@ Triage order when it fails:
 | FreeSWITCH SIP | VM_IP:5080, profile `external` | dispatcher.list.tpl, EslClient.cpp |
 | Agent DIDs | 788, 5000-5009 | kamailio.cfg.tpl |
 | Softphones | 1000-1002 (MySQL subscriber) | kamailio.cfg.tpl |
-| ESL | 8022 (not 8021) | gateway.yaml, originate.py |
+| ESL | 8022 (not 8021) | `.env` FREESWITCH_ESL_PORT |
 | Gateway WS | ws://HOST_IP:8080/voice/<uuid> | Application.cpp |
 | Metadata | {"did","ani","direction"} | Config.cpp |
 | Audio | 16 kHz mono, 20 ms | gateway.yaml |

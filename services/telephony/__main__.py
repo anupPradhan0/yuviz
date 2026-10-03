@@ -19,7 +19,7 @@ import uvicorn
 def main() -> None:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
     port = int(os.environ.get("PORT", "8750"))
-    uvicorn.run("services.telephony.app:app", host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run("services.telephony.app:app", host=os.environ.get("LISTEN_HOST", "127.0.0.1"), port=port, log_level="info")
 
 
 if __name__ == "__main__":

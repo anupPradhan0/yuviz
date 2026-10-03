@@ -13,7 +13,7 @@
 namespace voiceai {
 
 struct WebSocketConfig {
-    std::string host{"0.0.0.0"};
+    std::string host{"127.0.0.1"};   // GATEWAY_LISTEN_HOST
     uint16_t    port{8080};
     uint32_t    max_connections{1000};
     uint32_t    timeout_ms{30000};

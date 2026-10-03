@@ -35,7 +35,7 @@ TEST_F(ConfigTest, DefaultsAreAppliedWhenKeysMissing) {
     cfg.load(tmp_yaml_.string());
 
     EXPECT_EQ(cfg.websocket().port, 8080);
-    EXPECT_EQ(cfg.websocket().host, "0.0.0.0");
+    EXPECT_EQ(cfg.websocket().host, "127.0.0.1");
     EXPECT_EQ(cfg.media().sample_rate, 16000u);
     EXPECT_EQ(cfg.media().channels, 1u);
 }
@@ -302,7 +302,8 @@ protected:
     void SetUp() override {
         ConfigTest::SetUp();
         for (const char* v : {"FREESWITCH_ESL_PASSWORD", "FREESWITCH_ESL_HOST", "FREESWITCH_ESL_PORT",
-                              "SIP_PROXY_HOST", "SIP_PROXY_PORT", "CONVERSATION_SVC_TARGET", "REDIS_URL"}) {
+                              "SIP_PROXY_HOST", "SIP_PROXY_PORT", "CONVERSATION_SVC_TARGET", "REDIS_URL",
+                              "GATEWAY_LISTEN_HOST"}) {
             ::unsetenv(v);
         }
     }
@@ -345,6 +346,20 @@ TEST_F(EslEnvConfigTest, ConversationTargetAndRedisComeFromTheEnvironment) {
     EXPECT_EQ(cfg.conversation().endpoint, "localhost:50051");
     EXPECT_EQ(cfg.gateway().redis.host, "10.0.0.5");
     EXPECT_EQ(cfg.gateway().redis.port, 6380);
+}
+
+TEST_F(EslEnvConfigTest, WebSocketListensOnLoopbackUnlessGatewayListenHostIsSet) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "p", 1);
+    write_yaml("gateway:\n  websocket:\n    port: 8080\n");
+    {
+        voiceai::Config cfg;
+        cfg.load(tmp_yaml_.string());
+        EXPECT_EQ(cfg.websocket().host, "127.0.0.1");
+    }
+    ::setenv("GATEWAY_LISTEN_HOST", "192.168.0.116", 1);
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+    EXPECT_EQ(cfg.websocket().host, "192.168.0.116");
 }
 
 TEST_F(EslEnvConfigTest, RedisUrlWithoutPortOrDbUsesDefaults) {
