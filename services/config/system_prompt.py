@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from collections.abc import Callable
 from typing import Any, Literal
 
 import httpx
@@ -171,6 +172,17 @@ def _meta_prompt(inputs: dict[str, Any]) -> str:
 _Messages = list[dict[str, str]]
 
 
+def _parse_text(resp: httpx.Response, extract: Callable[[Any], Any]) -> str:
+    # A malformed 200 must not surface as LookupError (the routers map that to 404).
+    try:
+        text = extract(resp.json()).strip()
+    except (ValueError, IndexError, KeyError, TypeError, AttributeError):
+        raise ValueError("unexpected vendor response") from None
+    if not text:
+        raise ValueError("unexpected vendor response")
+    return text
+
+
 async def _call_openai(
     api_key: str, model: str, messages: _Messages, system: str | None, max_tokens: int,
 ) -> str:
@@ -191,7 +203,7 @@ async def _call_openai(
     if resp.status_code != 200:
         log.warning("OpenAI chat/completions returned %s", resp.status_code)
         raise ValueError(f"OpenAI returned {resp.status_code}")
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    return _parse_text(resp, lambda body: body["choices"][0]["message"]["content"])
 
 
 async def _call_anthropic(
@@ -214,7 +226,7 @@ async def _call_anthropic(
     if resp.status_code != 200:
         log.warning("Anthropic messages returned %s", resp.status_code)
         raise ValueError(f"Anthropic returned {resp.status_code}")
-    return resp.json()["content"][0]["text"].strip()
+    return _parse_text(resp, lambda body: body["content"][0]["text"])
 
 
 _CALLERS = {"openai": _call_openai, "anthropic": _call_anthropic}

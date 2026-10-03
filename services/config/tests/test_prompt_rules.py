@@ -285,3 +285,24 @@ async def test_generate_restores_dropped_blocks(provider, vendor):
     vendor.body = _prompt(speech="", guardrails="")
     out = await sp.generate_system_prompt(TENANT, CONFIG_ID, _inputs(), secret_resolver=_Resolver())
     assert HUMAN_SPEECH_VOICE in out and sp._GUARDRAILS in out
+
+
+@pytest.mark.parametrize(
+    "caller, payload",
+    [
+        ("anthropic", {"content": []}),
+        ("openai", {"choices": []}),
+        ("openai", {"choices": [{"message": {"content": None}}]}),
+    ],
+)
+async def test_malformed_vendor_200_is_a_value_error_not_a_lookup_error(monkeypatch, caller, payload):
+    monkeypatch.setattr(
+        sp.httpx,
+        "AsyncClient",
+        lambda **kw: _RealAsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)), **kw
+        ),
+    )
+    with pytest.raises(ValueError, match="unexpected vendor response") as exc:
+        await sp._CALLERS[caller]("key", "model", [{"role": "user", "content": "hi"}], None, 100)
+    assert not isinstance(exc.value, LookupError)
