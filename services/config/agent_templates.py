@@ -113,7 +113,7 @@ CATALOG: tuple[AgentTemplate, ...] = (
         ),
         clarify="Just so I note this correctly, will you be able to make the payment, or is there a problem with it?",
         workflows=(
-            ("Reminder workflow", (
+            ("Reminder steps", (
                 "Confirm who you are speaking to before you mention any amount. Ask: \"Am I speaking with the person this account is under?\"",
                 "Say in one sentence why you are calling, then give the amount due and the due date, only from the business facts. Say: \"I'm calling about a payment of four thousand rupees, due on the tenth.\"",
                 "Ask when they expect to pay. Ask: \"When do you think you'll be able to pay?\"",
@@ -168,7 +168,7 @@ CATALOG: tuple[AgentTemplate, ...] = (
         ),
         clarify="Would you like to go ahead with the renewal, or would you like to hear more first?",
         workflows=(
-            ("Renewal workflow", (
+            ("Renewal steps", (
                 "Confirm who you are speaking to, then say you are calling about their upcoming renewal. Ask: \"Am I speaking with the account holder?\"",
                 "Give the renewal date and the current price, only from the business facts. Say what is included and any fees, and say so if you do not know.",
                 "Ask: \"Would you like to renew?\" Then stop and wait.",
@@ -220,7 +220,7 @@ CATALOG: tuple[AgentTemplate, ...] = (
         ),
         clarify="Would you be happy to give me a quick rating, or would you rather skip it?",
         workflows=(
-            ("Survey workflow", (
+            ("Survey steps", (
                 "Confirm who you are speaking to and say you are calling for brief feedback on a recent service. Ask: \"Am I speaking with the person who used our service recently?\"",
                 "Ask the first rating. Ask: \"How satisfied were you, from one to five?\" Wait for a number.",
                 "Ask the second rating. Ask: \"How likely are you to use us again, from one to five?\"",
@@ -271,7 +271,7 @@ CATALOG: tuple[AgentTemplate, ...] = (
         ),
         clarify="Sure, I can help with that. Are you calling with a question, to leave a message, or to reach someone on the team?",
         workflows=(
-            ("Triage workflow", (
+            ("Triage steps", (
                 "Let them say why they are calling before you ask anything else. Ask: \"What can I help you with today?\"",
                 "Answer simple questions using only the business facts.",
                 "If they need the team, take their name. Ask: \"May I have your name?\" If it is unclear, ask them to spell it and read it back.",
@@ -321,7 +321,7 @@ CATALOG: tuple[AgentTemplate, ...] = (
         ),
         clarify="Sure, I can help with that. Are you looking to book, reschedule, or cancel an appointment?",
         workflows=(
-            ("Booking workflow", (
+            ("Booking steps", (
                 "Type: ask: \"What would you like to book?\"",
                 "Name: ask: \"May I have your full name?\" If unclear, ask them to spell it.",
                 "Contact: ask: \"What's the best number to reach you on?\" Read it back in small digit groups.",
@@ -379,7 +379,7 @@ CATALOG: tuple[AgentTemplate, ...] = (
         ),
         clarify="Sure, I can help with that. Are you calling to check on an order, or about a problem with one?",
         workflows=(
-            ("Order status workflow", (
+            ("Order status steps", (
                 "Ask for the order number. Ask: \"Could I have your order number, please?\"",
                 "Read it back one digit at a time and confirm it. Say: \"That's four, seven, one, two. Is that right?\"",
                 "Look the order up. If an order-lookup tool is available, use it and share only what it returns. If no such tool is available, share only the status information in the business facts; if there is none, say you cannot see orders and the team will follow up.",
@@ -431,7 +431,7 @@ CATALOG: tuple[AgentTemplate, ...] = (
         ),
         clarify="Are you still looking for some help with this, or has that changed?",
         workflows=(
-            ("Follow-up workflow", (
+            ("Follow-up steps", (
                 "Confirm who you are speaking to and say you are following up on their request for information. Ask: \"Am I speaking with the person who asked us for information?\"",
                 "Ask what they are looking for. Ask: \"What are you hoping to find?\" Then ask what matters most to them.",
                 "Ask about timing and who else is involved. Ask: \"When are you hoping to decide?\"",
@@ -483,7 +483,7 @@ CATALOG: tuple[AgentTemplate, ...] = (
         ),
         clarify="Sure, I can help with that. Could you tell me a bit more about what you'd like to know?",
         workflows=(
-            ("Answering workflow", (
+            ("Answering steps", (
                 "Read the whole message, then answer it directly in your first sentence. Say: \"Yes, we're open until seven today.\"",
                 "Find the answer. If a knowledge-search tool is available, search it before you answer or say you do not know. If no such tool is available, answer only from the business facts.",
                 "Add detail only if it helps, in one or two short lines.",

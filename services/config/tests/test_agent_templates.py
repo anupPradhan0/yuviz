@@ -128,6 +128,13 @@ def test_no_banned_word_in_catalog_display_fields():
     assert [s for s in scanned if BANNED.search(s)] == []
 
 
+@pytest.mark.parametrize("t", CATALOG, ids=IDS)
+def test_no_banned_word_in_rendered_prompt(t):
+    # the Fix step shows the rendered prompt to the owner, so it must pass the same copy scan
+    greeting, prompt = _render(t)
+    assert [l for l in [greeting, *prompt.splitlines()] if BANNED.search(l)] == []
+
+
 # ---- structure of every template ------------------------------------------------------------
 
 @pytest.mark.parametrize("t", CATALOG, ids=IDS)
@@ -227,9 +234,9 @@ def test_appointment_booking_has_the_reference_sections():
     assert "- Reschedule an appointment." in wants
     assert "- Cancel an appointment." in wants
     assert "Are you looking to book, reschedule, or cancel an appointment?" in wants
-    for heading in ("Booking workflow", "Rescheduling", "Cancellation"):
+    for heading in ("Booking steps", "Rescheduling", "Cancellation"):
         assert heading in prompt.splitlines()
-    booking = _section(prompt, "Booking workflow", "Rescheduling").strip().splitlines()
+    booking = _section(prompt, "Booking steps", "Rescheduling").strip().splitlines()
     assert [ln.split(".")[0] for ln in booking] == [str(n) for n in range(1, len(booking) + 1)]
     assert len(booking) >= 8
     text = "\n".join(booking)

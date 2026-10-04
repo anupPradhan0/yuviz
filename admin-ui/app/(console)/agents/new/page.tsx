@@ -10,6 +10,7 @@ import {
   ProviderConfig,
   Tenant,
   createAgent,
+  enableExecuteApi,
   generateSystemPrompt,
   listProviders,
   listTenants,
@@ -239,6 +240,7 @@ export default function NewAgentPage() {
         ...Array.from(selectedKbIds).map((kbId) => assignKnowledgeBase(agent.id, kbId, true)),
         ...Array.from(selectedApiIds).map((apiId) => setAgentCustomApiEnabled(agent.id, apiId, true)),
       ]);
+      if (selectedApiIds.size > 0) await enableExecuteApi(tenant.id, agent.id);
 
       router.push(`/agents/${tenantSlug}/${agent.slug}?test=1`);
     } catch (e) {

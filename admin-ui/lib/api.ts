@@ -1045,6 +1045,25 @@ export const updateAgentToolPolicy = (agentId: string, toolName: string, body: A
 export const deleteAgentToolPolicy = (agentId: string, toolName: string) =>
   request<void>(`/agents/${agentId}/tool-policies/${toolName}`, { method: "DELETE" });
 
+// Turns on the execute_api master switch for a new agent, the same calls the agent page's custom
+// API panel makes: reuse the tenant's toolexec provider config or create it, then add the policy.
+export async function enableExecuteApi(tenantId: string, agentId: string): Promise<void> {
+  const configs = await listToolProviderConfigs(tenantId, { toolName: "execute_api" });
+  const config =
+    configs.find((c) => c.engine === "toolexec") ??
+    (await createToolProviderConfig(tenantId, {
+      name: "Custom API execution",
+      tool_name: "execute_api",
+      engine: "toolexec",
+    }));
+  await createAgentToolPolicy(agentId, {
+    tool_name: "execute_api",
+    tool_provider_config_id: config.id,
+    enabled: true,
+    timeout_ms: 20000,
+  });
+}
+
 // ── Auth ─────────────────────────────────────────────────────────────────
 
 // Keep in sync with schema.sql's users_role_check.

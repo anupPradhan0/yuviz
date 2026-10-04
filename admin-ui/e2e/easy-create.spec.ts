@@ -795,3 +795,162 @@ test("a failed attach keeps the receptionist, shows a plain warning, and Try aga
   await next(page);
   await expect(page.getByText(`${easyCopy.documentsAttachedLabel}: 1 (Opening hours)`)).toBeVisible();
 });
+
+// ---- actions the receptionist can take (the account's existing custom APIs) ------------------
+
+const TOOLEXEC_URL = process.env.E2E_TOOLEXEC_URL ?? "http://localhost:8600";
+const ACTION_CORS = { ...CORS, "access-control-allow-headers": "authorization,content-type" };
+const customApi = (id: string, name: string, description: string) => ({
+  id, name, description, endpoint_url: "https://example.test/x", method: "POST", chain_levels: 1, params: [],
+});
+const HOURS_API = customApi("api-hours", "store_hours", "Look up store opening hours");
+const SLOTS_API = customApi("api-slots", "check_available_slots", "Check open appointment times");
+const BOOK_API = customApi("api-book", "book_appointment", "Book an appointment");
+
+// Stands in for the custom API service (list and enable) and for the two Config routes that turn
+// the shared on-switch on. `calls` records "METHOD path" in order; `failPolicy` makes that many
+// policy calls fail before they succeed. Everything else on Config (creating the receptionist) is real.
+async function stubActions(page: Page, apis: unknown[], failPolicy = 0) {
+  const calls: string[] = [];
+  const bodies: Record<string, unknown>[] = [];
+  let policyFailures = failPolicy;
+  await page.route(`${TOOLEXEC_URL}/**`, async (route) => {
+    const req = route.request();
+    if (req.method() === "OPTIONS") return route.fulfill({ status: 204, headers: ACTION_CORS });
+    const path = new URL(req.url()).pathname;
+    const reply = (status: number, json: unknown) => route.fulfill({ status, headers: ACTION_CORS, json });
+    if (req.method() === "GET") return reply(200, /^\/tenants\/[^/]+\/custom-apis$/.test(path) ? apis : []);
+    calls.push(`${req.method()} ${path}`);
+    return reply(200, { enabled: true });
+  });
+  await page.route(`${CONFIG_URL}/**`, async (route) => {
+    const req = route.request();
+    const path = new URL(req.url()).pathname;
+    const isProviders = /^\/tenants\/[^/]+\/tool-providers$/.test(path);
+    const isPolicies = /^\/agents\/[^/]+\/tool-policies$/.test(path);
+    if (!isProviders && !isPolicies) return route.fallback();
+    const reply = (status: number, json: unknown) => route.fulfill({ status, headers: ACTION_CORS, json });
+    if (req.method() === "OPTIONS") return route.fulfill({ status: 204, headers: ACTION_CORS });
+    if (req.method() === "GET") return reply(200, isProviders ? [{ id: "cfg-1", engine: "toolexec" }] : []);
+    calls.push(`${req.method()} ${path}`);
+    bodies.push(req.postDataJSON());
+    if (policyFailures-- > 0) return reply(500, { detail: "switch exploded" });
+    return reply(201, { id: "pol-1" });
+  });
+  return { calls, bodies };
+}
+
+const createdAgentId = (page: Page, path: string) =>
+  page
+    .waitForResponse((r) => r.request().method() === "POST" && new URL(r.url()).pathname.endsWith(path))
+    .then(async (r) => (await r.json()).id as string);
+
+async function toActionsBusiness(page: Page, name: string) {
+  await pickJob(page, VOICE_JOB);
+  await next(page);
+  await fillBusiness(page, name);
+}
+
+test("ticked actions are enabled one by one after create, then the on-switch, most relevant first", async ({ page }) => {
+  const stub = await stubActions(page, [HOURS_API, SLOTS_API, BOOK_API]);
+  await openEasy(page, tenantA);
+  await toActionsBusiness(page, uniqueName("Actions"));
+  await expect(page.getByText(easyCopy.actionsLabel)).toBeVisible();
+  const labels = await page.getByText(easyCopy.actionsLabel).locator("xpath=..").locator("label").allInnerTexts();
+  expect(labels.map((l) => l.split(" (")[0])).toEqual([
+    "Check open appointment times",
+    "Book an appointment",
+    "Look up store opening hours",
+  ]);
+  await scan(page, "actions section");
+  await page.getByLabel("Book an appointment").check();
+  await page.getByLabel("Check open appointment times").check();
+  await next(page);
+  const created = createdAgentId(page, "/agents/from-template");
+  await next(page);
+  const agentId = await created;
+  await expectStep(page, 3);
+  await expect
+    .poll(() => stub.calls)
+    .toEqual([
+      `PUT /agents/${agentId}/custom-apis/api-slots`,
+      `PUT /agents/${agentId}/custom-apis/api-book`,
+      `POST /agents/${agentId}/tool-policies`,
+    ]);
+  expect(stub.bodies).toEqual([expect.objectContaining({ tool_name: "execute_api", tool_provider_config_id: "cfg-1", enabled: true })]);
+  await next(page);
+  await next(page);
+  await expect(
+    page.getByText(`${easyCopy.actionsAttachedLabel}: 2 (Check open appointment times, Book an appointment)`),
+  ).toBeVisible();
+  await scan(page, "actions summary");
+});
+
+test("no action ticked means no enable call and no on-switch call", async ({ page }) => {
+  const stub = await stubActions(page, [SLOTS_API]);
+  await openEasy(page, tenantA);
+  await toActionsBusiness(page, uniqueName("NoActions"));
+  await expect(page.getByLabel("Check open appointment times")).not.toBeChecked();
+  await next(page);
+  await next(page);
+  await expectStep(page, 3);
+  await next(page);
+  await next(page);
+  await expectStep(page, 5);
+  expect(stub.calls).toEqual([]);
+  await expect(page.getByText(easyCopy.actionsAttachedLabel)).toHaveCount(0);
+});
+
+test("with no actions yet, a plain line and a link to where they are added", async ({ page }) => {
+  await stubActions(page, []);
+  await openEasy(page, tenantA);
+  await toActionsBusiness(page, uniqueName("EmptyActions"));
+  await expect(page.getByText(easyCopy.actionsNone)).toBeVisible();
+  await expect(page.getByRole("link", { name: easyCopy.actionsNoneLink })).toHaveAttribute("href", "/knowledge-bases");
+  await scan(page, "no actions");
+});
+
+test("a failed on-switch keeps the receptionist, shows a plain warning, and Try again retries only that", async ({ page }) => {
+  const stub = await stubActions(page, [SLOTS_API], 1);
+  await openEasy(page, tenantA);
+  await toActionsBusiness(page, uniqueName("RetryActions"));
+  await page.getByLabel("Check open appointment times").check();
+  await next(page);
+  const created = createdAgentId(page, "/agents/from-template");
+  await next(page);
+  const agentId = await created;
+  await expectStep(page, 3);
+  await expect(page.getByText(easyCopy.actionsWarning)).toBeVisible();
+  expect(await flow(page).innerText()).not.toContain("switch exploded");
+  await scan(page, "actions warning");
+  expect(stub.calls).toEqual([`PUT /agents/${agentId}/custom-apis/api-slots`, `POST /agents/${agentId}/tool-policies`]);
+
+  await page.getByRole("button", { name: easyCopy.documentsTryAgain }).click();
+  await expect(page.getByText(easyCopy.actionsWarning)).toHaveCount(0);
+  expect(stub.calls).toEqual([
+    `PUT /agents/${agentId}/custom-apis/api-slots`,
+    `POST /agents/${agentId}/tool-policies`,
+    `POST /agents/${agentId}/tool-policies`,
+  ]);
+  await next(page);
+  await next(page);
+  await expect(page.getByText(`${easyCopy.actionsAttachedLabel}: 1 (Check open appointment times)`)).toBeVisible();
+});
+
+test("the Advanced wizard turns the on-switch on when an action is ticked", async ({ page }) => {
+  const stub = await stubActions(page, [SLOTS_API]);
+  await openEasy(page, tenantA);
+  await page.getByRole("button", { name: easyCopy.advancedLink }).click();
+  await page.getByPlaceholder("Booking Bot").fill(uniqueName("Wizard"));
+  await page.locator("select.form-select").first().selectOption(tenantA);
+  await page.getByRole("button", { name: "5. Knowledge & Tools" }).click();
+  await page.getByLabel("check_available_slots").check();
+  await page.getByRole("button", { name: "6. Review" }).click();
+  const created = createdAgentId(page, `/tenants/${tenantA}/agents`);
+  await page.getByRole("button", { name: "Create Agent" }).click();
+  const agentId = await created;
+  await expect
+    .poll(() => stub.calls)
+    .toEqual([`PUT /agents/${agentId}/custom-apis/api-slots`, `POST /agents/${agentId}/tool-policies`]);
+  expect(stub.bodies).toEqual([expect.objectContaining({ tool_name: "execute_api", enabled: true })]);
+});

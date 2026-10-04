@@ -77,6 +77,14 @@ export const easyCopy = {
   documentsRetrying: "Trying again...",
   documentsAttachedLabel: "Documents it can look up",
 
+  // Step 2: optional actions the receptionist can take, from what the account already has.
+  actionsLabel: "Actions it can take (optional)",
+  actionsHint: "Things it can do for a caller, like checking open times or booking one.",
+  actionsNone: "You haven't added any actions yet.",
+  actionsNoneLink: "Add some",
+  actionsWarning: "Your receptionist was created, but some actions didn't get connected.",
+  actionsAttachedLabel: "Actions it can take",
+
   // Step 3
   languageLabel: "Language",
   languageAutomatic: "Choose automatically",

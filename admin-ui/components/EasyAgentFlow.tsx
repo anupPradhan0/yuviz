@@ -18,6 +18,7 @@ import {
   ProviderConfig,
   acceptPrompt,
   createAgentFromTemplate,
+  enableExecuteApi,
   listAgentTemplates,
   listAgents,
   listProviders,
@@ -30,6 +31,7 @@ import { LANGUAGES } from "@/lib/engineCatalog";
 import { easyCopy, easyErrorText } from "@/lib/easyCopy";
 import { EasyTestStep } from "@/components/EasyTestStep";
 import { EasyKnowledgePicker } from "@/components/EasyKnowledgePicker";
+import { EasyToolsPicker } from "@/components/EasyToolsPicker";
 import {
   KnowledgeBase,
   assignKnowledgeBase,
@@ -37,6 +39,7 @@ import {
   listKnowledgeBases,
   uploadDocument,
 } from "@/lib/knowledgeApi";
+import { CustomApi, listCustomApis, setAgentCustomApiEnabled } from "@/lib/toolexecApi";
 
 type Role = "llm" | "stt" | "tts";
 
@@ -63,6 +66,15 @@ interface DocumentWork {
 }
 
 const NO_DOCUMENT_WORK: DocumentWork = { files: [], created: null, attach: [] };
+
+// Action work still to do: ticked actions not yet enabled, and whether the
+// shared on-switch for actions is still to be turned on.
+interface ActionWork {
+  enable: CustomApi[];
+  switchOn: boolean;
+}
+
+const NO_ACTION_WORK: ActionWork = { enable: [], switchOn: false };
 
 const slugify = (text: string) =>
   text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40).replace(/-$/, "");
@@ -92,6 +104,8 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
   const [language, setLanguage] = useState("");
   const [collections, setCollections] = useState<KnowledgeBase[]>([]);
   const [tickedIds, setTickedIds] = useState<string[]>([]);
+  const [customApis, setCustomApis] = useState<CustomApi[]>([]);
+  const [tickedApiIds, setTickedApiIds] = useState<string[]>([]);
   const [files, setFiles] = useState<File[]>([]);
   const [picked, setPicked] = useState<Partial<Record<Role, string>>>({});
 
@@ -109,6 +123,10 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
   const [docWork, setDocWork] = useState<DocumentWork>(NO_DOCUMENT_WORK);
   const [attached, setAttached] = useState<KnowledgeBase[]>([]);
   const [docsBusy, setDocsBusy] = useState(false);
+
+  const [actionWork, setActionWork] = useState<ActionWork>(NO_ACTION_WORK);
+  const [connected, setConnected] = useState<CustomApi[]>([]);
+  const [actionsBusy, setActionsBusy] = useState(false);
 
   const [live, setLive] = useState(false);
   const [liveError, setLiveError] = useState<string | null>(null);
@@ -130,6 +148,9 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
     listKnowledgeBases(tenant.id)
       .then(setCollections)
       .catch(() => setCollections([]));
+    listCustomApis(tenant.id)
+      .then(setCustomApis)
+      .catch(() => setCustomApis([]));
     listAgents(tenant.slug)
       .then((agents) => {
         const newest = [...agents].sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
@@ -215,6 +236,40 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
     setDocsBusy(false);
   };
 
+  // Enables each action one at a time, then turns the shared on-switch on once
+  // at least one is enabled. Whatever fails stays in actionWork for "Try again".
+  const syncActions = async (agentId: string, work: ActionWork) => {
+    if (!tenant) return;
+    const failed: CustomApi[] = [];
+    const done: CustomApi[] = [];
+    for (const api of work.enable) {
+      try {
+        await setAgentCustomApiEnabled(agentId, api.id, true);
+        done.push(api);
+      } catch {
+        failed.push(api);
+      }
+    }
+    let switchOn = work.switchOn;
+    if (switchOn && connected.length + done.length > 0) {
+      try {
+        await enableExecuteApi(tenant.id, agentId);
+        switchOn = false;
+      } catch {
+        // Left in `switchOn` so Try again turns it on.
+      }
+    }
+    setConnected((prev) => [...prev, ...done]);
+    setActionWork({ enable: failed, switchOn });
+  };
+
+  const handleRetryActions = async () => {
+    if (!agent) return;
+    setActionsBusy(true);
+    await syncActions(agent.id, actionWork);
+    setActionsBusy(false);
+  };
+
   const handleCreate = async () => {
     if (!tenant || !template) return;
     const error = validateBusiness();
@@ -247,6 +302,10 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
         files,
         created: null,
         attach: collections.filter((kb) => tickedIds.includes(kb.id)),
+      });
+      await syncActions(created.id, {
+        enable: customApis.filter((api) => tickedApiIds.includes(api.id)),
+        switchOn: tickedApiIds.length > 0,
       });
     } catch (e) {
       setCreateError(e instanceof ApiError && e.status === 409 ? easyCopy.nameTaken : easyErrorText(e));
@@ -395,6 +454,15 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
         </div>
       )}
 
+      {agent && (actionWork.enable.length > 0 || actionWork.switchOn) && (
+        <div role="alert" className="error-banner" style={{ marginBottom: 10 }}>
+          {easyCopy.actionsWarning}{" "}
+          <button className="btn btn-ghost btn-sm" onClick={handleRetryActions} disabled={actionsBusy}>
+            {actionsBusy ? easyCopy.documentsRetrying : easyCopy.documentsTryAgain}
+          </button>
+        </div>
+      )}
+
       {step === STEP_JOB && (
         <>
           <div style={{ display: "grid", gap: 10 }}>
@@ -468,6 +536,14 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
                 files={files}
                 onAddFiles={(added) => setFiles((prev) => [...prev, ...added])}
                 onRemoveFile={(i) => setFiles((prev) => prev.filter((_, j) => j !== i))}
+              />
+            )}
+            {providers !== null && (
+              <EasyToolsPicker
+                apis={customApis}
+                jobId={templateId}
+                ticked={tickedApiIds}
+                onToggle={(id) => setTickedApiIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))}
               />
             )}
             {fieldError && <div role="alert" className="error-banner" style={{ marginTop: 10 }}>{fieldError}</div>}
@@ -595,6 +671,11 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
             {attached.length > 0 && (
               <p>
                 {easyCopy.documentsAttachedLabel}: {attached.length} ({attached.map((kb) => kb.name).join(", ")})
+              </p>
+            )}
+            {connected.length > 0 && (
+              <p>
+                {easyCopy.actionsAttachedLabel}: {connected.length} ({connected.map((api) => api.description || api.name).join(", ")})
               </p>
             )}
             {live ? (
