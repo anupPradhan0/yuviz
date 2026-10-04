@@ -4,6 +4,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { ArrowLeft, Mic, MicOff } from "lucide-react";
 import { Agent, ApiError, getAgent } from "@/lib/api";
 import { useWebCall } from "@/lib/useWebCall";
 
@@ -49,7 +50,7 @@ export default function AgentTestPage() {
           className="btn btn-ghost btn-sm"
           onClick={() => router.push(`/agents/${tenantSlug}/${agentSlug}`)}
         >
-          ← {agent?.name ?? "Agent"}
+          <ArrowLeft size={13} /> {agent?.name ?? "Agent"}
         </button>
         <div style={{ marginLeft: "auto" }}>
           <span className={`badge ${live ? "green" : "gray"}`}>{live ? "On a call" : "Idle"}</span>
@@ -116,7 +117,7 @@ export default function AgentTestPage() {
                     onClick={() => call.setMuted(!call.muted)}
                     aria-pressed={call.muted}
                   >
-                    {call.muted ? "🔇 Unmute" : "🎙 Mute"}
+                    {call.muted ? <><MicOff size={13} /> Unmute</> : <><Mic size={13} /> Mute</>}
                   </button>
                   <button className="btn btn-danger btn-sm" onClick={call.hangUp}>
                     End session

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { ArrowLeft, ArrowRight, Check, Mic } from "lucide-react";
 import { Agent, AgentStatus, AgentUpdate, ApiError, deleteAgent, getAgent, getLiveCalls, listProviders, ProviderConfig, undoPrompt, updateAgent, updateProvider } from "@/lib/api";
 import { KnowledgeBaseTabs } from "@/components/KnowledgeBaseTabs";
 import { ToolsPanel } from "@/components/ToolsPanel";
@@ -201,20 +202,20 @@ export default function AgentDetailPage() {
             back goes out to the agent list; the call flow is a sibling
             surface reached explicitly. */}
         <button className="btn btn-ghost btn-sm" onClick={() => router.push("/agents")}>
-          ← All agents
+          <ArrowLeft size={13} /> All agents
         </button>
         <div style={{ display: "flex", gap: 8 }}>
           <button
             className="btn btn-ghost btn-sm"
             onClick={() => router.push(`/workflows/${tenantSlug}/${agentSlug}`)}
           >
-            Call flow →
+            Call flow <ArrowRight size={13} />
           </button>
           <button
             className="btn btn-primary btn-sm"
             onClick={() => router.push(`/agents/${tenantSlug}/${agentSlug}/test`)}
           >
-            🎙️ Test Agent
+            <Mic size={13} /> Test Agent
           </button>
         </div>
       </div>
@@ -586,7 +587,7 @@ export default function AgentDetailPage() {
                           <option value="">— none —</option>
                           {byRole(role).map((p) => (
                             <option key={p.id} value={p.id}>
-                              {p.name} {p.environment !== "prod" ? "⚠ " + p.environment : ""}
+                              {p.name}{p.environment !== "prod" ? ` (${p.environment})` : ""}
                             </option>
                           ))}
                         </select>
@@ -829,7 +830,7 @@ export default function AgentDetailPage() {
           nothing on that tab the agent-level Save bar would write. */}
       {tab !== "knowledge" && (
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
-          {saved && <span style={{ alignSelf: "center", fontSize: ".76rem", color: "var(--green)" }}>Saved ✓</span>}
+          {saved && <span className="saved-note">Saved <Check size={13} /></span>}
           <button className="btn btn-danger btn-sm" onClick={openDeleteConfirm} disabled={deleting}>
             {deleting ? "Deleting…" : "Delete Agent"}
           </button>

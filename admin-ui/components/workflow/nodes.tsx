@@ -1,6 +1,7 @@
 "use client";
 
 import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { ArrowRight } from "lucide-react";
 import type { WorkflowNodeData, WorkflowNodeType } from "@/lib/workflowApi";
 import { useEditorActions } from "./editorContext";
 
@@ -56,8 +57,8 @@ function Badges({ data, type }: { data: WorkflowNodeData; type: WorkflowNodeType
         </span>
       )}
       {type === "transfer" && (
-        <span className="wf-badge" title="Where this transfer goes">
-          → {String(data.transfer_destination || "agent default")}
+        <span className="wf-badge" title="Where this transfer goes" style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+          <ArrowRight size={10} /> {String(data.transfer_destination || "agent default")}
         </span>
       )}
     </div>

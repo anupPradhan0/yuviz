@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Check, ChevronDown, ChevronRight } from "lucide-react";
 import { ApiError, listProviders, ProviderConfig } from "@/lib/api";
 import {
   AgentKnowledgeBase,
@@ -268,7 +269,7 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                       style={{ padding: "2px 6px" }}
                       onClick={() => setExpanded({ ...expanded, [row.id]: !isExpanded })}
                     >
-                      {isExpanded ? "▾" : "▸"}
+                      {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                     </button>
                     <div style={{ flex: 1 }}>
                       <div style={{ fontWeight: 500 }}>{row.name}</div>
@@ -430,7 +431,7 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                     </span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
-                    {policySaved && <span style={{ alignSelf: "center", fontSize: ".76rem", color: "var(--green)" }}>Saved ✓</span>}
+                    {policySaved && <span className="saved-note">Saved <Check size={13} /></span>}
                     <button className="btn btn-primary btn-sm" onClick={handleSavePolicy} disabled={policySaving}>
                       {policySaving ? "Saving…" : "Save"}
                     </button>

@@ -5,6 +5,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
+import { ArrowLeft, ChevronRight } from "lucide-react";
 import {
   ApiError, Call, TranscriptEntry, getCall, getTranscript,
 } from "@/lib/api";
@@ -49,7 +50,7 @@ export default function CallDetailPage() {
   if (error) {
     return (
       <>
-        <Link href="/calls" className="detail-back">← Call Log</Link>
+        <Link href="/calls" className="detail-back"><ArrowLeft size={13} /> Call Log</Link>
         <div className="error-banner">{error}</div>
       </>
     );
@@ -62,7 +63,7 @@ export default function CallDetailPage() {
 
   return (
     <>
-      <Link href="/calls" className="detail-back">← Call Log</Link>
+      <Link href="/calls" className="detail-back"><ArrowLeft size={13} /> Call Log</Link>
 
       <div className="detail-hdr">
         <div>
@@ -144,7 +145,7 @@ export default function CallDetailPage() {
                 <div className="detail-path">
                   {call.nodes_visited!.map((node, i) => (
                     <span key={`${node}-${i}`} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      {i > 0 && <span className="detail-path-arrow">→</span>}
+                      {i > 0 && <ChevronRight size={13} className="detail-path-arrow" />}
                       <span className="badge gray">{node}</span>
                     </span>
                   ))}

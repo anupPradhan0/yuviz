@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { ArrowLeft } from "lucide-react";
 import {
   ApiError, forgotPassword, getCurrentUser, googleSignInUrl, isConsoleRole, login, register,
   resendVerificationCode, resetPassword, SIGNUP_SOURCES, verifyEmail, type UserRole,
@@ -318,7 +319,7 @@ export default function LoginPage() {
       </aside>
 
       <main className="auth-panel">
-        <Link href="/" className="auth-back">← Back to homepage</Link>
+        <Link href="/" className="auth-back"><ArrowLeft size={13} /> Back to homepage</Link>
         <div className="auth-form">
           <div className="auth-mobile-logo"><Logo /></div>
           {verifyingEmail ? (
@@ -344,7 +345,7 @@ export default function LoginPage() {
               </div>
               <div className="login-alt">
                 <button type="button" onClick={() => { setVerifyingEmail(null); setError(null); }}>
-                  ← Use a different email
+                  <ArrowLeft size={13} /> Use a different email
                 </button>
               </div>
             </>
@@ -372,7 +373,7 @@ export default function LoginPage() {
                 </button>
               </form>
               <div className="login-alt">
-                <button type="button" onClick={() => openReset(null)}>← Back to sign in</button>
+                <button type="button" onClick={() => openReset(null)}><ArrowLeft size={13} /> Back to sign in</button>
               </div>
             </>
           ) : resetStep === "code" ? (
@@ -423,7 +424,7 @@ export default function LoginPage() {
                 </button>
               </div>
               <div className="login-alt">
-                <button type="button" onClick={() => openReset("email")}>← Use a different email</button>
+                <button type="button" onClick={() => openReset("email")}><ArrowLeft size={13} /> Use a different email</button>
               </div>
             </>
           ) : (

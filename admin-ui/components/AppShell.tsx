@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
+import { Check, ChevronDown, Moon, Sun } from "lucide-react";
 import { getCurrentUser, isConsoleRole, listTenants, Tenant, User } from "@/lib/api";
 import { clearToken, getToken } from "@/lib/auth";
 
@@ -475,7 +476,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     <span className="tenant-switch-name">{activeTenant?.name ?? "All tenants"}</span>
                     <span className="tenant-switch-id">{activeTenant?.slug ?? "platform"}</span>
                   </span>
-                  <span className="tenant-switch-caret">▾</span>
+                  <ChevronDown size={13} className="tenant-switch-caret" />
                 </button>
                 {tenantMenuOpen && (
                   <>
@@ -492,7 +493,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                           <br />
                           <span className="tenant-switch-row-meta">every account, unfiltered</span>
                         </span>
-                        {activeTenantId === null && <span className="tenant-switch-check">✓</span>}
+                        {activeTenantId === null && <Check size={14} className="tenant-switch-check" />}
                       </button>
                       {tenants.map((t) => (
                         <button
@@ -506,7 +507,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                             <br />
                             <span className="tenant-switch-row-meta">{t.slug}</span>
                           </span>
-                          {t.id === activeTenantId && <span className="tenant-switch-check">✓</span>}
+                          {t.id === activeTenantId && <Check size={14} className="tenant-switch-check" />}
                         </button>
                       ))}
                     </div>
@@ -531,7 +532,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
               title="Toggle theme"
             >
-              {theme === "dark" ? "🌙" : "☀️"}
+              {theme === "dark" ? <Moon size={15} /> : <Sun size={15} />}
             </button>
           </div>
         </div>

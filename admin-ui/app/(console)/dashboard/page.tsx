@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { Activity, Rocket } from "lucide-react";
 import {
   AgentWithTenant,
   ApiError,
@@ -412,10 +413,10 @@ export default function DashboardPage() {
         <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap-reverse", justifyContent: "flex-end" }}>
           <div style={{ display: "flex", gap: 8 }}>
             <Link href="/calls" className="btn btn-ghost" style={{ whiteSpace: "nowrap" }}>
-              <span style={{ marginRight: 4 }}>📊</span>Open live monitor
+              <Activity size={14} />Open live monitor
             </Link>
             <Link href="/campaigns" className="btn btn-ghost" style={{ whiteSpace: "nowrap" }}>
-              <span style={{ marginRight: 4 }}>🚀</span>New campaign
+              <Rocket size={14} />New campaign
             </Link>
           </div>
           <div style={{ display: "flex", gap: 4, borderLeft: "1px solid var(--border)", paddingLeft: 12 }}>

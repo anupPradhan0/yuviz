@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { X } from "lucide-react";
 import { ApiError } from "@/lib/api";
 import {
   CustomApi,
@@ -618,8 +619,8 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
                 </span>
                 Sensitive
               </label>
-              <button className="btn btn-danger btn-sm" onClick={() => removeParam(i)}>
-                ✕
+              <button className="btn btn-danger btn-sm" onClick={() => removeParam(i)} aria-label="Remove parameter">
+                <X size={13} />
               </button>
               </div>
             </div>

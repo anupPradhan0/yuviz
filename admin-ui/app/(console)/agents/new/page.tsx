@@ -4,6 +4,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { ArrowLeft, ArrowRight, Sparkles } from "lucide-react";
 import {
   Agent,
   AgentUpdate,
@@ -263,7 +264,7 @@ export default function NewAgentPage() {
     <>
       <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
         <button className="btn btn-ghost btn-sm" onClick={() => router.push("/agents")}>
-          ← Cancel
+          <ArrowLeft size={13} /> Cancel
         </button>
       </div>
 
@@ -630,7 +631,7 @@ export default function NewAgentPage() {
                   title={!llmId ? "Pick an LLM provider in step 2 first" : undefined}
                   onClick={handleGenerateWithAi}
                 >
-                  {generatingPrompt ? "Generating…" : "✨ Generate with AI"}
+                  {generatingPrompt ? "Generating…" : <><Sparkles size={13} /> Generate with AI</>}
                 </button>
               </div>
               {generateError && <div className="error-banner">{generateError}</div>}
@@ -660,12 +661,12 @@ export default function NewAgentPage() {
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
         {stepIndex > 0 && (
           <button className="btn btn-ghost btn-sm" onClick={goBack} disabled={creating}>
-            ← Back
+            <ArrowLeft size={13} /> Back
           </button>
         )}
         {step !== "review" ? (
           <button className="btn btn-primary btn-sm" onClick={goNext} disabled={!canLeaveIdentity}>
-            Next →
+            Next <ArrowRight size={13} />
           </button>
         ) : (
           <button className="btn btn-primary btn-sm" onClick={handleCreate} disabled={creating || !canLeaveIdentity}>

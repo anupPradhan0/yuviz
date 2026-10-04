@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { ArrowLeft, Check, Redo2, Undo2 } from "lucide-react";
 import {
   addEdge,
   Background,
@@ -517,7 +518,7 @@ function Panel({
         <div className="wf-toolbar">
           {header && (
             <>
-              <Link href={header.backHref} className="wf-back-btn" title="Back to Workflows">←</Link>
+              <Link href={header.backHref} className="wf-back-btn" title="Back to Workflows"><ArrowLeft size={15} /></Link>
               <span className="wf-page-title">{header.title}</span>
               <span className="wf-toolbar-sep" />
             </>
@@ -527,16 +528,18 @@ function Panel({
             title="Undo (Ctrl+Z)"
             disabled={depth.undo === 0}
             onClick={undo}
+            aria-label="Undo"
           >
-            ↶
+            <Undo2 size={14} />
           </button>
           <button
             className="btn btn-ghost btn-sm"
             title="Redo (Ctrl+Shift+Z)"
             disabled={depth.redo === 0}
             onClick={redo}
+            aria-label="Redo"
           >
-            ↷
+            <Redo2 size={14} />
           </button>
           <button
             className={`btn btn-sm ${testing ? "btn-primary" : "btn-ghost"}`}
@@ -570,7 +573,7 @@ function Panel({
               onClick={publish}
             >
               {publishing ? "Publishing…"
-                : justPublished ? "Published ✓"
+                : justPublished ? <>Published <Check size={13} /></>
                 : blocking ? `${errors.length} to fix`
                 : "Publish"}
             </button>

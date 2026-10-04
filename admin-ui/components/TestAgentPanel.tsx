@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import { Modal } from "@/components/Modal";
 
 const WEBCALL_URL = process.env.NEXT_PUBLIC_WEBCALL_URL || "ws://localhost:8300";
@@ -390,7 +391,7 @@ export function TestAgentPanel({
               onClick={() => setTranscriptOpen((o) => !o)}
             >
               <span>Transcript ({transcript.length})</span>
-              <span>{transcriptOpen ? "▲" : "▼"}</span>
+              {transcriptOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
             </button>
             {transcriptOpen && (
               <div style={{ maxHeight: 160, overflowY: "auto", padding: "8px 4px", fontSize: ".78rem", color: "var(--text-3)" }}>

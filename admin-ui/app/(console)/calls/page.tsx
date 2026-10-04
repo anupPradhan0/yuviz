@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { ArrowRight } from "lucide-react";
 import {
   ApiError, Call, CallSentiment, CallWithTenant, listAllCalls,
 } from "@/lib/api";
@@ -230,7 +231,9 @@ export default function CallsPage() {
                     {c.caller_number || c.called_number ? (
                       <div className="cell-stack">
                         <span>{c.caller_number || "—"}</span>
-                        <span className="cell-sub">→ {c.called_number || "—"}</span>
+                        <span className="cell-sub" style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                          <ArrowRight size={11} /> {c.called_number || "—"}
+                        </span>
                       </div>
                     ) : (
                       "—"

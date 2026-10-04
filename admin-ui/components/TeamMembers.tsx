@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Check } from "lucide-react";
 import {
   ApiError,
   createInvite,
@@ -404,7 +405,7 @@ export function TeamMembers({ embedded = false }: { embedded?: boolean }) {
                   <td style={{ fontSize: ".78rem" }}>{row.label}</td>
                   {([row.superadmin, row.admin, row.supervisor, row.viewer] as Reach[]).map((reach, i) => (
                     <td key={i} className="tbl-matrix-cell" style={{ color: reach === "yes" ? "var(--cyan)" : "var(--text-3)" }}>
-                      {reach === "yes" ? "✓" : "—"}
+                      {reach === "yes" ? <Check size={14} style={{ verticalAlign: "middle" }} /> : "—"}
                     </td>
                   ))}
                 </tr>
