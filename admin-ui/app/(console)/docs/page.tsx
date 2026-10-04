@@ -693,7 +693,7 @@ export default function DocsPage() {
                 <strong>Calls</strong> is the history: transcripts, how each call ended,
                 what the agent did. The single most useful page for understanding why
                 an agent behaved oddly — read the transcript rather than guessing.{" "}
-                <strong>Live Calls</strong> shows what is happening right now.
+                <strong>Live Calls</strong> shows what is happening right now (superadmins only).
               </P>
 
               <H3>Users</H3>

@@ -182,7 +182,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [pathname]);
 
   // Auth guard. /login and /invite skip it (invitees have no account); /no-access still needs a token.
-  // Non-console roles go to /no-access, except supervisor which may reach /live-calls only.
+  // Non-console roles go to /no-access.
   // authChecked stays false during a redirect so the page underneath never fetches.
   useEffect(() => {
     if (pathname === "/login" || pathname === "/invite") return;
@@ -192,13 +192,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }
     getCurrentUser()
       .then((u) => {
-        const supervisorOnItsOwnPage = u.role === "supervisor" && pathname.startsWith("/live-calls");
-        if (!isConsoleRole(u.role) && !supervisorOnItsOwnPage && pathname !== "/no-access") {
+        if (!isConsoleRole(u.role) && pathname !== "/no-access") {
           router.push("/no-access");
           return;
         }
-        // Direct-URL guard matching the hidden nav item.
-        if (u.role !== "superadmin" && pathname.startsWith("/tenants")) {
+        // Direct-URL guard matching the hidden nav items.
+        if (u.role !== "superadmin" && (pathname.startsWith("/tenants") || pathname.startsWith("/live-calls"))) {
           router.push("/no-access");
           return;
         }
@@ -282,21 +281,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   if (pathname === "/login" || pathname === "/invite" || pathname === "/no-access") return <>{children}</>;
   if (!authChecked) return null;
 
-  // supervisor's only grant is LIVE_CALLS_ROLES, so it sees just Live Calls.
-  const isSupervisor = user?.role === "supervisor";
-  const canManageUsers = user?.role === "superadmin" || user?.role === "admin";
+  const isSuperadmin = user?.role === "superadmin";
+  const canManageUsers = isSuperadmin || user?.role === "admin";
   const matches = (label: string) => label.toLowerCase().includes(search.trim().toLowerCase());
-  const visibleOverview = isSupervisor ? [] : OVERVIEW_ITEMS.filter((item) => matches(item.label));
+  const visibleOverview = OVERVIEW_ITEMS.filter((item) => matches(item.label));
   // Accounts is superadmin-only (tenants.py enforces it server-side).
-  const visibleManagement = isSupervisor
-    ? []
-    : MANAGEMENT_ITEMS.filter((item) => matches(item.label) && (item.href !== "/tenants" || user?.role === "superadmin"));
-  const visibleUsers = user?.role === "superadmin" && matches(USERS_ITEM.label);
-  const visibleCalling = isSupervisor
-    ? CALLING_ITEMS.filter((item) => item.href === "/live-calls")
-    : CALLING_ITEMS.filter((item) => matches(item.label));
-  const visibleBilling = !isSupervisor && canManageUsers && matches(BILLING_ITEM.label);
-  const visiblePlatform = isSupervisor ? [] : PLATFORM_ITEMS.filter((item) => matches(item.label));
+  const visibleManagement = MANAGEMENT_ITEMS.filter((item) => matches(item.label) && (item.href !== "/tenants" || isSuperadmin));
+  const visibleUsers = isSuperadmin && matches(USERS_ITEM.label);
+  // Live Calls is superadmin-only (LIVE_CALLS_ROLES enforces it server-side).
+  const visibleCalling = CALLING_ITEMS.filter((item) => matches(item.label) && (item.href !== "/live-calls" || isSuperadmin));
+  const visibleBilling = canManageUsers && matches(BILLING_ITEM.label);
+  const visiblePlatform = PLATFORM_ITEMS.filter((item) => matches(item.label));
 
   // Longest-prefix match, not first-match: /workflows/acme/reception must
   // resolve to "Agents", not a shorter unrelated prefix.

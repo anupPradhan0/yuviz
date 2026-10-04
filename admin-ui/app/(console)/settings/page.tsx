@@ -67,7 +67,7 @@ const ROLE_BADGE: Record<UserRole, string> = {
 const ROLE_BLURB: Record<UserRole, string> = {
   superadmin: "Full platform access across every account.",
   admin: "Manages this account: agents, numbers, users and billing.",
-  supervisor: "Monitors live calls and may intervene on them.",
+  supervisor: "Reserved role; no console access yet.",
   agent: "Handles calls; no console access.",
   viewer: "Read-only access to this account.",
 };
@@ -76,9 +76,9 @@ const ROLE_BLURB: Record<UserRole, string> = {
     AppShell and services/config/deps.py — it is a description of the real
     permissions, so it must be edited whenever those move. */
 const ROLE_ACCESS: Record<UserRole, string[]> = {
-  superadmin: ["Every account on the platform", "Agents, IVR flows, knowledge and voice", "Telephony, users and billing", "Full audit trail"],
+  superadmin: ["Every account on the platform", "Agents, IVR flows, knowledge and voice", "Telephony, users and billing", "Live Calls monitoring", "Full audit trail"],
   admin: ["This account only", "Agents, IVR flows, knowledge and voice", "Telephony, users and billing", "Full audit trail"],
-  supervisor: ["Live Calls only", "May listen to and barge into a live call", "No configuration access"],
+  supervisor: ["No console access yet", "Live Calls is superadmin-only"],
   agent: ["Handles calls", "No console access at all"],
   viewer: ["This account, read-only", "May not invite users or change configuration"],
 };

@@ -44,6 +44,7 @@ export default function AgentDetailPage() {
   // null = still checking.
   const [liveCallCount, setLiveCallCount] = useState<number | null>(null);
   const [deleteChecking, setDeleteChecking] = useState(false);
+  const [canViewLiveCalls, setCanViewLiveCalls] = useState(false);
 
   const [form, setForm] = useState<AgentUpdate>({});
   const [languageChoice, setLanguageChoice] = useState<string>("");
@@ -146,8 +147,11 @@ export default function AgentDetailPage() {
       // LiveCall has no agent_id, so match by name; only a pre-check — the DELETE is authoritative.
       const snapshot = await getLiveCalls(tenantSlug);
       setLiveCallCount(snapshot.items.filter((c) => c.agent_name === agent.name).length);
+      setCanViewLiveCalls(true);
     } catch (e) {
-      setSaveError(e instanceof ApiError ? e.detail : String(e));
+      // Live Calls is superadmin-only; other roles rely on the DELETE's 409.
+      if (e instanceof ApiError && e.status === 403) setLiveCallCount(0);
+      else setSaveError(e instanceof ApiError ? e.detail : String(e));
     } finally {
       setDeleteChecking(false);
     }
@@ -617,7 +621,7 @@ export default function AgentDetailPage() {
             // Deliberately no "force delete": this would cut off a live call.
             <>
               <button className="btn btn-ghost btn-sm" onClick={() => setDeleteConfirmOpen(false)}>Cancel</button>
-              <Link href="/live-calls" className="btn btn-ghost btn-sm">View live calls</Link>
+              {canViewLiveCalls && <Link href="/live-calls" className="btn btn-ghost btn-sm">View live calls</Link>}
             </>
           ) : (
             <>

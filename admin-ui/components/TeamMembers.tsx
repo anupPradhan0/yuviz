@@ -48,8 +48,8 @@ function deriveStatus(invite: Invite): DerivedInviteStatus {
 type Reach = "yes" | "no";
 const CAPABILITY_MATRIX: { label: string; superadmin: Reach; admin: Reach; supervisor: Reach; viewer: Reach }[] = [
   { label: "View dashboards & analytics", superadmin: "yes", admin: "yes", supervisor: "no", viewer: "yes" },
-  { label: "Listen & join live calls", superadmin: "yes", admin: "yes", supervisor: "yes", viewer: "no" },
-  { label: "View live-call transcripts", superadmin: "yes", admin: "yes", supervisor: "no", viewer: "no" },
+  { label: "Listen & join live calls", superadmin: "yes", admin: "no", supervisor: "no", viewer: "no" },
+  { label: "View live-call transcripts", superadmin: "yes", admin: "no", supervisor: "no", viewer: "no" },
   { label: "Manage agents & IVR flows", superadmin: "yes", admin: "yes", supervisor: "no", viewer: "no" },
   { label: "Manage phone numbers & telephony", superadmin: "yes", admin: "yes", supervisor: "no", viewer: "no" },
   { label: "Invite & manage users", superadmin: "yes", admin: "yes", supervisor: "no", viewer: "no" },
