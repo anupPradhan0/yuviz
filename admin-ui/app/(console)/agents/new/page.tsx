@@ -120,8 +120,14 @@ export default function NewAgentPage() {
   useEffect(() => {
     if (!tenant) return;
     listProviders(tenant.id).then(setProviders).catch(() => {});
-    listKnowledgeBases(tenant.id).then(setKbs).catch(() => {});
-    listCustomApis(tenant.id).then(setCustomApis).catch(() => {});
+    const loadKnowledge = () => {
+      listKnowledgeBases(tenant.id).then(setKbs).catch(() => {});
+      listCustomApis(tenant.id).then(setCustomApis).catch(() => {});
+    };
+    loadKnowledge();
+    // The "add one" links open in a new tab; pick up whatever was created there on return.
+    window.addEventListener("focus", loadKnowledge);
+    return () => window.removeEventListener("focus", loadKnowledge);
   }, [tenant]);
 
   // Regenerate the draft prompt until the user edits it by hand.
@@ -466,7 +472,13 @@ export default function NewAgentPage() {
             <div className="form-group">
               <label className="form-label">Knowledge Bases</label>
               {kbs.length === 0 ? (
-                <div className="form-hint">No knowledge bases yet in this account — add one from the Knowledge Base tab, then come back here.</div>
+                <div className="form-hint">
+                  No knowledge bases yet in this account.{" "}
+                  <a href="/knowledge-bases" target="_blank" rel="noopener noreferrer" style={{ color: "var(--cyan)" }}>
+                    Add a knowledge base ↗
+                  </a>{" "}
+                  It opens in a new tab and shows up here when you come back.
+                </div>
               ) : (
                 kbs.map((kb) => (
                   <label key={kb.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
@@ -479,7 +491,13 @@ export default function NewAgentPage() {
             <div className="form-group" style={{ marginBottom: 0 }}>
               <label className="form-label">Custom APIs</label>
               {customApis.length === 0 ? (
-                <div className="form-hint">No custom APIs yet in this account.</div>
+                <div className="form-hint">
+                  No custom APIs yet in this account.{" "}
+                  <a href="/knowledge-bases?tab=apis" target="_blank" rel="noopener noreferrer" style={{ color: "var(--cyan)" }}>
+                    Add an API ↗
+                  </a>{" "}
+                  It opens in a new tab and shows up here when you come back.
+                </div>
               ) : (
                 customApis.map((api) => (
                   <label key={api.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>

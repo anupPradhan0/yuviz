@@ -5,6 +5,7 @@ import Link from "next/link";
 import { ApiError, PhoneNumber, listPhoneNumbers } from "@/lib/api";
 
 const STATUS_CLS: Record<PhoneNumber["status"], string> = { active: "green", inactive: "gray", suspended: "amber" };
+const STATUS_LABEL: Record<PhoneNumber["status"], string> = { active: "Active", inactive: "Off", suspended: "Suspended" };
 
 // Read-only: the numbers whose calls reach this agent. Edited on Telephony.
 export function SipPanel({ tenantId, agentId }: { tenantId: string; agentId: string }) {
@@ -32,16 +33,16 @@ export function SipPanel({ tenantId, agentId }: { tenantId: string; agentId: str
   return (
     <div className="card">
       <div className="card-hdr">
-        <div className="card-title">Reachable on</div>
-        <div className="card-sub">numbers whose calls reach this agent</div>
-        <Link href="/telephony" className="btn btn-ghost btn-sm" style={{ marginLeft: "auto" }}>Manage in Telephony</Link>
+        <div className="card-title">Phone numbers</div>
+        <div className="card-sub">people who call these numbers talk to this agent</div>
+        <Link href="/telephony" className="btn btn-ghost btn-sm" style={{ marginLeft: "auto" }}>Manage numbers</Link>
       </div>
 
       {error && <div className="error-banner">{error}</div>}
 
       {reachable.length === 0 ? (
         <div className="empty-state">
-          No number routes to this agent yet. In Telephony, open a configuration and add a number, or edit one and pick this agent.
+          No phone number is connected to this agent yet. Go to Telephony, open a number and choose this agent.
         </div>
       ) : (
         reachable.map((n) => {
@@ -57,16 +58,16 @@ export function SipPanel({ tenantId, agentId }: { tenantId: string; agentId: str
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 500, fontFamily: "var(--mono)" }}>{n.did}</div>
                 <div style={{ fontSize: ".7rem", color: syncFailed ? "var(--red)" : "var(--text-3)" }}>
-                  {isFallback ? "Fallback: answers when the number's main agent can't" : "Inbound agent"}
+                  {isFallback ? "Backup: answers when the main agent can't" : "Main agent for this number"}
                   {n.region ? ` · ${n.region}` : ""}
-                  {syncFailed ? ` · provider isn't sending calls here: ${n.provider_sync?.message ?? "unknown error"}` : ""}
+                  {syncFailed ? ` · Not receiving calls: ${n.provider_sync?.message ?? "unknown error"}` : ""}
                 </div>
               </div>
-              <span className={`badge ${STATUS_CLS[n.status]}`}>{n.status}</span>
+              <span className={`badge ${STATUS_CLS[n.status]}`}>{STATUS_LABEL[n.status]}</span>
               {configKey ? (
-                <Link href={`/telephony?config=${configKey}`} className="btn btn-ghost btn-sm">View configuration</Link>
+                <Link href={`/telephony?config=${configKey}`} className="btn btn-ghost btn-sm">Open in Telephony</Link>
               ) : (
-                <Link href="/telephony" className="badge amber">No configuration</Link>
+                <Link href="/telephony" className="badge amber">Setup needed</Link>
               )}
             </div>
           );

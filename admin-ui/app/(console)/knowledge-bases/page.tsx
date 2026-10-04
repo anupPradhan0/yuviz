@@ -4,6 +4,7 @@
 // Stats show only stored values; storage/retrieval aren't metered.
 
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { ApiError, getCurrentUser } from "@/lib/api";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 import {
@@ -75,7 +76,8 @@ export default function KnowledgeBasesPage() {
   // Page-level error only for listTenants(); everything downstream depends on it.
   const [pageError, setPageError] = useState<string | null>(null);
   const [addSourceOpen, setAddSourceOpen] = useState(false);
-  const [tab, setTab] = useState<Tab>("sources");
+  const searchParams = useSearchParams();
+  const [tab, setTab] = useState<Tab>(searchParams.get("tab") === "apis" ? "apis" : "sources");
 
   const refresh = async () => {
     setLoading(true);

@@ -167,19 +167,19 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
       <div className="col-main">
         <div className="card">
           <div className="card-hdr">
-            <div className="card-title">execute_api</div>
-            <div className="card-sub">master switch — required before any custom API below can run for this agent</div>
+            <div className="card-title">API access</div>
+            <div className="card-sub">let this agent use your APIs during calls</div>
           </div>
           {switchError && <div className="error-banner">{switchError}</div>}
           {executeApiPolicyError && <div className="error-banner">{executeApiPolicyError}</div>}
           <div className="kb-row">
             <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 500 }}>Enable custom API execution</div>
+              <div style={{ fontWeight: 500 }}>Allow this agent to use APIs</div>
               <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>
-                Turns off entirely, this agent gets zero execute_api tool calls regardless of the toggles below.
+                When off, the agent won&apos;t use any API below, even ones that are switched on.
               </div>
             </div>
-            <label className="toggle-switch" title={executeApiPolicy?.enabled ? "Enabled" : "Disabled"}>
+            <label className="toggle-switch" title={executeApiPolicy?.enabled ? "On" : "Off"}>
               <input
                 type="checkbox"
                 checked={!!executeApiPolicy?.enabled}
@@ -191,8 +191,8 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
           </div>
           <div className="form-group">
             <label className="form-label">
-              Whole-chain budget (ms)
-              <span className="hint"> the wall-clock ceiling for one execute_api call, across every step in its chain</span>
+              Max wait per request (milliseconds)
+              <span className="hint"> how long the agent waits for an answer. 1000 = 1 second</span>
             </label>
             <div style={{ display: "flex", gap: 8 }}>
               <input
@@ -211,8 +211,8 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
 
         <div className="card">
           <div className="card-hdr">
-            <div className="card-title">Custom APIs</div>
-            <div className="card-sub">attach/enable this tenant&apos;s registered APIs for this agent</div>
+            <div className="card-title">Your APIs</div>
+            <div className="card-sub">choose which ones this agent can use</div>
           </div>
           {customApisError && <div className="error-banner">{customApisError}</div>}
           {agentCustomApisError && <div className="error-banner">{agentCustomApisError}</div>}
@@ -227,18 +227,19 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
                 <div style={{ flex: 1 }}>
                   <div style={{ fontWeight: 500 }}>{api.name}</div>
                   <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>
-                    {api.method} {api.endpoint_url} · chain_levels={api.chain_levels}
+                    {api.method} {api.endpoint_url}
+                    {api.chain_levels > 1 ? ` · ${api.chain_levels} steps` : ""}
                   </div>
                   {worstCaseExceedsBudget && (
                     <div style={{ fontSize: ".7rem", color: "var(--red)" }}>
-                      Worst-case chain total: {api.chain_levels} step(s) × {perStepMs}ms = {worstCaseMs}ms — exceeds
-                      this agent&apos;s whole-chain budget of {budgetMs}ms.
+                      May be too slow: this can take up to {worstCaseMs / 1000}s, but the agent only waits{" "}
+                      {budgetMs / 1000}s.
                     </div>
                   )}
                 </div>
                 <label
                   className="toggle-switch"
-                  title={assignment?.enabled ? "Enabled for this agent" : "Disabled for this agent"}
+                  title={assignment?.enabled ? "On for this agent" : "Off for this agent"}
                 >
                   <input
                     type="checkbox"
@@ -249,14 +250,14 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
                 </label>
                 {assignment && (
                   <button className="btn btn-danger btn-sm" onClick={() => handleDetach(api)}>
-                    Detach
+                    Remove
                   </button>
                 )}
               </div>
             );
           })}
 
-          {customApis.length === 0 && !customApisError && <div className="empty-state">No custom APIs registered yet.</div>}
+          {customApis.length === 0 && !customApisError && <div className="empty-state">No APIs set up yet. Add them in Knowledge Base, under APIs.</div>}
         </div>
       </div>
     </div>
