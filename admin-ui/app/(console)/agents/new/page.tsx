@@ -198,7 +198,21 @@ export default function NewAgentPage() {
 
   useEffect(() => {
     if (!tenant) return;
-    listProviders(tenant.id).then(setProviders).catch(() => {});
+    listProviders(tenant.id)
+      .then((provs) => {
+        setProviders(provs);
+        // Keep a valid existing pick (typed or restored); else the account default, else the only option.
+        const pick = (role: "stt" | "llm" | "tts", current: string | null, accountDefault: string | null) => {
+          const ofRole = provs.filter((p) => p.role === role);
+          if (current && ofRole.some((p) => p.id === current)) return current;
+          if (accountDefault && ofRole.some((p) => p.id === accountDefault)) return accountDefault;
+          return ofRole.length === 1 ? ofRole[0].id : null;
+        };
+        setSttId((prev) => pick("stt", prev, tenant.default_stt_config_id));
+        setLlmId((prev) => pick("llm", prev, tenant.default_llm_config_id));
+        setTtsId((prev) => pick("tts", prev, tenant.default_tts_config_id));
+      })
+      .catch(() => {});
     const loadKnowledge = () => {
       listKnowledgeBases(tenant.id).then(setKbs).catch(() => {});
       listCustomApis(tenant.id).then(setCustomApis).catch(() => {});
@@ -630,12 +644,17 @@ export default function NewAgentPage() {
                   className="btn btn-ghost btn-sm"
                   style={{ marginLeft: "auto" }}
                   disabled={!llmId || generatingPrompt}
-                  title={!llmId ? "Pick an AI model in step 2 first" : undefined}
                   onClick={handleGenerateWithAi}
                 >
                   {generatingPrompt ? "Generating…" : <><Sparkles size={13} /> Generate with AI</>}
                 </button>
               </div>
+              {!llmId && (
+                <div className="voice-missing" style={{ marginBottom: 6 }}>
+                  To write the prompt with AI, choose an AI model first.{" "}
+                  <a href="#" onClick={(e) => { e.preventDefault(); setStep("voice"); }}>Choose an AI model</a>
+                </div>
+              )}
               {generateError && <div className="error-banner">{generateError}</div>}
               <textarea
                 className="form-textarea"
