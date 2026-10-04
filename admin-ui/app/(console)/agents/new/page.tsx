@@ -17,13 +17,11 @@ import {
   listProviders,
   listTenants,
   updateAgent,
-  updateProvider,
 } from "@/lib/api";
 import { KnowledgeBase, assignKnowledgeBase, listKnowledgeBases } from "@/lib/knowledgeApi";
 import { CustomApi, listCustomApis, setAgentCustomApiEnabled } from "@/lib/toolexecApi";
-import { LocalVoicePicker } from "@/components/LocalVoicePicker";
-import { ElevenLabsVoicePicker } from "@/components/ElevenLabsVoicePicker";
-import { LANGUAGES, OTHER, asBrowsableTtsEngine } from "@/lib/engineCatalog";
+import { AgentVoiceSettings } from "@/components/AgentVoiceSettings";
+import { OTHER } from "@/lib/engineCatalog";
 import { buildSystemPrompt } from "@/lib/systemPromptBuilder";
 import { templateByKey } from "@/lib/agentTemplates";
 import { EasyAgentFlow } from "@/components/EasyAgentFlow";
@@ -75,7 +73,6 @@ export default function NewAgentPage() {
   const [sttId, setSttId] = useState<string | null>(null);
   const [llmId, setLlmId] = useState<string | null>(null);
   const [ttsId, setTtsId] = useState<string | null>(null);
-  const [chosenEngine, setChosenEngine] = useState<"macos" | "kokoro" | "elevenlabs" | null>(null);
 
   // Step 3 — Limits
   const [maxCallDuration, setMaxCallDuration] = useState<number | "">("");
@@ -150,18 +147,6 @@ export default function NewAgentPage() {
     name, purpose, persona, tone, language, selectedKbIds.size, transferType, transferCondition,
     complianceInstructions, fallbackResponse, promptEdited,
   ]);
-
-  const byRole = (role: string) => providers.filter((p) => p.role === role);
-  const selectedTts = providers.find((p) => p.id === ttsId) ?? null;
-
-  const applyDetectedLanguage = (l: string) => {
-    if (LANGUAGES.some((x) => x.value === l)) {
-      setLanguageChoice(l);
-    } else {
-      setLanguageChoice(OTHER);
-      setCustomLanguage(l);
-    }
-  };
 
   const toggleKb = (id: string) =>
     setSelectedKbIds((prev) => {
@@ -333,121 +318,21 @@ export default function NewAgentPage() {
         </div>
       )}
 
-      {step === "voice" && (
-        <div className="card">
-          <div className="card-hdr">
-            <div className="card-title">Language & Voice</div>
-          </div>
-          <div className="card-body">
-            <div className="form-group">
-              <label className="form-label">Language <span className="hint">overrides the STT/TTS provider&apos;s own language when set</span></label>
-              <select className="form-select" value={languageChoice} onChange={(e) => setLanguageChoice(e.target.value)}>
-                <option value="">— derive from provider —</option>
-                {LANGUAGES.map((l) => (
-                  <option key={l.value} value={l.value}>{l.label}</option>
-                ))}
-                <option value={OTHER}>Other (custom)…</option>
-              </select>
-              {languageChoice === OTHER && (
-                <input
-                  className="form-input"
-                  style={{ marginTop: 6, fontFamily: "var(--mono)" }}
-                  value={customLanguage}
-                  onChange={(e) => setCustomLanguage(e.target.value)}
-                  placeholder="e.g. nl-BE"
-                />
-              )}
-            </div>
-
-            <div className="form-group">
-              <label className="form-label">Voice</label>
-              {tenant &&
-                (() => {
-                  const engine = chosenEngine ?? asBrowsableTtsEngine(selectedTts?.engine);
-                  if (!engine) {
-                    return (
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        {(["macos", "kokoro", "elevenlabs"] as const).map((e) => (
-                          <button key={e} type="button" className="btn btn-ghost btn-sm" onClick={() => setChosenEngine(e)}>
-                            {e === "macos" ? "macOS say" : e === "kokoro" ? "Kokoro" : "ElevenLabs"}
-                          </button>
-                        ))}
-                      </div>
-                    );
-                  }
-                  if (engine === "elevenlabs") {
-                    const elevenLabsProvider =
-                      (selectedTts?.engine === "elevenlabs" ? selectedTts : undefined) ??
-                      providers.find((p) => p.role === "tts" && p.engine === "elevenlabs") ??
-                      null;
-                    return (
-                      <ElevenLabsVoicePicker
-                        tenantId={tenant.id}
-                        provider={elevenLabsProvider}
-                        isCurrentAssignment={selectedTts?.engine === "elevenlabs"}
-                        onProviderCreated={(p) => {
-                          setProviders((prev) => [...prev, p]);
-                          setTtsId(p.id);
-                        }}
-                        onVoicePicked={(updated) => {
-                          setProviders((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
-                          setTtsId(updated.id);
-                        }}
-                        onLanguageDetected={applyDetectedLanguage}
-                      />
-                    );
-                  }
-                  return (
-                    <LocalVoicePicker
-                      engine={engine}
-                      tenantId={tenant.id}
-                      providers={providers}
-                      value={ttsId}
-                      onChange={setTtsId}
-                      onProviderCreated={(p) => setProviders((prev) => [...prev, p])}
-                      onLanguageDetected={applyDetectedLanguage}
-                    />
-                  );
-                })()}
-              {selectedTts && (
-                <div style={{ marginTop: 10 }}>
-                  <label className="form-label">Speaking Speed <span className="hint">0.7 (slower) – 1.2 (faster)</span></label>
-                  <select
-                    className="form-select"
-                    style={{ width: 140 }}
-                    value={String(Number((selectedTts.extra as Record<string, unknown> | null)?.speed ?? 1.0))}
-                    onChange={async (e) => {
-                      const v = Number(e.target.value);
-                      const updated = await updateProvider(selectedTts.id, { extra: { ...((selectedTts.extra as Record<string, unknown>) || {}), speed: v } });
-                      setProviders((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
-                    }}
-                  >
-                    {[0.7, 0.8, 0.9, 1.0, 1.1, 1.2].map((v) => (
-                      <option key={v} value={String(v)}>{v.toFixed(1)}{v === 1.0 ? " (default)" : ""}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-            </div>
-
-            <div className="form-row">
-              <div className="form-group">
-                <label className="form-label">STT</label>
-                <select className="form-select" value={sttId || ""} onChange={(e) => setSttId(e.target.value || null)}>
-                  <option value="">— none —</option>
-                  {byRole("stt").map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
-              </div>
-              <div className="form-group">
-                <label className="form-label">LLM</label>
-                <select className="form-select" value={llmId || ""} onChange={(e) => setLlmId(e.target.value || null)}>
-                  <option value="">— none —</option>
-                  {byRole("llm").map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
-              </div>
-            </div>
-          </div>
-        </div>
+      {step === "voice" && tenant && (
+        <AgentVoiceSettings
+          tenantId={tenant.id}
+          providers={providers}
+          setProviders={setProviders}
+          languageChoice={languageChoice}
+          onLanguageChoice={setLanguageChoice}
+          customLanguage={customLanguage}
+          onCustomLanguage={setCustomLanguage}
+          sttId={sttId}
+          llmId={llmId}
+          ttsId={ttsId}
+          onAssign={(role, id) => (role === "stt" ? setSttId(id) : role === "llm" ? setLlmId(id) : setTtsId(id))}
+          onError={setLoadError}
+        />
       )}
 
       {step === "limits" && (
@@ -628,7 +513,7 @@ export default function NewAgentPage() {
                   className="btn btn-ghost btn-sm"
                   style={{ marginLeft: "auto" }}
                   disabled={!llmId || generatingPrompt}
-                  title={!llmId ? "Pick an LLM provider in step 2 first" : undefined}
+                  title={!llmId ? "Pick an AI model in step 2 first" : undefined}
                   onClick={handleGenerateWithAi}
                 >
                   {generatingPrompt ? "Generating…" : <><Sparkles size={13} /> Generate with AI</>}

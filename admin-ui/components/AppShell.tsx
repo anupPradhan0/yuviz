@@ -336,7 +336,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <div className="sidebar-search">
           <input
-            type="text"
+            type="search"
+            name="sidebar-page-search"
+            autoComplete="off"
+            aria-label="Search pages"
             placeholder="Search pages"
             value={search}
             onChange={(e) => setSearch(e.target.value)}

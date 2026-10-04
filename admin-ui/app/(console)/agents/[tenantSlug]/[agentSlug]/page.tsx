@@ -4,14 +4,13 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, ArrowRight, Check, Mic } from "lucide-react";
-import { Agent, AgentStatus, AgentUpdate, ApiError, deleteAgent, getAgent, getLiveCalls, listProviders, ProviderConfig, undoPrompt, updateAgent, updateProvider } from "@/lib/api";
+import { Agent, AgentStatus, AgentUpdate, ApiError, deleteAgent, getAgent, getLiveCalls, listProviders, ProviderConfig, undoPrompt, updateAgent } from "@/lib/api";
 import { KnowledgeBaseTabs } from "@/components/KnowledgeBaseTabs";
 import { ToolsPanel } from "@/components/ToolsPanel";
 import { Modal } from "@/components/Modal";
 import { SipPanel } from "@/components/SipPanel";
-import { LocalVoicePicker } from "@/components/LocalVoicePicker";
-import { ElevenLabsVoicePicker } from "@/components/ElevenLabsVoicePicker";
-import { LANGUAGES, OTHER, asBrowsableTtsEngine } from "@/lib/engineCatalog";
+import { AgentVoiceSettings } from "@/components/AgentVoiceSettings";
+import { LANGUAGES, OTHER } from "@/lib/engineCatalog";
 
 // Same stages as the creation wizard (/agents/new); its "Review" step is "Prompt" here.
 type Tab = "identity" | "voice" | "limits" | "advanced" | "knowledge" | "prompt" | "sip";
@@ -49,13 +48,6 @@ export default function AgentDetailPage() {
   const [form, setForm] = useState<AgentUpdate>({});
   const [languageChoice, setLanguageChoice] = useState<string>("");
   const [customLanguage, setCustomLanguage] = useState("");
-  // null = use the engine of the agent's current tts_config_id, so picking a voice
-  // never silently swaps the agent to a different TTS provider.
-  const [chosenEngine, setChosenEngine] = useState<"macos" | "kokoro" | "elevenlabs" | null>(null);
-  const [showEngineChooser, setShowEngineChooser] = useState(false);
-  // Local slider value while dragging — only PATCHed on release/keyup, not on
-  // every pixel of drag, which a plain onChange on a range input would do.
-  const [ttsSpeedDraft, setTtsSpeedDraft] = useState<number | null>(null);
 
   // ?test=1 comes from the creation wizard.
   useEffect(() => {
@@ -109,16 +101,6 @@ export default function AgentDetailPage() {
       .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)))
       .finally(() => setLoading(false));
   }, [tenantSlug, agentSlug]);
-
-  // Sync voice -> language (not the reverse): a voice is single-language, agent.language is a looser override.
-  const applyDetectedLanguage = (language: string) => {
-    if (LANGUAGES.some((l) => l.value === language)) {
-      setLanguageChoice(language);
-    } else {
-      setLanguageChoice(OTHER);
-      setCustomLanguage(language);
-    }
-  };
 
   const handleSave = async () => {
     if (!agent) return;
@@ -192,8 +174,6 @@ export default function AgentDetailPage() {
   if (loading) return <div className="empty-state">Loading…</div>;
   if (error) return <div className="error-banner">{error}</div>;
   if (!agent) return null;
-
-  const byRole = (role: string) => providers.filter((p) => p.role === role);
 
   return (
     <>
@@ -397,240 +377,20 @@ export default function AgentDetailPage() {
       {tab === "voice" && (
         <div className="cols">
           <div className="col-main">
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-hdr">
-                <div className="card-title">Language</div>
-              </div>
-              <div className="card-body">
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label">
-                    Language <span className="hint">overrides the STT/TTS provider&apos;s own language when set</span>
-                  </label>
-                  <select
-                    className="form-select"
-                    value={languageChoice}
-                    onChange={(e) => setLanguageChoice(e.target.value)}
-                  >
-                    <option value="">— derive from provider —</option>
-                    {LANGUAGES.map((l) => (
-                      <option key={l.value} value={l.value}>
-                        {l.label}
-                      </option>
-                    ))}
-                    <option value={OTHER}>Other (custom)…</option>
-                  </select>
-                  {languageChoice === OTHER && (
-                    <input
-                      className="form-input"
-                      style={{ marginTop: 6, fontFamily: "var(--mono)" }}
-                      value={customLanguage}
-                      onChange={(e) => setCustomLanguage(e.target.value)}
-                      placeholder="e.g. nl-BE"
-                    />
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-hdr">
-                <div className="card-title">Voice</div>
-                <div className="card-sub">sets the same TTS assignment as below</div>
-              </div>
-              <div className="card-body">
-                {(() => {
-                  const selectedTts = providers.find((p) => p.id === form.tts_config_id);
-                  const engine = chosenEngine ?? asBrowsableTtsEngine(selectedTts?.engine);
-
-                  if (showEngineChooser || !engine) {
-                    return (
-                      <div>
-                        <div className="form-hint" style={{ marginBottom: 8 }}>
-                          Choose a TTS engine to browse its voices.
-                        </div>
-                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          {(["macos", "kokoro", "elevenlabs"] as const).map((e) => (
-                            <button
-                              key={e}
-                              type="button"
-                              className="btn btn-ghost btn-sm"
-                              onClick={() => {
-                                setChosenEngine(e);
-                                setShowEngineChooser(false);
-                              }}
-                            >
-                              {e === "macos" ? "macOS say" : e === "kokoro" ? "Kokoro" : "ElevenLabs"}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  }
-
-                  const changeEngineButton = (
-                    <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
-                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowEngineChooser(true)}>
-                        Change engine
-                      </button>
-                    </div>
-                  );
-
-                  if (engine === "elevenlabs") {
-                    // Prefer the agent's own provider; a tenant may have several ElevenLabs accounts.
-                    const elevenLabsProvider =
-                      (selectedTts?.engine === "elevenlabs" ? selectedTts : undefined) ??
-                      providers.find((p) => p.role === "tts" && p.engine === "elevenlabs") ??
-                      null;
-                    return (
-                      <>
-                        <ElevenLabsVoicePicker
-                          tenantId={agent.tenant_id}
-                          provider={elevenLabsProvider}
-                          isCurrentAssignment={selectedTts?.engine === "elevenlabs"}
-                          onProviderCreated={(p) => {
-                            setProviders((prev) => [...prev, p]);
-                            setForm((prev) => ({ ...prev, tts_config_id: p.id }));
-                            setChosenEngine(null);
-                          }}
-                          onVoicePicked={(updated) => {
-                            setProviders((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
-                            setForm((prev) => ({ ...prev, tts_config_id: updated.id }));
-                            setChosenEngine(null);
-                          }}
-                          onLanguageDetected={applyDetectedLanguage}
-                        />
-                        {changeEngineButton}
-                      </>
-                    );
-                  }
-
-                  return (
-                    <>
-                      <LocalVoicePicker
-                        engine={engine}
-                        tenantId={agent.tenant_id}
-                        providers={providers}
-                        value={form.tts_config_id}
-                        onChange={(id) => {
-                          setForm((prev) => ({ ...prev, tts_config_id: id }));
-                          setChosenEngine(null);
-                        }}
-                        onProviderCreated={(p) => setProviders((prev) => [...prev, p])}
-                        onLanguageDetected={applyDetectedLanguage}
-                      />
-                      {changeEngineButton}
-                    </>
-                  );
-                })()}
-                {(() => {
-                  const selectedTts = providers.find((p) => p.id === form.tts_config_id);
-                  const savedSpeed = Number((selectedTts?.extra as Record<string, unknown> | null)?.speed ?? 1.0);
-                  const speed = ttsSpeedDraft ?? savedSpeed;
-                  const commit = async (v: number) => {
-                    setTtsSpeedDraft(null);
-                    if (!selectedTts || v === savedSpeed) return;
-                    try {
-                      const updated = await updateProvider(selectedTts.id, {
-                        extra: { ...((selectedTts.extra as Record<string, unknown>) || {}), speed: v },
-                      });
-                      setProviders(providers.map((p) => (p.id === updated.id ? updated : p)));
-                    } catch (err) {
-                      setError(err instanceof ApiError ? err.detail : String(err));
-                    }
-                  };
-                  return (
-                    <div className="form-group" style={{ marginTop: 12, marginBottom: 0 }}>
-                      <label className="form-label">
-                        Speaking Speed <span className="hint">0.7 (slower) – 1.2 (faster), default 1.0 — saved on the selected voice, applies immediately to the next call</span>
-                      </label>
-                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                        <input
-                          type="range"
-                          min={0.7}
-                          max={1.2}
-                          step={0.05}
-                          value={speed}
-                          disabled={!selectedTts}
-                          style={{ flex: 1, accentColor: "var(--cyan)" }}
-                          onChange={(e) => setTtsSpeedDraft(Number(e.target.value))}
-                          onMouseUp={(e) => commit(Number((e.target as HTMLInputElement).value))}
-                          onTouchEnd={(e) => commit(Number((e.target as HTMLInputElement).value))}
-                          onKeyUp={(e) => commit(Number((e.target as HTMLInputElement).value))}
-                        />
-                        <span className="mono" style={{ fontSize: ".78rem", color: "var(--text)", width: 68, flexShrink: 0 }}>
-                          {speed.toFixed(2)}{speed === 1.0 ? " (default)" : ""}
-                        </span>
-                      </div>
-                    </div>
-                  );
-                })()}
-              </div>
-            </div>
-
-            <div className="card">
-              <div className="card-hdr">
-                <div className="card-title">Provider Assignments</div>
-                <div className="card-sub">prod-first, dev warns</div>
-              </div>
-              <div className="card-body">
-                <div className="form-row">
-                  {(["stt", "llm", "tts"] as const).map((role) => {
-                    const key = `${role}_config_id` as const;
-                    return (
-                      <div className="form-group" key={role}>
-                        <label className="form-label">{role.toUpperCase()}</label>
-                        <select
-                          className="form-select"
-                          value={form[key] || ""}
-                          onChange={(e) => setForm({ ...form, [key]: e.target.value || null })}
-                        >
-                          <option value="">— none —</option>
-                          {byRole(role).map((p) => (
-                            <option key={p.id} value={p.id}>
-                              {p.name}{p.environment !== "prod" ? ` (${p.environment})` : ""}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    );
-                  })}
-                </div>
-                {(() => {
-                  const selectedLlm = providers.find((p) => p.id === form.llm_config_id);
-                  // Must match _is_thinking_capable() in services/conversation/ai_provider_manager.py.
-                  const isThinkingCapable = selectedLlm?.engine === "ollama" && !!selectedLlm.model?.startsWith("gemma4");
-                  if (!isThinkingCapable || !selectedLlm) return null;
-                  const thinking = Boolean((selectedLlm.extra as Record<string, unknown> | null)?.think ?? false);
-                  return (
-                    <div className="form-group" style={{ marginTop: 12, marginBottom: 0 }}>
-                      <label className="form-label" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        Thinking
-                        <span className="hint">
-                          {selectedLlm.model} can reason before answering — off by default (adds 5-8s/turn when on)
-                        </span>
-                      </label>
-                      <label className="toggle-switch">
-                        <input
-                          type="checkbox"
-                          checked={thinking}
-                          onChange={async (e) => {
-                            try {
-                              const updated = await updateProvider(selectedLlm.id, {
-                                extra: { ...((selectedLlm.extra as Record<string, unknown>) || {}), think: e.target.checked },
-                              });
-                              setProviders(providers.map((p) => (p.id === updated.id ? updated : p)));
-                            } catch (err) {
-                              setError(err instanceof ApiError ? err.detail : String(err));
-                            }
-                          }}
-                        />
-                        <span className="toggle-slider" />
-                      </label>
-                    </div>
-                  );
-                })()}
-              </div>
-            </div>
+            <AgentVoiceSettings
+              tenantId={agent.tenant_id}
+              providers={providers}
+              setProviders={setProviders}
+              languageChoice={languageChoice}
+              onLanguageChoice={setLanguageChoice}
+              customLanguage={customLanguage}
+              onCustomLanguage={setCustomLanguage}
+              sttId={form.stt_config_id}
+              llmId={form.llm_config_id}
+              ttsId={form.tts_config_id}
+              onAssign={(role, id) => setForm((prev) => ({ ...prev, [`${role}_config_id`]: id }))}
+              onError={setSaveError}
+            />
           </div>
         </div>
       )}

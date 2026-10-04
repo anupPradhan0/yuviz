@@ -97,7 +97,10 @@ export function SecretRefInput({
             placeholder ?? (mode === "key" ? "Paste the API key" : "env:MY_API_KEY")
           }
           disabled={disabled}
-          autoComplete="off"
+          // Browsers ignore "off" on password fields and autofill saved logins.
+          autoComplete="new-password"
+          data-1p-ignore
+          data-lpignore="true"
         />
         <button
           type="button"
