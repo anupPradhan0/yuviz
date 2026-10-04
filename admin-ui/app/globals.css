@@ -982,6 +982,11 @@ body {
   margin-top: 14px; padding: 10px 14px; background: var(--surf); border: 1px solid var(--border); border-radius: var(--r);
 }
 .agent-save-status { margin-right: auto; font-size: .76rem; color: var(--text-3); }
+.draft-banner {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; padding: 10px 14px;
+  font-size: .78rem; color: var(--text-2); background: var(--cyan-dim); border: 1px solid var(--cyan); border-radius: var(--r);
+}
+.draft-banner > span { flex: 1; min-width: 200px; }
 @media (max-width: 860px) {
   .cols:has(.agent-tips), .cols:has(.agent-details) { flex-direction: column; }
   .cols:has(.agent-tips) .col-side, .cols:has(.agent-details) .col-side { width: auto; }

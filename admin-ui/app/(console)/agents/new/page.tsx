@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeft, ArrowRight, Sparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, Sparkles } from "lucide-react";
 import {
   Agent,
   AgentUpdate,
@@ -25,6 +25,7 @@ import { OTHER } from "@/lib/engineCatalog";
 import { buildSystemPrompt } from "@/lib/systemPromptBuilder";
 import { templateByKey } from "@/lib/agentTemplates";
 import { EasyAgentFlow } from "@/components/EasyAgentFlow";
+import { AgentDraft, clearAgentDraft, draftSavedLabel, loadAgentDraft, saveAgentDraft } from "@/lib/agentDraft";
 
 type Step = "identity" | "voice" | "limits" | "advanced" | "knowledge" | "review";
 
@@ -103,18 +104,96 @@ export default function NewAgentPage() {
   const createdAgent = useRef<Agent | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
 
+  // Autosave: restore once on mount (never during SSR), then write on every change.
+  const [draftReady, setDraftReady] = useState(false);
+  const [restoredAt, setRestoredAt] = useState<number | null>(null);
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  const skipAutosave = useRef(false);
+
   const tenant = useMemo(() => tenants.find((t) => t.slug === tenantSlug) ?? null, [tenants, tenantSlug]);
   const language =
     languageChoice === "" ? null : languageChoice === OTHER ? customLanguage.trim() || null : languageChoice;
 
   useEffect(() => {
+    // A template click is an explicit fresh start, so it doesn't resume an older draft.
+    const d = template ? null : loadAgentDraft();
+    if (d) {
+      /* eslint-disable react-hooks/set-state-in-effect */
+      setStep(STEPS.some((s) => s.key === d.step) ? (d.step as Step) : "identity");
+      setName(d.name);
+      if (!searchParams.get("tenant")) setTenantSlug(d.tenantSlug);
+      setPurpose(d.purpose);
+      setPersona(d.persona);
+      setTone(d.tone);
+      setLanguageChoice(d.languageChoice);
+      setCustomLanguage(d.customLanguage);
+      setSttId(d.sttId);
+      setLlmId(d.llmId);
+      setTtsId(d.ttsId);
+      setMaxCallDuration(d.maxCallDuration);
+      setGoodbyeGraceMs(d.goodbyeGraceMs);
+      setEscalationThreshold(d.escalationThreshold);
+      setTransferType(d.transferType);
+      setTransferDestination(d.transferDestination);
+      setTransferCondition(d.transferCondition);
+      setTransferAnnouncement(d.transferAnnouncement);
+      setComplianceInstructions(d.complianceInstructions);
+      setFallbackResponse(d.fallbackResponse);
+      setSelectedKbIds(new Set(d.selectedKbIds));
+      setSelectedApiIds(new Set(d.selectedApiIds));
+      setGreeting(d.greeting);
+      setSystemPrompt(d.systemPrompt);
+      setPromptEdited(d.promptEdited);
+      setRestoredAt(d.savedAt);
+      setLastSavedAt(d.savedAt);
+    }
+    setDraftReady(true);
+    /* eslint-enable react-hooks/set-state-in-effect */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const hasContent = name.trim() !== "" || purpose.trim() !== "" || persona.trim() !== "";
+
+  useEffect(() => {
+    if (!draftReady || skipAutosave.current) return;
+    if (!hasContent) {
+      clearAgentDraft();
+      return;
+    }
+    const timer = setTimeout(() => {
+      const draft: AgentDraft = {
+        savedAt: Date.now(),
+        step, name, tenantSlug, purpose, persona, tone, languageChoice, customLanguage, sttId, llmId, ttsId,
+        maxCallDuration, goodbyeGraceMs, escalationThreshold, transferType, transferDestination,
+        transferCondition, transferAnnouncement, complianceInstructions, fallbackResponse,
+        selectedKbIds: Array.from(selectedKbIds), selectedApiIds: Array.from(selectedApiIds),
+        greeting, systemPrompt, promptEdited,
+      };
+      saveAgentDraft(draft);
+      setLastSavedAt(draft.savedAt);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [
+    draftReady, hasContent, step, name, tenantSlug, purpose, persona, tone, languageChoice, customLanguage,
+    sttId, llmId, ttsId, maxCallDuration, goodbyeGraceMs, escalationThreshold, transferType,
+    transferDestination, transferCondition, transferAnnouncement, complianceInstructions, fallbackResponse,
+    selectedKbIds, selectedApiIds, greeting, systemPrompt, promptEdited,
+  ]);
+
+  const startOver = () => {
+    skipAutosave.current = true;
+    clearAgentDraft();
+    window.location.replace("/agents/new");
+  };
+
+  useEffect(() => {
     listTenants()
       .then((ts) => {
         setTenants(ts);
-        if (!tenantSlug && ts.length > 0) setTenantSlug(ts[0].slug);
+        // Functional update: a restored draft's account may already be set, and must still exist.
+        setTenantSlug((prev) => (ts.some((t) => t.slug === prev) ? prev : ts[0]?.slug ?? ""));
       })
       .catch((e) => setLoadError(e instanceof ApiError ? e.detail : String(e)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -208,18 +287,21 @@ export default function NewAgentPage() {
     if (!slug) return;
     setCreating(true);
     setCreateError(null);
+    // A restored draft can reference things deleted since it was saved.
+    const known = (id: string | null) => (id && providers.some((p) => p.id === id) ? id : null);
     try {
       // A retry after a failed execute_api step must not create a second agent.
       let agent = createdAgent.current;
+      const apiIds = customApis.filter((api) => selectedApiIds.has(api.id)).map((api) => api.id);
       if (!agent) {
         const fresh = await createAgent(tenantSlug, {
           slug,
           name: name.trim(),
           greeting,
           system_prompt: systemPrompt,
-          stt_config_id: sttId,
-          llm_config_id: llmId,
-          tts_config_id: ttsId,
+          stt_config_id: known(sttId),
+          llm_config_id: known(llmId),
+          tts_config_id: known(ttsId),
         });
 
         await updateAgent(tenantSlug, fresh.id, {
@@ -234,14 +316,16 @@ export default function NewAgentPage() {
         });
 
         await Promise.all([
-          ...Array.from(selectedKbIds).map((kbId) => assignKnowledgeBase(fresh.id, kbId, true)),
-          ...Array.from(selectedApiIds).map((apiId) => setAgentCustomApiEnabled(fresh.id, apiId, true)),
+          ...kbs.filter((kb) => selectedKbIds.has(kb.id)).map((kb) => assignKnowledgeBase(fresh.id, kb.id, true)),
+          ...apiIds.map((apiId) => setAgentCustomApiEnabled(fresh.id, apiId, true)),
         ]);
         agent = fresh;
         createdAgent.current = fresh;
       }
-      if (selectedApiIds.size > 0) await enableExecuteApi(tenant.id, agent.id);
+      if (apiIds.length > 0) await enableExecuteApi(tenant.id, agent.id);
 
+      skipAutosave.current = true;
+      clearAgentDraft();
       router.push(`/agents/${tenantSlug}/${agent.slug}?test=1`);
     } catch (e) {
       setCreateError(e instanceof ApiError ? e.detail : String(e));
@@ -253,11 +337,26 @@ export default function NewAgentPage() {
 
   return (
     <>
-      <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
         <button className="btn btn-ghost btn-sm" onClick={() => router.push("/agents")}>
-          <ArrowLeft size={13} /> Cancel
+          <ArrowLeft size={13} /> All agents
         </button>
+        {hasContent && lastSavedAt && (
+          <span className="saved-note" style={{ marginLeft: "auto", color: "var(--text-3)" }}>
+            <Check size={13} /> Draft saved automatically. You can leave and come back anytime.
+          </span>
+        )}
       </div>
+
+      {restoredAt && (
+        <div className="draft-banner">
+          <span>
+            Welcome back. We restored the agent you were working on (saved {draftSavedLabel(restoredAt)}).
+          </span>
+          <button className="btn btn-ghost btn-sm" onClick={startOver}>Start over</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => setRestoredAt(null)}>Dismiss</button>
+        </div>
+      )}
 
       <div className="tabs">
         {STEPS.map((s, i) => (
