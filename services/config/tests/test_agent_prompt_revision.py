@@ -24,8 +24,10 @@ SLOT_KEYS = ("prompt_undo_previous", "prompt_undo_accepted_sha256")
 
 def _prompt(tag: str) -> str:
     return (
-        "How you speak\nBe brief.\nGuardrails\nNever guess.\n"
-        f"Doing your job well\nLine one {tag}.\nLine two {tag}.\nLine three {tag}."
+        "Role\nYour name is Sam.\nHow you speak\nBe brief.\n"
+        f"What callers want\nLine one {tag}.\nLine two {tag}.\nLine three {tag}.\n"
+        "When things go wrong\nAsk again.\nTools\nUse tools.\nGuardrails\nNever guess.\n"
+        "Response style\nBe short.\nEnding the call\nSay goodbye."
     )
 
 

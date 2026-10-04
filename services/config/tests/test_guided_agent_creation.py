@@ -184,7 +184,7 @@ def _url(tenant: dict, suffix: str = "") -> str:
 
 def _template_body(template_id: str, configs: dict, **overrides) -> dict:
     body = {
-        "template_id": template_id, "template_version": 2, "name": "Front Desk",
+        "template_id": template_id, "template_version": 3, "name": "Front Desk",
         "business_name": "Acme Dental", "business_facts": "Open 9 to 5.",
         "llm_config_id": configs["llm"],
     }
@@ -421,7 +421,7 @@ class TestFromTemplate:
         agent = await _create_agent(client, test_tenant, configs, "inbound-triage")
         row = await _agent_row(pool, agent["id"])
         assert row["status"] == "inactive"
-        assert (row["template_id"], row["template_version"]) == ("inbound-triage", 2)
+        assert (row["template_id"], row["template_version"]) == ("inbound-triage", 3)
         assert row["slug"] == "front-desk"
         assert row["tenant_id"] == test_tenant["id"]
         assert "Acme Dental" in row["greeting"] + row["system_prompt"]
@@ -432,7 +432,7 @@ class TestFromTemplate:
 
     @pytest.mark.parametrize(("overrides", "why"), [
         ({"template_id": "nope"}, "unknown template"),
-        ({"template_version": 3}, "version that is not the shipped one"),
+        ({"template_version": 2}, "version that is not the shipped one"),
         ({"stt_config_id": None}, "a needed role is null"),
         ({"llm_config_id": None}, "llm is null"),
         ({"name": "!!!"}, "a name with no letter or digit"),
@@ -1224,3 +1224,10 @@ def test_the_admin_ui_prompt_builder_mirrors_the_speech_and_guardrail_blocks():
     source = path.read_text()
     assert _ts_block(source, "HUMAN_SPEECH_VOICE") == sp.HUMAN_SPEECH_VOICE
     assert _ts_block(source, "GUARDRAILS") == sp._GUARDRAILS
+
+
+def test_the_admin_ui_prompt_builder_emits_the_required_headings_in_order():
+    path = pathlib.Path(__file__).parents[3] / "admin-ui" / "lib" / "systemPromptBuilder.ts"
+    returned = path.read_text().split("return [", 1)[1]
+    emitted = [ln.strip().strip(",").strip('"') for ln in returned.splitlines()]
+    assert [h for h in emitted if h in sp._HEADINGS] == list(sp._HEADINGS)
