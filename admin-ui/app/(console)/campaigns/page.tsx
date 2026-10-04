@@ -172,7 +172,7 @@ export default function CampaignsPage() {
               className="btn btn-sm"
               style={
                 statusTab === tab.value
-                  ? { background: "var(--cyan)", color: "#fff", borderColor: "var(--cyan)" }
+                  ? { background: "var(--cyan)", color: "var(--on-cyan)", borderColor: "var(--cyan)" }
                   : { background: "var(--surf)", color: "var(--text-2)", borderColor: "var(--border-2)" }
               }
               onClick={() => setStatusTab(tab.value)}

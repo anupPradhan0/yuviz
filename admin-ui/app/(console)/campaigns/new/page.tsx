@@ -63,7 +63,7 @@ function Stepper({ step }: { step: StepId }) {
                 flexShrink: 0,
                 background: s.id <= step ? "var(--cyan)" : "var(--surf)",
                 border: s.id <= step ? "none" : "1px solid var(--border-2)",
-                color: s.id <= step ? "#fff" : "var(--text-3)",
+                color: s.id <= step ? "var(--on-cyan)" : "var(--text-3)",
               }}
             >
               {s.id}
