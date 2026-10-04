@@ -15,6 +15,7 @@ Run: uvicorn services.toolexec.app:app --reload --port 8600
 
 from __future__ import annotations
 
+import os
 import logging
 from contextlib import asynccontextmanager
 
@@ -50,9 +51,18 @@ app = FastAPI(title="Voice AI Platform — Tool Execution Service", lifespan=lif
 
 # Admin UI is the only browser client — same narrow local-dev origin list as
 # Config Service's and Knowledge Service's app.py.
+# Admin UI origin(s). Defaults to the Next.js dev server's usual port; set
+# ADMIN_UI_ORIGINS (comma-separated) when running the console on another
+# port, e.g. a second stack beside the normal one. Still a narrow list, not
+# a wildcard — request auth is per-route (JWT), but CORS is what stops a
+# random page in the operator's browser from driving this API.
+_ADMIN_UI_ORIGINS = [
+    o.strip() for o in os.environ.get("ADMIN_UI_ORIGINS", "http://localhost:3000").split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=_ADMIN_UI_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
