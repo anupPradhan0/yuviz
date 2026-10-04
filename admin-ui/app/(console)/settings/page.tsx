@@ -780,22 +780,13 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {/* One horizontal tab strip, the same .tabs/.tab pair the rest of the
-          console uses. The left rail this replaced was a second navigation
-          idiom for four panels, and it pushed every panel into a narrow
-          column on an otherwise empty page. */}
+      {/* Group names stay off-screen: inline labels in the strip read as clickable tabs. */}
       <div className="tabs" style={{ alignItems: "center" }}>
         {groups.map((g, i) => (
           <div key={g.label} role="group" aria-label={g.label} style={{ display: "contents" }}>
-            <span
-              style={{
-                fontSize: ".62rem", fontWeight: 600, letterSpacing: ".06em", textTransform: "uppercase",
-                color: "var(--text-3)", padding: "0 6px", marginLeft: i > 0 ? 18 : 0,
-                borderLeft: i > 0 ? "1px solid var(--border)" : undefined, paddingLeft: i > 0 ? 18 : 0,
-              }}
-            >
-              {g.label}
-            </span>
+            {i > 0 && (
+              <span aria-hidden="true" style={{ width: 1, height: 16, background: "var(--border)", margin: "0 10px" }} />
+            )}
             {g.sections.map((item) => (
               <button
                 key={item.id}
