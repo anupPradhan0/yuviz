@@ -412,10 +412,10 @@ export default function DashboardPage() {
         </div>
         <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap-reverse", justifyContent: "flex-end" }}>
           <div style={{ display: "flex", gap: 8 }}>
-            <Link href="/calls" className="btn btn-ghost" style={{ whiteSpace: "nowrap" }}>
+            <Link href="/calls" className="btn btn-ghost">
               <Activity size={14} />Open live monitor
             </Link>
-            <Link href="/campaigns" className="btn btn-ghost" style={{ whiteSpace: "nowrap" }}>
+            <Link href="/campaigns" className="btn btn-ghost">
               <Rocket size={14} />New campaign
             </Link>
           </div>

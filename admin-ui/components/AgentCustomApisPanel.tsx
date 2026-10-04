@@ -248,7 +248,7 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
                   <span className="toggle-slider" />
                 </label>
                 {assignment && (
-                  <button className="btn btn-ghost btn-sm" onClick={() => handleDetach(api)}>
+                  <button className="btn btn-danger btn-sm" onClick={() => handleDetach(api)}>
                     Detach
                   </button>
                 )}

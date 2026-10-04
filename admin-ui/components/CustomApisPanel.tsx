@@ -619,7 +619,7 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
                 </span>
                 Sensitive
               </label>
-              <button className="btn btn-danger btn-sm" onClick={() => removeParam(i)} aria-label="Remove parameter">
+              <button className="btn btn-danger btn-sm btn-icon" onClick={() => removeParam(i)} aria-label="Remove parameter">
                 <X size={13} />
               </button>
               </div>

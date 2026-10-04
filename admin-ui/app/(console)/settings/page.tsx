@@ -548,7 +548,7 @@ function ChangeEmailCard({ passwordSet }: { passwordSet: boolean }) {
               <button className="btn btn-primary btn-sm" type="submit" disabled={submitting || code.length !== 6}>
                 {submitting ? "Verifying…" : "Confirm Email"}
               </button>
-              <button className="btn btn-sm" type="button" onClick={() => { setPendingEmail(null); setError(null); }}>
+              <button className="btn btn-ghost btn-sm" type="button" onClick={() => { setPendingEmail(null); setError(null); }}>
                 Cancel
               </button>
             </div>

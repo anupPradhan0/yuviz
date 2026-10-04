@@ -412,7 +412,7 @@ export default function TelephonyPage() {
           <div className="form-hint" style={{ marginTop: 4 }}>{accountLine}</div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <Link href="/live-calls" className="btn btn-sm btn-indigo">Live calls</Link>
+          <Link href="/live-calls" className="btn btn-ghost btn-sm">Live calls</Link>
         </div>
       </div>
 

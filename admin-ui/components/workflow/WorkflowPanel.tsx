@@ -524,7 +524,7 @@ function Panel({
             </>
           )}
           <button
-            className="btn btn-ghost btn-sm"
+            className="btn btn-ghost btn-sm btn-icon"
             title="Undo (Ctrl+Z)"
             disabled={depth.undo === 0}
             onClick={undo}
@@ -533,7 +533,7 @@ function Panel({
             <Undo2 size={14} />
           </button>
           <button
-            className="btn btn-ghost btn-sm"
+            className="btn btn-ghost btn-sm btn-icon"
             title="Redo (Ctrl+Shift+Z)"
             disabled={depth.redo === 0}
             onClick={redo}

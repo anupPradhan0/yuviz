@@ -273,7 +273,7 @@ export default function KnowledgeBaseDetailPage() {
                             />
                             Always include in prompt
                           </label>
-                          <button className="btn btn-ghost btn-sm" onClick={() => handleDeleteDoc(doc)}>
+                          <button className="btn btn-danger btn-sm" onClick={() => handleDeleteDoc(doc)}>
                             Delete
                           </button>
                         </div>

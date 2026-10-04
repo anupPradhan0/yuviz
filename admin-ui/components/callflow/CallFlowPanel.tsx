@@ -446,7 +446,7 @@ function Canvas({ flow, tenantSlug }: { flow: CallFlow; tenantSlug: string }) {
                 {selected ? "Step settings" : selectedEdge ? "Branch" : "Nothing selected"}
               </span>
               {(selected || selectedEdge) && (
-                <button className="btn btn-ghost btn-sm" style={{ marginLeft: "auto" }} onClick={deleteSelected}>
+                <button className="btn btn-danger btn-sm" style={{ marginLeft: "auto" }} onClick={deleteSelected}>
                   Delete
                 </button>
               )}

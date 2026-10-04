@@ -265,8 +265,8 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                 <div key={row.id}>
                   <div className="kb-row">
                     <button
-                      className="btn btn-ghost btn-sm"
-                      style={{ padding: "2px 6px" }}
+                      className="btn btn-ghost btn-sm btn-icon"
+                      aria-label={isExpanded ? "Collapse" : "Expand"}
                       onClick={() => setExpanded({ ...expanded, [row.id]: !isExpanded })}
                     >
                       {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
@@ -343,7 +343,7 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                             </label>
                           )}
                           {!agentId && (
-                            <button className="btn btn-ghost btn-sm" onClick={() => handleDeleteDoc(doc)}>
+                            <button className="btn btn-danger btn-sm" onClick={() => handleDeleteDoc(doc)}>
                               Delete
                             </button>
                           )}

@@ -69,7 +69,7 @@ export function SecretRefInput({
           </button>
           <button
             type="button"
-            className="btn btn-ghost btn-sm"
+            className="btn btn-danger btn-sm"
             disabled={disabled}
             onClick={() => {
               if (confirm("Remove this key? Whatever uses it will stop working until you add a replacement and save.")) {

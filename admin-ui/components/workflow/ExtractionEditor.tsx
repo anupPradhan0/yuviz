@@ -70,8 +70,7 @@ export function ExtractionEditor({
                 </div>
                 <button
                   type="button"
-                  className="btn btn-ghost btn-sm"
-                  style={{ height: 32 }}
+                  className="btn btn-ghost btn-icon"
                   onClick={() =>
                     onChange({ ...extraction, variables: extraction.variables.filter((_, j) => j !== i) })
                   }

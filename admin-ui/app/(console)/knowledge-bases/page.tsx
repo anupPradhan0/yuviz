@@ -287,7 +287,7 @@ export default function KnowledgeBasesPage() {
                     <td>
                       {canManage && (
                         <button
-                          className="btn btn-ghost btn-sm"
+                          className="btn btn-danger btn-sm"
                           disabled={removingKb === kb.id}
                           onClick={() => removeEmptyKb(kb)}
                         >
@@ -325,7 +325,7 @@ export default function KnowledgeBasesPage() {
                     <td>
                       {canManage && (
                         <button
-                          className="btn btn-ghost btn-sm"
+                          className="btn btn-danger btn-sm"
                           disabled={removingSource === s.id}
                           onClick={() => removeSource(s)}
                         >

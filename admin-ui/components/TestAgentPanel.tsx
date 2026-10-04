@@ -387,7 +387,7 @@ export function TestAgentPanel({
           <div style={{ marginBottom: 14, textAlign: "left" }}>
             <button
               className="btn btn-ghost btn-sm"
-              style={{ width: "100%", justifyContent: "space-between", display: "flex" }}
+              style={{ width: "100%", justifyContent: "space-between" }}
               onClick={() => setTranscriptOpen((o) => !o)}
             >
               <span>Transcript ({transcript.length})</span>
