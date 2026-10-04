@@ -283,6 +283,25 @@ async def test_expired_state_fails_with_no_token_request(pool, tenants, fake):
 
 
 @pytest.mark.asyncio
+async def test_two_simultaneous_callbacks_with_one_state_make_exactly_one_token_request(tenants, fake):
+    """Replay is tested one after the other above. The redeem is a single
+    conditional UPDATE, so two callbacks racing on one state must still spend it
+    once; a SELECT-then-UPDATE would let both through to the token endpoint."""
+    _url, state = await _fresh_state(tenants)
+
+    async def _slow_token(request):
+        await asyncio.sleep(0.05)
+        return httpx.Response(200, json=token_body())
+
+    fake.token = _slow_token
+    results = await asyncio.gather(_redeem(tenants, state), _redeem(tenants, state), return_exceptions=True)
+
+    failures = [r for r in results if isinstance(r, ValueError)]
+    assert len(failures) == 1 and str(failures[0]) == "oauth_connection_failed"
+    assert len(fake.requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_another_admin_of_the_same_tenant_cannot_redeem_the_state(tenants, fake):
     _url, state = await _fresh_state(tenants, user_key="a")
     with pytest.raises(ValueError, match="^oauth_connection_failed$"):
@@ -440,6 +459,33 @@ async def test_invalid_grant_flips_the_status_and_requires_reconnect(pool, tenan
 
 
 @pytest.mark.asyncio
+async def test_invalid_grant_delivered_to_a_refresh_that_lost_the_race_does_not_flip_the_status(pool, tenants, fake):
+    """Microsoft-style rotation: the winner has already replaced the refresh
+    token, so the loser's call carried a spent one and the provider says
+    invalid_grant. The connection is healthy; flipping it would force a
+    reconnect on a working integration."""
+    made, users = tenants
+    connection = await _connect(made["a"], users["a"], fake, refresh="rt-original")
+    await _expire_access_token(pool, connection["id"])
+
+    async def _winner_rotates_then_loser_is_refused(request):
+        await pool.execute(
+            "UPDATE oauth_connections SET access_token_ref = $2, refresh_token_ref = $3, "
+            "access_expires_at = now() + interval '1 hour' WHERE id = $1",
+            connection["id"], encrypt_tenant_secret(made["a"], "at-winner"), encrypt_tenant_secret(made["a"], "rt-winner"),
+        )
+        return httpx.Response(400, json={"error": "invalid_grant"})
+
+    fake.token = _winner_rotates_then_loser_is_refused
+    token, _ = await oauth.access_token_for(made["a"], str(connection["id"]))
+
+    assert token == "at-winner"
+    row = await pool.fetchrow("SELECT * FROM oauth_connections WHERE id = $1", connection["id"])
+    assert row["status"] == "connected"
+    assert decrypt_tenant_secret(made["a"], row["refresh_token_ref"]) == "rt-winner"
+
+
+@pytest.mark.asyncio
 async def test_a_5xx_refresh_leaves_the_status_unchanged(pool, tenants, fake):
     made, users = tenants
     connection = await _connect(made["a"], users["a"], fake)
@@ -586,6 +632,78 @@ async def test_the_revoke_and_the_shared_grant_probe_run_after_the_response(tena
     await background()
     assert time.perf_counter() - started >= 0.5
     assert probes == [1] and len(fake.calls_to("/revoke")) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_secret_reaches_a_log_record_or_an_audit_row_across_callback_refresh_and_disconnect(
+    pool, tenants, fake, caplog,
+):
+    """Design test 5. httpx logs every request URL at INFO, so with it at INFO a
+    secret in any query string goes red; the sentinels are first proven to have
+    flowed (form bodies, empty queries) so the absence below can fail."""
+    made, users = tenants
+    caplog.set_level("INFO")
+    caplog.set_level("INFO", logger="httpx")
+    sentinels = {"access": "AT-SENTINEL-1", "refresh": "RT-SENTINEL-1", "code": "CODE-SENTINEL-1"}
+    sentinels["client_secret"] = "google-client-secret"
+
+    set_target_tenant(made["a"])
+    url = await oauth.start_authorization(tenant_id=made["a"], user_id=users["a"], provider="google", preset_key=None)
+    fake.token = lambda request: httpx.Response(
+        200, json=token_body(access=sentinels["access"], refresh=sentinels["refresh"]))
+    state = _state_of(url)
+    verifier_ref = await pool.fetchval(
+        "SELECT code_verifier_ref FROM oauth_authorization_states WHERE tenant_id = $1", uuid.UUID(made["a"]))
+    connection = await oauth.complete_authorization(
+        tenant_id=made["a"], user_id=users["a"], user_email="admin@acme.test", state=state,
+        code=sentinels["code"], accounts_server=None,
+    )
+    sentinels["verifier"] = decrypt_tenant_secret(made["a"], verifier_ref)
+
+    await _expire_access_token(pool, connection["id"])
+    fake.token = lambda request: httpx.Response(200, json={"access_token": "AT-SENTINEL-2", "expires_in": 3600})
+    refreshed, _ = await oauth.access_token_for(made["a"], str(connection["id"]))
+    sentinels["access2"] = refreshed
+    _body, background, _ = await _disconnect(made["a"], users["a"], connection["id"])
+    await background()
+
+    # The values really flowed: each is in a form body, and no URL carried one.
+    forms = [fake.form(r) for r in fake.requests]
+    assert any(f.get("code") == sentinels["code"] and f.get("code_verifier") == sentinels["verifier"]
+               and f.get("client_secret") == sentinels["client_secret"] for f in forms)
+    assert any(f.get("refresh_token") == sentinels["refresh"] for f in forms)
+    assert any(f.get("token") == sentinels["refresh"] for f in forms)  # the revoke
+    assert refreshed == "AT-SENTINEL-2" and len(fake.requests) == 3  # token, refresh, revoke
+    assert all(r.url.query == b"" for r in fake.requests)
+    assert any(r.name == "httpx" for r in caplog.records)  # httpx was logging, so a URL leak would show
+
+    sinks = [caplog.text, json.dumps(connection, default=str)]
+    sinks += [r["t"] for r in await pool.fetch(
+        "SELECT row_to_json(a)::text AS t FROM audit_log a WHERE tenant_id = $1", uuid.UUID(made["a"]))]
+    for name, value in sentinels.items():
+        for sink in sinks:
+            assert value not in sink, name
+
+
+@pytest.mark.asyncio
+async def test_a_custom_api_cannot_point_at_another_tenants_connection(pool, tenants, fake):
+    """Design test 1(c): the composite FK on (oauth_connection_id, tenant_id) is
+    the storage-level fence behind the application predicates, and the only one
+    that holds if a handler forgets its own check."""
+    import asyncpg
+
+    made, users = tenants
+    connection = await _connect(made["a"], users["a"], fake)
+    insert = (
+        "INSERT INTO custom_apis (tenant_id, name, description, endpoint_url, method, auth_scheme, oauth_connection_id) "
+        "VALUES ($1, $2, 'd', 'https://www.googleapis.com/x', 'GET', 'oauth2_authorization_code', $3)"
+    )
+    with pytest.raises(asyncpg.ForeignKeyViolationError):
+        await pool.execute(insert, uuid.UUID(made["b"]), f"api_{uuid.uuid4().hex[:8]}", connection["id"])
+    try:  # the same insert for the owning tenant is accepted, so the refusal above is the tenant column
+        await pool.execute(insert, uuid.UUID(made["a"]), f"api_{uuid.uuid4().hex[:8]}", connection["id"])
+    finally:
+        await pool.execute("DELETE FROM custom_apis WHERE tenant_id = ANY($1::uuid[])", [uuid.UUID(made["a"]), uuid.UUID(made["b"])])
 
 
 @pytest.mark.asyncio

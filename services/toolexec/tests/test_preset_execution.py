@@ -528,6 +528,48 @@ async def test_the_remote_party_is_resolved_once_per_chain_and_only_for_chains_t
     assert len(calls) == 1  # find_booking and cancel share one resolution
 
 
+@pytest.mark.asyncio
+async def test_a_connected_connectors_access_token_reaches_google_but_no_step_row_or_log(pool, tenant_agent, monkeypatch, caplog):
+    """Design test 5, the executor leg: the bearer is attached to the outbound
+    request and then appears in none of what the run persists or logs."""
+    from libs.config_sdk.secrets import encrypt_tenant_secret
+
+    tenant, agent = tenant_agent
+    token = "AT-EXEC-SENTINEL"
+    connection = await pool.fetchval(
+        "INSERT INTO oauth_connections (tenant_id, provider, status, access_token_ref, access_expires_at, refresh_token_ref) "
+        "VALUES ($1, 'google', 'connected', $2, now() + interval '1 hour', $3) RETURNING id",
+        tenant["id"], encrypt_tenant_secret(tenant["id"], token), encrypt_tenant_secret(tenant["id"], "RT-EXEC-SENTINEL"),
+    )
+    try:
+        await _insert(pool, tenant, agent, "uses_google", auth_scheme="oauth2_authorization_code", method="GET",
+                      side_effecting=False, endpoint_url="https://www.googleapis.com/calendar/v3/x",
+                      oauth_connection_id=connection)
+        upstream = Upstream(default=(200, {"ok": True}))
+        monkeypatch.setattr(executor, "_step_transport", _mock(upstream))
+        caplog.set_level("INFO")
+        caplog.set_level("INFO", logger="httpx")
+
+        response = await executor.execute_chain(_request(tenant, agent, "uses_google"))
+
+        assert response.chain_status == "success"
+        assert [r.headers["authorization"] for r in upstream.requests] == [f"Bearer {token}"]  # it really flowed
+        persisted = await pool.fetch(
+            "SELECT row_to_json(s)::text AS t FROM api_chain_steps s JOIN api_chain_runs r ON r.id = s.run_id "
+            "WHERE r.tenant_id = $1 UNION ALL SELECT row_to_json(r)::text FROM api_chain_runs r WHERE r.tenant_id = $1",
+            tenant["id"])
+        assert len(persisted) == 2
+        for sink in [response.model_dump_json(), caplog.text, *[r["t"] for r in persisted]]:
+            assert token not in sink and "RT-EXEC-SENTINEL" not in sink
+    finally:
+        await pool.execute("DELETE FROM api_side_effect_claims WHERE tenant_id = $1", tenant["id"])
+        await pool.execute("DELETE FROM api_chain_steps WHERE run_id IN (SELECT id FROM api_chain_runs WHERE tenant_id = $1)", tenant["id"])
+        await pool.execute("DELETE FROM api_chain_runs WHERE tenant_id = $1", tenant["id"])
+        await pool.execute("DELETE FROM agent_custom_apis WHERE agent_id = $1", agent["id"])
+        await pool.execute("DELETE FROM custom_apis WHERE tenant_id = $1", tenant["id"])
+        await pool.execute("DELETE FROM oauth_connections WHERE id = $1", connection)
+
+
 def test_only_remote_party_reads_the_requests_call_numbers():
     tree = ast.parse(inspect.getsource(executor))
     readers: set[str] = set()

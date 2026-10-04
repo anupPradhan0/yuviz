@@ -271,6 +271,29 @@ def test_every_credential_call_site_passes_allow_pointer_schemes():
     assert len(calls) == _EXPECTED_CALL_SITES
 
 
+def test_allow_pointer_schemes_has_no_default_anywhere():
+    """A defaulted keyword lets a new caller omit the decision silently, and the
+    call-site count above only catches it when the caller is a direct call."""
+    import ast
+    from pathlib import Path
+
+    defaulted, seen = [], 0
+    for path in sorted(Path(auth.__file__).parent.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            positional = node.args.posonlyargs + node.args.args
+            defaults = [None] * (len(positional) - len(node.args.defaults)) + list(node.args.defaults)
+            params = list(zip(positional, defaults)) + list(zip(node.args.kwonlyargs, node.args.kw_defaults))
+            for arg, default in params:
+                if arg.arg == "allow_pointer_schemes":
+                    seen += 1
+                    if default is not None:
+                        defaulted.append(f"{path.name}:{node.name}")
+    assert seen == _EXPECTED_CALLEES  # the walk found the same functions the call-site test uses
+    assert defaulted == []
+
+
 # Mechanical inventory of ref-shaped columns (lessons 12, 29, 42): the schema
 # is asked what holds a ref, so a fifth column goes red here until it is wired
 # or classified. The four wired ones are exactly those the masking and

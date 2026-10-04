@@ -490,6 +490,43 @@ async def test_a_skipped_row_rolls_back_all_five_columns_and_writes_no_report(ds
     assert await fetch_one(dsn, f"SELECT convalidated FROM pg_constraint WHERE conname = '{_CONSTRAINT}'") is False
 
 
+@pytest.mark.parametrize("target", ["carriers", "custom_apis"])
+async def test_a_row_edited_after_the_scan_makes_the_conditional_update_abort_and_roll_back(
+    dsn, monkeypatch, tmp_path, capsys, target,
+):
+    """The skipped-row test above never reaches the UPDATE's own WHERE: it skips
+    the write, so the run fails later at VALIDATE. Here the real UPDATE runs
+    against a row whose value no longer matches what the scan read, so it must
+    match zero rows and abort. Remove `AND {column} = $2` / `AND auth_config = $3`
+    and the write lands on the stale row, the run exits 0, and this goes red."""
+    s = await seed(dsn)
+    before = await snapshot(dsn)
+    victim = s["car_pair_a"] if target == "carriers" else s["env_api"]
+    name = "_replace_scalar" if target == "carriers" else "_replace_custom_api"
+    real = getattr(script, name)
+    edited = []
+
+    async def _edit_then_write(conn, *args):
+        row_id = args[2] if target == "carriers" else args[0]
+        if not edited and row_id == victim:
+            if target == "carriers":
+                await conn.execute("UPDATE carriers SET auth_token_ref = 'edited-by-someone-else' WHERE id = $1", victim)
+            else:
+                await conn.execute("UPDATE custom_apis SET auth_config = '{\"token_ref\": \"env:OTHER\"}' WHERE id = $1", victim)
+            edited.append(row_id)
+        await real(conn, *args)
+
+    monkeypatch.setattr(script, name, _edit_then_write)
+    report = tmp_path / "never.jsonl"
+    assert await run_main(["--report", str(report)]) == 1
+    assert edited == [victim]  # the stale-row condition was really produced
+    assert "RuntimeError" in capsys.readouterr().err  # the zero-row abort, not a later check
+    assert await snapshot(dsn) == before  # the edit itself rolled back with everything else
+    assert not report.exists()
+    assert await fetch_one(dsn, "SELECT count(*) FROM audit_log") == 0
+    assert await _validated(dsn) is False
+
+
 async def test_a_missing_key_stops_the_run_without_touching_the_database(dsn, monkeypatch):
     await seed(dsn)
     before = await snapshot(dsn)
