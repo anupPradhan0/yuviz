@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable
@@ -272,10 +273,23 @@ async def _make_cartesia_tts(cfg: ProviderConfig, api_key: str | None) -> Any:
             f"provider_config id={cfg.id!r} engine='cartesia' has no voice set — "
             "Cartesia needs a voice id (a UUID from its /voices list)"
         )
+    extra = cfg.extra or {}
+    speed = extra.get("speed")
+    if speed is not None:
+        try:
+            speed = float(speed)
+        except (TypeError, ValueError):
+            speed = float("nan")
+        if isinstance(extra["speed"], bool) or not math.isfinite(speed):
+            raise ValueError(
+                f"provider_config id={cfg.id!r} engine='cartesia' has a non-numeric "
+                f"extra.speed {extra['speed']!r} — expected a multiplier such as 0.85"
+            )
     return CartesiaTTS(
         api_key=_require_api_key(cfg, api_key),
         voice=voice,
-        model=str((cfg.extra or {}).get("model") or "sonic-2"),
+        model=str(extra.get("model") or "sonic-2"),
+        speed=speed,
     )
 
 
