@@ -2,7 +2,8 @@ static_resources:
   listeners:
     - name: grpc_listener
       address:
-        socket_address: { address: 0.0.0.0, port_value: 10000 }
+        # Loopback only: Conversation's gRPC has no auth and trusts the tenant it is sent.
+        socket_address: { address: 127.0.0.1, port_value: 10000 }
       filter_chains:
         - filters:
             - name: envoy.filters.network.http_connection_manager

@@ -1,11 +1,4 @@
-"""
-Pydantic request/response models for Tool Execution Service's HTTP API —
-same convention as services/knowledge/schemas.py: responses are the plain
-dicts the service modules already return, no separate response schema,
-except ChainExecuteRequest/Response which cross the internal service
-boundary (services/toolexec/routers/execute.py) and so are validated on
-both sides of that call.
-"""
+"""Pydantic models for the Tool Execution Service HTTP API."""
 
 from __future__ import annotations
 
@@ -178,11 +171,7 @@ class ChainExecuteRequest(BaseModel):
     # Whole-chain wall clock, derived from the turn's deadline; server
     # clamps to TOOLEXEC_MAX_CHAIN_BUDGET_MS (can only lower).
     chain_budget_ms: int
-    # Effective per-agent ceiling. NOT trusted verbatim — bounded here
-    # against the platform maximum (never trust the caller already
-    # clamped it), and independently re-clamped again inside
-    # graph.resolve_order() and against agent_apis._effective_max_chain_depth()
-    # in the executor, so no single dropped clamp can let a chain past 4.
+    # Untrusted; also re-clamped in the executor and graph.resolve_order().
     max_chain_depth: int = Field(ge=1, le=graph.MAX_CHAIN_LEVELS)
     # The call's own metadata, stamped by Conversation from the route. Three
     # independent fields, never one pre-chosen "remote number": toolexec picks
@@ -213,16 +202,10 @@ class ChainExecuteResponse(BaseModel):
         "confirmation_required",
     ]
     steps: list[ChainStepReport] = []
-    # AC 6: what DID happen, never dropped even when the chain as a whole failed.
+    # Reported even when the chain as a whole failed.
     completed_steps: list[str] = []
     failed_step: ChainStepReport | None = None
-    # Redacted projection of the FINAL step only, populated only when
-    # chain_status == "success".
-    #
-    # A JSON array is as valid a response body as an object, and list
-    # endpoints (GET /users, GET /comments) return one — typing this as
-    # dict-only made the chain run correctly and then fail to serialize its
-    # own result, turning a successful call into a 500.
+    # Redacted final-step response, only on success; may be a JSON array.
     data: dict[str, Any] | list[Any] = {}
     missing_fields: list[dict] = []
     deterministic_response: str | None = None

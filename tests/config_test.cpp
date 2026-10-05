@@ -2,8 +2,12 @@
 #include "config/Config.h"
 #include "config/RedisClient.h"
 #include "logging/Logger.h"
+#include "telephony/EslClient.h"
+#include "telephony/TransferRequest.h"
+#include <cstdlib>
 #include <fstream>
 #include <filesystem>
+#include <string>
 
 namespace {
 
@@ -31,7 +35,7 @@ TEST_F(ConfigTest, DefaultsAreAppliedWhenKeysMissing) {
     cfg.load(tmp_yaml_.string());
 
     EXPECT_EQ(cfg.websocket().port, 8080);
-    EXPECT_EQ(cfg.websocket().host, "0.0.0.0");
+    EXPECT_EQ(cfg.websocket().host, "127.0.0.1");
     EXPECT_EQ(cfg.media().sample_rate, 16000u);
     EXPECT_EQ(cfg.media().channels, 1u);
 }
@@ -130,7 +134,7 @@ gateway:
     EXPECT_EQ(cfg.conversation().connect_timeout_ms, 3000u);
 }
 
-// ── Redis section (Phase 5) ──────────────────────────────────────────────────
+// ── Redis section ────────────────────────────────────────────────────────────
 
 TEST_F(ConfigTest, RedisSectionDefaultsToDisabled) {
     write_yaml("gateway:\n");
@@ -162,17 +166,14 @@ gateway:
 }
 
 // ── TenantConfig::from_redis() ───────────────────────────────────────────────
-// Only the disabled-Redis path is exercised here — this test suite is
-// hermetic by convention (no other test connects to a live external service;
-// EslClient has no dedicated test file for the same reason). The live
-// Redis roundtrip is verified manually, not via ctest.
+// Hermetic: only the disabled-Redis path is tested; live Redis is verified manually.
 
 TEST_F(ConfigTest, FromRedisFallsBackToDefaultsWhenRedisDisabled) {
     write_yaml("gateway:\n");
     voiceai::Config cfg;
     cfg.load(tmp_yaml_.string());
 
-    voiceai::Logger logger{"test"};
+    voiceai::Logger logger = voiceai::Logger::make_null();
     voiceai::RedisClient redis{cfg.gateway().redis, logger};  // enabled=false by default
 
     const auto expected = voiceai::TenantConfig::from_default(cfg.gateway());
@@ -185,16 +186,14 @@ TEST_F(ConfigTest, FromRedisFallsBackToDefaultsWhenRedisDisabled) {
 }
 
 // ── PhoneRoute::from_redis() ─────────────────────────────────────────────────
-// Same hermetic convention as FromRedisFallsBackToDefaultsWhenRedisDisabled
-// above — only the disabled/missing-key fallback path is exercised here; the
-// live Redis roundtrip is verified manually, not via ctest.
+// Hermetic: only the disabled/missing-key fallback is tested.
 
 TEST_F(ConfigTest, PhoneRouteFallsBackToDefaultsWhenRedisDisabled) {
     write_yaml("gateway:\n");
     voiceai::Config cfg;
     cfg.load(tmp_yaml_.string());
 
-    voiceai::Logger logger{"test"};
+    voiceai::Logger logger = voiceai::Logger::make_null();
     voiceai::RedisClient redis{cfg.gateway().redis, logger};  // enabled=false by default
 
     const auto route = voiceai::PhoneRoute::from_redis(redis, "5000");
@@ -209,7 +208,7 @@ TEST_F(ConfigTest, PhoneRouteFallsBackToDefaultsOnEmptyDid) {
     voiceai::Config cfg;
     cfg.load(tmp_yaml_.string());
 
-    voiceai::Logger logger{"test"};
+    voiceai::Logger logger = voiceai::Logger::make_null();
     voiceai::RedisClient redis{cfg.gateway().redis, logger};
 
     const auto route = voiceai::PhoneRoute::from_redis(redis, "");
@@ -220,7 +219,6 @@ TEST_F(ConfigTest, PhoneRouteFallsBackToDefaultsOnEmptyDid) {
 }
 
 // ── CallMetadata::parse() ────────────────────────────────────────────────────
-// Pure function, no I/O — hermetic by construction, not just by convention.
 
 TEST_F(ConfigTest, CallMetadataParsesAllFields) {
     const auto md = voiceai::CallMetadata::parse(
@@ -264,11 +262,8 @@ TEST_F(ConfigTest, CallMetadataIgnoresWrongTypedFields) {
 
 } // namespace
 
-// ── CallFsmTimerConfig transfer timeout (Phase 5F) ───────────────────────────
-// The Redis overlay's bounds logic itself needs a live/fake Redis (see the
-// hermetic-suite convention above) — verified live instead. What IS asserted
-// hermetically: the compiled default and the bound ordering the overlay
-// clamps against.
+// ── CallFsmTimerConfig transfer timeout ──────────────────────────────────────
+// Asserts the compiled default and bound ordering; the Redis overlay needs live Redis.
 
 TEST_F(ConfigTest, TransferTimeoutDefaultIs45sWithSaneBounds) {
     const voiceai::CallFsmTimerConfig t{};
@@ -288,4 +283,159 @@ TEST_F(ConfigTest, NoSpeechTimeoutDefaultIs30sWithSaneBounds) {
               voiceai::CallFsmTimerConfig::no_speech_timeout_default);
     EXPECT_LT(voiceai::CallFsmTimerConfig::no_speech_timeout_default,
               voiceai::CallFsmTimerConfig::no_speech_timeout_max);
+}
+
+// ── ESL settings from the environment (.env) ─────────────────────────────────
+namespace {
+
+class EslEnvConfigTest : public ConfigTest {
+protected:
+    void SetUp() override {
+        ConfigTest::SetUp();
+        for (const char* v : {"FREESWITCH_ESL_PASSWORD", "FREESWITCH_ESL_HOST", "FREESWITCH_ESL_PORT",
+                              "SIP_PROXY_HOST", "SIP_PROXY_PORT", "CONVERSATION_SVC_TARGET", "REDIS_URL",
+                              "GATEWAY_LISTEN_HOST"}) {
+            ::unsetenv(v);
+        }
+    }
+    void TearDown() override {
+        SetUp();
+        ConfigTest::TearDown();
+    }
+};
+
+}  // namespace
+
+TEST_F(EslEnvConfigTest, PasswordAndSipProxyComeFromTheEnvironment) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "from-env-secret", 1);
+    ::setenv("SIP_PROXY_HOST", "10.1.2.3", 1);
+    ::setenv("SIP_PROXY_PORT", "5070", 1);
+    write_yaml("gateway:\n  esl:\n    enabled: true\n    sip_proxy_host: \"127.0.0.1\"\n");
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+    EXPECT_EQ(cfg.esl().password, "from-env-secret");
+    EXPECT_EQ(cfg.esl().sip_proxy_host, "10.1.2.3");
+    EXPECT_EQ(cfg.esl().sip_proxy_port, 5070);
+}
+
+TEST_F(EslEnvConfigTest, EnvironmentWinsOverYaml) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "from-env", 1);
+    write_yaml("gateway:\n  esl:\n    enabled: true\n    password: \"from-yaml\"\n");
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+    EXPECT_EQ(cfg.esl().password, "from-env");
+}
+
+TEST_F(EslEnvConfigTest, ConversationTargetAndRedisComeFromTheEnvironment) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "p", 1);
+    ::setenv("CONVERSATION_SVC_TARGET", "localhost:50051", 1);
+    ::setenv("REDIS_URL", "redis://10.0.0.5:6380/0", 1);
+    write_yaml("gateway:\n  conversation:\n    type: \"grpc\"\n    endpoint: \"localhost:10000\"\n"
+               "  redis:\n    host: \"127.0.0.1\"\n    port: 6379\n");
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+    EXPECT_EQ(cfg.conversation().endpoint, "localhost:50051");
+    EXPECT_EQ(cfg.gateway().redis.host, "10.0.0.5");
+    EXPECT_EQ(cfg.gateway().redis.port, 6380);
+}
+
+TEST_F(EslEnvConfigTest, WebSocketListensOnLoopbackUnlessGatewayListenHostIsSet) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "p", 1);
+    write_yaml("gateway:\n  websocket:\n    port: 8080\n");
+    {
+        voiceai::Config cfg;
+        cfg.load(tmp_yaml_.string());
+        EXPECT_EQ(cfg.websocket().host, "127.0.0.1");
+    }
+    ::setenv("GATEWAY_LISTEN_HOST", "192.168.0.116", 1);
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+    EXPECT_EQ(cfg.websocket().host, "192.168.0.116");
+}
+
+TEST_F(EslEnvConfigTest, RedisUrlWithoutPortOrDbUsesDefaults) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "p", 1);
+    ::setenv("REDIS_URL", "redis://localhost", 1);
+    write_yaml("gateway:\n  esl:\n    enabled: true\n");
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+    EXPECT_EQ(cfg.gateway().redis.host, "localhost");
+    EXPECT_EQ(cfg.gateway().redis.port, 6379);
+}
+
+TEST_F(EslEnvConfigTest, UnsupportedRedisUrlRefusesToStart) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "p", 1);
+    write_yaml("gateway:\n  esl:\n    enabled: true\n");
+    for (const char* bad : {"http://localhost:6379", "redis://:secret@localhost:6379", "redis://localhost:6379/2",
+                            "redis://localhost:99999", "redis://:6379"}) {
+        ::setenv("REDIS_URL", bad, 1);
+        voiceai::Config cfg;
+        EXPECT_THROW(cfg.load(tmp_yaml_.string()), std::runtime_error) << bad;
+    }
+}
+
+TEST_F(EslEnvConfigTest, OutOfRangeOrMalformedPortRefusesToStart) {
+    write_yaml("gateway:\n  esl:\n    enabled: true\n    password: \"p\"\n");
+    for (const char* bad : {"80220", "8022x", "0", "-1", "99999999999999999999"}) {
+        ::setenv("FREESWITCH_ESL_PORT", bad, 1);
+        voiceai::Config cfg;
+        EXPECT_THROW(cfg.load(tmp_yaml_.string()), std::runtime_error) << bad;
+    }
+    ::unsetenv("FREESWITCH_ESL_PORT");
+    ::setenv("SIP_PROXY_PORT", "70000", 1);
+    voiceai::Config cfg;
+    EXPECT_THROW(cfg.load(tmp_yaml_.string()), std::runtime_error);
+}
+
+TEST_F(EslEnvConfigTest, EnabledEslWithoutAPasswordRefusesToStart) {
+    write_yaml("gateway:\n  esl:\n    enabled: true\n");
+    voiceai::Config cfg;
+    EXPECT_THROW(cfg.load(tmp_yaml_.string()), std::runtime_error);
+}
+
+TEST_F(EslEnvConfigTest, DisabledEslNeedsNoPassword) {
+    write_yaml("gateway:\n  esl:\n    enabled: false\n");
+    voiceai::Config cfg;
+    EXPECT_NO_THROW(cfg.load(tmp_yaml_.string()));
+}
+
+// Shipped files must leave the proxy host unset (update_kamailio_ip.sh writes it);
+// an .env.example default would override the yaml and bypass the unset refusal.
+TEST_F(EslEnvConfigTest, ShippedConfigAndEnvExampleLeaveNumbersRefused) {
+    const std::filesystem::path src{YUVIZ_SOURCE_DIR};
+    std::ifstream example{src / ".env.example"};
+    ASSERT_TRUE(example.is_open());
+    std::string line, shipped;
+    bool found = false;
+    while (std::getline(example, line)) {
+        if (line.rfind("SIP_PROXY_HOST=", 0) == 0) {
+            shipped = line.substr(std::string("SIP_PROXY_HOST=").size());
+            found = true;
+        }
+    }
+    ASSERT_TRUE(found) << ".env.example has no SIP_PROXY_HOST line";
+
+    // What start_local.sh would hand the Gateway (a blank value is exported
+    // as-is here; _load_env skips it, and env_value() must treat it as unset).
+    ::setenv("SIP_PROXY_HOST", shipped.c_str(), 1);
+    ::setenv("FREESWITCH_ESL_PASSWORD", "p", 1);
+    voiceai::Config cfg;
+    cfg.load((src / "config" / "gateway.yaml").string());
+    EXPECT_EQ(cfg.esl().sip_proxy_host, "");
+
+    voiceai::Logger logger = voiceai::Logger::make_null();
+    voiceai::EslClient client{cfg.esl(), logger};
+    std::string error;
+    EXPECT_FALSE(client.transfer(
+        voiceai::TransferRequest{"call-uuid-1", "cold", "1005", "x"}, error));
+    EXPECT_EQ(error, "sip_proxy_host_unset");
+}
+
+TEST_F(EslEnvConfigTest, BlankSipProxyHostEnvDoesNotOverrideTheYaml) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "p", 1);
+    ::setenv("SIP_PROXY_HOST", "", 1);
+    write_yaml("gateway:\n  esl:\n    enabled: true\n    sip_proxy_host: \"10.9.9.9\"\n");
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+    EXPECT_EQ(cfg.esl().sip_proxy_host, "10.9.9.9");
 }

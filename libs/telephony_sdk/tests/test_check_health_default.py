@@ -31,6 +31,9 @@ class _NoHealthOverride(ITelephonyProvider):
     def build_answer_response(self, websocket_url):
         return websocket_url
 
+    def parse_dtmf_digit(self, fields):
+        return None
+
     def normalize_inbound_webhook(self, *, url, headers, fields, account_tenant_slug):
         return NormalizedInboundCall(
             provider_call_id="id", from_number="", to_number="", known_tenant_slug=None, raw={},

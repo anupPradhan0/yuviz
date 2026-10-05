@@ -1,10 +1,4 @@
-"""
-Pydantic request models — validate what comes in over HTTP before it reaches
-Config Service. Responses are the plain dicts tenants.py/agents.py/
-provider_configs.py already return (FastAPI serializes UUID/datetime in a
-dict automatically) — no separate response schema, so there's exactly one
-place field lists are maintained, not two that can drift apart.
-"""
+"""Pydantic request models. Responses are the service modules' plain dicts (no response schemas)."""
 
 from __future__ import annotations
 
@@ -55,17 +49,12 @@ class TenantUpdate(BaseModel):
     no_speech_timeout_ms:  int | None = None
     stt_timeout_ms:        int | None = None
     llm_timeout_ms:        int | None = None
-    # Bounds mirror the gateway's CallFsmTimerConfig::transfer_timeout_min/max
-    # (10s-120s) — enforced here too so a bad value is rejected at config
-    # time instead of silently falling back to the default at call time.
+    # Mirrors the gateway's transfer timeout bounds, so bad values fail here, not silently at call time.
     transfer_timeout_ms:   int | None = Field(default=None, ge=10_000, le=120_000)
     default_stt_config_id: str | None = None
     default_llm_config_id: str | None = None
     default_tts_config_id: str | None = None
-    # None = field absent, per `exclude_unset` (matching every other field on
-    # this model) — clearing the cap back to NULL is not offered through
-    # this endpoint; use PATCH /tenants/{id}/concurrency's own dedicated
-    # route (routers/tenants.py) for that, which shares this same bound.
+    # None means unset; this route can't clear the cap to NULL.
     max_concurrent_calls:  int | None = Field(default=None, ge=1, le=10_000)
 
 
@@ -102,6 +91,54 @@ class AgentCreate(BaseModel):
         return _check_graph_bounds(value)
 
 
+def _no_double_braces(value: str) -> str:
+    # The runtime workflow renderer evaluates or deletes {{ ... }} and has no escape syntax.
+    if "{{" in value or "}}" in value:
+        raise ValueError("double curly brackets are not allowed")
+    return value
+
+
+class AgentFromTemplate(BaseModel):
+    template_id:      str
+    template_version: int
+    name:             str = Field(min_length=1, max_length=80)
+    business_name:    str = Field(min_length=1, max_length=120)
+    business_facts:   str = Field(max_length=1000)
+    language:         str | None = None
+    stt_config_id:    str | None = None
+    llm_config_id:    str | None = None
+    tts_config_id:    str | None = None
+
+    _braces = field_validator("name", "business_name", "business_facts")(_no_double_braces)
+
+
+class TestSessionCreate(BaseModel):
+    __test__ = False  # not a pytest class
+
+    channel: Literal["voice", "chat"]
+
+
+class TestChatTurn(BaseModel):
+    __test__ = False  # not a pytest class
+
+    credential: str
+    session_id: str
+    message:    str = Field(min_length=1, max_length=1000)
+
+
+class PromptRevise(BaseModel):
+    session_id:    str
+    problem:       str = Field(min_length=1, max_length=1000)
+    llm_config_id: str | None = None
+
+
+class PromptAccept(BaseModel):
+    session_id:         str
+    problem:            str = Field(min_length=1, max_length=1000)
+    proposed_prompt:    str = Field(max_length=20_000)
+    base_prompt_sha256: str
+
+
 class AgentUpdate(BaseModel):
     name:                 str | None = None
     greeting:             str | None = None
@@ -115,9 +152,7 @@ class AgentUpdate(BaseModel):
     transfer_destination: str | None = None
     queue_id:             str | None = None
     escalation_threshold: int | None = None
-    # What caller ID the human agent sees on a warm transfer's agent leg —
-    # resolved entirely in the Conversation Service; the gateway never sees
-    # this, only the final caller_id string (see transfer_engine.py).
+    # Caller ID the human sees on a warm transfer; resolved in the Conversation Service.
     caller_id_policy:     Literal["original", "platform", "custom"] | None = None
     platform_did:         str | None = None
     custom_caller_id:     str | None = None
@@ -126,7 +161,10 @@ class AgentUpdate(BaseModel):
     @classmethod
     def _transfer_destination_shape(cls, value: str | None) -> str | None:
         if value and not is_transfer_destination(value):
-            raise ValueError("transfer_destination must be a phone number/extension or sip:user@host")
+            raise ValueError(
+                "transfer_destination must be a phone number/extension or sip:user@host, and not "
+                "one of this platform's own AI numbers (788, 5000-5009) or a loopback address"
+            )
         return value
 
     @field_validator("platform_did", "custom_caller_id")
@@ -146,16 +184,9 @@ class AgentUpdate(BaseModel):
     farewell_message:      str | None = None
     transfer_announcement: str | None = None
     status:               Literal["active", "inactive"] | None = None
-    # Admin-configured hard ceiling on call length, in seconds; None = no
-    # limit set (leaves the column NULL — unlimited, the pre-existing
-    # behavior). Bounds mirror the DB CHECK constraint (agents_max_call_
-    # duration_s_check) so a bad value is rejected at config time instead
-    # of failing the INSERT/UPDATE.
+    # Hard call-length ceiling in seconds (None = unlimited); bounds mirror the DB CHECK.
     max_call_duration_s:  int | None = Field(default=None, ge=30, le=7200)
-    # Which call flow answers ahead of this agent (call_flows.id). Unset
-    # leaves it alone; an explicit null detaches the flow — the agent then
-    # answers directly, which is what every agent did before call flows
-    # existed.
+    # Call flow that answers ahead of this agent; explicit null detaches it.
     call_flow_id:         str | None = None
 
 
@@ -184,9 +215,7 @@ class WorkflowPublish(BaseModel):
 
 
 class VoicePreview(BaseModel):
-    """Text to speak in a provider_config's voice. The length cap lives in
-    voice_preview.MAX_CHARS too — this one keeps an oversized body from
-    reaching the vendor at all."""
+    """Text to speak in a provider_config's voice."""
     text: str = Field(min_length=1, max_length=600)
 
 
@@ -195,9 +224,7 @@ class CallFlowCreate(BaseModel):
     name:        str
     description: str = ""
     direction:   Literal["inbound", "outbound", "both"] = "inbound"
-    # Exactly one seeds the graph, or neither for the built-in starter:
-    # clone_from_id copies another flow in the same tenant, graph is the
-    # scaffold the builder's step picker produced.
+    # At most one seeds the graph (clone a same-tenant flow, or a builder scaffold); neither = starter.
     clone_from_id: str | None = None
     graph:         dict[str, Any] | None = None
 
@@ -216,8 +243,7 @@ class CallFlowUpdate(BaseModel):
 
 class CallFlowDraft(BaseModel):
     graph: dict[str, Any]
-    # 409 if call_flows.config_version moved since the editor loaded (a
-    # publish won the race) — same fence as WorkflowDraft's.
+    # 409 if call_flows.config_version moved since the editor loaded.
     expected_version: int | None = None
 
     @field_validator("graph")
@@ -242,10 +268,6 @@ class CallFlowPublish(BaseModel):
 
 class ProviderConfigCreate(BaseModel):
     name:        str
-    # 'embedding' added for Phase 6A's Knowledge Platform (services/knowledge/
-    # embedding_manager.py) — provider_configs.role's CHECK constraint
-    # already allows it (see database/knowledge_schema.sql); this schema
-    # just hadn't been widened to match until now.
     role:        Literal["stt", "llm", "tts", "embedding"]
     engine:      str
     environment: Literal["prod", "staging", "dev"] = "prod"
@@ -254,8 +276,7 @@ class ProviderConfigCreate(BaseModel):
     language:    str | None = None
     region:      str | None = None
     api_key_ref: str | None = None
-    # The credential itself, encrypted before it reaches Postgres and stored
-    # as an enc: api_key_ref. Never a column — see resolve_api_key_input().
+    # Plaintext credential; encrypted into an enc: api_key_ref, never stored as-is.
     api_key:     str | None = None
     extra:       dict[str, Any] | None = None
 
@@ -270,20 +291,13 @@ class ProviderConfigUpdate(BaseModel):
     region:      str | None = None
     api_key_ref: str | None = None
     api_key:     str | None = None
-    # Replaces the whole extra object — service layer does not deep-merge
-    # (see provider_configs.update_provider_config). Was missing here even
-    # though the service layer and admin-ui's own TS type both already
-    # supported it — PATCHing extra silently 400'd with "no fields to
-    # update" since FastAPI drops any JSON key with no matching Pydantic
-    # field before exclude_unset=True ever runs.
+    # Replaces the whole extra object (no deep merge).
     extra:       dict[str, Any] | None = None
 
 
 class TelephonyConfigCreate(BaseModel):
     name:                str
-    # Validated against libs.telephony_sdk's registered provider names at
-    # the business-logic layer (services/config/telephony_configs.py), not
-    # here — new providers are additive there, not a schema change here.
+    # Validated against the telephony_sdk registry in telephony_configs.py.
     provider:            str
     credentials:         dict[str, Any] = {}
     is_default_outbound: bool = False
@@ -291,24 +305,18 @@ class TelephonyConfigCreate(BaseModel):
 
 class TelephonyConfigUpdate(BaseModel):
     name:                str | None = None
-    # provider is immutable after creation — same posture as
-    # ProviderConfigUpdate dropping `role`.
+    # provider is immutable after creation.
     credentials:         dict[str, Any] | None = None
     is_default_outbound: bool | None = None
 
 
 class ToolProviderConfigCreate(BaseModel):
     name:        str
-    # 'tool_name' matches the static catalog in services/conversation/tools/
-    # registry.py (ToolRegistry) — "book_appointment"/"send_sms" today.
     tool_name:   str
     engine:      str
-    # One of api_key_ref/api_key is required — every tool engine today
-    # (cal_com, twilio) is a cloud API requiring credentials; the router
-    # checks that at least one was given (see resolve_api_key_input()).
+    # The router requires api_key_ref or api_key for every engine except toolexec.
     api_key_ref: str | None = None
-    # The credential itself, encrypted before it reaches Postgres — see
-    # provider_configs.resolve_api_key_input().
+    # Plaintext credential; encrypted before it reaches Postgres.
     api_key:     str | None = None
     extra:       dict[str, Any] | None = None
 
@@ -327,12 +335,7 @@ class AgentToolPolicyCreate(BaseModel):
     enabled:                  bool = True
     timeout_ms:               int | None = None
     max_calls_per_turn:       int | None = None
-    # NULL = use the platform ceiling (services/toolexec/graph.py's
-    # MAX_CHAIN_LEVELS = 4); a set value can only LOWER it, never raise
-    # it, enforced where it's actually applied (agent_apis.py's
-    # _effective_max_chain_depth and executor.py's ceiling clamp), never
-    # 0/disabled. Meaningful only for tool_name='execute_api'; harmless
-    # (unread) on every other tool's row.
+    # NULL = platform ceiling (4); a set value can only lower it. Read only for execute_api.
     max_chain_depth:          int | None = None
 
 

@@ -1,9 +1,4 @@
-"""
-MockConfigProvider — in-memory IConfigProvider, zero I/O. Lets a consumer
-like agent_resolver.py be tested by constructing RuntimeConfig objects
-directly rather than standing up real Postgres/Redis fixtures — the
-concrete testability win called out in the SDK's design doc.
-"""
+"""In-memory IConfigProvider for tests; zero I/O."""
 
 from __future__ import annotations
 
@@ -75,9 +70,11 @@ class MockConfigProvider:
     async def get_provider_config(self, provider_id: str) -> ProviderConfig | None:
         return self.provider_configs.get(provider_id)
 
-    async def get_runtime_config(self, tenant_slug: str, agent_slug: str) -> RuntimeConfig | None:
+    async def get_runtime_config(
+        self, tenant_slug: str, agent_slug: str, *, include_inactive: bool = False,
+    ) -> RuntimeConfig | None:
         agent = await self.get_agent(tenant_slug, agent_slug)
-        if agent is None or agent.status != "active":
+        if agent is None or (agent.status != "active" and not include_inactive):
             return None
         tenant = await self.get_tenant(tenant_slug)
         if tenant is None:

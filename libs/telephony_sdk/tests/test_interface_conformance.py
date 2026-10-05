@@ -25,9 +25,7 @@ def _provider_module_count() -> int:
 
 
 def test_registry_size_matches_provider_module_count():
-    # A provider added without conforming (e.g. missing an abstract method
-    # override) would fail to import, so this enumeration itself fails
-    # rather than silently omitting the new module (lesson 12, lesson 29).
+    # A non-conforming provider fails to import, so it can't be silently omitted.
     assert len(TelephonyProviderRegistry.all()) == _provider_module_count()
 
 
@@ -79,6 +77,9 @@ def test_subclass_without_normalize_inbound_webhook_is_abstract():
         def build_answer_response(self, websocket_url):
             return websocket_url
 
+        def parse_dtmf_digit(self, fields):
+            return None
+
     with pytest.raises(TypeError, match="abstract"):
         _Incomplete({})
 
@@ -109,6 +110,9 @@ def test_subclass_implementing_normalize_inbound_webhook_instantiates_with_defau
 
         def build_answer_response(self, websocket_url):
             return websocket_url
+
+        def parse_dtmf_digit(self, fields):
+            return None
 
         def normalize_inbound_webhook(self, *, url, headers, fields, account_tenant_slug):
             return NormalizedInboundCall(
@@ -147,6 +151,9 @@ async def test_concrete_defaults():
 
         def build_answer_response(self, websocket_url):
             return websocket_url
+
+        def parse_dtmf_digit(self, fields):
+            return None
 
         def normalize_inbound_webhook(self, *, url, headers, fields, account_tenant_slug):
             return NormalizedInboundCall(

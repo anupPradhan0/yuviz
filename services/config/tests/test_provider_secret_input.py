@@ -1,9 +1,4 @@
-"""
-The credential path from request body to column. No database: these are the
-checks that would have caught `api_key` never being declared on the request
-schemas, which made every provider create 500 and silently dropped a pasted
-key on update.
-"""
+"""Provider credential path from request body to column (no database)."""
 
 from __future__ import annotations
 
@@ -28,8 +23,7 @@ def test_create_schema_carries_the_typed_key():
 
 
 def test_update_schema_carries_the_typed_key():
-    # exclude_unset is what the PATCH router sends on; an undeclared field
-    # is dropped here silently, with no error anywhere.
+    # The PATCH router uses exclude_unset; an undeclared field is silently dropped.
     assert ProviderConfigUpdate(api_key="AIza-typed").model_dump(exclude_unset=True) == {
         "api_key": "AIza-typed",
     }
@@ -83,7 +77,6 @@ def test_stored_sentinel_as_a_typed_key_is_refused(key):
 
 
 def test_a_raw_key_in_the_pointer_field_is_refused(key):
-    # Raw keys in the pointer field must be refused instead of stored in plaintext.
     with pytest.raises(ValueError, match="must point at a secret"):
         resolve_api_key_input(None, "AIzaSyRAW", allow_pointer_schemes=True)
 

@@ -1,11 +1,6 @@
 """
-Agent CRUD — same cache-aside + audited-mutation pattern as tenants.py.
-
-get_agent() is keyed by (tenant_slug, agent_slug) rather than a bare id,
-because that's what the hot path actually has: the WebSocket path is
-`/<agent>/<uuid>`, and the tenant is resolved from the same connection
-context — nobody holds a UUID before the call starts. get_agent_by_id()
-exists for the Admin UI's edit-by-id flow, where the id is already known.
+Agent CRUD — cache-aside + audited mutations. get_agent() is keyed by slugs
+because that's all the call hot path has.
 
 Prompt sync (phase until Conversation reads agents.workflow):
 - Runtime still speaks agents.greeting / system_prompt.
@@ -16,15 +11,17 @@ Prompt sync (phase until Conversation reads agents.workflow):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from libs.config_sdk.workflow import graphs_equivalent, starter_graph
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import audit, cache, call_flows, db
 from .provider_configs import require_usable_tts_voice
+from .system_prompt import check_prompt_structure
 
 # `workflow` is absent — only publish/create may write a validated graph
 # (except the greeting/system_prompt mirror sync in update_agent).
@@ -43,6 +40,12 @@ _UPDATABLE_FIELDS = {
 
 _JSON_COLUMNS = ("workflow", "workflow_draft")
 
+# Undo slot: the prompt before the last accepted fix, and the hash of the
+# prompt that fix wrote. Never leaves this module (audit rows, API payloads).
+_SLOT_COLUMNS = ("prompt_undo_previous", "prompt_undo_accepted_sha256")
+
+_PROMPT_SHA_SQL = "encode(sha256(convert_to(coalesce(system_prompt,''),'UTF8')),'hex')"
+
 
 def cache_key(tenant_slug: str, agent_slug: str) -> str:
     return f"agent:{tenant_slug}:{agent_slug}"
@@ -57,16 +60,32 @@ def _row(row: Any) -> dict[str, Any]:
     return out
 
 
+def _strip_slot(row: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in row.items() if k not in _SLOT_COLUMNS}
+
+
+def _sha256_hex(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _audit_view(row: dict[str, Any]) -> dict[str, Any]:
     """Strip graph columns from ordinary agent audits (publish records them)."""
-    return {k: v for k, v in row.items() if k not in _JSON_COLUMNS}
+    return {k: v for k, v in _strip_slot(row).items() if k not in _JSON_COLUMNS}
 
 
 def _public_agent(row: dict[str, Any]) -> dict[str, Any]:
     """Published workflow stays on the agent GET/cache payload so call-setup
-    can carry it into RuntimeConfig. Draft is editor-only until draft testing."""
-    out = dict(row)
+    can carry it into RuntimeConfig. Draft is editor-only until draft testing.
+    can_undo and prompt_fixable are computed from the raw row before the slot
+    is stripped."""
+    prompt = row.get("system_prompt") or ""
+    out = _strip_slot(row)
     out.pop("workflow_draft", None)
+    out["can_undo"] = (
+        row.get("prompt_undo_previous") is not None
+        and _sha256_hex(prompt) == row.get("prompt_undo_accepted_sha256")
+    )
+    out["prompt_fixable"] = check_prompt_structure(prompt)
     return out
 
 
@@ -182,22 +201,12 @@ _PROVIDER_ROLE_BY_FIELD = {
 
 
 async def _validate_provider_assignments(conn: Any, tenant_id: Any, fields: dict[str, Any]) -> None:
-    """FK existence alone lets stt_config_id point at another tenant's
-    provider, or at a real provider_configs row with the wrong role (e.g.
-    an llm engine assigned as tts_config_id) — either silently breaks the
-    agent at call time rather than at config time. Checked here instead of
-    relying on the caller, so both create_agent() and update_agent() get
-    the same guarantee."""
+    """Reject provider ids from another tenant or with the wrong role (FK alone allows both)."""
     for field, expected_role in _PROVIDER_ROLE_BY_FIELD.items():
         config_id = fields.get(field)
         if config_id is None:
             continue
-        # UUID-format check before the query: a malformed (non-UUID-shaped)
-        # string reaching asyncpg's parameter binding raises DataError, which
-        # is neither a ValueError nor a LookupError — app.py has no handler
-        # for it, so it would otherwise surface as a raw, undetailed 500
-        # instead of a clean 400. Same discipline as deps.py's
-        # validate_id_exists() for other id fields in request bodies.
+        # A malformed id would raise asyncpg DataError (an unhandled 500).
         try:
             uuid.UUID(config_id)
         except (ValueError, TypeError):
@@ -208,17 +217,10 @@ async def _validate_provider_assignments(conn: Any, tenant_id: Any, fields: dict
             "WHERE id = $1 AND deleted_at IS NULL FOR SHARE", config_id,
         )
         if row is None:
-            raise ValueError(f"{field}={config_id!r} does not exist")
-        # tenant_id may arrive as a str (tenants.get_tenant() on a cache hit —
-        # cache.py round-trips through JSON, which has no UUID type) or a
-        # uuid.UUID (a fresh asyncpg row) depending on which caller resolved
-        # it; row["tenant_id"] here is always a fresh asyncpg UUID. Comparing
-        # the two directly is a type mismatch, not a tenant mismatch, and
-        # made every stt/llm/tts_config_id assignment fail immediately after
-        # the first cache hit for that tenant — same bug class as
-        # libs/tenancy.session's _split_tenant fix; same fix here.
+            raise ValueError(f"{field} not found")
+        # tenant_id may be a str (cache hit) or UUID; compare as strings.
         if str(row["tenant_id"]) != str(tenant_id):
-            raise ValueError(f"{field}={config_id!r} belongs to a different tenant")
+            raise ValueError(f"{field} not found")
         if row["role"] != expected_role:
             raise ValueError(f"{field}={config_id!r} has role {row['role']!r}, expected {expected_role!r}")
         require_usable_tts_voice(field, config_id, row["engine"], row["voice"])
@@ -235,6 +237,10 @@ async def create_agent(
     llm_config_id: Any | None = None,
     tts_config_id: Any | None = None,
     workflow: dict[str, Any] | None = None,
+    language: str | None = None,
+    status: str = "active",
+    template_id: str | None = None,
+    template_version: int | None = None,
     tenant_slug: str | None = None,
     user_id: Any | None = None,
     user_email: str | None = None,
@@ -264,10 +270,13 @@ async def create_agent(
         row = await conn.fetchrow(
             "INSERT INTO agents "
             "(tenant_id, slug, name, greeting, system_prompt, "
-            "stt_config_id, llm_config_id, tts_config_id, workflow, workflow_draft) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $9::jsonb) RETURNING *",
+            "stt_config_id, llm_config_id, tts_config_id, workflow, workflow_draft, "
+            "language, status, template_id, template_version) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $9::jsonb, $10, $11, $12, $13) "
+            "RETURNING *",
             tenant_id, slug, name, greeting, system_prompt,
             stt_config_id, llm_config_id, tts_config_id, graph_json,
+            language, status, template_id, template_version,
         )
         result = _row(row)
         await append_version(
@@ -285,13 +294,7 @@ async def create_agent(
         )
     public = _public_agent(result)
     if tenant_slug is not None:
-        # Warm the cache immediately rather than leaving it for the agent's
-        # first real call to populate lazily — same reasoning, and the same
-        # real live-call failure this exact gap already caused, as
-        # phone_numbers.create_phone_number()'s identical fix (see project
-        # memory). Optional (not required) because most existing
-        # callers only have tenant_id on hand; the REST router (the actual
-        # live-usage path) does have tenant_slug and passes it.
+        # Warm the cache now rather than on the agent's first live call.
         await get_agent(tenant_slug, slug)
     return public
 
@@ -304,9 +307,7 @@ async def update_agent(
     user_email: str | None = None,
     **fields: Any,
 ) -> dict[str, Any]:
-    """tenant_slug is required so the correct cache key can be invalidated —
-    it's not derivable from agent_id alone without an extra query, and the
-    caller (Admin UI / API layer) already has it from the request context."""
+    """tenant_slug scopes the lookup and names the cache key to invalidate."""
     if not fields:
         raise ValueError("update_agent() called with no fields to update")
     unknown = set(fields) - _UPDATABLE_FIELDS
@@ -315,15 +316,8 @@ async def update_agent(
 
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
-        # FOR UPDATE OF a is two fixes in one: it locks the agent row for
-        # the rest of this transaction (so a concurrent update can't read
-        # a stale "old" value for the audit log — see project memory's
-        # audit-race note), and the join against tenants scopes the
-        # lookup by tenant_slug — an agent_id that exists but belongs to
-        # a *different* tenant is indistinguishable from "doesn't exist"
-        # to this caller. Previously this was scoped by agent_id alone,
-        # which let any tenant's URL path update or delete any other
-        # tenant's agent by id (cross-tenant hijack).
+        # Row lock keeps the audit "old" value accurate; the tenant join makes
+        # another tenant's agent_id indistinguishable from not-found.
         old_row = await conn.fetchrow(
             "SELECT a.* FROM agents a JOIN tenants t ON t.id = a.tenant_id "
             "WHERE a.id = $1 AND t.slug = $2 FOR UPDATE OF a",
@@ -374,8 +368,8 @@ async def update_agent(
             )
 
         # Mirror mutates the live graph — keep graphs in this audit row.
-        old_audit = old if mirrored_graph else _audit_view(old)
-        new_audit = new if mirrored_graph else _audit_view(new)
+        old_audit = _strip_slot(old) if mirrored_graph else _audit_view(old)
+        new_audit = _strip_slot(new) if mirrored_graph else _audit_view(new)
         await audit.write_audit(
             conn,
             entity_type="agent",
@@ -394,13 +388,119 @@ async def update_agent(
     return _public_agent(new)
 
 
+async def _replace_prompt(
+    agent_id: Any,
+    *,
+    tenant_id: Any,
+    tenant_slug: str,
+    user_id: Any | None,
+    user_email: str | None,
+    new_prompt: Callable[[dict[str, Any]], str | None],
+    update_sql: str,
+    update_args: tuple[Any, ...],
+    note: str,
+) -> dict[str, Any] | None:
+    """Shared body of Accept and Undo: lock the row, mirror the new prompt into
+    the graphs, run the one conditional update that decides the outcome, then
+    version, audit and invalidate. `update_sql` takes $1 id, $2 tenant, then
+    `update_args`, then the two mirrored graphs as the last two parameters.
+    new_prompt maps the locked row to the prompt being written, since Undo
+    reads it from the slot."""
+    from .workflows import append_version
+
+    pool = await db.get_pool()
+    async with tenant_conn(pool) as conn:
+        old_row = await conn.fetchrow(
+            "SELECT * FROM agents WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL FOR UPDATE",
+            agent_id, tenant_id,
+        )
+        if old_row is None:
+            return None
+        old = _row(old_row)
+        fields = {"system_prompt": new_prompt(old)}
+        graph = _mirror_prompts_into_graph(old["workflow"], fields)
+        draft = _mirror_prompts_into_graph(old["workflow_draft"], fields)
+        graph_json = None if graph is None else json.dumps(graph)
+        draft_json = None if draft is None else json.dumps(draft)
+
+        new_row = await conn.fetchrow(update_sql, agent_id, tenant_id, *update_args, graph_json, draft_json)
+        if new_row is None:
+            return None
+        new = _row(new_row)
+
+        if graph_json is not None:
+            await append_version(conn, agent_id, graph_json, user_id=user_id, note=note)
+        await audit.write_audit(
+            conn,
+            entity_type="agent",
+            entity_id=agent_id,
+            action="updated",
+            user_id=user_id,
+            user_email=user_email,
+            old_value=_strip_slot(old),
+            new_value=_strip_slot(new),
+        )
+
+    await cache.invalidate(cache_key(tenant_slug, old["slug"]))
+    await call_flows.invalidate_runtime_caches_naming_agent(tenant_id, tenant_slug, agent_id)
+    return _public_agent(new)
+
+
+async def accept_prompt_revision(
+    agent_id: Any,
+    *,
+    tenant_id: Any,
+    tenant_slug: str,
+    proposed_prompt: str,
+    base_prompt_sha256: str,
+    user_id: Any | None = None,
+    user_email: str | None = None,
+) -> dict[str, Any] | None:
+    """Swap in a revised prompt only if the stored prompt still hashes to
+    base_prompt_sha256, keeping the old one in the undo slot. None means the
+    conditional update matched no row (stale base, or no such agent)."""
+    return await _replace_prompt(
+        agent_id, tenant_id=tenant_id, tenant_slug=tenant_slug, user_id=user_id, user_email=user_email,
+        new_prompt=lambda _old: proposed_prompt,
+        update_sql=(
+            "UPDATE agents SET system_prompt = $4, prompt_undo_previous = system_prompt, "
+            "prompt_undo_accepted_sha256 = $5, workflow = $6::jsonb, workflow_draft = $7::jsonb, "
+            "updated_at = now() "
+            "WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL "
+            f"AND {_PROMPT_SHA_SQL} = $3 RETURNING *"
+        ),
+        update_args=(base_prompt_sha256, proposed_prompt, _sha256_hex(proposed_prompt)),
+        note="prompt revision accepted",
+    )
+
+
+async def undo_prompt_revision(
+    agent_id: Any,
+    *,
+    tenant_id: Any,
+    tenant_slug: str,
+    user_id: Any | None = None,
+    user_email: str | None = None,
+) -> dict[str, Any] | None:
+    """Restore the prompt from before the last accepted fix, only while the
+    stored prompt is still the one that fix wrote. None means nothing to undo."""
+    return await _replace_prompt(
+        agent_id, tenant_id=tenant_id, tenant_slug=tenant_slug, user_id=user_id, user_email=user_email,
+        new_prompt=lambda old: old["prompt_undo_previous"],
+        update_sql=(
+            "UPDATE agents SET system_prompt = prompt_undo_previous, prompt_undo_previous = NULL, "
+            "prompt_undo_accepted_sha256 = NULL, workflow = $3::jsonb, workflow_draft = $4::jsonb, "
+            "updated_at = now() "
+            "WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL AND prompt_undo_previous IS NOT NULL "
+            f"AND {_PROMPT_SHA_SQL} = prompt_undo_accepted_sha256 RETURNING *"
+        ),
+        update_args=(),
+        note="prompt revision undone",
+    )
+
+
 class AgentHasLiveCalls(Exception):
-    """Raised instead of deleting an agent with a call in progress right
-    now — deliberately no force override anywhere in this feature (unlike
-    TenantHasActiveResources/ProviderConfigInUse): those are administrative
-    housekeeping that can wait a moment; this is a real person on the
-    phone. `ended_at IS NULL` is the same "live" signal live_calls.py's own
-    KPIs already use for "in progress," not a new definition."""
+    """Refuses deleting an agent with a call in progress; deliberately no force override."""
 
     def __init__(self, live_call_count: int) -> None:
         self.live_call_count = live_call_count

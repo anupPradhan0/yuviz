@@ -55,9 +55,9 @@ Record two addresses now; nearly every step below needs one of them:
 
 ## 2. Kamailio (build from source, prefix /usr/local)
 
-Debian's `kamailio` package installs config to /etc/kamailio, but every
-script in this repo hardcodes /usr/local/etc/kamailio. Building from source
-keeps scripts/update_kamailio_ip.sh working untouched.
+Debian's `kamailio` package lacks modules the config needs, so build from
+source. The repo renders its own config into ~/.yuviz/kamailio, so the
+installed one is unused.
 
     apt update && apt install -y git build-essential cmake bison flex \
       libssl-dev libmariadb-dev libmariadb-dev-compat default-mysql-server \
@@ -81,14 +81,14 @@ mounts $HOME), then run the generator **inside the VM** so it picks up the
 VM's IP rather than the Mac's:
 
     cd /Users/<you>/yuviz
-    ./scripts/update_kamailio_ip.sh
+    SIP_IP=VM_IP ./scripts/update_kamailio_ip.sh   # or SIP_IP=VM_IP in .env
 
 Add a softphone extension. The domain must equal VM_IP — ha1/ha1b are MD5
 digests with the domain baked in, and a stale domain surfaces as a generic
 403 "call rejected" that looks nothing like an auth problem:
 
     kamctl add 1001 <password>
-    kamailio -f /usr/local/etc/kamailio/kamailio.cfg -D -E
+    kamailio -f ~/.yuviz/kamailio/kamailio.cfg -D -E -Y ~/.yuviz/kamailio/run
 
 Dialable numbers are fixed by the cfg: `788` and `5000`-`5009` route to
 FreeSWITCH; `1000`-`1002` are registered softphones (kamailio.cfg.tpl).
@@ -129,21 +129,22 @@ RTP will not tolerate it.
 
 ## 6. FreeSWITCH config
 
-Four pieces. Every value here is pinned by host-side code — check the table
+Five pieces. Every value here is pinned by host-side code — check the table
 at the end before changing any of them.
 
 **autoload_configs/modules.conf.xml** — load `mod_sofia`,
 `mod_event_socket`, `mod_lua`, `mod_audio_fork`.
 
 **autoload_configs/event_socket.conf.xml** — port 8022 (not the 8021
-default), password ClueCon, and `listen-ip 0.0.0.0` so the Gateway on the
-host can reach it. That last change matters for security: ESL is an
-unauthenticated-by-default remote control surface for the whole switch, so
-pin it to the host with an ACL and change the password:
+default), a random password (the same value as `FREESWITCH_ESL_PASSWORD` in
+`.env`), and `listen-ip VM_IP` so the Gateway on the host can reach it. That last change matters for security: ESL is a
+remote control surface for the whole switch, so bind it to the one interface
+the host uses (never `0.0.0.0`), pin it to the host with an ACL, and change
+the password:
 
-    <param name="listen-ip" value="0.0.0.0"/>
+    <param name="listen-ip" value="VM_IP"/>
     <param name="listen-port" value="8022"/>
-    <param name="password" value="<something-not-ClueCon>"/>
+    <param name="password" value="<FREESWITCH_ESL_PASSWORD from .env>"/>
     <param name="apply-inbound-acl" value="gateway_host"/>
 
 and define `gateway_host` in autoload_configs/acl.conf.xml as HOST_IP/32.
@@ -153,6 +154,20 @@ and define `gateway_host` in autoload_configs/acl.conf.xml as HOST_IP/32.
 gateway/src/telephony/EslClient.cpp and services/campaigns/originate.py.
 
 **dialplan** — match `^(788|500\d)$`, answer, run the Lua below.
+
+**dialplan/default.xml** — replace the stock `default` context with the
+repo's deny-all one, exactly as `scripts/freeswitch/setup_macos.sh` does on
+macOS. Do not skip this. The stock context is a demo dialplan: `779` is
+eavesdrop-all, `886`/`*8`/`**<ext>` intercept another call, and the `35xx`
+conference rooms are shared by every tenant on the switch. The stock
+`public` context hands `10xx`, `35xx`-`38xx` and `5551212` on to it, so any
+call that reaches the `external` profile can end up there:
+
+    sudo /Users/<you>/yuviz/scripts/freeswitch/install_default_context.sh /etc/freeswitch
+    fs_cli -P 8022 -p <password> -x reloadxml
+
+The stock file is kept once as `dialplan/default.xml.stock`. Rerun it after
+any package upgrade that rewrites `/etc/freeswitch/dialplan/default.xml`.
 
 ## 7. The Lua dialplan script
 
@@ -185,17 +200,31 @@ Three details are load-bearing:
 
 ## 8. Host-side config changes
 
-These four are the entire cost of the VM split:
+These two are the entire cost of the VM split:
 
-    config/gateway.yaml
-      esl.host           127.0.0.1 -> VM_IP
-      esl.sip_proxy_host 192.168.0.116 -> VM_IP
-    services/campaigns (env)
+    .env (repo root; read by both the Gateway and Campaigns)
       FREESWITCH_ESL_HOST=VM_IP
-      SIP_PROXY_HOST=VM_IP
+      SIP_PROXY_HOST=VM_IP   (written by update_kamailio_ip.sh in step 3,
+                              since the repo is mounted; check it)
 
-`gateway.websocket.host` is already 0.0.0.0, so it accepts the VM's
-connection with no change.
+These live only in `.env`; `config/gateway.yaml` no longer carries any
+address.
+
+After `update_kamailio_ip.sh` changes `SIP_PROXY_HOST`, start the Gateway and
+Campaigns from a new terminal tab on the host (or `unset SIP_PROXY_HOST` and
+re-source `scripts/start_local.sh`). A tab that sourced it earlier keeps the
+old exported value, because `_load_env` never overrides the shell;
+`start_gateway` and `start_campaigns_service` warn when the two differ.
+
+The Gateway's audio WebSocket listens on loopback by default. In this split
+FreeSWITCH connects from the VM, so set the host's VM-facing address in
+`.env`:
+
+      GATEWAY_LISTEN_HOST=HOST_IP
+
+The WebSocket is unauthenticated: whoever connects can stream a call as any
+DID. Use the host-only network address rather than `0.0.0.0`, and allow only
+the VM's IP to port 8080 in the host firewall.
 
 ## 9. Route a DID to an agent
 
@@ -219,19 +248,11 @@ Triage order when it fails:
 
 ## Known repo gaps this setup runs into
 
-  - scripts/update_kamailio_ip.sh:44-45 hardcodes
-    /usr/local/freeswitch/bin/{fs_cli,freeswitch}. Debian packages put those
-    at /usr/bin, so step 3/3 silently prints "fs_cli not found — skipping"
-    and never restarts FreeSWITCH after an IP change. Worth making
-    overridable via env.
-  - The same script's header claims everything outside Kamailio is
-    already 127.0.0.1/localhost. Not true: config/gateway.yaml and
-    services/campaigns/originate.py both carry a literal 192.168.0.116,
-    and neither is rewritten. Inbound keeps working while warm transfer and
-    outbound campaigns break — an asymmetric failure that is annoying to
-    diagnose.
-  - scripts/start_local.sh:148-151 runs `cd $REPO && ./freeswitch`, but no
-    such file is in the repo. Presumably an uncommitted local wrapper.
+  - SIP_PROXY_HOST in .env must be VM_IP. update_kamailio_ip.sh writes it;
+    while it is blank the Gateway refuses transfers to numbers and
+    Campaigns refuses to originate, both with an explicit error. An old
+    .env holding 127.0.0.1 is wrong here: rerun the script, then restart
+    from a new tab (see section 8).
 
 ## Values pinned by host-side code
 
@@ -241,7 +262,7 @@ Triage order when it fails:
 | FreeSWITCH SIP | VM_IP:5080, profile `external` | dispatcher.list.tpl, EslClient.cpp |
 | Agent DIDs | 788, 5000-5009 | kamailio.cfg.tpl |
 | Softphones | 1000-1002 (MySQL subscriber) | kamailio.cfg.tpl |
-| ESL | 8022 (not 8021) | gateway.yaml, originate.py |
+| ESL | 8022 (not 8021) | `.env` FREESWITCH_ESL_PORT |
 | Gateway WS | ws://HOST_IP:8080/voice/<uuid> | Application.cpp |
 | Metadata | {"did","ani","direction"} | Config.cpp |
 | Audio | 16 kHz mono, 20 ms | gateway.yaml |

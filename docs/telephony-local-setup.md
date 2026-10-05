@@ -37,11 +37,9 @@ patched `mod_audio_fork` plays them into the call. The Gateway also connects
 to FreeSWITCH's event socket (ESL, `127.0.0.1:8022`) to receive DTMF and
 hangups and to send hangup and transfer commands.
 
-Everything binds to **127.0.0.1**. That address never changes when your Wi-Fi
-or VPN does, and it avoids a real failure seen on macOS, where a VPN interface
-(`utun`) silently drops packets a host sends to its own VPN address. The
-catch: only a softphone on the same machine can call in. To use a phone on
-your LAN, see [Using your LAN IP instead](#using-your-lan-ip-instead).
+Everything binds to **127.0.0.1** by default (`SIP_IP` in `.env`), which never
+changes with your Wi-Fi or VPN. Only a softphone on this Mac can call in; for
+a phone on your LAN, see [Using your LAN IP instead](#using-your-lan-ip-instead).
 
 ## What's in the repo
 
@@ -52,7 +50,7 @@ your LAN, see [Using your LAN IP instead](#using-your-lan-ip-instead).
 | `scripts/freeswitch/start_voice_ai.lua` | Dialplan script: answers, starts the fork with `{"did","ani","direction"}` metadata, then plays endless silence while the Gateway drives the call. |
 | `scripts/freeswitch/00_voice_ai.xml` | Dialplan entry: routes `788` and `5000`-`5009` to the Lua script. |
 | `scripts/kamailio/*.tpl` | Kamailio config templates (`__LAN_IP__` gets replaced). |
-| `scripts/update_kamailio_ip.sh` | Renders the Kamailio config, fixes subscriber digests, restarts FreeSWITCH if its IP is stale. |
+| `scripts/update_kamailio_ip.sh` | Applies `SIP_IP` to Kamailio, FreeSWITCH and `.env`, and restarts what is stale. |
 | `scripts/start_local.sh` | `start_*` helpers for every service. |
 
 ## Before you start
@@ -83,14 +81,15 @@ This script:
   - puts ESL on `127.0.0.1:8022`;
   - disables the stock `internal` SIP profile, which would bind 5060, Kamailio's port;
   - sets `local_ip_v4` and `external_{rtp,sip}_ip` to `127.0.0.1` (the default STUN lookup puts your public IP into the call setup and the call goes silent);
-  - installs the dialplan entry.
+  - installs the dialplan entry;
+  - replaces the stock `default` dialplan context with a deny-all one (`scripts/freeswitch/install_default_context.sh`). The stock context is a demo whose `779`/`886` extensions eavesdrop on or intercept any call on the switch, and the stock `public` context hands calls on to it.
 
 Rerun it after every `brew upgrade freeswitch`, which deletes the built module.
 
 ### 2. Kamailio
 
-Build Kamailio from source into `/usr/local`, because the scripts hardcode
-`/usr/local/etc/kamailio`. The repo config needs `db_mysql` and `http_client`,
+Build Kamailio from source into `/usr/local` (its config is rendered into
+`~/.yuviz/kamailio`). It needs `db_mysql` and `http_client`,
 and **both are excluded from a default build**. Build them explicitly:
 
 ```bash
@@ -170,7 +169,7 @@ REPO="$PWD"   # run from the repo root
 # load the module
 sudo sed -i 's|\(.*<load module="mod_lua"/>.*\)|\1\n    <load module="mod_audio_fork"/>|' $C/autoload_configs/modules.conf.xml
 
-# ESL on loopback, port 8022 (pinned by config/gateway.yaml)
+# ESL on loopback, port 8022 (FREESWITCH_ESL_PORT in .env)
 sudo sed -i -e 's|name="listen-ip" value="[^"]*"|name="listen-ip" value="127.0.0.1"|' \
             -e 's|name="listen-port" value="[^"]*"|name="listen-port" value="8022"|' \
             $C/autoload_configs/event_socket.conf.xml
@@ -189,12 +188,16 @@ sudo sed -i 's|^<include>|<include>\n  <X-PRE-PROCESS cmd="set" data="local_ip_v
 sudo cp "$REPO/scripts/freeswitch/00_voice_ai.xml" $C/dialplan/public/
 sudo ln -sf "$REPO/scripts/freeswitch/start_voice_ai.lua" /usr/share/freeswitch/scripts/start_voice_ai.lua
 
+# deny-all "default" context: the stock one eavesdrops on/intercepts other calls (779, 886)
+sudo "$REPO/scripts/freeswitch/install_default_context.sh" $C
+
 sudo systemctl restart freeswitch
 ```
 
-The ESL password is still the default `ClueCon`. That's acceptable only
-because ESL now listens on loopback. Change it in both
-`event_socket.conf.xml` and `config/gateway.yaml` if the machine is shared.
+Set the ESL password to a random value in `event_socket.conf.xml`, and the
+same value as `FREESWITCH_ESL_PASSWORD` in `.env`; the Gateway and Campaigns
+read it from there. Don't leave FreeSWITCH's built-in default: anything that
+can reach port 8022 can control every call.
 
 ### 4. Kamailio
 
@@ -208,12 +211,8 @@ make cfg include_modules="db_mysql dispatcher auth_db htable http_client"
 make all && sudo make install
 ```
 
-On Linux, `scripts/update_kamailio_ip.sh` looks for FreeSWITCH at
-`/usr/local/freeswitch` unless Homebrew is present. Point it at the apt install:
-
-```bash
-export FS_CLI=/usr/bin/fs_cli FS_BIN=/usr/bin/freeswitch
-```
+The scripts find FreeSWITCH under Homebrew, `/usr/local/freeswitch` or `/usr`
+(apt), in that order. Set `FS_PREFIX` to choose one.
 
 ### 5. Build the Gateway
 
@@ -271,8 +270,8 @@ Only `1000`-`1002` are routed as softphones, a limit set in `kamailio.cfg.tpl`.
 **Render and deploy the config:**
 
 ```bash
-SIP_IP=127.0.0.1 ./scripts/update_kamailio_ip.sh     # prompts for sudo
-kamailio -c -f /usr/local/etc/kamailio/kamailio.cfg -Y ~/.yuviz/kamailio/run   # should print "config file ok"
+./scripts/update_kamailio_ip.sh     # start_kamailio also runs it
+kamailio -c -f ~/.yuviz/kamailio/kamailio.cfg -Y ~/.yuviz/kamailio/run   # should print "config file ok"
 ```
 
 ## Route a number to an agent
@@ -314,7 +313,7 @@ portmap                 # shows what's listening
 
 A few gotchas with `start_local.sh`:
 - The Python helpers call `python3`, so **activate the repo venv first** (`source venv/bin/activate`), otherwise you get `No module named uvicorn`.
-- `start_config_service` hardcodes `POSTGRES_DSN=postgresql://satish@localhost:5432/voiceai`. Change the user to yours.
+- Settings come from the repo's `.env` (template `.env.example`), which sourcing the script creates and fills with generated secrets on first run. Each `start_*` names any setting it still needs, such as `FREESWITCH_ESL_PASSWORD`.
 - After rebuilding `mod_audio_fork`, **restart FreeSWITCH fully**. `reload mod_audio_fork` breaks the module's WebSocket layer, and FreeSWITCH exits on the next call.
 
 ## Softphone
@@ -401,23 +400,28 @@ Logs:
 |---|---|
 | FreeSWITCH (macOS) | `~/.yuviz/freeswitch/log/freeswitch.log` |
 | FreeSWITCH (Linux) | `/var/log/freeswitch/freeswitch.log` |
-| Kamailio | stderr of `start_kamailio` |
+| Kamailio | stderr of `start_kamailio`, or `~/.yuviz/logs/kamailio.log` |
 | Gateway | stdout of `start_gateway` |
 
 ## Using your LAN IP instead
 
-To call from a phone on your Wi-Fi, bind to the LAN IP instead:
+To call from a phone on your Wi-Fi, set `SIP_IP=auto` in `.env`, run
+`start_kamailio`, and once run `install_network_sync`. Register the phone as
+`1001@<lan-ip>`. Don't use a VPN address: with `auto`, a full-tunnel VPN
+(`utun*`, `ppp*`, `ipsec*`) keeps the last applied LAN address instead of
+rebinding onto the tunnel (and dropping calls).
 
-```bash
-SIP_IP=<lan-ip> scripts/freeswitch/setup_macos.sh     # or edit local_ip_v4 in vars.xml on Linux
-SIP_IP=<lan-ip> ./scripts/update_kamailio_ip.sh
-```
+With `auto`, SIP (5060, 5080) is open to everyone on that network. On a café
+or hotspot Wi-Fi, use `127.0.0.1`.
 
-Then register the phone as `1001@<lan-ip>`. Rerun both commands whenever the
-IP changes. Don't use a VPN address.
+**Changing networks.** `install_network_sync` adds a launchd agent that reruns
+`update_kamailio_ip.sh` on every network change. It updates the config and
+`.env`, and restarts Kamailio, FreeSWITCH, the Gateway and Campaigns. Log:
+`~/.yuviz/logs/network-sync.log`. `remove_network_sync` uninstalls it.
 
-Warm transfer and outbound campaigns also dial through the SIP proxy. They
-read `esl.sip_proxy_host` in `config/gateway.yaml` and `SIP_PROXY_HOST` for
-the campaigns service. Both default to a hardcoded `192.168.0.116`, so set
-them to the same IP (or `127.0.0.1`), or those two features will fail while
-inbound calls keep working.
+Transfers and campaigns dial through Kamailio at `SIP_PROXY_HOST`, which the
+script writes. While it is blank, the Gateway and Campaigns refuse to dial
+numbers instead of sending calls to a wrong host.
+
+**Restarting by hand:** use a new terminal tab. An old tab keeps the
+`SIP_PROXY_HOST` it exported, and `start_gateway` warns about it.

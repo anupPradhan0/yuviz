@@ -1,21 +1,17 @@
 "use client";
 
-// Stage-wise agent creation. Replaces the old two-field modal (name + tenant)
-// that dropped straight onto the canvas with a hardcoded greeting/system
-// prompt and left voice/model/transfer/knowledge-base for later. Every field
-// collected here already exists on the agent row or in a tenant-scoped
-// junction table (agent_knowledge_bases / agent_custom_apis) — this page is
-// pure frontend orchestration over the existing create/update/assign
-// endpoints, no backend changes.
+// Stage-wise agent creation over the existing create/update/assign endpoints.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  Agent,
   AgentUpdate,
   ApiError,
   ProviderConfig,
   Tenant,
   createAgent,
+  enableExecuteApi,
   generateSystemPrompt,
   listProviders,
   listTenants,
@@ -29,6 +25,7 @@ import { ElevenLabsVoicePicker } from "@/components/ElevenLabsVoicePicker";
 import { LANGUAGES, OTHER, asBrowsableTtsEngine } from "@/lib/engineCatalog";
 import { buildSystemPrompt } from "@/lib/systemPromptBuilder";
 import { templateByKey } from "@/lib/agentTemplates";
+import { EasyAgentFlow } from "@/components/EasyAgentFlow";
 
 type Step = "identity" | "voice" | "limits" | "advanced" | "knowledge" | "review";
 
@@ -51,12 +48,12 @@ export default function NewAgentPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  // Prefill from ?template= (see lib/agentTemplates.ts). Read once as the
-  // initial state of the fields it touches, never as an effect that writes
-  // over what's already typed — a template is a starting point, and every
-  // field stays freely editable afterwards.
+  // ?template= is read once as initial state only, so it never overwrites typed input.
   const template = templateByKey(searchParams.get("template"));
 
+  // Easy is the default; a quick-start link (?template=) carries advanced-wizard
+  // fields, so it opens the wizard it was written for.
+  const [mode, setMode] = useState<"easy" | "advanced">(template ? "advanced" : "easy");
   const [step, setStep] = useState<Step>("identity");
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
@@ -84,12 +81,7 @@ export default function NewAgentPage() {
   const [goodbyeGraceMs, setGoodbyeGraceMs] = useState<number | "">(3000);
   const [escalationThreshold, setEscalationThreshold] = useState<number | "">("");
 
-  // Step 4 — Advanced (transfer rules + compliance/fallback — the latter
-  // two have no dedicated agent columns, so they're folded straight into
-  // the generated system prompt rather than invented as new DB fields).
-  // A template's transfer condition is only meaningful with a transfer type
-  // set — otherwise the Advanced step renders it disabled and it never
-  // reaches the prompt.
+  // Step 4 — Advanced. Compliance/fallback have no agent columns; they go into the generated prompt.
   const [transferType, setTransferType] = useState<AgentUpdate["transfer_type"]>(
     template ? "cold" : "none",
   );
@@ -110,6 +102,7 @@ export default function NewAgentPage() {
   const [generatingPrompt, setGeneratingPrompt] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const createdAgent = useRef<Agent | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
 
   const tenant = useMemo(() => tenants.find((t) => t.slug === tenantSlug) ?? null, [tenants, tenantSlug]);
@@ -133,9 +126,7 @@ export default function NewAgentPage() {
     listCustomApis(tenant.id).then(setCustomApis).catch(() => {});
   }, [tenant]);
 
-  // Regenerate the draft prompt from structured inputs until the reviewer
-  // edits it by hand — once edited, their own wording wins and stops being
-  // silently overwritten by a later step change.
+  // Regenerate the draft prompt until the user edits it by hand.
   useEffect(() => {
     if (promptEdited) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -226,41 +217,47 @@ export default function NewAgentPage() {
     setCreating(true);
     setCreateError(null);
     try {
-      const agent = await createAgent(tenantSlug, {
-        slug,
-        name: name.trim(),
-        greeting,
-        system_prompt: systemPrompt,
-        stt_config_id: sttId,
-        llm_config_id: llmId,
-        tts_config_id: ttsId,
-      });
+      // A retry after a failed execute_api step must not create a second agent.
+      let agent = createdAgent.current;
+      if (!agent) {
+        const fresh = await createAgent(tenantSlug, {
+          slug,
+          name: name.trim(),
+          greeting,
+          system_prompt: systemPrompt,
+          stt_config_id: sttId,
+          llm_config_id: llmId,
+          tts_config_id: ttsId,
+        });
 
-      await updateAgent(tenantSlug, agent.id, {
-        language,
-        max_call_duration_s: maxCallDuration === "" ? null : maxCallDuration,
-        goodbye_grace_ms: goodbyeGraceMs === "" ? undefined : goodbyeGraceMs,
-        transfer_type: transferType,
-        transfer_destination: transferType === "none" ? null : transferDestination.trim() || null,
-        transfer_prompt: transferType === "none" ? null : transferCondition.trim() || null,
-        transfer_announcement: transferType === "none" ? null : transferAnnouncement.trim() || null,
-        escalation_threshold: escalationThreshold === "" ? null : escalationThreshold,
-      });
+        await updateAgent(tenantSlug, fresh.id, {
+          language,
+          max_call_duration_s: maxCallDuration === "" ? null : maxCallDuration,
+          goodbye_grace_ms: goodbyeGraceMs === "" ? undefined : goodbyeGraceMs,
+          transfer_type: transferType,
+          transfer_destination: transferType === "none" ? null : transferDestination.trim() || null,
+          transfer_prompt: transferType === "none" ? null : transferCondition.trim() || null,
+          transfer_announcement: transferType === "none" ? null : transferAnnouncement.trim() || null,
+          escalation_threshold: escalationThreshold === "" ? null : escalationThreshold,
+        });
 
-      await Promise.all([
-        ...Array.from(selectedKbIds).map((kbId) => assignKnowledgeBase(agent.id, kbId, true)),
-        ...Array.from(selectedApiIds).map((apiId) => setAgentCustomApiEnabled(agent.id, apiId, true)),
-      ]);
+        await Promise.all([
+          ...Array.from(selectedKbIds).map((kbId) => assignKnowledgeBase(fresh.id, kbId, true)),
+          ...Array.from(selectedApiIds).map((apiId) => setAgentCustomApiEnabled(fresh.id, apiId, true)),
+        ]);
+        agent = fresh;
+        createdAgent.current = fresh;
+      }
+      if (selectedApiIds.size > 0) await enableExecuteApi(tenant.id, agent.id);
 
-      // Land on a live test call, not the canvas — the first thing to
-      // verify is that the agent actually talks the way steps 1-4 said it
-      // should, before touching the flow at all.
       router.push(`/agents/${tenantSlug}/${agent.slug}?test=1`);
     } catch (e) {
       setCreateError(e instanceof ApiError ? e.detail : String(e));
       setCreating(false);
     }
   };
+
+  if (mode === "easy") return <EasyAgentFlow onAdvanced={() => setMode("advanced")} />;
 
   return (
     <>

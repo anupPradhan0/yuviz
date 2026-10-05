@@ -96,15 +96,30 @@ echo "  vars: external_{rtp,sip}_ip = local_ip_v4"
 
 # SIP_IP pins local_ip_v4 (FreeSWITCH otherwise auto-detects the
 # default-route interface, which may be a VPN). Must match the IP Kamailio
-# listens on — see scripts/update_kamailio_ip.sh.
+# listens on — see scripts/update_kamailio_ip.sh. Resolve `auto` to an IPv4
+# (never write the literal string "auto" into vars.xml).
+REPO="$REPO_ROOT"
+# shellcheck source=../lib/sip.sh
+source "$REPO_ROOT/scripts/lib/sip.sh"
+_dotenv() { [[ -f "$REPO_ROOT/.env" ]] && grep "^$1=" "$REPO_ROOT/.env" | cut -d= -f2- || true; }
+SIP_IP="${SIP_IP:-$(_dotenv SIP_IP)}"
 if [[ -n "${SIP_IP:-}" ]]; then
+  PIN_IP="$(_sip_target_ip)" || true
+  if [[ -z "$PIN_IP" || ! "$PIN_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$PIN_IP" == 0.0.0.0 ]]; then
+    echo "ERROR: SIP_IP must be 127.0.0.1, auto or one IPv4 address (not 0.0.0.0); got '${SIP_IP}' (resolved to '${PIN_IP:-}')" >&2
+    exit 1
+  fi
   sed -i '' '/data="local_ip_v4=/d' "$vars"
-  sed -i '' "s|^<include>|<include>\n  <X-PRE-PROCESS cmd=\"set\" data=\"local_ip_v4=$SIP_IP\"/>|" "$vars"
-  echo "  vars: local_ip_v4 = $SIP_IP"
+  sed -i '' "s|^<include>|<include>\n  <X-PRE-PROCESS cmd=\"set\" data=\"local_ip_v4=$PIN_IP\"/>|" "$vars"
+  echo "  vars: local_ip_v4 = $PIN_IP"
 fi
 
 cp "$HERE/00_voice_ai.xml" "$CONF/dialplan/public/00_voice_ai.xml"
 echo "  dialplan: public/00_voice_ai.xml (788, 5000-5009 -> start_voice_ai.lua)"
+
+# The stock "default" context is a demo dialplan with eavesdrop/intercept
+# extensions that reach every call on the switch. Keep the original once.
+"$HERE/install_default_context.sh" "$CONF"
 echo ""
 
 # ── Step 3: sanity check ────────────────────────────────────────────────────

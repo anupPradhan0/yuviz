@@ -1,234 +1,214 @@
 #!/usr/bin/env bash
-# Realigns the whole local stack with the machine's current LAN IP after a
-# network change (new Wi-Fi, switching to a phone hotspot, etc).
-#
-# Three independent things go stale when the network changes, and all three
-# have to be fixed together or calls silently break in different ways:
-#
-#   1. Kamailio's kamailio.cfg/dispatcher.list — the listen address and the
-#      FreeSWITCH routing target are hardcoded (7 occurrences across the two
-#      files), regenerated here from scripts/kamailio/*.tpl.
-#   2. The kamailio MySQL `subscriber` table — auth_db matches REGISTER/INVITE
-#      requests by (username, domain), and ha1/ha1b are MD5 digests that bake
-#      the domain in. A stale domain here causes 403s that look like generic
-#      "call rejected" failures even after (1) is fixed.
-#   3. FreeSWITCH's local_ip_v4 — this is a core-level variable resolved once
-#      at process startup (not on every "reloadxml"), so a FreeSWITCH process
-#      that's been running since before the network change stays bound to the
-#      old IP until it's restarted.
-#
-# Most of the rest of the stack (Envoy, Postgres/Redis DSNs, admin-ui, the
-# FreeSWITCH Lua dialplan script) is 127.0.0.1/localhost/0.0.0.0. Not
-# rewritten here: config/gateway.yaml esl.sip_proxy_host and SIP_PROXY_HOST
-# for the campaigns service — warm transfer and outbound need those set to
-# the same LAN IP.
-#
-# Idempotent: safe to run any time, even if the IP hasn't changed. Each of the
-# three steps independently detects "already correct" and skips.
-#
-# Privilege model: run this as your normal user, NOT via sudo. The two
-# operations that need root (writing into /usr/local/etc/kamailio, and
-# restarting the kamailio process, which binds a privileged port) escalate
-# individually via `sudo` — you'll get one password prompt, cached for the
-# rest of the run. Everything else (MySQL, FreeSWITCH) runs as you, which
-# matters: FreeSWITCH must keep running as your user, not root, or its
-# runtime files end up with the wrong ownership.
-#
-# Usage: scripts/update_kamailio_ip.sh
+# Applies SIP_IP (.env) to Kamailio, FreeSWITCH, subscriber digests and
+# SIP_PROXY_HOST, and restarts what still uses the old address.
+#   SIP_IP=127.0.0.1 (default) | auto (LAN IP) | <fixed IPv4>
+# Usage: scripts/update_kamailio_ip.sh [--if-changed]
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TPL_DIR="$REPO_ROOT/scripts/kamailio"
-KAMAILIO_ETC="/usr/local/etc/kamailio"
-KAMAILIO_CFG="$KAMAILIO_ETC/kamailio.cfg"
-# Homebrew FreeSWITCH (scripts/freeswitch/setup_macos.sh) when present, else
-# the old source-install prefix. Both overridable via env.
-FS_PREFIX="$(brew --prefix freeswitch 2>/dev/null || echo /usr/local/freeswitch)"
-FS_CLI="${FS_CLI:-$FS_PREFIX/bin/fs_cli}"
-FS_BIN="${FS_BIN:-$FS_PREFIX/bin/freeswitch}"
-FS_HOME="${FS_HOME:-$HOME/.yuviz/freeswitch}"
-FS_ESL_PORT=8022
-FS_ESL_PASSWORD=ClueCon
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TPL_DIR="$REPO/scripts/kamailio"
+# shellcheck source=lib/env.sh
+source "$REPO/scripts/lib/env.sh"
+# shellcheck source=lib/sip.sh
+source "$REPO/scripts/lib/sip.sh"
+MYSQL="${MYSQL:-mysql}"
 
-# UDP "connect" doesn't send a packet (no handshake) — the OS just resolves
-# which local interface/IP would be used to reach that destination, which is
-# exactly the current LAN IP regardless of interface name (en0/en1/etc, which
-# changes across machines and Wi-Fi vs Ethernet). Works even without real
-# connectivity to 8.8.8.8, since nothing is actually transmitted for a UDP
-# socket's connect().
-detect_lan_ip() {
-  python3 -c "
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-try:
-    s.connect(('8.8.8.8', 80))
-    print(s.getsockname()[0])
-finally:
-    s.close()
-"
-}
+# Literal .env value, never sourced; the shell's value wins.
+_dotenv() { [[ -f "$REPO/.env" ]] && grep "^$1=" "$REPO/.env" | cut -d= -f2- || true; }
+SIP_IP="${SIP_IP:-$(_dotenv SIP_IP)}"
+FS_ESL_PORT="${FREESWITCH_ESL_PORT:-$(_dotenv FREESWITCH_ESL_PORT)}"
+FS_ESL_PORT="${FS_ESL_PORT:-8022}"
+FS_ESL_PASSWORD="${FREESWITCH_ESL_PASSWORD:-$(_dotenv FREESWITCH_ESL_PASSWORD)}"
+KAMAILIO_DB_URL="${KAMAILIO_DB_URL:-$(_dotenv KAMAILIO_DB_URL)}"
+KAMAILIO_DB_URL="${KAMAILIO_DB_URL:?set KAMAILIO_DB_URL in .env}"
 
-fs_cli() {
-  "$FS_CLI" -H 127.0.0.1 -P "$FS_ESL_PORT" -p "$FS_ESL_PASSWORD" -x "$1" 2>/dev/null
-}
+export KAMAILIO_DIR YUVIZ_LOGS
+mkdir -p "$KAMAILIO_DIR/run" "$YUVIZ_LOGS"
+APPLIED="$KAMAILIO_DIR/.applied_ip"
+ok=1
 
-# SIP_IP overrides detection. Use SIP_IP=127.0.0.1 when the softphone runs on
-# this Mac: it never changes, and detection picks the default-route
-# interface, which on a VPN (utun) can silently drop traffic to its own
-# address — the softphone then just times out.
-if [[ -n "${SIP_IP:-}" ]]; then
-  LAN_IP="$SIP_IP"
-  echo "Using SIP_IP: $LAN_IP"
-else
-  LAN_IP="$(detect_lan_ip)"
-  if [[ -z "$LAN_IP" || "$LAN_IP" == "127.0.0.1" ]]; then
-    echo "ERROR: could not detect a real LAN IP (got '$LAN_IP') — is Wi-Fi/Ethernet connected?" >&2
-    exit 1
-  fi
-  echo "Detected LAN IP: $LAN_IP"
+# One run at a time.
+LOCK="$KAMAILIO_DIR/.sync.lock"
+find "$LOCK" -maxdepth 0 -mmin +10 -exec rmdir {} \; 2>/dev/null || true
+mkdir "$LOCK" 2>/dev/null || { echo "another network sync is running"; exit 0; }
+trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+
+IP="$(_sip_target_ip "$APPLIED")" || true
+if [[ -z "$IP" ]]; then
+  [[ "${1:-}" == --if-changed ]] && exit 0   # offline or VPN; the next change reruns this
+  echo "ERROR: SIP_IP=auto but no usable address was found — is Wi-Fi/Ethernet connected (not a VPN)?" >&2
+  exit 1
 fi
-echo ""
+# One interface only; the value lands in config, SQL and vars.xml.
+if [[ ! "$IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$IP" == 0.0.0.0 ]]; then
+  echo "ERROR: SIP_IP must be 127.0.0.1, auto or one IPv4 address (not 0.0.0.0); got '$IP'" >&2
+  exit 1
+fi
+# Also re-run when vars.xml still has a literal "auto" (or other stale pin) from
+# setup_macos.sh before it resolved SIP_IP.
+_fs_local_ip_pin_matches() {
+  local vars
+  vars="$(_fs_vars_xml)" || return 0
+  grep -qF "data=\"local_ip_v4=$1\"" "$vars"
+}
+if [[ "${1:-}" == --if-changed && -f "$KAMAILIO_DIR/kamailio.cfg" \
+      && "$(cat "$APPLIED" 2>/dev/null)" == "$IP" ]] \
+   && _fs_local_ip_pin_matches "$IP"; then
+  exit 0
+fi
+echo "[$(date '+%F %T')] SIP_IP=${SIP_IP:-127.0.0.1} -> $IP"
+# Restarted services inherit this priority.
+own_nice="$(ps -o nice= -p $$ | tr -d ' ')"
+[[ "${own_nice:-0}" -gt 0 ]] && echo "  WARNING: running at nice $own_nice; services restarted from here inherit it" >&2
 
-# ── Step 1: regenerate Kamailio config from templates ───────────────────────
-echo "=== Step 1/3: Kamailio config ==="
+# ── 1. SIP_PROXY_HOST ────────────────────────────────────────────────────────
+if [[ ! -f "$REPO/.env" ]]; then
+  echo "  WARNING: $REPO/.env not found — SIP_PROXY_HOST NOT written. Source" >&2
+  echo "  scripts/start_local.sh once (it creates .env), then rerun this script." >&2
+elif [[ "$(_env_get SIP_PROXY_HOST || true)" == "$IP" ]]; then
+  echo "  .env: SIP_PROXY_HOST already $IP"
+elif _env_put SIP_PROXY_HOST "$IP" && [[ "$(_env_get SIP_PROXY_HOST)" == "$IP" ]]; then
+  echo "  .env: SIP_PROXY_HOST=$IP"
+else
+  echo "ERROR: could not write SIP_PROXY_HOST=$IP to $REPO/.env" >&2
+  exit 1
+fi
+[[ -f "$REPO/.env" ]] && _warn_env_drift SIP_PROXY_HOST
 
-kamailio_changed=0
+# Stops pids with SIGTERM, then SIGKILL after $1 seconds.
+_stop() {
+  local wait_s=$1; shift
+  [[ $# -gt 0 ]] || return 0
+  kill -TERM "$@" 2>/dev/null || true
+  for _ in $(seq 1 $((wait_s * 2))); do
+    kill -0 "$@" 2>/dev/null || return 0
+    sleep 0.5
+  done
+  kill -KILL "$@" 2>/dev/null || true
+}
+
+# ── 2. Kamailio config ───────────────────────────────────────────────────────
+sed_escape() { printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'; }
+changed=0
 for name in kamailio.cfg dispatcher.list; do
-  tpl="$TPL_DIR/$name.tpl"
-  target="$KAMAILIO_ETC/$name"
-
-  if [[ ! -f "$tpl" ]]; then
-    echo "ERROR: template not found: $tpl" >&2
-    exit 1
-  fi
-
-  # Generate into a real temp file, not a shell variable — command
-  # substitution silently strips trailing newlines, which would make an
-  # unchanged file look "different" from the on-disk original on every run.
   tmp="$(mktemp)"
-  trap 'rm -f "$tmp"' EXIT
-  sed "s/__LAN_IP__/$LAN_IP/g" "$tpl" > "$tmp"
-
-  if sudo diff -q "$tmp" "$target" > /dev/null 2>&1; then
-    echo "  $name: already up to date (IP unchanged)"
+  sed -e "s/__LAN_IP__/$IP/g" \
+      -e "s|__KAMAILIO_DIR__|$(sed_escape "$KAMAILIO_DIR")|g" \
+      -e "s|__KAMAILIO_DB_URL__|$(sed_escape "$KAMAILIO_DB_URL")|g" "$TPL_DIR/$name.tpl" > "$tmp"
+  if cmp -s "$tmp" "$KAMAILIO_DIR/$name"; then
     rm -f "$tmp"
-    trap - EXIT
-    continue
+  else
+    (umask 077; mv -f "$tmp" "$KAMAILIO_DIR/$name")
+    changed=1
   fi
-
-  # Back up whatever's currently deployed before overwriting — timestamped,
-  # so this never collides with or clobbers any backup you've made by hand
-  # (kamailio.cfg_orig, kamailio.cfg_working_push_notification, etc. are
-  # left untouched).
-  if sudo test -f "$target"; then
-    backup="$target.bak.$(date +%Y%m%d%H%M%S)"
-    sudo cp "$target" "$backup"
-    echo "  $name: backed up existing file to $(basename "$backup")"
-  fi
-
-  sudo mv "$tmp" "$target"
-  trap - EXIT
-  echo "  $name: regenerated with IP=$LAN_IP"
-  kamailio_changed=1
 done
-
-if [[ "$kamailio_changed" == "1" ]] && pgrep -x kamailio > /dev/null 2>&1; then
-  echo "  restarting kamailio to pick up the new config..."
-  sudo pkill -x kamailio || true
-  for _ in $(seq 1 20); do
-    pgrep -x kamailio > /dev/null 2>&1 || break
-    sleep 0.5
-  done
-  sudo kamailio -DD -E -f "$KAMAILIO_CFG"
-  sleep 1
-  if pgrep -x kamailio > /dev/null 2>&1; then
-    echo "  kamailio restarted"
-  else
-    echo "  WARNING: kamailio did not come back up — check its config with:" >&2
-    echo "    sudo kamailio -c -f $KAMAILIO_CFG" >&2
-  fi
-elif [[ "$kamailio_changed" == "1" ]]; then
-  echo "  kamailio isn't currently running — nothing to restart"
+read -r -a kam_pids <<< "$(_kamailio_pids | tr '\n' ' ')"
+if [[ ${#kam_pids[@]} -gt 0 ]] && ! pgrep -u "$(id -u)" -f "^([^ ]*/)?kamailio -f $KAMAILIO_DIR/kamailio.cfg" >/dev/null; then
+  changed=1   # still running from the legacy path
 fi
-echo ""
-
-# ── Step 2: fix up the MySQL subscriber table's auth domain ─────────────────
-echo "=== Step 2/3: MySQL subscriber auth domain ==="
-
-if ! command -v mysql > /dev/null 2>&1; then
-  echo "  mysql client not found on PATH — skipping"
-elif ! mysql -u root kamailio -e "SELECT 1" > /dev/null 2>&1; then
-  echo "  can't reach the kamailio MySQL database — skipping"
+if [[ "$changed" == 0 ]]; then
+  echo "  kamailio: config already for $IP"
+elif [[ ${#kam_pids[@]} -eq 0 ]]; then
+  echo "  kamailio: config rendered for $IP (not running)"
+elif ! kamailio -c -f "$KAMAILIO_DIR/kamailio.cfg" -Y "$KAMAILIO_DIR/run" >/dev/null 2>&1; then
+  echo "  WARNING: new kamailio config does not check; the running one is left alone." >&2
+  echo "    kamailio -c -f $KAMAILIO_DIR/kamailio.cfg -Y $KAMAILIO_DIR/run" >&2
+  ok=0
 else
-  stale_rows="$(mysql -u root kamailio -N -e \
-    "SELECT username, password FROM subscriber WHERE domain != '$LAN_IP';")"
+  _stop 10 "${kam_pids[@]}"
+  (cd "$REPO" && nohup bash -c '. scripts/lib/sip.sh; _kamailio_start' >>"$YUVIZ_LOGS/kamailio.log" 2>&1 &)
+  echo "  kamailio: restarted on $IP (log $YUVIZ_LOGS/kamailio.log)"
+fi
 
+# ── 3. Subscriber digests ────────────────────────────────────────────────────
+if ! command -v "$MYSQL" > /dev/null 2>&1; then
+  echo "  mysql: client not found — skipped"
+elif ! "$MYSQL" -u root kamailio -e "SELECT 1" > /dev/null 2>&1; then
+  echo "  mysql: kamailio database unreachable — skipped"
+else
+  stale_rows="$("$MYSQL" -u root kamailio -N -e "SELECT username, password FROM subscriber WHERE domain != '$IP';")"
   if [[ -z "$stale_rows" ]]; then
-    echo "  all subscriber rows already use domain=$LAN_IP"
+    echo "  mysql: subscribers already on $IP"
   else
-    sql_file="$(mktemp)"
-    trap 'rm -f "$sql_file"' EXIT
-    # ha1/ha1b bake the domain into an MD5 digest, so the domain column and
-    # the hashes have to be updated together or auth_db's digest check fails
-    # even though the row now "looks" right. Recomputed here in Python rather
-    # than MySQL's MD5() because MySQL 9.x removed the builtin in favor of an
-    # optional component that isn't installed on this box.
-    python3 -c "
-import sys
-
-new_domain = '$LAN_IP'
-rows = '''$stale_rows'''.strip().splitlines()
-for row in rows:
-    username, password = row.split('\t')
-    import hashlib
-    ha1 = hashlib.md5(f'{username}:{new_domain}:{password}'.encode()).hexdigest()
-    ha1b = hashlib.md5(f'{username}@{new_domain}:{new_domain}:{password}'.encode()).hexdigest()
-    print(f\"UPDATE subscriber SET domain='{new_domain}', ha1='{ha1}', ha1b='{ha1b}' WHERE username='{username}';\")
-" > "$sql_file"
-    mysql -u root kamailio < "$sql_file"
-    rm -f "$sql_file"
-    trap - EXIT
-    n="$(echo "$stale_rows" | wc -l | tr -d ' ')"
-    echo "  updated $n subscriber row(s) to domain=$LAN_IP"
+    # MySQL 9 has no MD5().
+    STALE_ROWS="$stale_rows" NEW_DOMAIN="$IP" python3 -c "
+import hashlib, os
+d = os.environ['NEW_DOMAIN']
+for row in os.environ['STALE_ROWS'].strip().splitlines():
+    u, p = row.split('\t')
+    ha1 = hashlib.md5(f'{u}:{d}:{p}'.encode()).hexdigest()
+    ha1b = hashlib.md5(f'{u}@{d}:{d}:{p}'.encode()).hexdigest()
+    print(f\"UPDATE subscriber SET domain='{d}', ha1='{ha1}', ha1b='{ha1b}' WHERE username='{u}';\")
+" | "$MYSQL" -u root kamailio
+    echo "  mysql: $(grep -c . <<< "$stale_rows") subscriber(s) moved to $IP"
   fi
 fi
-echo ""
 
-# ── Step 3: restart FreeSWITCH if it's still bound to a stale IP ────────────
-echo "=== Step 3/3: FreeSWITCH local_ip_v4 ==="
-
-if [[ ! -x "$FS_CLI" ]]; then
-  echo "  fs_cli not found — skipping"
-elif ! fs_running_ip="$(fs_cli 'eval ${local_ip_v4}')" || [[ -z "$fs_running_ip" ]]; then
-  echo "  FreeSWITCH isn't running (or ESL isn't reachable) — nothing to restart"
-elif [[ "$fs_running_ip" == "$LAN_IP" ]]; then
-  echo "  FreeSWITCH already bound to $LAN_IP"
+# ── 4. FreeSWITCH local_ip_v4 ────────────────────────────────────────────────
+if ! vars="$(_fs_vars_xml)"; then
+  echo "  freeswitch: not installed — skipped"
 else
-  echo "  FreeSWITCH is still bound to stale IP $fs_running_ip — restarting"
-  # local_ip_v4 is resolved once at process startup, not on "reloadxml" or a
-  # sofia profile restart — a full process restart is the only way to pick
-  # up a network change that happened while FreeSWITCH kept running.
-  fs_cli shutdown || true
-  for _ in $(seq 1 20); do
-    pgrep -x freeswitch > /dev/null 2>&1 || break
-    sleep 0.5
-  done
-  if [[ -d "$FS_HOME/conf" ]]; then
-    # Same flags as start_freeswitch in scripts/start_local.sh.
-    "$FS_BIN" -nc -nonat -conf "$FS_HOME/conf" -log "$FS_HOME/log" -db "$FS_HOME/db" \
-      -run "$FS_HOME/run" -scripts "$REPO_ROOT/scripts/freeswitch"
-  else
-    ( cd /usr/local/freeswitch && "$FS_BIN" -nc )
+  pin="<X-PRE-PROCESS cmd=\"set\" data=\"local_ip_v4=$IP\"/>"
+  if ! grep -qF "$pin" "$vars"; then
+    sed -i.bak -e '/data="local_ip_v4=/d' "$vars" && rm -f "$vars.bak"
+    sed -i.bak -e "s|^<include>|<include>\\
+  $pin|" "$vars" && rm -f "$vars.bak"
+    echo "  freeswitch: local_ip_v4 pinned to $IP in $vars"
   fi
-  sleep 2
-  new_ip="$(fs_cli 'eval ${local_ip_v4}' || true)"
-  if [[ "$new_ip" == "$LAN_IP" ]]; then
-    echo "  FreeSWITCH restarted, now bound to $LAN_IP"
+  fs_cli="$(_fs_prefix)/bin/fs_cli"
+  _fs() { "$fs_cli" -H 127.0.0.1 -P "$FS_ESL_PORT" -p "$FS_ESL_PASSWORD" -x "$1" 2>/dev/null || true; }
+  running="$(_fs 'eval ${local_ip_v4}')"
+  if [[ -z "$running" ]]; then
+    echo "  freeswitch: not running"
+  elif [[ "$running" == "$IP" ]]; then
+    echo "  freeswitch: already on $IP"
   else
-    echo "  WARNING: FreeSWITCH restarted but reports local_ip_v4=$new_ip (expected $LAN_IP)" >&2
+    _fs 'fsctl shutdown' >/dev/null
+    _stop 20 $(pgrep -u "$(id -u)" -x freeswitch || true)
+    (cd "$REPO" && _fs_start -nc >>"$YUVIZ_LOGS/freeswitch.log" 2>&1) || true
+    for _ in $(seq 1 30); do [[ "$(_fs 'eval ${local_ip_v4}')" == "$IP" ]] && break; sleep 1; done
+    echo "  freeswitch: restarted ($running -> $IP)"
+  fi
+  # A new address refuses binds briefly and sofia gives up after 3 tries.
+  if [[ -n "$running" ]]; then
+    for f in "$(dirname "$vars")"/sip_profiles/*.xml; do
+      p="$(basename "$f" .xml)"
+      [[ "$p" == *ipv6* ]] && continue
+      for _ in $(seq 1 15); do
+        _fs 'sofia status' | grep -qE "^ +$p[[:space:]]+profile[[:space:]]+sip:[^ ]*@$IP:" && break
+        _fs "sofia profile $p start" >/dev/null
+        sleep 2
+      done
+      if _fs 'sofia status' | grep -qE "^ +$p[[:space:]]+profile[[:space:]]+sip:[^ ]*@$IP:"; then
+        echo "  freeswitch: profile $p up on $IP"
+      else
+        echo "  WARNING: freeswitch profile $p is not up on $IP; the next sync retries" >&2
+        ok=0
+      fi
+    done
   fi
 fi
 
-echo ""
-echo "Done."
+# ── 5. Gateway and Campaigns ─────────────────────────────────────────────────
+# Restarts this checkout's <label> processes with a stale SIP_PROXY_HOST.
+_restart_stale() {
+  local label=$1 pattern=$2 start=$3 pid cwd current stale=()
+  for pid in $(pgrep -u "$(id -u)" -f "$pattern" || true); do
+    cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
+    [[ "$cwd" == "$REPO" ]] || continue
+    current="$(ps eww -o command= -p "$pid" | tr ' ' '\n' | sed -n 's/^SIP_PROXY_HOST=//p' | head -1)"
+    [[ "$current" == "$IP" ]] || stale+=("$pid")
+  done
+  [[ ${#stale[@]} -gt 0 ]] || return 0
+  _stop 40 "${stale[@]}"
+  # env -u: else this shell's old value wins over .env.
+  (cd "$REPO" && env -u SIP_PROXY_HOST nohup bash -c ". scripts/start_local.sh >/dev/null && $start" \
+    >>"$YUVIZ_LOGS/$label.log" 2>&1 &)
+  echo "  $label: restarted for SIP_PROXY_HOST=$IP (log $YUVIZ_LOGS/$label.log)"
+}
+# Anchored, so a shell merely mentioning the program never matches.
+_restart_stale gateway '^[^ ]*build/gateway/voice_ai_gateway( |$)' start_gateway
+_restart_stale campaigns '^[^ ]*[Pp]ython[0-9.]* -m uvicorn services\.campaigns\.app:app' start_campaigns_service
+
+if [[ "$ok" == 1 ]]; then echo "$IP" > "$APPLIED"; echo "  done"; else rm -f "$APPLIED"; fi

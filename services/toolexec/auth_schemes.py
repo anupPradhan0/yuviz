@@ -50,10 +50,7 @@ TENANT_ENV_PREFIX = "TENANT_"  # env:TENANT_<uuid-hex-upper>_<NAME>
 TENANT_SECRET_ROOT = os.environ["TOOLEXEC_TENANT_SECRET_ROOT"]  # NOT the platform k8s mount
 
 _ENV_REF_RE = re.compile(rf"env:{TENANT_ENV_PREFIX}(?P<hex>[0-9A-F]{{32}})_[A-Z0-9_]+")
-# No '/' beyond the two fixed separators, so a raw '..' segment cannot even
-# reach the regex stage. The .resolve()/relative_to() check below is belt to
-# this regex's braces: a symlink planted inside the tenant's own directory
-# would otherwise still escape it.
+# No '/' in the name; the resolve()/relative_to() check also blocks symlink escapes.
 _K8S_REF_RE = re.compile(r"k8s:tenants/(?P<tenant_id>[^/]+)/[A-Za-z0-9._-]+")
 
 
@@ -130,9 +127,7 @@ def _validate_pointer_ref(tenant_id: str, ref: str) -> None:
     raise ValueError("credential_ref_outside_tenant_namespace")
 
 
-# Pointed at TOOLEXEC_TENANT_SECRET_ROOT, never the platform k8s mount —
-# this is what makes a validated k8s: ref actually read from the tenant's
-# own directory rather than the platform's secret volume.
+# Tenant secret root, never the platform k8s mount.
 _tenant_secret_resolver = CompositeSecretResolver(k8s_mount_root=TENANT_SECRET_ROOT)
 
 
@@ -151,10 +146,7 @@ async def resolve_tenant_ref(tenant_id: str, ref: str) -> str:
     return await _tenant_secret_resolver.resolve(ref)
 
 
-# (tenant_id, custom_api_id) -> (access_token, expires_at epoch seconds).
-# In-process only, never persisted — a token is a short-lived derived
-# artifact, not a credential the tenant authored, so there is nothing here
-# for redaction.py to redact and nothing here survives a restart.
+# (tenant_id, custom_api_id) -> (access_token, expires_at epoch seconds); in-process only.
 _oauth2_token_cache: dict[tuple[str, str], tuple[str, float]] = {}
 
 

@@ -404,7 +404,7 @@ Everything lives in `deployment/.env`, generated on first run.
 |---|---|---|
 | `CONFIG_SERVICE_PASSWORD` | random | Internal service account, not a UI login |
 | `JWT_SECRET` | random | Signs Config Service tokens |
-| `POSTGRES_DSN` | `postgresql://voiceai:voiceai@postgres:5432/voiceai` | Host is the compose service name |
+| `POSTGRES_DSN` | built by `dev.sh` from the generated `POSTGRES_PASSWORD` | Host is the compose service name |
 | `OLLAMA_BASE_URL` | `http://ollama:11434` | Set automatically from `USE_HOST_OLLAMA` |
 | `BIND_ADDR` | `127.0.0.1` | Host interface for every published port |
 | `VOICEAI_STT_MODEL` | `small.en` | Used by both conversation and the seed — they must agree |
@@ -494,7 +494,7 @@ does not.
 it emails a 6-digit code (needs working SMTP — in dev, read it in Mailpit).
 Without SMTP there is no default credential to fall back on: create another
 superadmin from the host with
-`POSTGRES_DSN=postgresql://voiceai:voiceai@127.0.0.1:5432/voiceai python3
+`POSTGRES_DSN="postgresql://voiceai:$(grep ^POSTGRES_PASSWORD= deployment/.env | cut -d= -f2)@127.0.0.1:5432/voiceai" python3
 scripts/create_superadmin.py <email> <password>` — from the host, use
 `127.0.0.1`, not the compose service name `postgres`. Or wipe and start over
 with `./deployment/sh/dev.sh --clean`, which brings the setup screen back.

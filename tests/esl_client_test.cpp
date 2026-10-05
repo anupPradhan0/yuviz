@@ -1,11 +1,5 @@
-// Phase 5 of AI-to-human transfer: EslClient::transfer() (uuid_transfer).
-//
-// EslClient speaks ESL's plain-text protocol over a raw TCP socket (see
-// gateway/src/telephony/EslClient.cpp) — there is no fake/mock ESL server
-// library to inject, so this test runs a minimal real one on 127.0.0.1 (a
-// background thread speaking just enough of the protocol: auth/request,
-// auth accept/reject, and api command/response framing) and asserts against
-// the exact commands EslClient sends and how it interprets replies.
+// EslClient command tests against a minimal real ESL server on loopback
+// (auth, api command/response framing); asserts exact commands and reply handling.
 
 #include <gtest/gtest.h>
 
@@ -45,10 +39,7 @@ void send_all(int fd, const std::string& data) {
     ::send(fd, data.data(), data.size(), 0);
 }
 
-// A single scripted exchange: after auth succeeds, the server expects one
-// command and sends back the given api/response body (wrapped with the
-// correct Content-Length framing) — or, if `reject_auth` is set on the
-// fixture, never gets this far at all.
+// One scripted exchange: after auth (unless `reject_auth`), one command and a framed reply.
 struct FakeEslServer {
     int listen_fd{-1};
     uint16_t port{0};
@@ -133,6 +124,7 @@ EslConfig make_cfg(uint16_t port) {
     cfg.port               = port;
     cfg.password           = "ClueCon";
     cfg.connect_timeout_ms = 500;
+    cfg.sip_proxy_host     = "192.168.0.116";  // Kamailio; numbers are dialed through it
     return cfg;
 }
 
@@ -140,13 +132,16 @@ EslConfig make_cfg(uint16_t port) {
 
 // ── uuid_transfer command construction ──────────────────────────────────────
 
-TEST(EslClientTransferTest, PhoneNumberDestinationUsesXmlDefaultDialplan) {
+TEST(EslClientTransferTest, PhoneNumberDestinationBridgesThroughTheSipProxy) {
     FakeEslServer server;
     server.start();
     server.next_reply_body = "+OK";
 
     Logger logger = Logger::make_null();
-    EslClient client{make_cfg(server.port), logger};
+    EslConfig cfg = make_cfg(server.port);
+    cfg.sip_proxy_host = "192.168.0.116";
+    cfg.sip_proxy_port = 5060;
+    EslClient client{cfg, logger};
 
     std::string error;
     const bool ok = client.transfer(make_req("call-uuid-1", "1005", "customer_requested"), error);
@@ -154,7 +149,133 @@ TEST(EslClientTransferTest, PhoneNumberDestinationUsesXmlDefaultDialplan) {
     EXPECT_TRUE(ok);
     EXPECT_TRUE(error.empty());
     ASSERT_EQ(server.received_commands.size(), 1u);
-    EXPECT_EQ(server.received_commands[0], "api uuid_transfer call-uuid-1 1005 XML default");
+    EXPECT_EQ(server.received_commands[0],
+              "api uuid_transfer call-uuid-1 'bridge:sofia/external/sip:1005@192.168.0.116:5060' inline");
+}
+
+// The stock "default" context maps 779 to eavesdrop-all and 886 to intercept:
+// a tenant-chosen number must never be looked up in any dialplan context.
+TEST(EslClientTransferTest, NoTransferDestinationReachesADialplanContext) {
+    for (const char* dest : {"779", "886", "15005", "+919876543210", "sip:agent@example.com"}) {
+        FakeEslServer server;
+        server.start();
+        server.next_reply_body = "+OK";
+        Logger logger = Logger::make_null();
+        EslClient client{make_cfg(server.port), logger};
+        std::string error;
+        ASSERT_TRUE(client.transfer(make_req("call-uuid-9", dest), error)) << dest;
+        ASSERT_EQ(server.received_commands.size(), 1u) << dest;
+        const std::string& cmd = server.received_commands[0];
+        EXPECT_EQ(cmd.find(" XML "), std::string::npos) << cmd;
+        EXPECT_EQ(cmd.rfind("api uuid_transfer call-uuid-9 'bridge:sofia/external/", 0), 0u) << cmd;
+        EXPECT_EQ(cmd.substr(cmd.size() - 8), "' inline") << cmd;
+    }
+}
+
+// The platform's own AI numbers (00_voice_ai.xml) bridged from FreeSWITCH hit
+// Kamailio's loop guard: refused up front so the caller is never left in
+// silence waiting on a transfer that cannot connect.
+TEST(EslClientTransferTest, PlatformAiNumberRefusedBeforeAnyCommand) {
+    for (const char* dest : {"788", "5000", "5005", "5009"}) {
+        FakeEslServer server;
+        server.start();
+        Logger logger = Logger::make_null();
+        EslClient client{make_cfg(server.port), logger};
+
+        std::string error;
+        EXPECT_FALSE(client.transfer(make_req("call-uuid-p", dest), error)) << dest;
+        EXPECT_EQ(error, "platform_destination") << dest;
+        std::string job_uuid;
+        EXPECT_FALSE(client.originate_async(dest, "+15551234567", job_uuid, error)) << dest;
+        EXPECT_EQ(error, "platform_destination") << dest;
+        EXPECT_TRUE(server.received_commands.empty()) << dest;
+    }
+}
+
+// A SIP URI at the switch itself (or the proxy in front of it) enters one of
+// FreeSWITCH's own dialplan contexts — stock "public" hands 10xx and the
+// 35xx conference rooms on to "default".
+TEST(EslClientTransferTest, SipUriAtThePlatformRefusedBeforeAnyCommand) {
+    const std::vector<std::string> platform_uris = {
+        "sip:3500@127.0.0.1:5080",
+        "sips:3500@127.0.0.1",
+        "sip:3500@127.1:5080",              // inet_aton shorthand
+        "sip:779@2130706433",               // 127.0.0.1 as one integer
+        "sip:3500@0.0.0.0",
+        "sip:3500@localhost:5080",
+        "sip:3500@LocalHost.",
+        "sip:3500@fs.localhost",
+        "sip:3500@192.168.0.116:5080",      // esl.sip_proxy_host
+        "sip:3500@pbx.example.com;maddr=127.0.0.1",
+        "sip:3500@pbx.example.com;MADDR=10.0.0.1",
+    };
+    for (const auto& dest : platform_uris) {
+        FakeEslServer server;
+        server.start();
+        Logger logger = Logger::make_null();
+        EslClient client{make_cfg(server.port), logger};
+
+        std::string error;
+        EXPECT_FALSE(client.transfer(make_req("call-uuid-s", dest), error)) << dest;
+        EXPECT_EQ(error, "platform_destination") << dest;
+        std::string job_uuid;
+        EXPECT_FALSE(client.originate_async(dest, "+15551234567", job_uuid, error)) << dest;
+        EXPECT_EQ(error, "platform_destination") << dest;
+        EXPECT_TRUE(server.received_commands.empty()) << dest;
+    }
+}
+
+TEST(EslClientTransferTest, SipUriAtTheEslHostRefused) {
+    Logger logger = Logger::make_null();
+    EslConfig cfg = make_cfg(1);  // never connected: refused before any I/O
+    cfg.host = "10.20.30.40";
+    EslClient client{cfg, logger};
+
+    std::string error;
+    EXPECT_FALSE(client.transfer(make_req("call-uuid-e", "sip:3500@10.20.30.40:5080"), error));
+    EXPECT_EQ(error, "platform_destination");
+}
+
+TEST(EslClientTransferTest, SipUriElsewhereStillAllowedWhenHostOnlyLooksLocal) {
+    for (const char* dest : {"sip:agent@127.example.com", "sip:localhost@pbx.example.com",
+                             "sip:agent@192.168.0.117:5060"}) {
+        FakeEslServer server;
+        server.start();
+        server.next_reply_body = "+OK";
+        Logger logger = Logger::make_null();
+        EslClient client{make_cfg(server.port), logger};
+
+        std::string error;
+        EXPECT_TRUE(client.transfer(make_req("call-uuid-o", dest), error)) << dest << " " << error;
+        EXPECT_EQ(server.received_commands.size(), 1u) << dest;
+    }
+}
+
+// Without a proxy host, refuse numbers rather than INVITE a wrong host (~32 s of silence).
+// A SIP URI does not need the proxy.
+TEST(EslClientTransferTest, NumberRefusedWhenSipProxyHostUnset) {
+    FakeEslServer server;
+    server.start();
+    server.next_reply_body = "+OK";
+    Logger logger = Logger::make_null();
+    EslConfig cfg = make_cfg(server.port);
+    cfg.sip_proxy_host.clear();
+    EslClient client{cfg, logger};
+
+    std::string error;
+    EXPECT_FALSE(client.transfer(make_req("call-uuid-u", "1005"), error));
+    EXPECT_EQ(error, "sip_proxy_host_unset");
+    std::string job_uuid;
+    EXPECT_FALSE(client.originate_async("1005", "+15551234567", job_uuid, error));
+    EXPECT_EQ(error, "sip_proxy_host_unset");
+    EXPECT_TRUE(server.received_commands.empty());
+
+    EXPECT_TRUE(client.transfer(make_req("call-uuid-u", "sip:agent@example.com"), error));
+    EXPECT_EQ(server.received_commands.size(), 1u);
+}
+
+TEST(EslClientTransferTest, SipProxyHostDefaultsToUnset) {
+    EXPECT_TRUE(EslConfig{}.sip_proxy_host.empty());
 }
 
 TEST(EslClientTransferTest, SipUriDestinationUsesInlineBridge) {
@@ -364,8 +485,7 @@ TEST(EslClientUuidGuardTest, EveryUuidCommandRefusesNonUuidInput) {
 // ── Connection failure ───────────────────────────────────────────────────────
 
 TEST(EslClientTransferTest, UnreachableEslReturnsFalse) {
-    // Nothing listens on this port; connect() itself fails/times out fast
-    // via EslClient's own non-blocking-connect-with-timeout path.
+    // Nothing listens on this port; connect() fails fast.
     EslConfig cfg = make_cfg(1);
     cfg.connect_timeout_ms = 100;
     Logger logger = Logger::make_null();
@@ -410,7 +530,7 @@ TEST(EslClientTransferTest, ConnectionDroppedMidCommandReturnsFalse) {
     ASSERT_EQ(server.received_commands.size(), 1u);  // command was sent before the drop
 }
 
-// ── hangup() — same request/reply shape, previously untested ────────────────
+// ── hangup() ────────────────────────────────────────────────────────────────
 
 TEST(EslClientHangupTest, SuccessfulHangupIssuesUuidKill) {
     FakeEslServer server;
@@ -436,11 +556,7 @@ TEST(EslClientHangupTest, EmptyUuidSkipsConnectionEntirely) {
 }
 
 // ── originate_async() / bridge() / stop_audio_fork() / hold() / unhold() ───
-// Warm transfer's 5 new commands (see docs/warm_transfer_architecture.md
-// §6). bgapi's own immediate reply carries no Content-Length body — the
-// Job-UUID is a header line — so FakeEslServer's next_reply_body here is
-// itself header text, matching send_command_locked's content_length==0
-// ("command/reply carries its result in Reply-Text") branch.
+// bgapi replies carry Job-UUID as a header (no body), so next_reply_body here is header text.
 
 TEST(EslClientOriginateAsyncTest, PlainExtensionDialsThroughSipProxyDirectly) {
     FakeEslServer server;

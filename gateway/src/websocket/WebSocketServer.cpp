@@ -65,6 +65,8 @@ bool WebSocketServer::start() {
 
     lws_context_creation_info info{};
     info.port      = static_cast<int>(config_.port);
+    // Without iface lws binds every interface whatever websocket.host says.
+    info.iface     = (config_.host.empty() || config_.host == "0.0.0.0") ? nullptr : config_.host.c_str();
     info.protocols = protocols;
     info.options   = LWS_SERVER_OPTION_HTTP_HEADERS_SECURITY_BEST_PRACTICES_ENFORCE;
     info.user      = this;
@@ -83,6 +85,8 @@ bool WebSocketServer::start() {
 void WebSocketServer::stop() {
     if (!running_.exchange(false)) return;
 
+    // lws_service() ignores its timeout and can block in poll() for many seconds; wake it.
+    if (context_) lws_cancel_service(context_);
     if (service_thread_.joinable()) service_thread_.join();
 
     if (context_) {
