@@ -52,9 +52,13 @@ async def caller(pool, tenant_agent):
 async def foreign(pool, other_tenant_admin):
     """A KB, a document in it and an agent, all owned by the other tenant."""
     tenant = other_tenant_admin["tenant"]
+    embedding_config = await pool.fetchrow(
+        "INSERT INTO provider_configs (tenant_id, name, role, engine) "
+        "VALUES ($1, 'Embed', 'embedding', 'ollama') RETURNING id", tenant["id"],
+    )
     kb = dict(await pool.fetchrow(
-        "INSERT INTO knowledge_bases (tenant_id, slug, name) VALUES ($1, 'theirs', 'Theirs') RETURNING *",
-        tenant["id"],
+        "INSERT INTO knowledge_bases (tenant_id, slug, name, embedding_config_id) "
+        "VALUES ($1, 'theirs', 'Theirs', $2) RETURNING *", tenant["id"], embedding_config["id"],
     ))
     document = dict(await pool.fetchrow(
         "INSERT INTO kb_documents (kb_id, tenant_id, title, source_ref, content_type) "
@@ -69,6 +73,7 @@ async def foreign(pool, other_tenant_admin):
     await pool.execute("DELETE FROM kb_ingestion_jobs WHERE document_id = $1", document["id"])
     await pool.execute("DELETE FROM kb_documents WHERE id = $1", document["id"])
     await pool.execute("DELETE FROM knowledge_bases WHERE id = $1", kb["id"])
+    await pool.execute("DELETE FROM provider_configs WHERE id = $1", embedding_config["id"])
     await pool.execute("DELETE FROM agents WHERE id = $1", agent["id"])
 
 
@@ -121,6 +126,13 @@ async def test_attach_to_foreign_agent_is_refused_like_an_unknown_agent(client, 
     assert await _attached(pool, foreign["agent"]["id"]) == []
 
 
+async def test_attach_malformed_kb_id_is_the_same_404(client, caller):
+    resp = await client.post(
+        f"/agents/{caller['agent']['id']}/knowledge-bases", json={"kb_id": "not-a-uuid"}, headers=caller["headers"],
+    )
+    assert resp.status_code == 404
+
+
 # ── (1c) the row cannot exist ───────────────────────────────────────────────────
 
 async def test_database_refuses_a_cross_tenant_attachment(pool, caller, foreign):
@@ -147,7 +159,6 @@ async def test_database_refuses_repointing_an_attachment_across_tenants(pool, ca
 
 async def test_a_stray_cross_tenant_row_is_invisible_to_retrieval_and_listing(pool, caller, foreign):
     tenant, agent = caller["tenant"], caller["agent"]
-    await pool.execute("UPDATE knowledge_bases SET embedding_config_id = NULL WHERE id = $1", foreign["kb"]["id"])
     await _insert_cross_tenant_row(pool, agent["id"], foreign["kb"]["id"])
     set_caller_tenant(str(tenant["id"]))
 
@@ -228,7 +239,7 @@ async def test_oversize_upload_stops_reading_early(caller, monkeypatch):
 
         async def read(self, size):
             Counting.reads += 1
-            return b"x" * size
+            return b"x" * size if Counting.reads <= 50 else b""
 
     with pytest.raises(Exception) as exc:
         await documents_router._read_capped(Counting())
