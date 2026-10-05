@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable
@@ -260,6 +261,38 @@ async def _make_deepgram_tts(cfg: ProviderConfig, api_key: str | None) -> Any:
     )
 
 
+async def _make_cartesia_tts(cfg: ProviderConfig, api_key: str | None) -> Any:
+    from .providers.tts.cartesia import CartesiaTTS
+
+    # voice is a Cartesia voice id (a UUID), not a display name — there is
+    # no sensible default, so an unset one fails here rather than
+    # synthesizing in whatever voice the API happens to pick.
+    voice = (cfg.voice or "").strip()
+    if not voice:
+        raise ValueError(
+            f"provider_config id={cfg.id!r} engine='cartesia' has no voice set — "
+            "Cartesia needs a voice id (a UUID from its /voices list)"
+        )
+    extra = cfg.extra or {}
+    speed = extra.get("speed")
+    if speed is not None:
+        try:
+            speed = float(speed)
+        except (TypeError, ValueError):
+            speed = float("nan")
+        if isinstance(extra["speed"], bool) or not math.isfinite(speed):
+            raise ValueError(
+                f"provider_config id={cfg.id!r} engine='cartesia' has a non-numeric "
+                f"extra.speed {extra['speed']!r} — expected a multiplier such as 0.85"
+            )
+    return CartesiaTTS(
+        api_key=_require_api_key(cfg, api_key),
+        voice=voice,
+        model=str(extra.get("model") or "sonic-2"),
+        speed=speed,
+    )
+
+
 _DEFAULT_REGISTRY: dict[tuple[str, str], ProviderFactory] = {
     ("stt", "faster_whisper"): _make_faster_whisper,
     ("stt", "deepgram"):       _make_deepgram,
@@ -274,6 +307,7 @@ _DEFAULT_REGISTRY: dict[tuple[str, str], ProviderFactory] = {
     ("tts", "kokoro"):         _make_kokoro_tts,
     ("tts", "elevenlabs"):     _make_elevenlabs_tts,
     ("tts", "deepgram"):       _make_deepgram_tts,
+    ("tts", "cartesia"):       _make_cartesia_tts,
 }
 
 
