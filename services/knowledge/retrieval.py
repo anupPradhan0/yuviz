@@ -73,7 +73,8 @@ async def _agent_kb_groups(conn: asyncpg.Connection, tenant_slug: str, agent_slu
         "FROM agent_knowledge_bases akb "
         "JOIN agents a ON a.id = akb.agent_id AND a.deleted_at IS NULL "
         "JOIN tenants t ON t.id = a.tenant_id AND t.deleted_at IS NULL "
-        "JOIN knowledge_bases kb ON kb.id = akb.kb_id AND kb.deleted_at IS NULL AND kb.status = 'active' "
+        "JOIN knowledge_bases kb ON kb.id = akb.kb_id AND kb.tenant_id = a.tenant_id "
+        "AND kb.deleted_at IS NULL AND kb.status = 'active' "
         "WHERE t.slug = $1 AND a.slug = $2 AND akb.enabled AND kb.embedding_config_id IS NOT NULL",
         tenant_slug, agent_slug,
     )
@@ -90,7 +91,8 @@ async def _agent_enabled_kb_ids(conn: asyncpg.Connection, tenant_slug: str, agen
         "FROM agent_knowledge_bases akb "
         "JOIN agents a ON a.id = akb.agent_id AND a.deleted_at IS NULL "
         "JOIN tenants t ON t.id = a.tenant_id AND t.deleted_at IS NULL "
-        "JOIN knowledge_bases kb ON kb.id = akb.kb_id AND kb.deleted_at IS NULL AND kb.status = 'active' "
+        "JOIN knowledge_bases kb ON kb.id = akb.kb_id AND kb.tenant_id = a.tenant_id "
+        "AND kb.deleted_at IS NULL AND kb.status = 'active' "
         "WHERE t.slug = $1 AND a.slug = $2 AND akb.enabled",
         tenant_slug, agent_slug,
     )

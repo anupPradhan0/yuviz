@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 
 from libs.tenancy import set_target_tenant
@@ -25,18 +26,27 @@ async def assign_knowledge_base(
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
     await _authorize_agent(agent_id, current_user)
-    return await agent_kb_service.assign(agent_id, body.kb_id, enabled=body.enabled)
+    try:
+        return await agent_kb_service.assign(agent_id, body.kb_id, enabled=body.enabled)
+    except (LookupError, asyncpg.DataError):
+        # Foreign and nonexistent KBs get the same response.
+        raise HTTPException(status_code=404, detail=f"knowledge_base {body.kb_id!r} not found")
 
 
 async def _authorize_agent(agent_id: str, current_user: CurrentUser) -> None:
     """update_assignment/detach_knowledge_base are keyed on agent_id rather
     than on a row of their own — agent_knowledge_bases carries no tenant
-    column — so the check resolves the *agent's* tenant (no check today)."""
+    column — so the check resolves the *agent's* tenant. A foreign agent gets
+    the same 404 as a missing one."""
+    not_found = HTTPException(status_code=404, detail=f"agent {agent_id!r} not found")
     platform_scoped = is_platform_scoped(current_user)
     tenant_id = await agent_kb_service.get_agent_tenant_id(agent_id, platform_scoped=platform_scoped)
     if tenant_id is None:
-        raise HTTPException(status_code=404, detail=f"agent {agent_id!r} not found")
-    await assert_tenant_access(tenant_id, current_user)
+        raise not_found
+    try:
+        await assert_tenant_access(tenant_id, current_user)
+    except HTTPException:
+        raise not_found
     set_target_tenant(tenant_id)
 
 

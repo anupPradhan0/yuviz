@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 
 from libs.tenancy import set_target_tenant
@@ -49,6 +50,11 @@ async def create_agent_tool_policy(
             max_chain_depth=body.max_chain_depth,
             user_id=current_user.id,
             user_email=current_user.email,
+        )
+    except (LookupError, asyncpg.DataError):
+        # Foreign and nonexistent provider configs get the same response.
+        raise HTTPException(
+            status_code=404, detail=f"tool_provider_config {body.tool_provider_config_id!r} not found",
         )
     except Exception as e:
         # UNIQUE(agent_id, tool_name) violation.
