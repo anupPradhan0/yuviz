@@ -62,7 +62,7 @@ async def test_retrieval_policy_put_cross_tenant_is_403_not_written(
     assert row is None
 
 
-async def test_agent_kb_list_get_cross_tenant_is_403_unknown_agent_is_404(
+async def test_agent_kb_list_get_cross_tenant_is_404_like_unknown_agent(
     client, pool, test_tenant, test_admin, other_tenant_admin,
 ):
     agent = await _make_agent(pool, test_tenant)
@@ -75,7 +75,7 @@ async def test_agent_kb_list_get_cross_tenant_is_403_unknown_agent_is_404(
         "/agents/00000000-0000-0000-0000-000000000000/knowledge-bases",
         headers={"Authorization": f"Bearer {test_admin['token']}"},
     )
-    assert cross_resp.status_code == 403
+    assert cross_resp.status_code == 404
     assert unknown_resp.status_code == 404
 
 

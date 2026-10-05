@@ -26,6 +26,8 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
+import re
 from typing import AsyncGenerator
 
 import httpx
@@ -38,6 +40,16 @@ _DEFAULT_BASE_URL = "https://api.cartesia.ai"
 # code change here, not a per-tenant setting.
 _API_VERSION = "2024-06-10"
 _DEFAULT_MODEL = "sonic-2"
+# Speed is a multiplier on the voice's normal pace (1.0 = unchanged). The
+# bounds are Cartesia's documented range for generation_config.speed.
+_MIN_SPEED = 0.6
+_MAX_SPEED = 1.5
+
+
+def _is_legacy_model(model: str) -> bool:
+    """sonic-3 and newer take generation_config; sonic-2 and older do not."""
+    m = re.match(r"sonic-(\d+)", model)
+    return m is None or int(m.group(1)) < 3
 
 
 class CartesiaTTS:
@@ -48,7 +60,12 @@ class CartesiaTTS:
               SecretResolver, never re-resolved per call.
     voice   — a Cartesia voice id (a UUID), NOT a human name. The console
               shows names; the id is what the API wants.
-    model   — "sonic-2" unless a tenant pins an older one via extra.model.
+    model   — "sonic-2" unless a tenant pins another via extra.model.
+    speed   — optional multiplier (1.0 = normal), clamped to 0.6–1.5. None
+              leaves the request body without any speed control. Sent as
+              generation_config.speed on sonic-3+, and as the older
+              __experimental_controls.speed (-1..1, mapped linearly from the
+              multiplier) on sonic-2 and earlier.
     """
 
     def __init__(
@@ -58,9 +75,11 @@ class CartesiaTTS:
         model:     str = _DEFAULT_MODEL,
         base_url:  str = _DEFAULT_BASE_URL,
         timeout_s: float = 15.0,
+        speed:     float | None = None,
     ) -> None:
         self._voice = voice
         self._model = model
+        self._speed = None if speed is None else min(max(speed, _MIN_SPEED), _MAX_SPEED)
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             headers={
@@ -69,10 +88,10 @@ class CartesiaTTS:
             },
             timeout=timeout_s,
         )
-        log.info("CartesiaTTS voice=%s model=%s", voice, model)
+        log.info("CartesiaTTS voice=%s model=%s speed=%s", voice, model, self._speed)
 
     def _body(self, text: str, sample_rate: int) -> dict:
-        return {
+        body = {
             "model_id": self._model,
             "transcript": text,
             "voice": {"mode": "id", "id": self._voice},
@@ -82,6 +101,13 @@ class CartesiaTTS:
                 "sample_rate": sample_rate,
             },
         }
+        if self._speed is not None:
+            if _is_legacy_model(self._model):
+                control = min(max((self._speed - 1.0) / 0.5, -1.0), 1.0)
+                body["__experimental_controls"] = {"speed": control}
+            else:
+                body["generation_config"] = {"speed": self._speed}
+        return body
 
     async def synthesize(self, text: str, sample_rate: int) -> bytes:
         if not text.strip():

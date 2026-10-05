@@ -164,6 +164,45 @@ CREATE TABLE IF NOT EXISTS agent_tool_policies (
 
 CREATE INDEX IF NOT EXISTS idx_agent_tool_policies_agent ON agent_tool_policies(agent_id) WHERE enabled;
 
+-- A policy may only reference a provider config of the agent's own tenant. The FKs are tenant-blind
+-- and the RLS WITH CHECK tests only the agent. Runs as the invoking role: a caller who cannot see
+-- the config under RLS finds no row and is refused too (fail closed).
+CREATE OR REPLACE FUNCTION agent_tool_policies_same_tenant() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM agents a JOIN tool_provider_configs c ON c.tenant_id = a.tenant_id
+         WHERE a.id = NEW.agent_id AND c.id = NEW.tool_provider_config_id
+    ) THEN
+        RAISE EXCEPTION 'tool provider config % does not belong to the tenant of agent %',
+            NEW.tool_provider_config_id, NEW.agent_id USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS agent_tool_policies_same_tenant ON agent_tool_policies;
+CREATE TRIGGER agent_tool_policies_same_tenant
+    BEFORE INSERT OR UPDATE OF agent_id, tool_provider_config_id ON agent_tool_policies
+    FOR EACH ROW EXECUTE FUNCTION agent_tool_policies_same_tenant();
+
+-- Rows that predate the trigger are reported, never deleted: the resolver ignores them (tenant
+-- predicate on the join) but an operator should review and remove them.
+DO $tool_policy_cross_tenant_report$
+DECLARE
+    bad RECORD;
+BEGIN
+    FOR bad IN
+        SELECT p.id, p.agent_id, p.tool_provider_config_id
+        FROM agent_tool_policies p
+        JOIN agents a ON a.id = p.agent_id
+        JOIN tool_provider_configs c ON c.id = p.tool_provider_config_id
+        WHERE c.tenant_id <> a.tenant_id
+    LOOP
+        RAISE WARNING 'cross-tenant agent_tool_policies row: id=% agent_id=% tool_provider_config_id=% (review and delete)',
+            bad.id, bad.agent_id, bad.tool_provider_config_id;
+    END LOOP;
+END $tool_policy_cross_tenant_report$;
+
 -- ── users ────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS users (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

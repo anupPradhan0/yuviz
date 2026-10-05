@@ -79,7 +79,9 @@ class ToolPolicyResolver:
                 SELECT atp.tool_name, atp.timeout_ms, atp.max_calls_per_turn, atp.max_chain_depth,
                        tpc.id AS tool_provider_config_id, tpc.engine, tpc.api_key_ref, tpc.extra
                 FROM agent_tool_policies atp
-                JOIN tool_provider_configs tpc ON tpc.id = atp.tool_provider_config_id
+                JOIN agents a ON a.id = atp.agent_id
+                JOIN tool_provider_configs tpc
+                  ON tpc.id = atp.tool_provider_config_id AND tpc.tenant_id = a.tenant_id
                 WHERE atp.agent_id = $1 AND atp.enabled = true AND tpc.deleted_at IS NULL
                 """,
                 agent_id,
