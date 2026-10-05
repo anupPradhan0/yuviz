@@ -148,6 +148,37 @@ services:
       retries: 30
       start_period: 20s
 
+  toolexec:
+    <<: *python-service
+    command: ["python", "-m", "services.toolexec"]
+    environment:
+      PORT: "8600"
+      LISTEN_HOST: "0.0.0.0"   # inside the container; the host port is bounded by BIND_ADDR
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      REDIS_URL: ${REDIS_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
+      ADMIN_UI_ORIGINS: ${ADMIN_UI_URL:-http://localhost:3000}
+      TOOLEXEC_TENANT_SECRET_ROOT: /app/data/toolexec_tenant_secrets
+      TOOLEXEC_ARGS_HMAC_KEY: ${TOOLEXEC_ARGS_HMAC_KEY:?run deployment/sh/dev.sh to generate deployment/.env}
+      TOOLEXEC_ARGS_HMAC_KEY_REF: env:TOOLEXEC_ARGS_HMAC_KEY
+      TOOLEXEC_EXECUTE_SUBJECTS: ${CONFIG_SERVICE_EMAIL}
+      TOOLEXEC_HTTP_HOST_ALLOWLIST: ${TOOLEXEC_HTTP_HOST_ALLOWLIST:-}
+      TOOLEXEC_OAUTH_REDIRECT_URI: ${TOOLEXEC_OAUTH_REDIRECT_URI:-}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${TOOLEXEC_PORT:-8600}:8600"
+    volumes:
+      - toolexec-secrets:/app/data/toolexec_tenant_secrets
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8600/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
   conversation:
     <<: *python-service
     command: ["python", "-m", "services.conversation",
@@ -159,6 +190,7 @@ services:
       CONFIG_SERVICE_EMAIL: ${CONFIG_SERVICE_EMAIL}
       CONFIG_SERVICE_PASSWORD: ${CONFIG_SERVICE_PASSWORD}
       KNOWLEDGE_SERVICE_URL: http://knowledge:8100
+      TOOLEXEC_SERVICE_URL: http://toolexec:8600
       LISTEN_HOST: "0.0.0.0"   # inside the container; the host port is bounded by BIND_ADDR
       # pipeline_config.py defaults to "macos", which needs the macOS `say` binary.
       VOICEAI_TTS_ENGINE: kokoro
@@ -259,6 +291,7 @@ services:
     environment:
       NEXT_PUBLIC_CONFIG_SERVICE_URL: http://localhost:${CONFIG_PORT:-8000}
       NEXT_PUBLIC_KNOWLEDGE_SERVICE_URL: http://localhost:${KNOWLEDGE_PORT:-8100}
+      NEXT_PUBLIC_TOOLEXEC_SERVICE_URL: http://localhost:${TOOLEXEC_PORT:-8600}
       NEXT_PUBLIC_WEBCALL_URL: ws://localhost:${WEBCALL_PORT:-8300}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${ADMIN_UI_PORT:-3000}:3000"
@@ -280,3 +313,4 @@ volumes:
   ollama-models:
   hf-cache:
   knowledge-docs:
+  toolexec-secrets:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from services.config import calls
 
@@ -62,6 +63,27 @@ async def test_list_calls_filters_by_direction(test_tenant, scoped, pool):
     assert [c["session_id"] for c in result["items"]] == [outbound_id]
 
     await pool.execute("DELETE FROM calls WHERE session_id IN ($1, $2)", inbound_id, outbound_id)
+
+
+async def test_list_calls_filters_by_started_at_range(test_tenant, scoped, pool):
+    recent_id, old_id = (f"test-call-{uuid.uuid4().hex[:8]}" for _ in range(2))
+    await pool.execute(
+        "INSERT INTO calls (session_id, tenant_id, direction, started_at) "
+        "VALUES ($1, $3, 'inbound', NOW() - INTERVAL '1 hour'), ($2, $3, 'inbound', NOW() - INTERVAL '10 days')",
+        recent_id, old_id, test_tenant["slug"],
+    )
+    now = datetime.now(timezone.utc)
+    try:
+        after = await calls.list_calls(test_tenant["slug"], started_after=now - timedelta(days=1))
+        assert [c["session_id"] for c in after["items"]] == [recent_id]
+        assert after["total"] == 1
+
+        window = await calls.list_calls(
+            test_tenant["slug"], started_after=now - timedelta(days=11), started_before=now - timedelta(days=9),
+        )
+        assert [c["session_id"] for c in window["items"]] == [old_id]
+    finally:
+        await pool.execute("DELETE FROM calls WHERE session_id IN ($1, $2)", recent_id, old_id)
 
 
 async def test_get_call_unknown_returns_none():

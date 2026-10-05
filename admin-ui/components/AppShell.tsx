@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Check, ChevronDown, Moon, Sun } from "lucide-react";
 import { getCurrentUser, isConsoleRole, listTenants, Tenant, User } from "@/lib/api";
 import { clearToken, getToken } from "@/lib/auth";
+import { clearAllAgentDrafts } from "@/lib/agentDraft";
 
 // Shared with other pages' tenant pickers (e.g. Live Calls) so they stay in sync with the header.
 export const ACTIVE_TENANT_STORAGE_KEY = "yuviz.activeTenantId";
@@ -274,6 +275,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   };
 
   const handleLogout = () => {
+    clearAllAgentDrafts();
     clearToken();
     router.push("/login");
   };

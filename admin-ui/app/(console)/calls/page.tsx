@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   ArrowRight, Check, ChevronDown, ChevronLeft, ChevronRight, PhoneIncoming, PhoneOutgoing, RefreshCw, Search, X,
 } from "lucide-react";
-import { ApiError, CallWithTenant, listAllCalls } from "@/lib/api";
+import { ALL_CALLS_LIMIT, ApiError, CallTimeRange, CallWithTenant, listAllCalls } from "@/lib/api";
 import { SentimentBadge, SENTIMENT_ORDER, sentimentLabel } from "@/components/SentimentBadge";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 
@@ -44,6 +44,21 @@ type Column = { key: ColKey; label: string; options: FilterOption[]; align?: "ri
 type TimeRange = { from: string; to: string };
 
 const ageMs = (c: CallWithTenant) => Date.now() - new Date(c.started_at).getTime();
+
+function timeRangeFor(filter: string | undefined, custom: TimeRange): CallTimeRange {
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  switch (filter) {
+    case "1h": return { startedAfter: ago(HOUR) };
+    case "today": return { startedAfter: new Date(new Date().setHours(0, 0, 0, 0)).toISOString() };
+    case "7d": return { startedAfter: ago(7 * 24 * HOUR) };
+    case "30d": return { startedAfter: ago(30 * 24 * HOUR) };
+    case "custom": return {
+      startedAfter: custom.from ? new Date(custom.from).toISOString() : undefined,
+      startedBefore: custom.to ? new Date(new Date(custom.to).getTime() + 59_999).toISOString() : undefined,
+    };
+    default: return {};
+  }
+}
 
 function formatRangeEnd(v: string): string {
   return new Date(v).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -144,7 +159,7 @@ function ColumnFilter({
               <button key={o.value} type="button" role="menuitemradio" aria-checked={o.value === value}
                 className={`th-filter-row${o.value === value ? " active" : ""}`} onClick={() => pick(o.value)}>
                 <span>{o.label}</span>
-                <span className="th-filter-count">{counts.get(o.value) ?? 0}</span>
+                {counts.has(o.value) && <span className="th-filter-count">{counts.get(o.value)}</span>}
                 {o.value === value && <Check size={13} className="th-filter-check" />}
               </button>
             ))}
@@ -171,21 +186,26 @@ export default function CallsPage() {
   const [filters, setFilters] = useState<Partial<Record<ColKey, string>>>({});
   const [customRange, setCustomRange] = useState<TimeRange>({ from: "", to: "" });
 
+  const [truncated, setTruncated] = useState(false);
+
   const [pageSize, setPageSize] = useState(25);
   const [page, setPage] = useState(1);
+
+  const timeFilter = filters.time;
 
   const load = useCallback(() => {
     if (tenantLoading || targetTenants.length === 0) return;
     setLoading(true);
     setError(null);
-    listAllCalls(targetTenants)
-      .then((cs) => {
-        setCalls(cs);
+    listAllCalls(targetTenants, timeRangeFor(timeFilter, customRange))
+      .then((result) => {
+        setCalls(result.calls);
+        setTruncated(result.truncated);
         setPage(1);
       })
       .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)))
       .finally(() => setLoading(false));
-  }, [targetTenants, tenantLoading]);
+  }, [targetTenants, tenantLoading, timeFilter, customRange]);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(load, [load]);
@@ -289,6 +309,8 @@ export default function CallsPage() {
   const optionCounts = useMemo(() => {
     const out = new Map<ColKey, Map<string, number>>();
     for (const col of columns) {
+      // Time ranges are fetched server-side, so the loaded calls can't count the other ranges.
+      if (col.key === "time") continue;
       const others = activeTests.filter((f) => f.key !== col.key);
       const base = searched.filter((c) => others.every((f) => f.test(c)));
       out.set(col.key, new Map(col.options.map((o) => [o.value, base.filter(o.test).length])));
@@ -346,8 +368,9 @@ export default function CallsPage() {
               : filtered.length === calls.length
                 ? `${calls.length} call${calls.length === 1 ? "" : "s"}`
                 : `${filtered.length} of ${calls.length} calls`}
+            {!loading && truncated && ` · showing the latest ${ALL_CALLS_LIMIT} per account, narrow the time range to see older calls`}
           </div>
-          {!loading && calls.length > 0 && (
+          {!loading && (calls.length > 0 || timeFilter) && (
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
               {hasFilters && (
                 <button type="button" className="btn btn-ghost btn-sm" onClick={clearFilters}>
@@ -373,7 +396,7 @@ export default function CallsPage() {
 
         {loading ? (
           <div className="empty-state">Loading calls…</div>
-        ) : calls.length === 0 ? (
+        ) : calls.length === 0 && !timeFilter ? (
           <div className="empty-state">
             No calls yet. Calls appear here as soon as an agent answers or places one.
           </div>

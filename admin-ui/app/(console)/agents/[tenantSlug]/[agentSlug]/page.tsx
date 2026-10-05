@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, ArrowRight, Check, Mic } from "lucide-react";
-import { Agent, AgentUpdate, ApiError, deleteAgent, getAgent, getLiveCalls, listProviders, ProviderConfig, undoPrompt, updateAgent } from "@/lib/api";
+import { Agent, AgentUpdate, ApiError, deleteAgent, getAgent, getCurrentUser, getLiveCalls, listProviders, ProviderConfig, undoPrompt, updateAgent } from "@/lib/api";
 import { KnowledgeBaseTabs } from "@/components/KnowledgeBaseTabs";
 import { ToolsPanel } from "@/components/ToolsPanel";
 import { Modal } from "@/components/Modal";
@@ -57,7 +57,7 @@ export default function AgentDetailPage() {
   // null = still checking.
   const [liveCallCount, setLiveCallCount] = useState<number | null>(null);
   const [deleteChecking, setDeleteChecking] = useState(false);
-  const [canViewLiveCalls, setCanViewLiveCalls] = useState(false);
+  const [isSuperadmin, setIsSuperadmin] = useState(false);
 
   const [form, setForm] = useState<AgentUpdate>({});
   const [languageChoice, setLanguageChoice] = useState<string>("");
@@ -73,6 +73,10 @@ export default function AgentDetailPage() {
       router.replace(`/agents/${tenantSlug}/${agentSlug}/test`);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    getCurrentUser().then((me) => setIsSuperadmin(me.role === "superadmin")).catch(() => setIsSuperadmin(false));
   }, []);
 
   useEffect(() => {
@@ -165,16 +169,19 @@ export default function AgentDetailPage() {
   const openDeleteConfirm = async () => {
     if (!agent) return;
     setDeleteConfirmOpen(true);
-    setLiveCallCount(null);
     setSaveError(null);
+    // Live Calls is superadmin-only; other roles rely on the DELETE's 409.
+    if (!isSuperadmin) {
+      setLiveCallCount(0);
+      return;
+    }
+    setLiveCallCount(null);
     setDeleteChecking(true);
     try {
       // LiveCall has no agent_id, so match by name; only a pre-check — the DELETE is authoritative.
       const snapshot = await getLiveCalls(tenantSlug);
       setLiveCallCount(snapshot.items.filter((c) => c.agent_name === agent.name).length);
-      setCanViewLiveCalls(true);
     } catch (e) {
-      // Live Calls is superadmin-only; other roles rely on the DELETE's 409.
       if (e instanceof ApiError && e.status === 403) setLiveCallCount(0);
       else setSaveError(e instanceof ApiError ? e.detail : String(e));
     } finally {
@@ -681,7 +688,7 @@ export default function AgentDetailPage() {
             // Deliberately no "force delete": this would cut off a live call.
             <>
               <button className="btn btn-ghost btn-sm" onClick={() => setDeleteConfirmOpen(false)}>Cancel</button>
-              {canViewLiveCalls && <Link href="/live-calls" className="btn btn-ghost btn-sm">View live calls</Link>}
+              {isSuperadmin && <Link href="/live-calls" className="btn btn-ghost btn-sm">View live calls</Link>}
             </>
           ) : (
             <>
@@ -708,8 +715,10 @@ export default function AgentDetailPage() {
             fontSize: ".78rem", color: "var(--text-2)", lineHeight: 1.5,
             borderLeft: "2px solid var(--green-border)", padding: "6px 0 6px 10px", margin: 0,
           }}>
-            No one is on a call with this agent. Phone numbers that use it will switch to their backup agent, or to
-            your account&apos;s default agent.
+            {isSuperadmin
+              ? "No one is on a call with this agent."
+              : "If a call is in progress on this agent, deletion will be refused until it ends."}{" "}
+            Phone numbers that use it will switch to their backup agent, or to your account&apos;s default agent.
           </p>
         )}
       </Modal>

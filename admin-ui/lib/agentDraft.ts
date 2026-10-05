@@ -1,6 +1,14 @@
 // Browser-only autosave for the /agents/new wizard, so leaving the page never loses typed work.
 
-const DRAFT_KEY = "yuviz:new-agent-draft";
+import { tokenUserId } from "@/lib/auth";
+
+const DRAFT_PREFIX = "yuviz:new-agent-draft";
+
+// Keyed per user so a draft never surfaces for another account on the same browser.
+function draftKey(): string | null {
+  const userId = tokenUserId();
+  return userId ? `${DRAFT_PREFIX}:${userId}` : null;
+}
 
 export interface AgentDraft {
   savedAt: number;
@@ -32,8 +40,10 @@ export interface AgentDraft {
 }
 
 export function loadAgentDraft(): AgentDraft | null {
+  const key = draftKey();
+  if (!key) return null;
   try {
-    const raw = window.localStorage.getItem(DRAFT_KEY);
+    const raw = window.localStorage.getItem(key);
     return raw ? (JSON.parse(raw) as AgentDraft) : null;
   } catch {
     return null;
@@ -41,16 +51,31 @@ export function loadAgentDraft(): AgentDraft | null {
 }
 
 export function saveAgentDraft(draft: AgentDraft): void {
+  const key = draftKey();
+  if (!key) return;
   try {
-    window.localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+    window.localStorage.setItem(key, JSON.stringify(draft));
   } catch {
     // Blocked/full storage: autosave silently degrades to none.
   }
 }
 
 export function clearAgentDraft(): void {
+  const key = draftKey();
+  if (!key) return;
   try {
-    window.localStorage.removeItem(DRAFT_KEY);
+    window.localStorage.removeItem(key);
+  } catch {
+    // Same non-fatal fallback as saveAgentDraft.
+  }
+}
+
+// Explicit sign-out only; a 401 expiry keeps the draft for the same user's return.
+export function clearAllAgentDrafts(): void {
+  try {
+    Object.keys(window.localStorage)
+      .filter((k) => k.startsWith(DRAFT_PREFIX))
+      .forEach((k) => window.localStorage.removeItem(k));
   } catch {
     // Same non-fatal fallback as saveAgentDraft.
   }
