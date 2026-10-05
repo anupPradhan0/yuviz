@@ -30,7 +30,8 @@ async def list_for_agent(agent_id: Any) -> list[dict[str, Any]]:
             """
             SELECT atp.*, tpc.name AS tool_provider_config_name, tpc.engine AS tool_provider_config_engine
             FROM agent_tool_policies atp
-            JOIN tool_provider_configs tpc ON tpc.id = atp.tool_provider_config_id
+            JOIN agents a ON a.id = atp.agent_id
+            JOIN tool_provider_configs tpc ON tpc.id = atp.tool_provider_config_id AND tpc.tenant_id = a.tenant_id
             WHERE atp.agent_id = $1 AND tpc.deleted_at IS NULL
             ORDER BY atp.created_at
             """,
@@ -51,8 +52,16 @@ async def create_agent_tool_policy(
     user_id: Any | None = None,
     user_email: str | None = None,
 ) -> dict[str, Any]:
+    """Raises LookupError unless the provider config is a live one of the agent's own tenant."""
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
+        same_tenant_config = await conn.fetchval(
+            "SELECT 1 FROM tool_provider_configs c JOIN agents a ON a.tenant_id = c.tenant_id "
+            "WHERE c.id = $1 AND a.id = $2 AND c.deleted_at IS NULL",
+            tool_provider_config_id, agent_id,
+        )
+        if same_tenant_config is None:
+            raise LookupError(f"tool_provider_config {tool_provider_config_id!r} not found")
         row = await conn.fetchrow(
             "INSERT INTO agent_tool_policies "
             "(agent_id, tool_name, tool_provider_config_id, enabled, timeout_ms, max_calls_per_turn, "

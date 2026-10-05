@@ -19,7 +19,7 @@ from .storage import StorageProvider
 
 log = logging.getLogger(__name__)
 
-_SUPPORTED_CONTENT_TYPES = {"text/plain", "text/markdown"}
+SUPPORTED_CONTENT_TYPES = {"text/plain", "text/markdown"}
 AUTO_INLINE_THRESHOLD_BYTES = 500
 POLL_INTERVAL_S = 2.0
 
@@ -41,9 +41,9 @@ async def _fetch_embedding_config(conn: asyncpg.Connection, kb_id) -> EmbeddingP
 
 
 async def _extract_text(content_type: str, raw: bytes) -> str:
-    if content_type not in _SUPPORTED_CONTENT_TYPES:
+    if content_type not in SUPPORTED_CONTENT_TYPES:
         raise ValueError(
-            f"unsupported content_type={content_type!r} — supported: {sorted(_SUPPORTED_CONTENT_TYPES)}",
+            f"unsupported content_type={content_type!r} — supported: {sorted(SUPPORTED_CONTENT_TYPES)}",
         )
     return raw.decode("utf-8")
 

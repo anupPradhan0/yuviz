@@ -100,6 +100,45 @@ CREATE TABLE IF NOT EXISTS agent_knowledge_bases (
 
 CREATE INDEX IF NOT EXISTS idx_agent_kb_agent ON agent_knowledge_bases(agent_id) WHERE enabled;
 
+-- A KB may only be attached to an agent of its own tenant. The FKs above are tenant-blind and the
+-- RLS WITH CHECK tests only the agent, so enforce it here. Runs as the invoking role: a caller who
+-- cannot see the KB under RLS finds no row and is refused too (fail closed).
+CREATE OR REPLACE FUNCTION agent_knowledge_bases_same_tenant() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM agents a JOIN knowledge_bases kb ON kb.tenant_id = a.tenant_id
+         WHERE a.id = NEW.agent_id AND kb.id = NEW.kb_id
+    ) THEN
+        RAISE EXCEPTION 'knowledge base % does not belong to the tenant of agent %', NEW.kb_id, NEW.agent_id
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS agent_knowledge_bases_same_tenant ON agent_knowledge_bases;
+CREATE TRIGGER agent_knowledge_bases_same_tenant
+    BEFORE INSERT OR UPDATE OF agent_id, kb_id ON agent_knowledge_bases
+    FOR EACH ROW EXECUTE FUNCTION agent_knowledge_bases_same_tenant();
+
+-- Rows that predate the trigger are reported, never deleted: retrieval ignores them (tenant
+-- predicate on the join) but an operator should review and remove them.
+DO $kb_cross_tenant_report$
+DECLARE
+    bad RECORD;
+BEGIN
+    FOR bad IN
+        SELECT akb.agent_id, akb.kb_id
+        FROM agent_knowledge_bases akb
+        JOIN agents a ON a.id = akb.agent_id
+        JOIN knowledge_bases kb ON kb.id = akb.kb_id
+        WHERE kb.tenant_id <> a.tenant_id
+    LOOP
+        RAISE WARNING 'cross-tenant agent_knowledge_bases row: agent_id=% kb_id=% (review and delete)',
+            bad.agent_id, bad.kb_id;
+    END LOOP;
+END $kb_cross_tenant_report$;
+
 -- ── agent_retrieval_policies — per-agent RetrievalPolicy, never hardcoded ──
 -- Precedence: per-call override > this row > system default. No row = system default.
 CREATE TABLE IF NOT EXISTS agent_retrieval_policies (
@@ -142,6 +181,8 @@ BEGIN
             akb.agent_id,
             jsonb_agg(akb.kb_id::text ORDER BY akb.kb_id) AS kb_ids
         FROM agent_knowledge_bases akb
+        JOIN agents ag ON ag.id = akb.agent_id
+        JOIN knowledge_bases kb ON kb.id = akb.kb_id AND kb.tenant_id = ag.tenant_id
         WHERE akb.enabled
         GROUP BY akb.agent_id
     ),

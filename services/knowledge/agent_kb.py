@@ -42,7 +42,9 @@ async def _refresh_flag(agent_id: Any) -> None:
         row = await conn.fetchrow(
             "SELECT EXISTS ("
             "  SELECT 1 FROM agent_knowledge_bases akb "
-            "  JOIN knowledge_bases kb ON kb.id = akb.kb_id AND kb.deleted_at IS NULL AND kb.status = 'active' "
+            "  JOIN agents a ON a.id = akb.agent_id "
+            "  JOIN knowledge_bases kb ON kb.id = akb.kb_id AND kb.tenant_id = a.tenant_id "
+            "    AND kb.deleted_at IS NULL AND kb.status = 'active' "
             "  WHERE akb.agent_id = $1 AND akb.enabled"
             ") AS has_kb",
             agent_id,
@@ -55,7 +57,8 @@ async def list_for_agent(agent_id: Any) -> list[dict[str, Any]]:
     async with tenant_conn(pool) as conn:
         rows = await conn.fetch(
             "SELECT akb.*, kb.slug AS kb_slug, kb.name AS kb_name FROM agent_knowledge_bases akb "
-            "JOIN knowledge_bases kb ON kb.id = akb.kb_id AND kb.deleted_at IS NULL "
+            "JOIN agents a ON a.id = akb.agent_id "
+            "JOIN knowledge_bases kb ON kb.id = akb.kb_id AND kb.tenant_id = a.tenant_id AND kb.deleted_at IS NULL "
             "WHERE akb.agent_id = $1 ORDER BY kb.name",
             agent_id,
         )
@@ -73,6 +76,7 @@ async def list_for_kb(kb_id: Any, *, platform_scoped: bool = False) -> list[dict
             "FROM agent_knowledge_bases akb "
             "JOIN agents a  ON a.id = akb.agent_id  AND a.deleted_at IS NULL "
             "JOIN tenants t ON t.id = a.tenant_id   AND t.deleted_at IS NULL "
+            "JOIN knowledge_bases kb ON kb.id = akb.kb_id AND kb.tenant_id = a.tenant_id "
             "WHERE akb.kb_id = $1 "
             "ORDER BY a.name",
             kb_id,
@@ -81,8 +85,16 @@ async def list_for_kb(kb_id: Any, *, platform_scoped: bool = False) -> list[dict
 
 
 async def assign(agent_id: Any, kb_id: Any, *, enabled: bool = True) -> dict[str, Any]:
+    """Raises LookupError unless kb_id is a live KB of the agent's own tenant."""
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
+        same_tenant_kb = await conn.fetchval(
+            "SELECT 1 FROM knowledge_bases kb JOIN agents a ON a.tenant_id = kb.tenant_id "
+            "WHERE kb.id = $1 AND a.id = $2 AND kb.deleted_at IS NULL",
+            kb_id, agent_id,
+        )
+        if same_tenant_kb is None:
+            raise LookupError(f"knowledge_base {kb_id!r} not found")
         row = await conn.fetchrow(
             "INSERT INTO agent_knowledge_bases (agent_id, kb_id, enabled) VALUES ($1, $2, $3) "
             "ON CONFLICT (agent_id, kb_id) DO UPDATE SET enabled = $3 RETURNING *",
@@ -125,7 +137,8 @@ async def has_enabled_kb(tenant_slug: str, agent_slug: str) -> bool:
             "  SELECT 1 FROM agent_knowledge_bases akb "
             "  JOIN agents a ON a.id = akb.agent_id AND a.deleted_at IS NULL "
             "  JOIN tenants t ON t.id = a.tenant_id AND t.deleted_at IS NULL "
-            "  JOIN knowledge_bases kb ON kb.id = akb.kb_id AND kb.deleted_at IS NULL AND kb.status = 'active' "
+            "  JOIN knowledge_bases kb ON kb.id = akb.kb_id AND kb.tenant_id = a.tenant_id "
+            "    AND kb.deleted_at IS NULL AND kb.status = 'active' "
             "  WHERE t.slug = $1 AND a.slug = $2 AND akb.enabled"
             ") AS has_kb",
             tenant_slug, agent_slug,
