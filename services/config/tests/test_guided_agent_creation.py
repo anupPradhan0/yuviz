@@ -184,7 +184,7 @@ def _url(tenant: dict, suffix: str = "") -> str:
 
 def _template_body(template_id: str, configs: dict, **overrides) -> dict:
     body = {
-        "template_id": template_id, "template_version": 3, "name": "Front Desk",
+        "template_id": template_id, "template_version": 4, "name": "Front Desk",
         "business_name": "Acme Dental", "business_facts": "Open 9 to 5.",
         "llm_config_id": configs["llm"],
     }
@@ -421,7 +421,7 @@ class TestFromTemplate:
         agent = await _create_agent(client, test_tenant, configs, "inbound-triage")
         row = await _agent_row(pool, agent["id"])
         assert row["status"] == "inactive"
-        assert (row["template_id"], row["template_version"]) == ("inbound-triage", 3)
+        assert (row["template_id"], row["template_version"]) == ("inbound-triage", 4)
         assert row["slug"] == "front-desk"
         assert row["tenant_id"] == test_tenant["id"]
         assert "Acme Dental" in row["greeting"] + row["system_prompt"]

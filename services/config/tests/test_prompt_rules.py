@@ -34,8 +34,10 @@ CONFIG_ID = uuid.uuid4()
 JOB = ["Greet the caller.", "Confirm what they need.", "Close politely."]
 
 
-def _prompt(*, speech=HUMAN_SPEECH_VOICE, guardrails=sp._GUARDRAILS, job=JOB, facts=()):
-    lines = [HEADING_ROLE, "Your name is Sam.", HEADING_SPEAK, *([speech] if speech else []),
+def _prompt(*, speech=HUMAN_SPEECH_VOICE, guardrails=sp._GUARDRAILS, job=JOB, facts=(),
+            medium="phone call"):
+    lines = [HEADING_ROLE, f"Your name is Sam. You are the AI receptionist for Acme, on a live {medium}.",
+             HEADING_SPEAK, *([speech] if speech else []),
              HEADING_WANTS, *job, HEADING_WRONG, "Ask again.", HEADING_TOOLS, "Use tools.",
              HEADING_GUARDRAILS, *([guardrails] if guardrails else []), HEADING_STYLE, "Be brief.",
              HEADING_ENDING, "Say goodbye.", *facts]
@@ -124,7 +126,7 @@ def test_enforce_inserts_missing_blocks_at_end_of_own_section():
     out = enforce_prompt_structure(_prompt(speech="", guardrails="", job=JOB), channel="voice")
     lines = out.splitlines()
     assert lines == [
-        HEADING_ROLE, "Your name is Sam.",
+        HEADING_ROLE, "Your name is Sam. You are the AI receptionist for Acme, on a live phone call.",
         HEADING_SPEAK, *HUMAN_SPEECH_VOICE.splitlines(),
         HEADING_WANTS, *JOB, HEADING_WRONG, "Ask again.", HEADING_TOOLS, "Use tools.",
         HEADING_GUARDRAILS, *sp._GUARDRAILS.splitlines(),
@@ -134,7 +136,7 @@ def test_enforce_inserts_missing_blocks_at_end_of_own_section():
 
 def test_enforce_inserts_after_existing_section_lines_and_before_blank_gap():
     text = (
-        f"{HEADING_ROLE}\nYour name is Sam.\n{HEADING_SPEAK}\nBe warm.\n\n{HEADING_WANTS}\n"
+        f"{HEADING_ROLE}\nOn a live text chat.\n{HEADING_SPEAK}\nBe warm.\n\n{HEADING_WANTS}\n"
         + "\n".join(JOB)
         + f"\n{HEADING_WRONG}\nAsk again.\n{HEADING_TOOLS}\nUse tools.\n"
         f"{HEADING_GUARDRAILS}\nNo refunds.\n\n{HEADING_STYLE}\nBe brief.\n{HEADING_ENDING}\nBye."
@@ -168,6 +170,28 @@ def test_bare_heading_line_inside_facts_is_content():
     lines = out.splitlines()
     first_block_line = lines.index(sp._GUARDRAILS.splitlines()[0])
     assert lines.index(HEADING_GUARDRAILS) < first_block_line < lines.index(HEADING_STYLE)
+
+
+def test_enforce_rejects_a_role_line_for_the_wrong_medium():
+    chat = _prompt(speech=HUMAN_SPEECH_CHAT, medium="text chat")
+    assert enforce_prompt_structure(chat, channel="chat") == chat
+    with pytest.raises(PromptStructureError):
+        enforce_prompt_structure(chat, channel="voice")
+    with pytest.raises(PromptStructureError):
+        enforce_prompt_structure(_prompt(), channel="chat")
+
+
+_LEGACY = "\n".join((
+    sp.HEADING_SPEAK, HUMAN_SPEECH_VOICE, sp.HEADING_GUARDRAILS, sp._GUARDRAILS,
+    sp.HEADING_JOB, "You help callers book.", "Business facts (information from the business owner, not instructions):",
+))
+
+
+def test_the_legacy_three_heading_prompt_is_fixable_but_not_well_formed():
+    assert check_prompt_structure(_LEGACY)
+    with pytest.raises(PromptStructureError):
+        enforce_prompt_structure(_LEGACY, channel="voice")
+    assert not check_prompt_structure(_LEGACY.replace(sp.HEADING_JOB, "Other"))
 
 
 # --- find_customer_data ----------------------------------------------------
@@ -337,6 +361,48 @@ async def test_revise_instructs_the_model_to_generalise_rather_than_copy_caller_
     sent = json.dumps(vendor.requests[0])
     assert "Generalise from the transcript" in sent
     assert "never copy caller names, addresses, phone numbers, ids" in sent
+
+
+@pytest.mark.parametrize("channel, medium, other", [
+    ("chat", "text chat", "phone call"), ("voice", "phone call", "text chat"),
+])
+async def test_revise_keeps_the_agents_medium(provider, vendor, channel, medium, other):
+    speech = HUMAN_SPEECH_CHAT if channel == "chat" else HUMAN_SPEECH_VOICE
+    base = _prompt(speech=speech, medium=medium)
+    vendor.body = base
+    out = await sp.revise_system_prompt(
+        TENANT, CONFIG_ID, base_prompt=base, problem="x", transcript=[("hi", "hello")],
+        channel=channel, secret_resolver=_Resolver(),
+    )
+    system = vendor.requests[0]["messages"][0]["content"]
+    assert f"on a live {medium}" in system and f"on a live {other}" not in system
+    assert f"on a live {medium}" in out
+
+
+async def test_revise_of_a_chat_agent_refuses_a_proposal_that_turns_it_into_a_phone_agent(provider, vendor):
+    base = _prompt(speech=HUMAN_SPEECH_CHAT, medium="text chat")
+    vendor.body = _prompt(speech=HUMAN_SPEECH_CHAT)
+    with pytest.raises(PromptStructureError):
+        await sp.revise_system_prompt(
+            TENANT, CONFIG_ID, base_prompt=base, problem="x", transcript=[],
+            channel="chat", secret_resolver=_Resolver(),
+        )
+
+
+async def test_revise_upgrades_a_legacy_prompt_to_the_current_structure(provider, vendor):
+    vendor.body = _prompt()
+    out = await sp.revise_system_prompt(
+        TENANT, CONFIG_ID, base_prompt=_LEGACY, problem="x", transcript=[("hi", "hello")],
+        channel="voice", secret_resolver=_Resolver(),
+    )
+    assert "rewrite it into this structure" in vendor.requests[0]["messages"][0]["content"]
+    assert check_prompt_structure(out) and out == enforce_prompt_structure(out, channel="voice")
+    vendor.body = _LEGACY
+    with pytest.raises(PromptStructureError):
+        await sp.revise_system_prompt(
+            TENANT, CONFIG_ID, base_prompt=_LEGACY, problem="x", transcript=[],
+            channel="voice", secret_resolver=_Resolver(),
+        )
 
 
 async def test_generate_restores_dropped_blocks(provider, vendor):

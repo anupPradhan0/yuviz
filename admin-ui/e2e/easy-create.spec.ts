@@ -810,7 +810,7 @@ const BOOK_API = customApi("api-book", "book_appointment", "Book an appointment"
 // Stands in for the custom API service (list and enable) and for the two Config routes that turn
 // the shared on-switch on. `calls` records "METHOD path" in order; `failPolicy` makes that many
 // policy calls fail before they succeed. Everything else on Config (creating the receptionist) is real.
-async function stubActions(page: Page, apis: unknown[], failPolicy = 0) {
+async function stubActions(page: Page, apis: unknown[], failPolicy = 0, policies: unknown[] = []) {
   const calls: string[] = [];
   const bodies: Record<string, unknown>[] = [];
   let policyFailures = failPolicy;
@@ -831,7 +831,7 @@ async function stubActions(page: Page, apis: unknown[], failPolicy = 0) {
     if (!isProviders && !isPolicies) return route.fallback();
     const reply = (status: number, json: unknown) => route.fulfill({ status, headers: ACTION_CORS, json });
     if (req.method() === "OPTIONS") return route.fulfill({ status: 204, headers: ACTION_CORS });
-    if (req.method() === "GET") return reply(200, isProviders ? [{ id: "cfg-1", engine: "toolexec" }] : []);
+    if (req.method() === "GET") return reply(200, isProviders ? [{ id: "cfg-1", engine: "toolexec" }] : policies);
     calls.push(`${req.method()} ${path}`);
     bodies.push(req.postDataJSON());
     if (policyFailures-- > 0) return reply(500, { detail: "switch exploded" });
@@ -935,6 +935,45 @@ test("a failed on-switch keeps the receptionist, shows a plain warning, and Try 
   await next(page);
   await next(page);
   await expect(page.getByText(`${easyCopy.actionsAttachedLabel}: 1 (Check open appointment times)`)).toBeVisible();
+});
+
+test("an agent that already has the on-switch policy gets no second one", async ({ page }) => {
+  const stub = await stubActions(page, [SLOTS_API], 0, [{ tool_name: "execute_api", enabled: true }]);
+  await openEasy(page, tenantA);
+  await toActionsBusiness(page, uniqueName("HasSwitch"));
+  await page.getByLabel("Check open appointment times").check();
+  await next(page);
+  const created = createdAgentId(page, "/agents/from-template");
+  await next(page);
+  const agentId = await created;
+  await expectStep(page, 3);
+  expect(stub.calls).toEqual([`PUT /agents/${agentId}/custom-apis/api-slots`]);
+  await expect(page.getByText(easyCopy.actionsWarning)).toHaveCount(0);
+});
+
+test("the Test step waits until the actions are attached", async ({ page }) => {
+  const stub = await stubActions(page, [SLOTS_API]);
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let held: () => void = () => {};
+  const reached = new Promise<void>((resolve) => (held = resolve));
+  await page.route(`${TOOLEXEC_URL}/**`, async (route) => {
+    if (route.request().method() !== "PUT") return route.fallback();
+    held();
+    await gate;
+    return route.fallback();
+  });
+  await openEasy(page, tenantA);
+  await toActionsBusiness(page, uniqueName("Ordering"));
+  await page.getByLabel("Check open appointment times").check();
+  await next(page);
+  await next(page);
+  await reached;
+  await expectStep(page, 2);
+  expect(stub.calls).toEqual([]);
+  release();
+  await expectStep(page, 3);
+  await expect.poll(() => stub.calls.length).toBe(2);
 });
 
 test("the Advanced wizard turns the on-switch on when an action is ticked", async ({ page }) => {

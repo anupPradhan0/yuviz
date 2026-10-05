@@ -2,9 +2,10 @@
 
 // Stage-wise agent creation over the existing create/update/assign endpoints.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  Agent,
   AgentUpdate,
   ApiError,
   ProviderConfig,
@@ -101,6 +102,7 @@ export default function NewAgentPage() {
   const [generatingPrompt, setGeneratingPrompt] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const createdAgent = useRef<Agent | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
 
   const tenant = useMemo(() => tenants.find((t) => t.slug === tenantSlug) ?? null, [tenants, tenantSlug]);
@@ -215,31 +217,37 @@ export default function NewAgentPage() {
     setCreating(true);
     setCreateError(null);
     try {
-      const agent = await createAgent(tenantSlug, {
-        slug,
-        name: name.trim(),
-        greeting,
-        system_prompt: systemPrompt,
-        stt_config_id: sttId,
-        llm_config_id: llmId,
-        tts_config_id: ttsId,
-      });
+      // A retry after a failed execute_api step must not create a second agent.
+      let agent = createdAgent.current;
+      if (!agent) {
+        const fresh = await createAgent(tenantSlug, {
+          slug,
+          name: name.trim(),
+          greeting,
+          system_prompt: systemPrompt,
+          stt_config_id: sttId,
+          llm_config_id: llmId,
+          tts_config_id: ttsId,
+        });
 
-      await updateAgent(tenantSlug, agent.id, {
-        language,
-        max_call_duration_s: maxCallDuration === "" ? null : maxCallDuration,
-        goodbye_grace_ms: goodbyeGraceMs === "" ? undefined : goodbyeGraceMs,
-        transfer_type: transferType,
-        transfer_destination: transferType === "none" ? null : transferDestination.trim() || null,
-        transfer_prompt: transferType === "none" ? null : transferCondition.trim() || null,
-        transfer_announcement: transferType === "none" ? null : transferAnnouncement.trim() || null,
-        escalation_threshold: escalationThreshold === "" ? null : escalationThreshold,
-      });
+        await updateAgent(tenantSlug, fresh.id, {
+          language,
+          max_call_duration_s: maxCallDuration === "" ? null : maxCallDuration,
+          goodbye_grace_ms: goodbyeGraceMs === "" ? undefined : goodbyeGraceMs,
+          transfer_type: transferType,
+          transfer_destination: transferType === "none" ? null : transferDestination.trim() || null,
+          transfer_prompt: transferType === "none" ? null : transferCondition.trim() || null,
+          transfer_announcement: transferType === "none" ? null : transferAnnouncement.trim() || null,
+          escalation_threshold: escalationThreshold === "" ? null : escalationThreshold,
+        });
 
-      await Promise.all([
-        ...Array.from(selectedKbIds).map((kbId) => assignKnowledgeBase(agent.id, kbId, true)),
-        ...Array.from(selectedApiIds).map((apiId) => setAgentCustomApiEnabled(agent.id, apiId, true)),
-      ]);
+        await Promise.all([
+          ...Array.from(selectedKbIds).map((kbId) => assignKnowledgeBase(fresh.id, kbId, true)),
+          ...Array.from(selectedApiIds).map((apiId) => setAgentCustomApiEnabled(fresh.id, apiId, true)),
+        ]);
+        agent = fresh;
+        createdAgent.current = fresh;
+      }
       if (selectedApiIds.size > 0) await enableExecuteApi(tenant.id, agent.id);
 
       router.push(`/agents/${tenantSlug}/${agent.slug}?test=1`);

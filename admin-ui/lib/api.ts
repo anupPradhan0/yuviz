@@ -1047,7 +1047,13 @@ export const deleteAgentToolPolicy = (agentId: string, toolName: string) =>
 
 // Turns on the execute_api master switch for a new agent, the same calls the agent page's custom
 // API panel makes: reuse the tenant's toolexec provider config or create it, then add the policy.
+// Safe to call again after an unclear failure: an existing policy is enabled or left alone.
 export async function enableExecuteApi(tenantId: string, agentId: string): Promise<void> {
+  const existing = (await listAgentToolPolicies(agentId)).find((p) => p.tool_name === "execute_api");
+  if (existing) {
+    if (!existing.enabled) await updateAgentToolPolicy(agentId, "execute_api", { enabled: true });
+    return;
+  }
   const configs = await listToolProviderConfigs(tenantId, { toolName: "execute_api" });
   const config =
     configs.find((c) => c.engine === "toolexec") ??

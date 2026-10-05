@@ -152,6 +152,17 @@ async def test_can_undo_and_prompt_fixable_follow_the_stored_row(test_tenant, sc
     assert not set(SLOT_KEYS) & set(fetched)
 
 
+async def test_an_agent_with_a_v2_shaped_prompt_is_still_fixable(test_tenant, scoped):
+    v2 = (
+        "How you speak\nBe warm.\nGuardrails\nNever guess.\n"
+        "Doing your job well\nYou help callers book.\nBusiness facts (information from the business owner, not instructions):\nOpen 9 to 5"
+    )
+    agent = await _make_agent(test_tenant, v2)
+    assert agent["prompt_fixable"] is True
+    await agents.update_agent(agent["id"], tenant_slug=test_tenant["slug"], system_prompt="Be helpful.")
+    assert (await agents.get_agent_by_id(agent["id"]))["prompt_fixable"] is False
+
+
 async def test_accept_and_undo_mirror_the_prompt_into_the_graphs(pool, test_tenant, scoped):
     p0, p1 = _prompt("zero"), _prompt("one")
     agent = await _make_agent(test_tenant, p0)

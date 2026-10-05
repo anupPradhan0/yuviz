@@ -297,7 +297,6 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
     try {
       const created = await createAgentFromTemplate(tenant.slug, body);
       setAgent(created);
-      setStep(STEP_TEST);
       await syncDocuments(created.id, {
         files,
         created: null,
@@ -307,6 +306,7 @@ export function EasyAgentFlow({ onAdvanced }: { onAdvanced: () => void }) {
         enable: customApis.filter((api) => tickedApiIds.includes(api.id)),
         switchOn: tickedApiIds.length > 0,
       });
+      setStep(STEP_TEST);
     } catch (e) {
       setCreateError(e instanceof ApiError && e.status === 409 ? easyCopy.nameTaken : easyErrorText(e));
     } finally {
