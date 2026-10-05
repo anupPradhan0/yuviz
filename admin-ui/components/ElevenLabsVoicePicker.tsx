@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Check, ChevronDown, Circle } from "lucide-react";
 import { ApiError, ElevenLabsVoice, ProviderConfig, createProvider, listElevenLabsVoices, updateProvider } from "@/lib/api";
 import { ELEVENLABS_LANGUAGES } from "@/lib/engineCatalog";
 import { SecretRefInput } from "./SecretRefInput";
@@ -204,8 +205,8 @@ export function ElevenLabsVoicePicker({
       >
         {selectedVoice ? (
           <>
-            <span style={{ color: isCurrentAssignment ? "var(--green)" : "var(--text-3)", marginRight: 8 }}>
-              {isCurrentAssignment ? "✓" : "•"}
+            <span style={{ color: isCurrentAssignment ? "var(--green)" : "var(--text-3)", marginRight: 8, display: "flex" }}>
+              {isCurrentAssignment ? <Check size={15} /> : <Circle size={8} fill="currentColor" />}
             </span>
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 500 }}>{selectedVoice.name}</div>
@@ -217,7 +218,7 @@ export function ElevenLabsVoicePicker({
         ) : (
           <div style={{ flex: 1, color: "var(--text-3)" }}>Select a voice…</div>
         )}
-        <span style={{ color: "var(--text-3)" }}>▾</span>
+        <ChevronDown size={15} style={{ color: "var(--text-3)", flexShrink: 0 }} />
       </button>
     );
   }

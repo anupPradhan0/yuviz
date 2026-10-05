@@ -195,12 +195,11 @@ class TestConsoleGateApp:
         assert names == set(DIRECT_AUTHENTICATED_USER_ALLOWLIST), names
 
     def test_live_calls_routes_match_role_allowlist(self):
-        # Fails if a route is added under the operator gate without an entry, or viewer is added.
+        # Fails if a route is added under the operator gate without an entry, or any non-superadmin role is added.
         names = _route_names_depending_on_code(app, _LIVE_CALLS_OPERATOR_CODE)
         assert names == set(LIVE_CALLS_ROLE_ALLOWLIST), names
         for role_set in LIVE_CALLS_ROLE_ALLOWLIST.values():
-            assert role_set == deps.LIVE_CALLS_ROLES == {"superadmin", "admin", "supervisor"}
-            assert "viewer" not in role_set
+            assert role_set == deps.LIVE_CALLS_ROLES == {"superadmin"}
 
 
 def _iter_api_routes(routes):
@@ -242,6 +241,6 @@ _LIVE_CALLS_OPERATOR_CODE = deps.require_live_calls_operator().__code__
 
 # Route -> expected role set for every route gated by require_live_calls_operator().
 LIVE_CALLS_ROLE_ALLOWLIST: dict[str, frozenset[str]] = {
-    "get_live_calls": frozenset({"superadmin", "admin", "supervisor"}),
-    "request_intervention": frozenset({"superadmin", "admin", "supervisor"}),
+    "get_live_calls": frozenset({"superadmin"}),
+    "request_intervention": frozenset({"superadmin"}),
 }

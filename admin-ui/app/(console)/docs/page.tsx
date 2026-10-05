@@ -1,6 +1,6 @@
 "use client";
 
-// Configuration guide for tenant admins. Deliberately static (no fetches) so it works when the API doesn't.
+// Configuration guide for tenant admins. Static (no fetches) so it still renders when the API is down.
 // Keep in step with the agent wizard, APIs tab and knowledge base forms.
 
 import { useState } from "react";
@@ -80,13 +80,13 @@ export default function DocsPage() {
   const [section, setSection] = useState<SectionId>("start");
 
   return (
-    <div>
-      <div className="detail-hdr">
-        <div>
-          <h1 className="card-title" style={{ fontSize: "1.3rem" }}>Configuration guide</h1>
-          <div className="card-sub">
-            What every field does, and what happens if you get it wrong
-          </div>
+    <div style={{ maxWidth: 980 }}>
+      <div style={{ marginBottom: 18 }}>
+        <h1 style={{ fontSize: "1.5rem", fontWeight: 600, letterSpacing: "-.025em", margin: 0, color: "var(--text)" }}>
+          Configuration guide
+        </h1>
+        <div className="form-hint" style={{ marginTop: 4 }}>
+          What every field does, and what happens if you get it wrong
         </div>
       </div>
 
@@ -114,7 +114,7 @@ export default function DocsPage() {
                 difference between them is the single most important idea here.
               </P>
 
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, margin: "16px 0" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 14, margin: "16px 0" }}>
                 <div className="card" style={{ padding: 16 }}>
                   <div style={{ fontWeight: 600, marginBottom: 6 }}>A knowledge base</div>
                   <div style={{ fontSize: ".88rem", color: "var(--text-2)" }}>
@@ -693,7 +693,7 @@ export default function DocsPage() {
                 <strong>Calls</strong> is the history: transcripts, how each call ended,
                 what the agent did. The single most useful page for understanding why
                 an agent behaved oddly — read the transcript rather than guessing.{" "}
-                <strong>Live Calls</strong> shows what is happening right now.
+                <strong>Live Calls</strong> shows what is happening right now (superadmins only).
               </P>
 
               <H3>Users</H3>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Plus } from "lucide-react";
 import {
   AgentToolPolicy,
   ApiError,
@@ -181,7 +182,7 @@ export function ToolsPanel({ tenantId, agentId }: { tenantId: string; agentId: s
         <div className="card">
           <div className="card-hdr">
             <div className="card-title">Tools</div>
-            <div className="card-sub">what this agent can do beyond talking</div>
+            <div className="card-sub">extra things this agent can do on a call, like booking or looking things up</div>
           </div>
 
           {policies.map((p) => (
@@ -192,7 +193,7 @@ export function ToolsPanel({ tenantId, agentId }: { tenantId: string; agentId: s
                   {p.tool_name} · {p.tool_provider_config_engine}
                 </div>
               </div>
-              <label className="toggle-switch" title={p.enabled ? "Enabled" : "Disabled — never offered to the LLM"}>
+              <label className="toggle-switch" title={p.enabled ? "On" : "Off: the agent won't use this"}>
                 <input type="checkbox" checked={p.enabled} onChange={(e) => handleToggleEnabled(p, e.target.checked)} />
                 <span className="toggle-slider" />
               </label>
@@ -218,19 +219,19 @@ export function ToolsPanel({ tenantId, agentId }: { tenantId: string; agentId: s
                   <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>via {engine.display_name}</div>
                 </div>
                 <button
-                  className="btn btn-primary btn-sm"
-                  style={{ width: 26, height: 26, padding: 0, fontSize: "1rem", lineHeight: 1 }}
+                  className="btn btn-primary btn-sm btn-icon"
                   title={`Add ${entry.display_name}`}
+                  aria-label={`Add ${entry.display_name}`}
                   onClick={() => openConfig(entry, engine)}
                 >
-                  +
+                  <Plus size={14} />
                 </button>
               </div>
             )),
           )}
 
           {policies.length === 0 && availableEntries.length === 0 && (
-            <div className="empty-state">No tools available.</div>
+            <div className="empty-state">No tools available yet.</div>
           )}
         </div>
       </div>

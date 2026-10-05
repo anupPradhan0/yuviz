@@ -2,6 +2,7 @@
 
 // Variables to extract from this node's slice of the conversation (runs when the call leaves the node).
 
+import { X } from "lucide-react";
 import type { Extraction, ExtractionVariable } from "@/lib/workflowApi";
 
 const EMPTY: Extraction = { enabled: false, prompt: "", variables: [] };
@@ -69,13 +70,13 @@ export function ExtractionEditor({
                 </div>
                 <button
                   type="button"
-                  className="btn btn-ghost btn-sm"
-                  style={{ height: 32 }}
+                  className="btn btn-ghost btn-icon"
                   onClick={() =>
                     onChange({ ...extraction, variables: extraction.variables.filter((_, j) => j !== i) })
                   }
+                  aria-label="Remove variable"
                 >
-                  ✕
+                  <X size={13} />
                 </button>
               </div>
               <input

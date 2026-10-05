@@ -1,5 +1,7 @@
 "use client";
 
+import { X } from "lucide-react";
+
 export function Modal({
   open,
   title,
@@ -20,8 +22,8 @@ export function Modal({
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-hdr">
           <div className="modal-title">{title}</div>
-          <button className="modal-close" onClick={onClose}>
-            ✕
+          <button className="modal-close" onClick={onClose} aria-label="Close">
+            <X size={16} />
           </button>
         </div>
         <div className="modal-body">{children}</div>

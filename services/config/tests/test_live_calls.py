@@ -12,6 +12,7 @@ from collections import OrderedDict
 
 import asyncpg
 import pytest
+import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from libs.tenancy import set_target_tenant
@@ -39,6 +40,14 @@ async def _create_user(*, role: str, tenant_id=None, email: str | None = None) -
     return await users_service.create_user(
         email=email, password="test-password-not-real", role=role, tenant_id=tenant_id,
     )
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def operator(pool, test_tenant):
+    """Superadmin bound to test_tenant: the only role Live Calls admits, in tenant scope."""
+    user = await _create_user(role="superadmin", tenant_id=test_tenant["id"])
+    yield {"user": user}
+    await _soft_delete_user(pool, user["id"])
 
 
 async def _create_service_account_viewer(pool) -> dict:
@@ -107,7 +116,7 @@ class TestFreshAuthority:
     async def test_memoizes_within_ttl_then_rereads_after_role_change_and_expiry(
         self, pool, test_tenant, monkeypatch,
     ):
-        user_row = await _create_user(role="supervisor", tenant_id=test_tenant["id"])
+        user_row = await _create_user(role="superadmin", tenant_id=test_tenant["id"])
         try:
             token_user = auth.decode_access_token(auth.create_access_token(user_row))
 
@@ -128,22 +137,23 @@ class TestFreshAuthority:
             first = await deps.fresh_authority(app_state, token_user, "self", ttl_s=60)
             second = await deps.fresh_authority(app_state, token_user, "self", ttl_s=60)
             assert calls["count"] == 1
-            assert first.role == second.role == "supervisor"
+            assert first.role == second.role == "superadmin"
 
             # Within the TTL the memo still wins.
             await users_service.update_user(user_row["id"], role="admin")
             still_memoized = await deps.fresh_authority(app_state, token_user, "self", ttl_s=60)
-            assert still_memoized.role == "supervisor"
+            assert still_memoized.role == "superadmin"
             assert calls["count"] == 1
 
-            third = await deps.fresh_authority(app_state, token_user, "self", ttl_s=0)
-            assert third.role == "admin"
+            with pytest.raises(Exception) as exc_info:
+                await deps.fresh_authority(app_state, token_user, "self", ttl_s=0)
+            assert exc_info.value.status_code == 403
             assert calls["count"] == 2
         finally:
             await _soft_delete_user(pool, user_row["id"])
 
     async def test_assert_current_authority_403s_on_soft_delete(self, pool, test_tenant):
-        user_row = await _create_user(role="admin", tenant_id=test_tenant["id"])
+        user_row = await _create_user(role="superadmin", tenant_id=test_tenant["id"])
         token_user = auth.decode_access_token(auth.create_access_token(user_row))
         await _soft_delete_user(pool, user_row["id"])
         with pytest.raises(Exception) as exc_info:
@@ -151,7 +161,7 @@ class TestFreshAuthority:
         assert exc_info.value.status_code == 403
 
     async def test_assert_current_authority_403s_on_tenant_mismatch(self, pool, test_tenant):
-        user_row = await _create_user(role="admin", tenant_id=test_tenant["id"])
+        user_row = await _create_user(role="superadmin", tenant_id=test_tenant["id"])
         try:
             token_user = auth.decode_access_token(auth.create_access_token(user_row))
             other_tenant = await pool.fetchrow(
@@ -300,12 +310,30 @@ def _reset_throttle() -> None:
 
 
 class TestTenantIsolationAndScope:
-    async def test_tenant_scoped_admin_sees_only_own_tenant(self, pool, test_tenant, test_admin):
+    @pytest.mark.parametrize("role", ["admin", "supervisor", "viewer", "agent"])
+    async def test_non_superadmin_roles_403_on_both_routes(self, role, pool, test_tenant):
+        user = await _create_user(role=role, tenant_id=test_tenant["id"])
+        session_id = await _insert_call(pool, tenant_slug=test_tenant["slug"])
+        try:
+            _clear_authority_memo()
+            _reset_throttle()
+            async with _client_as(user) as client:
+                get_resp = await client.get("/live-calls")
+                post_resp = await _post_intervention(client, session_id)
+            assert get_resp.status_code == post_resp.status_code == 403
+            assert await pool.fetchval(
+                "SELECT COUNT(*) FROM live_call_interventions WHERE session_id = $1", session_id,
+            ) == 0
+        finally:
+            await _cleanup_call(pool, session_id)
+            await _soft_delete_user(pool, user["id"])
+
+    async def test_tenant_scoped_operator_sees_only_own_tenant(self, pool, test_tenant, operator):
         other_tenant = await _create_tenant(pool)
         call_a = await _insert_call(pool, tenant_slug=test_tenant["slug"])
         call_b = await _insert_call(pool, tenant_slug=other_tenant["slug"])
         try:
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 resp = await client.get("/live-calls")
             assert resp.status_code == 200, resp.text
             body = resp.json()
@@ -318,12 +346,12 @@ class TestTenantIsolationAndScope:
             await _cleanup_tenant(pool, other_tenant)
 
     async def test_no_existence_oracle_for_foreign_vs_nonexistent_tenant_slug(
-        self, pool, test_tenant, test_admin,
+        self, pool, test_tenant, operator,
     ):
         other_tenant = await _create_tenant(pool)
         try:
             _reset_throttle()
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 foreign_resp = await client.get("/live-calls", params={"tenant_slug": other_tenant["slug"]})
                 _reset_throttle()
                 nonexistent_resp = await client.get(
@@ -451,9 +479,9 @@ class TestTenantIsolationAndScope:
         self, pool, test_tenant,
     ):
         # Fresh row (NULL-tenant superadmin) must win over the stale tenant claim.
-        admin_row = await _create_user(role="admin", tenant_id=test_tenant["id"])
+        admin_row = await _create_user(role="superadmin", tenant_id=test_tenant["id"])
         try:
-            await users_service.update_user(admin_row["id"], role="superadmin", tenant_id=None)
+            await users_service.update_user(admin_row["id"], tenant_id=None)
             _clear_authority_memo()
             async with _client_as(admin_row) as client:
                 resp = await client.get("/live-calls")
@@ -466,72 +494,67 @@ class TestTenantIsolationAndScope:
 # ── T7 — AC15 snippet authority, decided on the DB role not the token ───────
 
 class TestSnippetAuthority:
-    async def test_snippet_visible_to_admin_withheld_from_supervisor(self, pool, test_tenant, test_admin):
+    async def test_snippet_visible_to_superadmin_and_never_to_supervisor(self, pool, test_tenant, operator):
         session_id = await _insert_call(pool, tenant_slug=test_tenant["slug"])
         await _insert_transcript_turn(pool, session_id=session_id, caller_text="the secret caller phrase")
         supervisor = await _create_user(role="supervisor", tenant_id=test_tenant["id"])
         try:
             _clear_authority_memo()
             _reset_throttle()
-            async with _client_as(test_admin["user"]) as client:
-                admin_resp = await client.get("/live-calls")
-            assert admin_resp.status_code == 200
-            admin_item = admin_resp.json()["items"][0]
-            assert admin_item["transcript_snippet"] == "the secret caller phrase"
-            assert admin_item["transcript_withheld"] is False
+            async with _client_as(operator["user"]) as client:
+                operator_resp = await client.get("/live-calls")
+            assert operator_resp.status_code == 200
+            operator_item = operator_resp.json()["items"][0]
+            assert operator_item["transcript_snippet"] == "the secret caller phrase"
+            assert operator_item["transcript_withheld"] is False
 
             _clear_authority_memo()
             _reset_throttle()
             async with _client_as(supervisor) as client:
                 sup_resp = await client.get("/live-calls")
-            assert sup_resp.status_code == 200
-            sup_item = sup_resp.json()["items"][0]
-            assert sup_item["transcript_snippet"] is None
-            assert sup_item["transcript_withheld"] is True
+            assert sup_resp.status_code == 403
             assert "the secret caller phrase" not in sup_resp.text
         finally:
             await _cleanup_call(pool, session_id)
             await _soft_delete_user(pool, supervisor["id"])
 
-    async def test_demotion_stops_snippet_only_after_the_shipped_60s_ttl(self, pool, test_tenant, test_admin):
+    async def test_demotion_403s_only_after_the_shipped_60s_ttl(self, pool, test_tenant, operator):
         session_id = await _insert_call(pool, tenant_slug=test_tenant["slug"])
-        await _insert_transcript_turn(pool, session_id=session_id, caller_text="only admins should see this")
+        await _insert_transcript_turn(pool, session_id=session_id, caller_text="only superadmins should see this")
         try:
             _clear_authority_memo()
             _reset_throttle()
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 first = await client.get("/live-calls")
                 assert first.status_code == 200
-                assert first.json()["items"][0]["transcript_snippet"] == "only admins should see this"
+                assert first.json()["items"][0]["transcript_snippet"] == "only superadmins should see this"
 
-                await users_service.update_user(test_admin["user"]["id"], role="supervisor")
+                await users_service.update_user(operator["user"]["id"], role="admin")
 
                 # Still inside the real 60s memo TTL (deliberately not shortened).
                 _reset_throttle()
-                still_admin_view = await client.get("/live-calls")
-                assert still_admin_view.status_code == 200
-                assert still_admin_view.json()["items"][0]["transcript_snippet"] == "only admins should see this"
+                still_memoized = await client.get("/live-calls")
+                assert still_memoized.status_code == 200
 
                 await asyncio.sleep(deps.AUTHORITY_MEMO_TTL_S + 1)
 
                 _reset_throttle()
                 after_ttl = await client.get("/live-calls")
-                assert after_ttl.status_code == 200
-                assert after_ttl.json()["items"][0]["transcript_withheld"] is True
-                assert "only admins should see this" not in after_ttl.text
+                assert after_ttl.status_code == 403
+                assert "only superadmins should see this" not in after_ttl.text
         finally:
             await _cleanup_call(pool, session_id)
 
-    async def test_soft_delete_403s_after_the_shipped_60s_ttl(self, pool, test_tenant, test_admin):
+    async def test_soft_delete_403s_after_the_shipped_60s_ttl(self, pool, test_tenant, operator):
         session_id = await _insert_call(pool, tenant_slug=test_tenant["slug"])
         try:
             _clear_authority_memo()
             _reset_throttle()
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 first = await client.get("/live-calls")
                 assert first.status_code == 200
 
-                await _soft_delete_user(pool, test_admin["user"]["id"])
+                await _soft_delete_user(pool, operator["user"]["id"])
 
                 _reset_throttle()
                 still_ok = await client.get("/live-calls")
@@ -637,32 +660,32 @@ class TestKpis:
 # ── T9 — rate limit + acquire timeout ────────────────────────────────────
 
 class TestRateLimitAndAcquireTimeout:
-    async def test_rate_limit_429s_after_bucket_exhausted(self, pool, test_tenant, test_admin):
+    async def test_rate_limit_429s_after_bucket_exhausted(self, pool, test_tenant, operator):
         # Bucket capacity is 4: drive exactly that, then one more.
         _clear_authority_memo()
         _reset_throttle()
-        async with _client_as(test_admin["user"]) as client:
+        async with _client_as(operator["user"]) as client:
             responses = [await client.get("/live-calls") for _ in range(4)]
             fifth = await client.get("/live-calls")
         assert all(r.status_code == 200 for r in responses), [r.status_code for r in responses]
         assert fifth.status_code == 429
         _reset_throttle()
 
-    async def test_granted_request_is_never_throttled_below_the_bucket_cap(self, test_tenant, test_admin):
+    async def test_granted_request_is_never_throttled_below_the_bucket_cap(self, test_tenant, operator):
         _clear_authority_memo()
         _reset_throttle()
-        async with _client_as(test_admin["user"]) as client:
+        async with _client_as(operator["user"]) as client:
             resp = await client.get("/live-calls")
         assert resp.status_code == 200
         _reset_throttle()
 
     async def test_throttle_tolerates_realistic_multi_tab_traffic_without_any_reset(
-        self, pool, test_tenant, test_admin,
+        self, pool, test_tenant, operator,
     ):
         """Four requests in one 5s window (multiple tabs, re-fetches) pass on the real
         shared throttle with no reset; a fifth still 429s."""
         _clear_authority_memo()
-        async with _client_as(test_admin["user"]) as client:
+        async with _client_as(operator["user"]) as client:
             responses = [await client.get("/live-calls") for _ in range(4)]
             assert all(r.status_code == 200 for r in responses), [r.status_code for r in responses]
 
@@ -752,12 +775,12 @@ class TestRequestInterventionServiceFunction:
 
 
 class TestInterventionIpAddress:
-    async def test_spoofed_non_ip_xff_stores_null(self, pool, test_tenant, test_admin):
+    async def test_spoofed_non_ip_xff_stores_null(self, pool, test_tenant, operator):
         session_id = await _insert_call(pool, tenant_slug=test_tenant["slug"])
         try:
             _clear_authority_memo()
             _reset_throttle()
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 resp = await _post_intervention(
                     client, session_id, headers={"X-Forwarded-For": "not-an-ip, 10.0.0.1"},
                 )
@@ -769,12 +792,12 @@ class TestInterventionIpAddress:
         finally:
             await _cleanup_call(pool, session_id)
 
-    async def test_well_formed_xff_hop_is_stored(self, pool, test_tenant, test_admin):
+    async def test_well_formed_xff_hop_is_stored(self, pool, test_tenant, operator):
         session_id = await _insert_call(pool, tenant_slug=test_tenant["slug"])
         try:
             _clear_authority_memo()
             _reset_throttle()
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 resp = await _post_intervention(
                     client, session_id, headers={"X-Forwarded-For": "203.0.113.7, 10.0.0.1"},
                 )
@@ -789,7 +812,7 @@ class TestInterventionIpAddress:
 
 class TestInterventionDenialAuditing:
     async def test_byte_identical_404_across_foreign_nonexistent_and_oversized_session_id(
-        self, pool, test_tenant, test_admin,
+        self, pool, test_tenant, operator,
     ):
         other_tenant = await _create_tenant(pool)
         foreign_session = await _insert_call(pool, tenant_slug=other_tenant["slug"])
@@ -798,7 +821,7 @@ class TestInterventionDenialAuditing:
         try:
             _clear_authority_memo()
             _reset_throttle()
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 foreign_resp = await _post_intervention(client, foreign_session)
                 _reset_throttle()
                 nonexistent_resp = await _post_intervention(client, nonexistent_session)
@@ -815,12 +838,12 @@ class TestInterventionDenialAuditing:
             await _cleanup_call(pool, foreign_session)
             await _cleanup_tenant(pool, other_tenant)
 
-    async def test_resolve_scope_tenant_mismatch_404_is_also_audited(self, pool, test_tenant, test_admin):
+    async def test_resolve_scope_tenant_mismatch_404_is_also_audited(self, pool, test_tenant, operator):
         other_tenant = await _create_tenant(pool)
         try:
             _clear_authority_memo()
             _reset_throttle()
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 resp = await _post_intervention(
                     client, f"test-live-{uuid.uuid4().hex[:8]}", tenant_slug=other_tenant["slug"],
                 )
@@ -837,7 +860,7 @@ class TestInterventionDenialAuditing:
 class TestInterventionStaleTokenAndAuditCompleteness:
     async def test_soft_delete_after_success_403s_the_replayed_token(self, pool, test_tenant):
         session_id = await _insert_call(pool, tenant_slug=test_tenant["slug"])
-        admin_row = await _create_user(role="admin", tenant_id=test_tenant["id"])
+        admin_row = await _create_user(role="superadmin", tenant_id=test_tenant["id"])
         try:
             _clear_authority_memo()
             _reset_throttle()
@@ -862,7 +885,7 @@ class TestInterventionStaleTokenAndAuditCompleteness:
 
     async def test_demotion_after_success_403s_the_replayed_token(self, pool, test_tenant):
         session_id = await _insert_call(pool, tenant_slug=test_tenant["slug"])
-        admin_row = await _create_user(role="admin", tenant_id=test_tenant["id"])
+        admin_row = await _create_user(role="superadmin", tenant_id=test_tenant["id"])
         try:
             _clear_authority_memo()
             _reset_throttle()
@@ -880,13 +903,13 @@ class TestInterventionStaleTokenAndAuditCompleteness:
             await _soft_delete_user(pool, admin_row["id"])
 
     async def test_in_tenant_request_produces_one_paired_intervention_and_audit_row(
-        self, pool, test_tenant, test_admin,
+        self, pool, test_tenant, operator,
     ):
         session_id = await _insert_call(pool, tenant_slug=test_tenant["slug"])
         try:
             _clear_authority_memo()
             _reset_throttle()
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 resp = await _post_intervention(client, session_id, action="barge")
             assert resp.status_code == 202, resp.text
 
@@ -897,7 +920,7 @@ class TestInterventionStaleTokenAndAuditCompleteness:
             intervention = intervention_rows[0]
             assert intervention["outcome"] == "unavailable"
             assert intervention["action"] == "barge"
-            assert intervention["user_email"] == test_admin["user"]["email"]
+            assert intervention["user_email"] == operator["user"]["email"]
 
             audit_rows = await pool.fetch(
                 "SELECT * FROM audit_log WHERE entity_type = 'live_call_intervention' "
@@ -906,8 +929,8 @@ class TestInterventionStaleTokenAndAuditCompleteness:
             )
             assert len(audit_rows) == 1
             audit_row = audit_rows[0]
-            assert audit_row["user_id"] == test_admin["user"]["id"]
-            assert audit_row["user_email"] == test_admin["user"]["email"]
+            assert audit_row["user_id"] == operator["user"]["id"]
+            assert audit_row["user_email"] == operator["user"]["email"]
             assert db.json_col(audit_row["new_value"])["session_id"] == session_id
         finally:
             await _cleanup_call(pool, session_id)
@@ -917,15 +940,15 @@ class TestInterventionStaleTokenAndAuditCompleteness:
 
 class TestDenialAuditAggregation:
     async def test_twenty_rapid_denials_from_one_user_aggregate_into_fewer_than_twenty_rows(
-        self, pool, test_tenant, test_admin,
+        self, pool, test_tenant, operator,
     ):
-        key = (str(test_admin["user"]["id"]), str(test_tenant["id"]))
+        key = (str(operator["user"]["id"]), str(test_tenant["id"]))
         live_calls._denial_audit_windows.pop(key, None)
         before = await _count_audit_rows(pool, test_tenant["id"], "denied")
         try:
             _clear_authority_memo()
             _reset_throttle()
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 for _ in range(20):
                     _reset_throttle()
                     resp = await _post_intervention(client, f"nope-{uuid.uuid4().hex[:8]}")
@@ -967,12 +990,12 @@ class TestDenialAuditAggregation:
             await _soft_delete_user(pool, superadmin["id"])
             await _cleanup_tenant(pool, other_tenant)
 
-    async def test_granted_requests_are_never_aggregated(self, pool, test_tenant, test_admin):
+    async def test_granted_requests_are_never_aggregated(self, pool, test_tenant, operator):
         session_ids = [await _insert_call(pool, tenant_slug=test_tenant["slug"]) for _ in range(3)]
         try:
             _clear_authority_memo()
             _reset_throttle()
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 for session_id in session_ids:
                     _reset_throttle()
                     resp = await _post_intervention(client, session_id)
@@ -992,7 +1015,7 @@ class TestAuthorityMemoBounds:
         self, pool, test_tenant, monkeypatch,
     ):
         monkeypatch.setattr(deps, "AUTHORITY_MEMO_MAX_ENTRIES", 5)
-        admin_row = await _create_user(role="admin", tenant_id=test_tenant["id"])
+        admin_row = await _create_user(role="superadmin", tenant_id=test_tenant["id"])
         try:
             token_user = auth.decode_access_token(auth.create_access_token(admin_row))
             _clear_authority_memo()
@@ -1003,19 +1026,19 @@ class TestAuthorityMemoBounds:
         finally:
             await _soft_delete_user(pool, admin_row["id"])
 
-    async def test_a_404d_slug_is_not_retained_in_the_memo(self, pool, test_tenant, test_admin):
+    async def test_a_404d_slug_is_not_retained_in_the_memo(self, pool, test_tenant, operator):
         bad_slug = f"nope-{uuid.uuid4().hex[:8]}"
         _clear_authority_memo()
         _reset_throttle()
-        async with _client_as(test_admin["user"]) as client:
+        async with _client_as(operator["user"]) as client:
             resp = await client.get("/live-calls", params={"tenant_slug": bad_slug})
         assert resp.status_code == 404
 
         memo = app.state._live_calls_authority_memo
-        assert (str(test_admin["user"]["id"]), bad_slug) not in memo
+        assert (str(operator["user"]["id"]), bad_slug) not in memo
 
     async def test_post_intervention_404_should_not_recache_the_evicted_scope_key(
-        self, pool, test_tenant, test_admin,
+        self, pool, test_tenant, operator,
     ):
         """KNOWN BUG (expected to fail): the POST 404 handler re-caches the evicted scope_key.
         Do not weaken this assertion."""
@@ -1023,41 +1046,41 @@ class TestAuthorityMemoBounds:
         try:
             _clear_authority_memo()
             _reset_throttle()
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 resp = await _post_intervention(
                     client, f"test-live-{uuid.uuid4().hex[:8]}", tenant_slug=other_tenant["slug"],
                 )
             assert resp.status_code == 404
 
             memo = app.state._live_calls_authority_memo
-            assert (str(test_admin["user"]["id"]), other_tenant["slug"]) not in memo
+            assert (str(operator["user"]["id"]), other_tenant["slug"]) not in memo
         finally:
             await _cleanup_tenant(pool, other_tenant)
 
     async def test_post_intervention_404_denial_ignores_a_stale_self_memo_entry(
-        self, pool, test_tenant, test_admin,
+        self, pool, test_tenant, operator,
     ):
         """A cached "self" entry from before a re-tenant must not decide which
         tenant's audit log the 404 denial lands in."""
         previous_tenant = await _create_tenant(pool, name="Previous Tenant")
         target_tenant = await _create_tenant(pool, name="Target Tenant")
-        user_id = str(test_admin["user"]["id"])
+        user_id = str(operator["user"]["id"])
         for tid in (test_tenant["id"], previous_tenant["id"]):
             live_calls._denial_audit_windows.pop((user_id, str(tid)), None)
         try:
             _clear_authority_memo()
             _reset_throttle()
             stale = auth.CurrentUser(
-                id=user_id, email=test_admin["user"]["email"], role="admin",
+                id=user_id, email=operator["user"]["email"], role="superadmin",
                 tenant_id=str(previous_tenant["id"]),
-                token_version=test_admin["user"].get("token_version", 0),
+                token_version=operator["user"].get("token_version", 0),
             )
             app.state._live_calls_authority_memo = OrderedDict(
                 {(user_id, "self"): (time.monotonic(), stale)}
             )
             own_before = await _count_audit_rows(pool, test_tenant["id"], "denied")
             prev_before = await _count_audit_rows(pool, previous_tenant["id"], "denied")
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 resp = await _post_intervention(
                     client, f"test-live-{uuid.uuid4().hex[:8]}", tenant_slug=target_tenant["slug"],
                 )
@@ -1071,13 +1094,13 @@ class TestAuthorityMemoBounds:
 
     @pytest.mark.parametrize("scope", ["self", "previous-slug"])
     async def test_post_intervention_never_executes_in_a_stale_memo_tenant(
-        self, pool, test_tenant, test_admin, scope,
+        self, pool, test_tenant, operator, scope,
     ):
         """The write itself must ignore a memo entry that predates a re-tenant
         (another process may still hold it; forget_user only evicts locally)."""
         previous_tenant = await _create_tenant(pool, name="Previous Tenant")
         foreign_session = await _insert_call(pool, tenant_slug=previous_tenant["slug"])
-        user_id = str(test_admin["user"]["id"])
+        user_id = str(operator["user"]["id"])
         for tid in (test_tenant["id"], previous_tenant["id"]):
             live_calls._denial_audit_windows.pop((user_id, str(tid)), None)
         scope_key = "self" if scope == "self" else previous_tenant["slug"]
@@ -1086,16 +1109,16 @@ class TestAuthorityMemoBounds:
             _clear_authority_memo()
             _reset_throttle()
             stale = auth.CurrentUser(
-                id=user_id, email=test_admin["user"]["email"], role="admin",
+                id=user_id, email=operator["user"]["email"], role="superadmin",
                 tenant_id=str(previous_tenant["id"]),
-                token_version=test_admin["user"].get("token_version", 0),
+                token_version=operator["user"].get("token_version", 0),
             )
             app.state._live_calls_authority_memo = OrderedDict(
                 {(user_id, scope_key): (time.monotonic(), stale)}
             )
             own_before = await _count_audit_rows(pool, test_tenant["id"], "denied")
             prev_before = await _count_audit_rows(pool, previous_tenant["id"], "denied")
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 resp = await _post_intervention(client, foreign_session, tenant_slug=tenant_slug)
             # Exactly the 404 a cold memo gives for a foreign session id or slug.
             assert resp.status_code == 404, resp.text
@@ -1119,7 +1142,7 @@ class TestAuthorityMemoBounds:
     ):
         """PATCH /users/{id} evicts the user's memoized authority on tenant or role change."""
         previous_tenant = await _create_tenant(pool, name="Previous Tenant")
-        moved = await _create_user(role="admin", tenant_id=previous_tenant["id"])
+        moved = await _create_user(role="superadmin", tenant_id=previous_tenant["id"])
         moved_id = str(moved["id"])
         try:
             for patch in ({"tenant_id": str(test_tenant["id"])}, {"role": "supervisor"}):
@@ -1145,23 +1168,23 @@ class TestAuthorityMemoBounds:
 # ── T25 — soft-deleted own tenant 403s instead of falling through ────────
 
 class TestSoftDeletedOwnTenant:
-    async def test_get_live_calls_403s_when_own_tenant_soft_deleted(self, pool, test_tenant, test_admin):
+    async def test_get_live_calls_403s_when_own_tenant_soft_deleted(self, pool, test_tenant, operator):
         await tenants_service.soft_delete_tenant(test_tenant["id"])
         try:
             _clear_authority_memo()
             _reset_throttle()
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 resp = await client.get("/live-calls")
             assert resp.status_code == 403
         finally:
             await pool.execute("UPDATE tenants SET deleted_at = NULL WHERE id = $1", test_tenant["id"])
 
-    async def test_post_intervention_403s_when_own_tenant_soft_deleted(self, pool, test_tenant, test_admin):
+    async def test_post_intervention_403s_when_own_tenant_soft_deleted(self, pool, test_tenant, operator):
         await tenants_service.soft_delete_tenant(test_tenant["id"])
         try:
             _clear_authority_memo()
             _reset_throttle()
-            async with _client_as(test_admin["user"]) as client:
+            async with _client_as(operator["user"]) as client:
                 resp = await _post_intervention(client, f"test-live-{uuid.uuid4().hex[:8]}")
             assert resp.status_code == 403
         finally:
@@ -1172,7 +1195,7 @@ class TestSoftDeletedOwnTenant:
 
 class TestConcurrencyEndpoint:
     async def test_admin_can_update_own_tenant_concurrency_and_next_poll_reflects_it(
-        self, pool, test_tenant, test_admin,
+        self, pool, test_tenant, test_admin, operator,
     ):
         session_id = await _insert_call(pool, tenant_slug=test_tenant["slug"])
         try:
@@ -1182,10 +1205,10 @@ class TestConcurrencyEndpoint:
                 patch_resp = await client.patch(
                     f"/tenants/{test_tenant['id']}/concurrency", json={"max_concurrent_calls": 4},
                 )
-                assert patch_resp.status_code == 200, patch_resp.text
-                assert patch_resp.json()["max_concurrent_calls"] == 4
+            assert patch_resp.status_code == 200, patch_resp.text
+            assert patch_resp.json()["max_concurrent_calls"] == 4
 
-                _reset_throttle()
+            async with _client_as(operator["user"]) as client:
                 poll = await client.get("/live-calls")
             assert poll.status_code == 200
             assert poll.json()["kpis"]["utilization_pct"] == 25.0  # proves cache invalidation

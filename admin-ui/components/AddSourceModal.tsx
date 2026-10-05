@@ -122,13 +122,13 @@ export function AddSourceModal({
           {SOURCE_CARDS.map((c) => (
             <button
               key={c.key}
-              className="btn btn-ghost"
-              style={{ flexDirection: "column", height: 90, opacity: c.enabled ? 1 : 0.5 }}
+              className="agent-template-card"
+              style={{ opacity: c.enabled ? 1 : 0.5, cursor: c.enabled ? "pointer" : "not-allowed" }}
               disabled={!c.enabled}
               onClick={() => setCard(c.key)}
             >
-              <div style={{ fontWeight: 500 }}>{c.label}</div>
-              <div style={{ fontSize: ".72rem", color: "var(--text-3)" }}>{c.hint}</div>
+              <div className="agent-template-title">{c.label}</div>
+              <div className="agent-template-blurb">{c.hint}</div>
             </button>
           ))}
         </div>

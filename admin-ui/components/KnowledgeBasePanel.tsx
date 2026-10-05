@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Check, ChevronDown, ChevronRight } from "lucide-react";
 import { ApiError, listProviders, ProviderConfig } from "@/lib/api";
 import {
   AgentKnowledgeBase,
@@ -222,7 +223,7 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
 
         <div className="card">
           <div className="card-hdr">
-            <div className="card-title">{agentId ? "Attached Knowledge Bases" : "Knowledge Bases"}</div>
+            <div className="card-title">{agentId ? "Knowledge this agent can use" : "Knowledge Bases"}</div>
             <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
               {agentId && unassignedKbs.length > 0 && (
                 <select
@@ -234,7 +235,7 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                     e.target.value = "";
                   }}
                 >
-                  <option value="">+ Attach existing…</option>
+                  <option value="">+ Add a knowledge base…</option>
                   {unassignedKbs.map((kb) => (
                     <option key={kb.id} value={kb.id}>
                       {kb.name}
@@ -253,7 +254,9 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
           {rows.length === 0 ? (
             <div className="empty-state">
               {agentId
-                ? "No knowledge bases attached — this agent behaves exactly as it did before RAG existed, with zero added latency."
+                ? unassignedKbs.length > 0
+                  ? "No knowledge added yet. Add a knowledge base above so the agent can answer from your documents."
+                  : "No knowledge added yet. Create a knowledge base in Knowledge Base, then add it here."
                 : "No knowledge bases yet."}
             </div>
           ) : (
@@ -264,11 +267,11 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                 <div key={row.id}>
                   <div className="kb-row">
                     <button
-                      className="btn btn-ghost btn-sm"
-                      style={{ padding: "2px 6px" }}
+                      className="btn btn-ghost btn-sm btn-icon"
+                      aria-label={isExpanded ? "Collapse" : "Expand"}
                       onClick={() => setExpanded({ ...expanded, [row.id]: !isExpanded })}
                     >
-                      {isExpanded ? "▾" : "▸"}
+                      {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                     </button>
                     <div style={{ flex: 1 }}>
                       <div style={{ fontWeight: 500 }}>{row.name}</div>
@@ -279,7 +282,7 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                     {agentId && (
                       <label
                         className="toggle-switch"
-                        title={row.enabled ? "Enabled — retrieved when relevant" : "Disabled — never retrieved"}
+                        title={row.enabled ? "On: used when it's relevant" : "Off: not used"}
                       >
                         <input
                           type="checkbox"
@@ -304,7 +307,7 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                     )}
                     {agentId && (
                       <button className="btn btn-danger btn-sm" onClick={() => handleDetach(row.id)}>
-                        Detach
+                        Remove
                       </button>
                     )}
                   </div>
@@ -323,8 +326,8 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                           {statusBadge(doc.status)}
                           {agentId ? (
                             doc.usage_mode === "prompt" && (
-                              <span className="badge gray" title="Always injected into the LLM prompt every turn">
-                                always in prompt
+                              <span className="badge gray" title="The agent reads this on every call">
+                                always used
                               </span>
                             )
                           ) : (
@@ -342,7 +345,7 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                             </label>
                           )}
                           {!agentId && (
-                            <button className="btn btn-ghost btn-sm" onClick={() => handleDeleteDoc(doc)}>
+                            <button className="btn btn-danger btn-sm" onClick={() => handleDeleteDoc(doc)}>
                               Delete
                             </button>
                           )}
@@ -360,20 +363,19 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
         <div className="col-side">
           <div className="card">
             <div className="card-hdr">
-              <div className="card-title">Retrieval Settings</div>
-              {ragEnabled && <div className="card-sub">unset falls back to the platform default</div>}
+              <div className="card-title">Lookup settings</div>
+              {ragEnabled && <div className="card-sub">how the agent searches your documents</div>}
             </div>
             <div className="card-body">
               {!ragEnabled ? (
                 <div style={{ fontSize: ".76rem", color: "var(--text-3)", lineHeight: 1.5 }}>
-                  Attach and enable at least one knowledge base to configure retrieval — with none enabled, this agent
-                  behaves exactly as it did before RAG existed, with zero added latency.
+                  Turn on at least one knowledge base to adjust how the agent searches it.
                 </div>
               ) : (
                 <>
                   <div className="form-group">
                     <label className="form-label">
-                      Chunk limit <span className="hint">chunks retrieved per query</span>
+                      Snippets to read <span className="hint">matching passages checked per question</span>
                     </label>
                     <input
                       className="form-input"
@@ -386,7 +388,7 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                   </div>
                   <div className="form-group">
                     <label className="form-label">
-                      Character limit <span className="hint">total retrieved per query</span>
+                      Max text to read <span className="hint">characters per question</span>
                     </label>
                     <input
                       className="form-input"
@@ -399,7 +401,7 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                   </div>
                   <div className="form-group">
                     <label className="form-label">
-                      Vector distance limit <span className="hint">chunks below this similarity are never retrieved</span>
+                      How close a match must be <span className="hint">stricter means fewer but more relevant snippets</span>
                     </label>
                     <input
                       className="form-range"
@@ -412,8 +414,8 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                       onChange={(e) => setPolicyForm({ ...policyForm, minimum_score: Number(e.target.value) })}
                     />
                     <div className="form-range-row" style={{ justifyContent: "space-between" }}>
-                      <span className="form-range-label">More similar</span>
-                      <span className="form-range-label">Less similar</span>
+                      <span className="form-range-label">Stricter</span>
+                      <span className="form-range-label">Looser</span>
                     </div>
                   </div>
                   <div className="form-group" style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -426,11 +428,11 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                       <span className="toggle-slider" />
                     </label>
                     <span className="form-label" style={{ margin: 0 }}>
-                      Include source citations
+                      Mention where answers come from
                     </span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
-                    {policySaved && <span style={{ alignSelf: "center", fontSize: ".76rem", color: "var(--green)" }}>Saved ✓</span>}
+                    {policySaved && <span className="saved-note">Saved <Check size={13} /></span>}
                     <button className="btn btn-primary btn-sm" onClick={handleSavePolicy} disabled={policySaving}>
                       {policySaving ? "Saving…" : "Save"}
                     </button>
@@ -496,14 +498,14 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
           </div>
           <div className="form-group">
             <label className="form-label">
-              Embedding Provider <span className="hint">only needed for documents over ~500 bytes</span>
+              Search model <span className="hint">needed for anything longer than a short paragraph</span>
             </label>
             <select
               className="form-select"
               value={createForm.embedding_config_id}
               onChange={(e) => setCreateForm({ ...createForm, embedding_config_id: e.target.value })}
             >
-              <option value="">— none (prompt-only KB) —</option>
+              <option value="">None (short documents only)</option>
               {embeddingProviders.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}

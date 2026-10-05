@@ -2,7 +2,7 @@
 Shared FastAPI dependencies — verified JWT identity, role and tenant gates.
 
 get_current_user() enforces CONSOLE_ROLES (fencing off supervisor/agent);
-get_authenticated_user() is the raw decode-or-401 for routes those roles need.
+get_authenticated_user() is the raw decode-or-401 for self-service routes every role needs.
 """
 
 from __future__ import annotations
@@ -22,9 +22,8 @@ from .auth import CurrentUser, InvalidTokenError, decode_access_token
 
 CONSOLE_ROLES = frozenset({"superadmin", "admin", "viewer"})
 
-# Supervisor reaches only live-calls routes, via its own dependency, so
-# CONSOLE_ROLES stays untouched.
-LIVE_CALLS_ROLES = frozenset({"superadmin", "admin", "supervisor"})
+# Live calls are superadmin-only; the gate stays separate from CONSOLE_ROLES.
+LIVE_CALLS_ROLES = frozenset({"superadmin"})
 
 # Supervisor is deliberately excluded from transcripts.
 TRANSCRIPT_ROLES = frozenset({"superadmin", "admin"})
@@ -127,8 +126,7 @@ async def assert_tenant_access(tenant: "str | uuid.UUID | None", current_user: C
 
 
 def require_live_calls_operator():
-    """Dependency admitting LIVE_CALLS_ROLES only; built on get_authenticated_user
-    because supervisor must stay outside CONSOLE_ROLES."""
+    """Dependency admitting LIVE_CALLS_ROLES only."""
 
     async def _check(user: CurrentUser = Depends(get_authenticated_user)) -> CurrentUser:
         if user.role not in LIVE_CALLS_ROLES:

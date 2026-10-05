@@ -4,6 +4,7 @@
 // unsupported engines return a 400 whose message is shown as-is.
 
 import { useEffect, useRef, useState } from "react";
+import { Play } from "lucide-react";
 import { ApiError, previewVoice } from "@/lib/api";
 
 export function VoicePreviewButton({
@@ -71,7 +72,7 @@ export function VoicePreviewButton({
         disabled={disabled}
         title={why ?? "Hear this line in the flow's voice"}
       >
-        {busy ? "▶ Playing…" : `▶ ${label}`}
+<Play size={12} /> {busy ? "Playing…" : label}
       </button>
       {error && !compact && <div className="cf-preview-error">{error}</div>}
       {error && compact && <span className="cf-preview-error">{error}</span>}

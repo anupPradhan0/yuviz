@@ -4,6 +4,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { ArrowLeft, ArrowRight, Check, Sparkles } from "lucide-react";
 import {
   Agent,
   AgentUpdate,
@@ -16,16 +17,15 @@ import {
   listProviders,
   listTenants,
   updateAgent,
-  updateProvider,
 } from "@/lib/api";
 import { KnowledgeBase, assignKnowledgeBase, listKnowledgeBases } from "@/lib/knowledgeApi";
 import { CustomApi, listCustomApis, setAgentCustomApiEnabled } from "@/lib/toolexecApi";
-import { LocalVoicePicker } from "@/components/LocalVoicePicker";
-import { ElevenLabsVoicePicker } from "@/components/ElevenLabsVoicePicker";
-import { LANGUAGES, OTHER, asBrowsableTtsEngine } from "@/lib/engineCatalog";
+import { AgentVoiceSettings } from "@/components/AgentVoiceSettings";
+import { OTHER } from "@/lib/engineCatalog";
 import { buildSystemPrompt } from "@/lib/systemPromptBuilder";
 import { templateByKey } from "@/lib/agentTemplates";
 import { EasyAgentFlow } from "@/components/EasyAgentFlow";
+import { AgentDraft, clearAgentDraft, draftSavedLabel, loadAgentDraft, saveAgentDraft } from "@/lib/agentDraft";
 
 type Step = "identity" | "voice" | "limits" | "advanced" | "knowledge" | "review";
 
@@ -74,7 +74,6 @@ export default function NewAgentPage() {
   const [sttId, setSttId] = useState<string | null>(null);
   const [llmId, setLlmId] = useState<string | null>(null);
   const [ttsId, setTtsId] = useState<string | null>(null);
-  const [chosenEngine, setChosenEngine] = useState<"macos" | "kokoro" | "elevenlabs" | null>(null);
 
   // Step 3 — Limits
   const [maxCallDuration, setMaxCallDuration] = useState<number | "">("");
@@ -105,25 +104,123 @@ export default function NewAgentPage() {
   const createdAgent = useRef<Agent | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
 
+  // Autosave: restore once on mount (never during SSR), then write on every change.
+  const [draftReady, setDraftReady] = useState(false);
+  const [restoredAt, setRestoredAt] = useState<number | null>(null);
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  const skipAutosave = useRef(false);
+
   const tenant = useMemo(() => tenants.find((t) => t.slug === tenantSlug) ?? null, [tenants, tenantSlug]);
   const language =
     languageChoice === "" ? null : languageChoice === OTHER ? customLanguage.trim() || null : languageChoice;
 
   useEffect(() => {
+    // A template click is an explicit fresh start, so it doesn't resume an older draft.
+    const d = template ? null : loadAgentDraft();
+    if (d) {
+      /* eslint-disable react-hooks/set-state-in-effect */
+      setStep(STEPS.some((s) => s.key === d.step) ? (d.step as Step) : "identity");
+      setName(d.name);
+      if (!searchParams.get("tenant")) setTenantSlug(d.tenantSlug);
+      setPurpose(d.purpose);
+      setPersona(d.persona);
+      setTone(d.tone);
+      setLanguageChoice(d.languageChoice);
+      setCustomLanguage(d.customLanguage);
+      setSttId(d.sttId);
+      setLlmId(d.llmId);
+      setTtsId(d.ttsId);
+      setMaxCallDuration(d.maxCallDuration);
+      setGoodbyeGraceMs(d.goodbyeGraceMs);
+      setEscalationThreshold(d.escalationThreshold);
+      setTransferType(d.transferType);
+      setTransferDestination(d.transferDestination);
+      setTransferCondition(d.transferCondition);
+      setTransferAnnouncement(d.transferAnnouncement);
+      setComplianceInstructions(d.complianceInstructions);
+      setFallbackResponse(d.fallbackResponse);
+      setSelectedKbIds(new Set(d.selectedKbIds));
+      setSelectedApiIds(new Set(d.selectedApiIds));
+      setGreeting(d.greeting);
+      setSystemPrompt(d.systemPrompt);
+      setPromptEdited(d.promptEdited);
+      setRestoredAt(d.savedAt);
+      setLastSavedAt(d.savedAt);
+    }
+    setDraftReady(true);
+    /* eslint-enable react-hooks/set-state-in-effect */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const hasContent = name.trim() !== "" || purpose.trim() !== "" || persona.trim() !== "";
+
+  useEffect(() => {
+    if (!draftReady || skipAutosave.current) return;
+    if (!hasContent) {
+      clearAgentDraft();
+      return;
+    }
+    const timer = setTimeout(() => {
+      const draft: AgentDraft = {
+        savedAt: Date.now(),
+        step, name, tenantSlug, purpose, persona, tone, languageChoice, customLanguage, sttId, llmId, ttsId,
+        maxCallDuration, goodbyeGraceMs, escalationThreshold, transferType, transferDestination,
+        transferCondition, transferAnnouncement, complianceInstructions, fallbackResponse,
+        selectedKbIds: Array.from(selectedKbIds), selectedApiIds: Array.from(selectedApiIds),
+        greeting, systemPrompt, promptEdited,
+      };
+      saveAgentDraft(draft);
+      setLastSavedAt(draft.savedAt);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [
+    draftReady, hasContent, step, name, tenantSlug, purpose, persona, tone, languageChoice, customLanguage,
+    sttId, llmId, ttsId, maxCallDuration, goodbyeGraceMs, escalationThreshold, transferType,
+    transferDestination, transferCondition, transferAnnouncement, complianceInstructions, fallbackResponse,
+    selectedKbIds, selectedApiIds, greeting, systemPrompt, promptEdited,
+  ]);
+
+  const startOver = () => {
+    skipAutosave.current = true;
+    clearAgentDraft();
+    window.location.replace("/agents/new");
+  };
+
+  useEffect(() => {
     listTenants()
       .then((ts) => {
         setTenants(ts);
-        if (!tenantSlug && ts.length > 0) setTenantSlug(ts[0].slug);
+        // Functional update: a restored draft's account may already be set, and must still exist.
+        setTenantSlug((prev) => (ts.some((t) => t.slug === prev) ? prev : ts[0]?.slug ?? ""));
       })
       .catch((e) => setLoadError(e instanceof ApiError ? e.detail : String(e)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     if (!tenant) return;
-    listProviders(tenant.id).then(setProviders).catch(() => {});
-    listKnowledgeBases(tenant.id).then(setKbs).catch(() => {});
-    listCustomApis(tenant.id).then(setCustomApis).catch(() => {});
+    listProviders(tenant.id)
+      .then((provs) => {
+        setProviders(provs);
+        // Keep a valid existing pick (typed or restored); else the account default, else the only option.
+        const pick = (role: "stt" | "llm" | "tts", current: string | null, accountDefault: string | null) => {
+          const ofRole = provs.filter((p) => p.role === role);
+          if (current && ofRole.some((p) => p.id === current)) return current;
+          if (accountDefault && ofRole.some((p) => p.id === accountDefault)) return accountDefault;
+          return ofRole.length === 1 ? ofRole[0].id : null;
+        };
+        setSttId((prev) => pick("stt", prev, tenant.default_stt_config_id));
+        setLlmId((prev) => pick("llm", prev, tenant.default_llm_config_id));
+        setTtsId((prev) => pick("tts", prev, tenant.default_tts_config_id));
+      })
+      .catch(() => {});
+    const loadKnowledge = () => {
+      listKnowledgeBases(tenant.id).then(setKbs).catch(() => {});
+      listCustomApis(tenant.id).then(setCustomApis).catch(() => {});
+    };
+    loadKnowledge();
+    // The "add one" links open in a new tab; pick up whatever was created there on return.
+    window.addEventListener("focus", loadKnowledge);
+    return () => window.removeEventListener("focus", loadKnowledge);
   }, [tenant]);
 
   // Regenerate the draft prompt until the user edits it by hand.
@@ -149,18 +246,6 @@ export default function NewAgentPage() {
     name, purpose, persona, tone, language, selectedKbIds.size, transferType, transferCondition,
     complianceInstructions, fallbackResponse, promptEdited,
   ]);
-
-  const byRole = (role: string) => providers.filter((p) => p.role === role);
-  const selectedTts = providers.find((p) => p.id === ttsId) ?? null;
-
-  const applyDetectedLanguage = (l: string) => {
-    if (LANGUAGES.some((x) => x.value === l)) {
-      setLanguageChoice(l);
-    } else {
-      setLanguageChoice(OTHER);
-      setCustomLanguage(l);
-    }
-  };
 
   const toggleKb = (id: string) =>
     setSelectedKbIds((prev) => {
@@ -216,18 +301,21 @@ export default function NewAgentPage() {
     if (!slug) return;
     setCreating(true);
     setCreateError(null);
+    // A restored draft can reference things deleted since it was saved.
+    const known = (id: string | null) => (id && providers.some((p) => p.id === id) ? id : null);
     try {
       // A retry after a failed execute_api step must not create a second agent.
       let agent = createdAgent.current;
+      const apiIds = customApis.filter((api) => selectedApiIds.has(api.id)).map((api) => api.id);
       if (!agent) {
         const fresh = await createAgent(tenantSlug, {
           slug,
           name: name.trim(),
           greeting,
           system_prompt: systemPrompt,
-          stt_config_id: sttId,
-          llm_config_id: llmId,
-          tts_config_id: ttsId,
+          stt_config_id: known(sttId),
+          llm_config_id: known(llmId),
+          tts_config_id: known(ttsId),
         });
 
         await updateAgent(tenantSlug, fresh.id, {
@@ -242,14 +330,16 @@ export default function NewAgentPage() {
         });
 
         await Promise.all([
-          ...Array.from(selectedKbIds).map((kbId) => assignKnowledgeBase(fresh.id, kbId, true)),
-          ...Array.from(selectedApiIds).map((apiId) => setAgentCustomApiEnabled(fresh.id, apiId, true)),
+          ...kbs.filter((kb) => selectedKbIds.has(kb.id)).map((kb) => assignKnowledgeBase(fresh.id, kb.id, true)),
+          ...apiIds.map((apiId) => setAgentCustomApiEnabled(fresh.id, apiId, true)),
         ]);
         agent = fresh;
         createdAgent.current = fresh;
       }
-      if (selectedApiIds.size > 0) await enableExecuteApi(tenant.id, agent.id);
+      if (apiIds.length > 0) await enableExecuteApi(tenant.id, agent.id);
 
+      skipAutosave.current = true;
+      clearAgentDraft();
       router.push(`/agents/${tenantSlug}/${agent.slug}?test=1`);
     } catch (e) {
       setCreateError(e instanceof ApiError ? e.detail : String(e));
@@ -261,11 +351,26 @@ export default function NewAgentPage() {
 
   return (
     <>
-      <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
         <button className="btn btn-ghost btn-sm" onClick={() => router.push("/agents")}>
-          ← Cancel
+          <ArrowLeft size={13} /> All agents
         </button>
+        {hasContent && lastSavedAt && (
+          <span className="saved-note" style={{ marginLeft: "auto", color: "var(--text-3)" }}>
+            <Check size={13} /> Draft saved automatically. You can leave and come back anytime.
+          </span>
+        )}
       </div>
+
+      {restoredAt && (
+        <div className="draft-banner">
+          <span>
+            Welcome back. We restored the agent you were working on (saved {draftSavedLabel(restoredAt)}).
+          </span>
+          <button className="btn btn-ghost btn-sm" onClick={startOver}>Start over</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => setRestoredAt(null)}>Dismiss</button>
+        </div>
+      )}
 
       <div className="tabs">
         {STEPS.map((s, i) => (
@@ -332,121 +437,21 @@ export default function NewAgentPage() {
         </div>
       )}
 
-      {step === "voice" && (
-        <div className="card">
-          <div className="card-hdr">
-            <div className="card-title">Language & Voice</div>
-          </div>
-          <div className="card-body">
-            <div className="form-group">
-              <label className="form-label">Language <span className="hint">overrides the STT/TTS provider&apos;s own language when set</span></label>
-              <select className="form-select" value={languageChoice} onChange={(e) => setLanguageChoice(e.target.value)}>
-                <option value="">— derive from provider —</option>
-                {LANGUAGES.map((l) => (
-                  <option key={l.value} value={l.value}>{l.label}</option>
-                ))}
-                <option value={OTHER}>Other (custom)…</option>
-              </select>
-              {languageChoice === OTHER && (
-                <input
-                  className="form-input"
-                  style={{ marginTop: 6, fontFamily: "var(--mono)" }}
-                  value={customLanguage}
-                  onChange={(e) => setCustomLanguage(e.target.value)}
-                  placeholder="e.g. nl-BE"
-                />
-              )}
-            </div>
-
-            <div className="form-group">
-              <label className="form-label">Voice</label>
-              {tenant &&
-                (() => {
-                  const engine = chosenEngine ?? asBrowsableTtsEngine(selectedTts?.engine);
-                  if (!engine) {
-                    return (
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        {(["macos", "kokoro", "elevenlabs"] as const).map((e) => (
-                          <button key={e} type="button" className="btn btn-ghost btn-sm" onClick={() => setChosenEngine(e)}>
-                            {e === "macos" ? "macOS say" : e === "kokoro" ? "Kokoro" : "ElevenLabs"}
-                          </button>
-                        ))}
-                      </div>
-                    );
-                  }
-                  if (engine === "elevenlabs") {
-                    const elevenLabsProvider =
-                      (selectedTts?.engine === "elevenlabs" ? selectedTts : undefined) ??
-                      providers.find((p) => p.role === "tts" && p.engine === "elevenlabs") ??
-                      null;
-                    return (
-                      <ElevenLabsVoicePicker
-                        tenantId={tenant.id}
-                        provider={elevenLabsProvider}
-                        isCurrentAssignment={selectedTts?.engine === "elevenlabs"}
-                        onProviderCreated={(p) => {
-                          setProviders((prev) => [...prev, p]);
-                          setTtsId(p.id);
-                        }}
-                        onVoicePicked={(updated) => {
-                          setProviders((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
-                          setTtsId(updated.id);
-                        }}
-                        onLanguageDetected={applyDetectedLanguage}
-                      />
-                    );
-                  }
-                  return (
-                    <LocalVoicePicker
-                      engine={engine}
-                      tenantId={tenant.id}
-                      providers={providers}
-                      value={ttsId}
-                      onChange={setTtsId}
-                      onProviderCreated={(p) => setProviders((prev) => [...prev, p])}
-                      onLanguageDetected={applyDetectedLanguage}
-                    />
-                  );
-                })()}
-              {selectedTts && (
-                <div style={{ marginTop: 10 }}>
-                  <label className="form-label">Speaking Speed <span className="hint">0.7 (slower) – 1.2 (faster)</span></label>
-                  <select
-                    className="form-select"
-                    style={{ width: 140 }}
-                    value={String(Number((selectedTts.extra as Record<string, unknown> | null)?.speed ?? 1.0))}
-                    onChange={async (e) => {
-                      const v = Number(e.target.value);
-                      const updated = await updateProvider(selectedTts.id, { extra: { ...((selectedTts.extra as Record<string, unknown>) || {}), speed: v } });
-                      setProviders((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
-                    }}
-                  >
-                    {[0.7, 0.8, 0.9, 1.0, 1.1, 1.2].map((v) => (
-                      <option key={v} value={String(v)}>{v.toFixed(1)}{v === 1.0 ? " (default)" : ""}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-            </div>
-
-            <div className="form-row">
-              <div className="form-group">
-                <label className="form-label">STT</label>
-                <select className="form-select" value={sttId || ""} onChange={(e) => setSttId(e.target.value || null)}>
-                  <option value="">— none —</option>
-                  {byRole("stt").map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
-              </div>
-              <div className="form-group">
-                <label className="form-label">LLM</label>
-                <select className="form-select" value={llmId || ""} onChange={(e) => setLlmId(e.target.value || null)}>
-                  <option value="">— none —</option>
-                  {byRole("llm").map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-                </select>
-              </div>
-            </div>
-          </div>
-        </div>
+      {step === "voice" && tenant && (
+        <AgentVoiceSettings
+          tenantId={tenant.id}
+          providers={providers}
+          setProviders={setProviders}
+          languageChoice={languageChoice}
+          onLanguageChoice={setLanguageChoice}
+          customLanguage={customLanguage}
+          onCustomLanguage={setCustomLanguage}
+          sttId={sttId}
+          llmId={llmId}
+          ttsId={ttsId}
+          onAssign={(role, id) => (role === "stt" ? setSttId(id) : role === "llm" ? setLlmId(id) : setTtsId(id))}
+          onError={setLoadError}
+        />
       )}
 
       {step === "limits" && (
@@ -580,7 +585,13 @@ export default function NewAgentPage() {
             <div className="form-group">
               <label className="form-label">Knowledge Bases</label>
               {kbs.length === 0 ? (
-                <div className="form-hint">No knowledge bases yet in this account — add one from the Knowledge Base tab, then come back here.</div>
+                <div className="form-hint">
+                  No knowledge bases yet in this account.{" "}
+                  <a href="/knowledge-bases" target="_blank" rel="noopener noreferrer" style={{ color: "var(--cyan)" }}>
+                    Add a knowledge base ↗
+                  </a>{" "}
+                  It opens in a new tab and shows up here when you come back.
+                </div>
               ) : (
                 kbs.map((kb) => (
                   <label key={kb.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
@@ -593,7 +604,13 @@ export default function NewAgentPage() {
             <div className="form-group" style={{ marginBottom: 0 }}>
               <label className="form-label">Custom APIs</label>
               {customApis.length === 0 ? (
-                <div className="form-hint">No custom APIs yet in this account.</div>
+                <div className="form-hint">
+                  No custom APIs yet in this account.{" "}
+                  <a href="/knowledge-bases?tab=apis" target="_blank" rel="noopener noreferrer" style={{ color: "var(--cyan)" }}>
+                    Add an API ↗
+                  </a>{" "}
+                  It opens in a new tab and shows up here when you come back.
+                </div>
               ) : (
                 customApis.map((api) => (
                   <label key={api.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0" }}>
@@ -627,12 +644,17 @@ export default function NewAgentPage() {
                   className="btn btn-ghost btn-sm"
                   style={{ marginLeft: "auto" }}
                   disabled={!llmId || generatingPrompt}
-                  title={!llmId ? "Pick an LLM provider in step 2 first" : undefined}
                   onClick={handleGenerateWithAi}
                 >
-                  {generatingPrompt ? "Generating…" : "✨ Generate with AI"}
+                  {generatingPrompt ? "Generating…" : <><Sparkles size={13} /> Generate with AI</>}
                 </button>
               </div>
+              {!llmId && (
+                <div className="voice-missing" style={{ marginBottom: 6 }}>
+                  To write the prompt with AI, choose an AI model first.{" "}
+                  <a href="#" onClick={(e) => { e.preventDefault(); setStep("voice"); }}>Choose an AI model</a>
+                </div>
+              )}
               {generateError && <div className="error-banner">{generateError}</div>}
               <textarea
                 className="form-textarea"
@@ -660,12 +682,12 @@ export default function NewAgentPage() {
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
         {stepIndex > 0 && (
           <button className="btn btn-ghost btn-sm" onClick={goBack} disabled={creating}>
-            ← Back
+            <ArrowLeft size={13} /> Back
           </button>
         )}
         {step !== "review" ? (
           <button className="btn btn-primary btn-sm" onClick={goNext} disabled={!canLeaveIdentity}>
-            Next →
+            Next <ArrowRight size={13} />
           </button>
         ) : (
           <button className="btn btn-primary btn-sm" onClick={handleCreate} disabled={creating || !canLeaveIdentity}>

@@ -10,6 +10,7 @@ import { useActiveTenant } from "@/lib/useActiveTenant";
 import { listAgentKnowledgeBases } from "@/lib/knowledgeApi";
 import { listAgentCustomApis } from "@/lib/toolexecApi";
 import { AGENT_TEMPLATES } from "@/lib/agentTemplates";
+import { AgentDraft, clearAgentDraft, draftSavedLabel, loadAgentDraft } from "@/lib/agentDraft";
 
 interface AgentRow extends Agent {
   tenantName: string;
@@ -30,6 +31,12 @@ export default function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [draft, setDraft] = useState<AgentDraft | null>(null);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setDraft(loadAgentDraft());
+  }, []);
 
   // allSettled: one failing tenant must not blank the others.
   useEffect(() => {
@@ -124,6 +131,25 @@ export default function AgentsPage() {
           New agent
         </button>
       </div>
+
+      {draft && (
+        <div className="draft-banner">
+          <span>
+            You have an unfinished agent{draft.name.trim() ? <> called <b>{draft.name.trim()}</b></> : ""}, saved{" "}
+            {draftSavedLabel(draft.savedAt)}.
+          </span>
+          <button className="btn btn-primary btn-sm" onClick={() => router.push("/agents/new")}>Continue</button>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => {
+              clearAgentDraft();
+              setDraft(null);
+            }}
+          >
+            Discard
+          </button>
+        </div>
+      )}
 
       <div className="form-label" style={{ letterSpacing: ".06em", textTransform: "uppercase", fontSize: ".68rem" }}>
         Start from a template

@@ -69,7 +69,7 @@ export function SecretRefInput({
           </button>
           <button
             type="button"
-            className="btn btn-ghost btn-sm"
+            className="btn btn-danger btn-sm"
             disabled={disabled}
             onClick={() => {
               if (confirm("Remove this key? Whatever uses it will stop working until you add a replacement and save.")) {
@@ -97,7 +97,10 @@ export function SecretRefInput({
             placeholder ?? (mode === "key" ? "Paste the API key" : "env:MY_API_KEY")
           }
           disabled={disabled}
-          autoComplete="off"
+          // Browsers ignore "off" on password fields and autofill saved logins.
+          autoComplete="new-password"
+          data-1p-ignore
+          data-lpignore="true"
         />
         <button
           type="button"

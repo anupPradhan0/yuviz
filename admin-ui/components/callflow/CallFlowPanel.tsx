@@ -5,6 +5,7 @@
 // Validation is always server-side (libs/config_sdk/callflow.py) so it can't drift from publish.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft } from "lucide-react";
 import {
   Background,
   Controls,
@@ -354,7 +355,7 @@ function Canvas({ flow, tenantSlug }: { flow: CallFlow; tenantSlug: string }) {
     <div className="wf-root">
       <div className="cf-header">
         <button className="btn btn-ghost btn-sm" onClick={() => router.push("/workflows")}>
-          ← IVR Flows
+          <ArrowLeft size={13} /> IVR Flows
         </button>
         <div className="cf-header-title">
           <h1>{flow.name}</h1>
@@ -445,7 +446,7 @@ function Canvas({ flow, tenantSlug }: { flow: CallFlow; tenantSlug: string }) {
                 {selected ? "Step settings" : selectedEdge ? "Branch" : "Nothing selected"}
               </span>
               {(selected || selectedEdge) && (
-                <button className="btn btn-ghost btn-sm" style={{ marginLeft: "auto" }} onClick={deleteSelected}>
+                <button className="btn btn-danger btn-sm" style={{ marginLeft: "auto" }} onClick={deleteSelected}>
                   Delete
                 </button>
               )}

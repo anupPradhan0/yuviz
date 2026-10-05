@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { ArrowLeft } from "lucide-react";
 import {
   AgentWithTenant,
   ApiError,
@@ -62,7 +63,7 @@ function Stepper({ step }: { step: StepId }) {
                 flexShrink: 0,
                 background: s.id <= step ? "var(--cyan)" : "var(--surf)",
                 border: s.id <= step ? "none" : "1px solid var(--border-2)",
-                color: s.id <= step ? "#fff" : "var(--text-3)",
+                color: s.id <= step ? "var(--on-cyan)" : "var(--text-3)",
               }}
             >
               {s.id}
@@ -170,8 +171,8 @@ export default function NewCampaignPage() {
   return (
     <>
       <div style={{ marginBottom: 18 }}>
-        <Link href="/campaigns" style={{ color: "var(--text-3)", fontSize: ".8rem" }}>
-          ← Campaigns
+        <Link href="/campaigns" className="detail-back">
+          <ArrowLeft size={13} /> Campaigns
         </Link>
         <h1 style={{ fontSize: "1.6rem", fontWeight: 700, color: "var(--text)", margin: "6px 0 0" }}>Create Campaign</h1>
       </div>

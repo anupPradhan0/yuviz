@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
+import { ArrowLeft } from "lucide-react";
 import {
   Agent,
   ApiError,
@@ -134,8 +135,8 @@ export default function CampaignDetailPage() {
   if (!campaign) {
     return (
       <>
-        <Link href="/campaigns" style={{ color: "var(--text-3)", fontSize: ".8rem" }}>
-          ← Campaigns
+        <Link href="/campaigns" className="detail-back">
+          <ArrowLeft size={13} /> Campaigns
         </Link>
         <div className="error-banner" style={{ marginTop: 12 }}>{error || "Campaign not found."}</div>
       </>
@@ -145,8 +146,8 @@ export default function CampaignDetailPage() {
   return (
     <>
       <div style={{ marginBottom: 18 }}>
-        <Link href="/campaigns" style={{ color: "var(--text-3)", fontSize: ".8rem" }}>
-          ← Campaigns
+        <Link href="/campaigns" className="detail-back">
+          <ArrowLeft size={13} /> Campaigns
         </Link>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6, flexWrap: "wrap" }}>
           <h1 style={{ fontSize: "1.4rem", fontWeight: 700, color: "var(--text)", margin: 0 }}>{campaign.name}</h1>

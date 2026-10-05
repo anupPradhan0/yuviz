@@ -5,6 +5,7 @@ Uncached: append-heavy data queried many ways would need per-filter invalidation
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from libs.tenancy import platform_conn, tenant_conn
@@ -41,6 +42,8 @@ async def list_calls(
     limit: int = 50,
     offset: int = 0,
     direction: str | None = None,
+    started_after: datetime | None = None,
+    started_before: datetime | None = None,
 ) -> dict[str, Any]:
     """tenant_slug, not tenant_id: calls.tenant_id is a TEXT slug, not a UUID FK."""
     pool = await db.get_pool()
@@ -49,6 +52,12 @@ async def list_calls(
     if direction is not None:
         params.append(direction)
         where.append(f"c.direction = ${len(params)}")
+    if started_after is not None:
+        params.append(started_after)
+        where.append(f"c.started_at >= ${len(params)}")
+    if started_before is not None:
+        params.append(started_before)
+        where.append(f"c.started_at <= ${len(params)}")
     where_clause = " AND ".join(where)
 
     async with tenant_conn(pool) as conn:

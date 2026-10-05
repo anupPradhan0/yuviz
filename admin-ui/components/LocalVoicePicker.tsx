@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { Check, ChevronDown, Circle, Mars, Venus } from "lucide-react";
 import { ApiError, ProviderConfig, createProvider } from "@/lib/api";
 import { VOICES_BY_ENGINE, VoiceGender } from "@/lib/engineCatalog";
 
@@ -9,10 +10,10 @@ const ENGINE_LABELS: Record<string, string> = {
   kokoro: "Kokoro",
 };
 
-const GENDER_BADGE: Record<VoiceGender, string> = {
-  female: "♀",
-  male: "♂",
-  neutral: "⚬",
+const GENDER_BADGE: Record<VoiceGender, React.ReactNode> = {
+  female: <Venus size={12} />,
+  male: <Mars size={12} />,
+  neutral: <Circle size={10} />,
 };
 
 const GENDER_FILTERS: { value: VoiceGender | "all"; label: string }[] = [
@@ -88,7 +89,7 @@ export function LocalVoicePicker({
       >
         {selectedVoice ? (
           <>
-            <span style={{ color: "var(--green)", marginRight: 8 }}>✓</span>
+            <Check size={15} style={{ color: "var(--green)", marginRight: 8, flexShrink: 0 }} />
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 500 }}>{selectedVoice.label}</div>
               <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>{ENGINE_LABELS[engine]} · Primary voice</div>
@@ -97,7 +98,7 @@ export function LocalVoicePicker({
         ) : (
           <div style={{ flex: 1, color: "var(--text-3)" }}>Select a voice…</div>
         )}
-        <span style={{ color: "var(--text-3)" }}>▾</span>
+        <ChevronDown size={15} style={{ color: "var(--text-3)", flexShrink: 0 }} />
       </button>
     );
   }
@@ -122,7 +123,7 @@ export function LocalVoicePicker({
               className={`btn btn-sm ${genderFilter === f.value ? "btn-primary" : "btn-ghost"}`}
               onClick={() => setGenderFilter(f.value)}
             >
-              {f.value !== "all" && <span style={{ marginRight: 4 }}>{GENDER_BADGE[f.value]}</span>}
+              {f.value !== "all" && GENDER_BADGE[f.value]}
               {f.label}
             </button>
           ))}
@@ -136,7 +137,7 @@ export function LocalVoicePicker({
             <div key={voiceId} className="kb-row">
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 500 }}>
-                  <span style={{ marginRight: 4, opacity: 0.6 }}>{GENDER_BADGE[gender]}</span>
+                  <span style={{ marginRight: 4, opacity: 0.6, verticalAlign: "-1px" }}>{GENDER_BADGE[gender]}</span>
                   {label}
                 </div>
                 <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>{language}</div>

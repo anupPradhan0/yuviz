@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from .. import calls as calls_service
@@ -31,10 +33,15 @@ async def list_calls(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     direction: str | None = Query(default=None, pattern="^(inbound|outbound)$"),
+    started_after: datetime | None = Query(default=None),
+    started_before: datetime | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     await get_or_404(tenants_service.get_tenant(tenant_slug), f"tenant {tenant_slug!r} not found")
-    return await calls_service.list_calls(tenant_slug, limit=limit, offset=offset, direction=direction)
+    return await calls_service.list_calls(
+        tenant_slug, limit=limit, offset=offset, direction=direction,
+        started_after=started_after, started_before=started_before,
+    )
 
 
 @tenant_scoped_router.get("/latency-stats")

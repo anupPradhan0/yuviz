@@ -67,7 +67,7 @@ const ROLE_BADGE: Record<UserRole, string> = {
 const ROLE_BLURB: Record<UserRole, string> = {
   superadmin: "Full platform access across every account.",
   admin: "Manages this account: agents, numbers, users and billing.",
-  supervisor: "Monitors live calls and may intervene on them.",
+  supervisor: "Reserved role; no console access yet.",
   agent: "Handles calls; no console access.",
   viewer: "Read-only access to this account.",
 };
@@ -76,9 +76,9 @@ const ROLE_BLURB: Record<UserRole, string> = {
     AppShell and services/config/deps.py — it is a description of the real
     permissions, so it must be edited whenever those move. */
 const ROLE_ACCESS: Record<UserRole, string[]> = {
-  superadmin: ["Every account on the platform", "Agents, IVR flows, knowledge and voice", "Telephony, users and billing", "Full audit trail"],
+  superadmin: ["Every account on the platform", "Agents, IVR flows, knowledge and voice", "Telephony, users and billing", "Live Calls monitoring", "Full audit trail"],
   admin: ["This account only", "Agents, IVR flows, knowledge and voice", "Telephony, users and billing", "Full audit trail"],
-  supervisor: ["Live Calls only", "May listen to and barge into a live call", "No configuration access"],
+  supervisor: ["No console access yet", "Live Calls is superadmin-only"],
   agent: ["Handles calls", "No console access at all"],
   viewer: ["This account, read-only", "May not invite users or change configuration"],
 };
@@ -548,7 +548,7 @@ function ChangeEmailCard({ passwordSet }: { passwordSet: boolean }) {
               <button className="btn btn-primary btn-sm" type="submit" disabled={submitting || code.length !== 6}>
                 {submitting ? "Verifying…" : "Confirm Email"}
               </button>
-              <button className="btn btn-sm" type="button" onClick={() => { setPendingEmail(null); setError(null); }}>
+              <button className="btn btn-ghost btn-sm" type="button" onClick={() => { setPendingEmail(null); setError(null); }}>
                 Cancel
               </button>
             </div>
@@ -780,22 +780,13 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {/* One horizontal tab strip, the same .tabs/.tab pair the rest of the
-          console uses. The left rail this replaced was a second navigation
-          idiom for four panels, and it pushed every panel into a narrow
-          column on an otherwise empty page. */}
+      {/* Group names stay off-screen: inline labels in the strip read as clickable tabs. */}
       <div className="tabs" style={{ alignItems: "center" }}>
         {groups.map((g, i) => (
           <div key={g.label} role="group" aria-label={g.label} style={{ display: "contents" }}>
-            <span
-              style={{
-                fontSize: ".62rem", fontWeight: 600, letterSpacing: ".06em", textTransform: "uppercase",
-                color: "var(--text-3)", padding: "0 6px", marginLeft: i > 0 ? 18 : 0,
-                borderLeft: i > 0 ? "1px solid var(--border)" : undefined, paddingLeft: i > 0 ? 18 : 0,
-              }}
-            >
-              {g.label}
-            </span>
+            {i > 0 && (
+              <span aria-hidden="true" style={{ width: 1, height: 16, background: "var(--border)", margin: "0 10px" }} />
+            )}
             {g.sections.map((item) => (
               <button
                 key={item.id}

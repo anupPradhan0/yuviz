@@ -345,6 +345,7 @@ if [ -z "$(compose "${COMPOSE_PROFILE[@]}" ps -q 2>/dev/null)" ]; then
     check_port "${CONFIG_PORT:-8000}"        "set CONFIG_PORT"
     check_port "${KNOWLEDGE_PORT:-8100}"     "set KNOWLEDGE_PORT"
     check_port "${WEBCALL_PORT:-8300}"       "set WEBCALL_PORT"
+    check_port "${TOOLEXEC_PORT:-8600}"      "set TOOLEXEC_PORT"
     check_port "${CONVERSATION_PORT:-50051}" "set CONVERSATION_PORT"
     check_port "${POSTGRES_PORT:-5432}"      "a local Postgres is running; stop it or set POSTGRES_PORT"
     check_port "${REDIS_PORT:-6379}"         "a local Redis is running; stop it or set REDIS_PORT"
@@ -382,7 +383,7 @@ fi
 
 # Blank counts as missing: auth.py's os.environ.get returns "" rather than its
 # fallback, so an empty JWT_SECRET silently becomes the signing key.
-for secret in POSTGRES_PASSWORD:32 CONFIG_SERVICE_PASSWORD:32 JWT_SECRET:48 YUVIZ_APP_PASSWORD:32; do
+for secret in POSTGRES_PASSWORD:32 CONFIG_SERVICE_PASSWORD:32 JWT_SECRET:48 YUVIZ_APP_PASSWORD:32 TOOLEXEC_ARGS_HMAC_KEY:48; do
     key=${secret%:*}; len=${secret#*:}
     if [ -n "$(grep "^${key}=" "$ENV_FILE" | cut -d= -f2-)" ]; then continue; fi
     value=$(rand "$len")
@@ -567,7 +568,7 @@ wait_healthy() {
 if [ "$WANT_STT" = "1" ] && [ "$WANT_TTS" = "1" ]; then
     dim "conversation loads its speech models before serving — slowest on first run"
 fi
-for svc in postgres redis config knowledge conversation webcall admin-ui; do
+for svc in postgres redis config knowledge toolexec conversation webcall admin-ui; do
     wait_healthy "$svc" || { cleanup_hint; exit 1; }
 done
 

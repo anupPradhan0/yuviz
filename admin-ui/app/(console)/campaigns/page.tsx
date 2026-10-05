@@ -159,7 +159,7 @@ export default function CampaignsPage() {
             Outbound dialing with per-campaign pacing, retry ladders and DNC scrubbing.
           </div>
         </div>
-        <Link href="/campaigns/new" className="btn btn-primary btn-sm" style={{ padding: "8px 16px" }}>
+        <Link href="/campaigns/new" className="btn btn-primary">
           New campaign
         </Link>
       </div>
@@ -169,12 +169,7 @@ export default function CampaignsPage() {
           {STATUS_TABS.map((tab) => (
             <button
               key={tab.value}
-              className="btn btn-sm"
-              style={
-                statusTab === tab.value
-                  ? { background: "var(--cyan)", color: "#fff", borderColor: "var(--cyan)" }
-                  : { background: "var(--surf)", color: "var(--text-2)", borderColor: "var(--border-2)" }
-              }
+              className={`btn btn-sm ${statusTab === tab.value ? "btn-primary" : "btn-ghost"}`}
               onClick={() => setStatusTab(tab.value)}
             >
               {tab.label} <span style={{ opacity: 0.7 }}>{statusCounts[tab.value] || 0}</span>

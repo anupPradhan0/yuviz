@@ -641,12 +641,14 @@ export interface TranscriptEntry {
 
 export const listCalls = (
   tenantSlug: string,
-  opts?: { limit?: number; offset?: number; direction?: CallDirection },
+  opts?: { limit?: number; offset?: number; direction?: CallDirection } & CallTimeRange,
 ) => {
   const params = new URLSearchParams();
   if (opts?.limit) params.set("limit", String(opts.limit));
   if (opts?.offset) params.set("offset", String(opts.offset));
   if (opts?.direction) params.set("direction", opts.direction);
+  if (opts?.startedAfter) params.set("started_after", opts.startedAfter);
+  if (opts?.startedBefore) params.set("started_before", opts.startedBefore);
   const qs = params.toString();
   return request<CallListResult>(`/tenants/${tenantSlug}/calls${qs ? `?${qs}` : ""}`);
 };
@@ -660,14 +662,26 @@ export interface CallWithTenant extends Call {
   tenantName: string;
 }
 
-export const listAllCalls = async (tenants: Tenant[]): Promise<CallWithTenant[]> => {
-  const perTenant = await Promise.all(
-    tenants.map(async (t) => {
-      const result = await listCalls(t.slug, { limit: 200 });
-      return result.items.map((c) => ({ ...c, tenantName: t.name }));
-    }),
-  );
-  return perTenant.flat().sort((a, b) => b.started_at.localeCompare(a.started_at));
+/** ISO timestamps, inclusive. */
+export interface CallTimeRange {
+  startedAfter?: string;
+  startedBefore?: string;
+}
+
+export const ALL_CALLS_LIMIT = 200;
+
+/** `truncated`: some account has more calls in the range than the per-account limit loaded. */
+export const listAllCalls = async (
+  tenants: Tenant[],
+  range: CallTimeRange = {},
+): Promise<{ calls: CallWithTenant[]; truncated: boolean }> => {
+  const perTenant = await Promise.all(tenants.map((t) => listCalls(t.slug, { limit: ALL_CALLS_LIMIT, ...range })));
+  return {
+    calls: perTenant
+      .flatMap((result, i) => result.items.map((c) => ({ ...c, tenantName: tenants[i].name })))
+      .sort((a, b) => b.started_at.localeCompare(a.started_at)),
+    truncated: perTenant.some((result) => result.total > result.items.length),
+  };
 };
 
 // ── Live Calls Monitoring ────────────────────────────────────────────────

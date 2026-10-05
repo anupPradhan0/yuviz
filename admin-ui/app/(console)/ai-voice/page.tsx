@@ -16,11 +16,11 @@ export default function AiVoicePage() {
 
   return (
     <>
-      <div style={{ display: "flex", gap: 4, marginBottom: 16 }}>
+      <div className="tabs">
         {TABS.map((tab) => (
           <button
             key={tab.id}
-            className={`btn btn-sm ${section === tab.id ? "btn-primary" : "btn-ghost"}`}
+            className={`tab${section === tab.id ? " active" : ""}`}
             onClick={() => setSection(tab.id)}
           >
             {tab.label}

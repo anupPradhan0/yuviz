@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
+import { ArrowLeft, ExternalLink } from "lucide-react";
 import {
   Agent,
   ApiError,
@@ -411,7 +412,7 @@ export default function TelephonyPage() {
           <div className="form-hint" style={{ marginTop: 4 }}>{accountLine}</div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <Link href="/live-calls" className="btn btn-sm btn-indigo">Live calls</Link>
+          {isSuperadmin && <Link href="/live-calls" className="btn btn-ghost btn-sm">Live calls</Link>}
         </div>
       </div>
 
@@ -730,8 +731,8 @@ function AddConfigModal({
           ))}
         </div>
         {docsUrl[provider] && (
-          <a href={docsUrl[provider]} target="_blank" rel="noreferrer" className="hint" style={{ display: "inline-block", marginTop: 6 }}>
-            {providerLabel(provider)} docs ↗
+          <a href={docsUrl[provider]} target="_blank" rel="noreferrer" className="hint" style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 6 }}>
+            {providerLabel(provider)} docs <ExternalLink size={12} />
           </a>
         )}
       </div>
@@ -919,7 +920,7 @@ function ConfigDetail({
   return (
     <>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18, flexWrap: "wrap" }}>
-        <button className="btn btn-ghost btn-sm" onClick={onBack}>← Configurations</button>
+        <button className="btn btn-ghost btn-sm" onClick={onBack}><ArrowLeft size={13} /> Configurations</button>
         <h1 style={{ fontSize: "1.3rem", fontWeight: 600, letterSpacing: "-.025em", margin: 0, color: "var(--text)" }}>
           {config.name}
         </h1>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Check } from "lucide-react";
 import {
   ApiError,
   createInvite,
@@ -47,8 +48,8 @@ function deriveStatus(invite: Invite): DerivedInviteStatus {
 type Reach = "yes" | "no";
 const CAPABILITY_MATRIX: { label: string; superadmin: Reach; admin: Reach; supervisor: Reach; viewer: Reach }[] = [
   { label: "View dashboards & analytics", superadmin: "yes", admin: "yes", supervisor: "no", viewer: "yes" },
-  { label: "Listen & join live calls", superadmin: "yes", admin: "yes", supervisor: "yes", viewer: "no" },
-  { label: "View live-call transcripts", superadmin: "yes", admin: "yes", supervisor: "no", viewer: "no" },
+  { label: "Listen & join live calls", superadmin: "yes", admin: "no", supervisor: "no", viewer: "no" },
+  { label: "View live-call transcripts", superadmin: "yes", admin: "no", supervisor: "no", viewer: "no" },
   { label: "Manage agents & IVR flows", superadmin: "yes", admin: "yes", supervisor: "no", viewer: "no" },
   { label: "Manage phone numbers & telephony", superadmin: "yes", admin: "yes", supervisor: "no", viewer: "no" },
   { label: "Invite & manage users", superadmin: "yes", admin: "yes", supervisor: "no", viewer: "no" },
@@ -404,7 +405,7 @@ export function TeamMembers({ embedded = false }: { embedded?: boolean }) {
                   <td style={{ fontSize: ".78rem" }}>{row.label}</td>
                   {([row.superadmin, row.admin, row.supervisor, row.viewer] as Reach[]).map((reach, i) => (
                     <td key={i} className="tbl-matrix-cell" style={{ color: reach === "yes" ? "var(--cyan)" : "var(--text-3)" }}>
-                      {reach === "yes" ? "✓" : "—"}
+                      {reach === "yes" ? <Check size={14} style={{ verticalAlign: "middle" }} /> : "—"}
                     </td>
                   ))}
                 </tr>

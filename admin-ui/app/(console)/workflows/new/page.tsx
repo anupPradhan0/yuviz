@@ -5,6 +5,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { ArrowLeft, ArrowRight } from "lucide-react";
 import { ApiError, Tenant, listTenants } from "@/lib/api";
 import { CallFlowNodeType, CallFlowSummary, createCallFlow, listCallFlows } from "@/lib/callFlowApi";
 import { BLOCKS, scaffoldGraph } from "@/lib/callFlowScaffold";
@@ -121,7 +122,7 @@ export default function NewCallFlowPage() {
     <>
       <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
         <button className="btn btn-ghost btn-sm" onClick={() => router.push("/workflows")}>
-          ← Cancel
+          <ArrowLeft size={13} /> Cancel
         </button>
       </div>
 
@@ -290,11 +291,11 @@ export default function NewCallFlowPage() {
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
         {stepIndex > 0 && (
-          <button className="btn btn-ghost btn-sm" onClick={goBack} disabled={creating}>← Back</button>
+          <button className="btn btn-ghost btn-sm" onClick={goBack} disabled={creating}><ArrowLeft size={13} /> Back</button>
         )}
         {step !== "name" ? (
           <button className="btn btn-primary btn-sm" onClick={goNext} disabled={!canLeaveSource}>
-            Next →
+            Next <ArrowRight size={13} />
           </button>
         ) : (
           <button

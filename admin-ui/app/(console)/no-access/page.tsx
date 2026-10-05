@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getCurrentUser, User } from "@/lib/api";
 import { clearToken } from "@/lib/auth";
+import { clearAllAgentDrafts } from "@/lib/agentDraft";
 
 // Standalone landing page for the "agent" role, which has no Config API access (see CONSOLE_ROLES).
 export default function NoAccessPage() {
@@ -17,6 +18,7 @@ export default function NoAccessPage() {
   }, []);
 
   const handleSignOut = () => {
+    clearAllAgentDrafts();
     clearToken();
     router.push("/login");
   };

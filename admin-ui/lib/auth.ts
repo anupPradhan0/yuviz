@@ -19,6 +19,18 @@ export function setToken(token: string): void {
   window.localStorage.setItem(TOKEN_KEY, token);
 }
 
+// Unverified `sub` claim: only for scoping browser-local data, never for authorization.
+export function tokenUserId(): string | null {
+  const payload = getToken()?.split(".")[1];
+  if (!payload) return null;
+  try {
+    const sub = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/"))).sub;
+    return typeof sub === "string" && sub ? sub : null;
+  } catch {
+    return null;
+  }
+}
+
 export function clearToken(): void {
   window.localStorage.removeItem(TOKEN_KEY);
 }
