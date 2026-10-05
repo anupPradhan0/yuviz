@@ -1,6 +1,12 @@
 """Carriers (BYOC) CRUD — cold path, uncached.
 
-auth_token_ref is a reference path (e.g. 'env:PLIVO_AUTH_TOKEN'), safe to return.
+auth_token_ref is an env:/k8s: pointer or an `enc:` ciphertext that carries
+the token itself. An `enc:` ref is a bearer capability (lesson 43): the DID
+Service decrypts it with no tenant binding, so one tenant pasting another's
+would have it decrypted. So it is never accepted from a client (the server
+mints it from the plaintext `auth_token`), and public_carrier() masks it in
+every browser-facing response. Only a platform service account — the DID
+Service's own — gets the sealed value. Same rules as provider_configs.
 """
 
 from __future__ import annotations
@@ -10,8 +16,15 @@ from typing import Any
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import audit, db
+from .provider_configs import mask_enc, resolve_api_key_input
 
 _UPDATABLE_FIELDS = {"name", "auth_id", "auth_token_ref", "carrier_account_ref"}
+
+
+def public_carrier(carrier: dict[str, Any], *, masked: bool) -> dict[str, Any]:
+    if not masked:
+        return carrier
+    return {**carrier, "auth_token_ref": mask_enc(carrier["auth_token_ref"])}
 
 
 async def get_carrier_by_id(carrier_id: Any, *, platform_scoped: bool = False) -> dict[str, Any] | None:
@@ -47,10 +60,14 @@ async def create_carrier(
     provider: str,
     auth_id: str | None = None,
     auth_token_ref: str | None = None,
+    auth_token: str | None = None,
     carrier_account_ref: str | None = None,
+    allow_pointer_schemes: bool,
     user_id: Any | None = None,
     user_email: str | None = None,
 ) -> dict[str, Any]:
+    auth_token_ref = resolve_api_key_input(auth_token, auth_token_ref, allow_pointer_schemes=allow_pointer_schemes)
+
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         row = await conn.fetchrow(
@@ -74,11 +91,17 @@ async def create_carrier(
 async def update_carrier(
     carrier_id: Any,
     *,
+    allow_pointer_schemes: bool,
     user_id: Any | None = None,
     user_email: str | None = None,
     **fields: Any,
 ) -> dict[str, Any]:
-    if not fields:
+    # `auth_token` is a credential, not a column: sealed and folded into
+    # auth_token_ref. Absent means untouched; present-but-empty is a clear.
+    had_auth_token = "auth_token" in fields
+    typed_token = fields.pop("auth_token", None)
+
+    if not fields and not had_auth_token:
         raise ValueError("update_carrier() called with no fields to update")
     unknown = set(fields) - _UPDATABLE_FIELDS
     if unknown:
@@ -92,6 +115,14 @@ async def update_carrier(
         if old_row is None:
             raise LookupError(f"carrier {carrier_id} not found")
         old = dict(old_row)
+
+        # After the FOR UPDATE fetch, so the round-trip check sees the row
+        # this transaction holds.
+        if had_auth_token or "auth_token_ref" in fields:
+            fields["auth_token_ref"] = resolve_api_key_input(
+                typed_token, fields.get("auth_token_ref"),
+                current_ref=old["auth_token_ref"], allow_pointer_schemes=allow_pointer_schemes,
+            )
 
         columns = list(fields.keys())
         set_clause = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(columns))

@@ -1,39 +1,98 @@
 """Provider config CRUD with cache-aside reads and audited mutations.
 
-api_key_ref is returned as stored (a pointer or sealed `enc:` value, never a resolved secret).
+api_key_ref is a pointer (env:/k8s:) or an `enc:` ciphertext that CARRIES the
+credential. An `enc:` ref is a bearer capability: it decrypts for whoever
+presents it, whatever tenant row it sits on. So it is never accepted from a
+client (only the server mints it, from a plaintext `api_key`), and it is
+masked in every browser-facing response. Only a platform service account —
+Conversation Service reading this endpoint on a Redis miss — gets the sealed
+value, which is why masking happens at the router edge (public_provider_config)
+and the cache and getters here keep the real one.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from libs.config_sdk.secrets import ENCRYPTED_PREFIX, encrypt_secret
+from libs.config_sdk.secrets import ENCRYPTED_PREFIX, QUARANTINED as _QUARANTINED, encrypt_secret
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import audit, cache, db
 from .secret_resolver import SecretResolver
 
+if TYPE_CHECKING:
+    # auth.py raises at import without JWT_SECRET; the seed script and the
+    # Knowledge tests import this module without one.
+    from .auth import CurrentUser
+
 log = logging.getLogger(__name__)
 
-_SECRET_SCHEMES = ("env:", "k8s:", ENCRYPTED_PREFIX)
+STORED_SENTINEL = "[stored]"
+_POINTER_SCHEMES = ("env:", "k8s:")
 
 
-# ponytail: enc: refs are returned unmasked; Conversation Service needs the sealed value on a Redis miss.
-def resolve_api_key_input(api_key: str | None, api_key_ref: str | None) -> str | None:
-    """Encrypts a typed key, stores a pointer verbatim, rejects a raw key in the pointer field.
-    None means no credential (NULL column)."""
+def ref_mask_required(user: CurrentUser) -> bool:
+    """Every principal except a platform service account sees refs masked,
+    superadmin included."""
+    return not (user.is_service_account and user.tenant_id is None)
+
+
+def mask_enc(value: str | None) -> str | None:
+    if value and value.startswith(ENCRYPTED_PREFIX):
+        return STORED_SENTINEL
+    if value == _QUARANTINED:
+        return ""
+    return value
+
+
+def public_provider_config(cfg: dict[str, Any], *, masked: bool) -> dict[str, Any]:
+    if not masked:
+        return cfg
+    return {**cfg, "api_key_ref": mask_enc(cfg["api_key_ref"])}
+
+
+def resolve_api_key_input(
+    api_key: str | None,
+    api_key_ref: str | None,
+    *,
+    current_ref: str | None = None,
+    allow_pointer_schemes: bool,
+) -> str | None:
+    """Turns what the UI sent into what belongs in the column: a typed key is
+    encrypted, `"[stored]"` or a byte-identical `enc:` round-trip keeps
+    `current_ref`, and a raw key pasted into the pointer field is rejected —
+    that mistake stored a live Gemini key in plaintext. None means no
+    credential, i.e. a NULL column.
+
+    `allow_pointer_schemes` has no default on purpose: callers pass
+    `is_platform_scoped(user)`, and a permissive default would silently
+    undo that. A tenant may not name an env:/k8s: path (lesson 37), nor
+    present an `enc:` ciphertext it did not already hold (lesson 43); both
+    fail with the same text so the scheme is not an oracle."""
     ref = (api_key_ref or "").strip()
+    if api_key == STORED_SENTINEL:
+        raise ValueError("credential_ref_not_accepted: send the key as api_key")
     if api_key and ref:
         raise ValueError("send either api_key or api_key_ref, not both")
     if api_key:
         return encrypt_secret(api_key.strip())
     if not ref:
         return None
-    if ref.startswith(_SECRET_SCHEMES):
-        return ref
+    if ref == STORED_SENTINEL:
+        if current_ref is None:
+            raise ValueError("credential_ref_not_accepted: send the key as api_key")
+        return current_ref
+    if ref.startswith(ENCRYPTED_PREFIX):
+        if ref == current_ref:
+            return ref
+        raise ValueError("credential_ref_not_accepted: send the key as api_key")
+    if ref.startswith(_POINTER_SCHEMES):
+        if allow_pointer_schemes:
+            return ref
+        raise ValueError("credential_ref_not_accepted: send the key as api_key")
     raise ValueError(
         "api_key_ref must point at a secret (env:VAR_NAME or "
         "k8s:namespace/secret). To store the key itself, send it as `api_key` "
@@ -111,12 +170,13 @@ async def create_provider_config(
     api_key_ref: str | None = None,
     api_key: str | None = None,
     extra: dict[str, Any] | None = None,
+    allow_pointer_schemes: bool,
     user_id: Any | None = None,
     user_email: str | None = None,
 ) -> dict[str, Any]:
     import json as _json
 
-    api_key_ref = resolve_api_key_input(api_key, api_key_ref)
+    api_key_ref = resolve_api_key_input(api_key, api_key_ref, allow_pointer_schemes=allow_pointer_schemes)
 
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
@@ -145,6 +205,7 @@ async def create_provider_config(
 async def update_provider_config(
     provider_id: Any,
     *,
+    allow_pointer_schemes: bool,
     user_id: Any | None = None,
     user_email: str | None = None,
     **fields: Any,
@@ -152,10 +213,8 @@ async def update_provider_config(
     # `api_key` folds into api_key_ref. Absent means untouched; present-but-empty clears it.
     had_api_key = "api_key" in fields
     typed_key = fields.pop("api_key", None)
-    if had_api_key or "api_key_ref" in fields:
-        fields["api_key_ref"] = resolve_api_key_input(typed_key, fields.get("api_key_ref"))
 
-    if not fields:
+    if not fields and not had_api_key:
         raise ValueError("update_provider_config() called with no fields to update")
     unknown = set(fields) - _UPDATABLE_FIELDS
     if unknown:
@@ -175,6 +234,14 @@ async def update_provider_config(
             raise LookupError(f"provider_config {provider_id} not found")
         old = dict(old_row)
         old["extra"] = db.json_col(old["extra"])
+
+        # After the FOR UPDATE fetch, so "[stored]" and the byte-identical
+        # round-trip are compared with the row this transaction holds.
+        if had_api_key or "api_key_ref" in fields:
+            fields["api_key_ref"] = resolve_api_key_input(
+                typed_key, fields.get("api_key_ref"),
+                current_ref=old["api_key_ref"], allow_pointer_schemes=allow_pointer_schemes,
+            )
 
         columns = list(fields.keys())
         set_parts = []

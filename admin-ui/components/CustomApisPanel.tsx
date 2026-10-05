@@ -5,20 +5,32 @@ import { ApiError } from "@/lib/api";
 import {
   CustomApi,
   CustomApiAuthScheme,
+  CustomApiAuthSecrets,
   CustomApiMethod,
   CustomApiParamSpec,
   createCustomApi,
   deleteCustomApi,
   listCustomApis,
+  listOAuthConnections,
   updateCustomApi,
 } from "@/lib/toolexecApi";
-import { SecretRefInput } from "./SecretRefInput";
+import { SecretRefInput, secretPayload } from "./SecretRefInput";
 import { Modal } from "@/components/Modal";
 
 // toolexec's default when timeout_ms is NULL; only used for the chain-total hint.
 const DEFAULT_STEP_TIMEOUT_MS = 6000;
 
 type ParamForm = CustomApiParamSpec;
+
+type AuthRefField = keyof CustomApiAuthSecrets;
+
+const AUTH_REF_FIELDS: Record<CustomApiAuthScheme, AuthRefField[]> = {
+  none: [],
+  api_key: ["key_ref"],
+  bearer: ["token_ref"],
+  oauth2_client_credentials: ["client_id_ref", "client_secret_ref"],
+  oauth2_authorization_code: [], // the credential lives on the connection, not the row
+};
 
 interface ApiForm {
   name: string;
@@ -117,6 +129,8 @@ function estimateChainLevels(params: ParamForm[], allApis: CustomApi[]): number 
 export function CustomApisPanel({ tenantId }: { tenantId: string }) {
   const [customApis, setCustomApis] = useState<CustomApi[]>([]);
   const [customApisError, setCustomApisError] = useState<string | null>(null);
+  // Ids of connections that are not usable, to flag the APIs that depend on them.
+  const [brokenConnectionIds, setBrokenConnectionIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
 
   const [editing, setEditing] = useState<CustomApi | null>(null);
@@ -130,6 +144,9 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
     try {
       setCustomApis(await listCustomApis(tenantId));
       setCustomApisError(null);
+      // The badge is a hint; the list stays usable without it.
+      const connections = await listOAuthConnections(tenantId).catch(() => []);
+      setBrokenConnectionIds(new Set(connections.filter((c) => c.status !== "connected").map((c) => c.id)));
     } catch (e) {
       setCustomApisError(e instanceof ApiError ? e.detail : String(e));
     } finally {
@@ -216,18 +233,26 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
   const removeParam = (index: number) =>
     setForm((f) => ({ ...f, params: f.params.filter((_, i) => i !== index) }));
 
-  const authConfigFor = (f: ApiForm): Record<string, unknown> => {
-    switch (f.auth_scheme) {
-      case "api_key":
-        return { key_ref: f.key_ref };
-      case "bearer":
-        return { token_ref: f.token_ref };
-      case "oauth2_client_credentials":
-        return { client_id_ref: f.client_id_ref, client_secret_ref: f.client_secret_ref };
-      default:
-        return {};
+  // A typed key goes out as auth_secrets for the server to seal; "[stored]"
+  // and a pointer go back as the ref. The ref itself never reaches the
+  // browser, so a saved credential can only be echoed, not re-sent.
+  const authPayloadFor = (f: ApiForm) => {
+    const auth_config: Record<string, unknown> = {};
+    const auth_secrets: CustomApiAuthSecrets = {};
+    for (const field of AUTH_REF_FIELDS[f.auth_scheme]) {
+      const sent = secretPayload(f[field], (editing?.auth_config[field] as string) ?? "");
+      if (sent.api_key !== undefined) auth_secrets[field] = sent.api_key;
+      else if (sent.api_key_ref !== undefined) auth_config[field] = sent.api_key_ref;
     }
+    return Object.keys(auth_secrets).length > 0 ? { auth_config, auth_secrets } : { auth_config };
   };
+
+  // The server blanks a credential it quarantined, so an edit of a saved
+  // API shows the field empty and required.
+  const quarantinedHint = (field: AuthRefField) =>
+    editing && editing.auth_config[field] === "" ? (
+      <span className="hint"> was revoked by a security cleanup — enter it again</span>
+    ) : null;
 
   const handleSave = async () => {
     setSaving(true);
@@ -239,7 +264,7 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
         endpoint_url: form.endpoint_url,
         method: form.method,
         auth_scheme: form.auth_scheme,
-        auth_config: authConfigFor(form),
+        ...authPayloadFor(form),
         side_effecting: form.side_effecting,
         timeout_ms: form.timeout_ms.trim() ? Number(form.timeout_ms) : null,
         sensitive_response_paths: form.sensitive_response_paths
@@ -294,14 +319,22 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
           {customApis.map((api) => (
             <div key={api.id} className="kb-row">
               <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 500 }}>{api.name}</div>
+                <div style={{ fontWeight: 500 }}>
+                  {api.name}
+                  {api.preset_key && <span className="badge gray" style={{ marginLeft: 8 }}>Managed by preset</span>}
+                  {api.oauth_connection_id && brokenConnectionIds.has(api.oauth_connection_id) && (
+                    <span className="badge amber" style={{ marginLeft: 8 }}>Disabled: reconnect the account</span>
+                  )}
+                </div>
                 <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>
                   {api.method} {api.endpoint_url} · chain_levels={api.chain_levels}
                 </div>
               </div>
-              <button className="btn btn-ghost btn-sm" onClick={() => openEdit(api)}>
-                Edit
-              </button>
+              {!api.preset_key && (
+                <button className="btn btn-ghost btn-sm" onClick={() => openEdit(api)}>
+                  Edit
+                </button>
+              )}
               <button className="btn btn-danger btn-sm" onClick={() => handleDelete(api)}>
                 Delete
               </button>
@@ -420,7 +453,7 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
           <div className="form-group">
             <label className="form-label">
               Key ref <span className="required">*</span>
-              <span className="hint"> tenant-namespaced only — enc:/env:/k8s:</span>
+              {quarantinedHint("key_ref")}
             </label>
             <SecretRefInput value={form.key_ref} onChange={(v) => setForm({ ...form, key_ref: v })} canEncrypt />
           </div>
@@ -429,6 +462,7 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
           <div className="form-group">
             <label className="form-label">
               Token ref <span className="required">*</span>
+              {quarantinedHint("token_ref")}
             </label>
             <SecretRefInput value={form.token_ref} onChange={(v) => setForm({ ...form, token_ref: v })} canEncrypt />
           </div>
@@ -438,6 +472,7 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
             <div className="form-group">
               <label className="form-label">
                 Client ID ref <span className="required">*</span>
+                {quarantinedHint("client_id_ref")}
               </label>
               <SecretRefInput
                 value={form.client_id_ref}
@@ -448,6 +483,7 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
             <div className="form-group">
               <label className="form-label">
                 Client secret ref <span className="required">*</span>
+                {quarantinedHint("client_secret_ref")}
               </label>
               <SecretRefInput
                 value={form.client_secret_ref}

@@ -1,0 +1,11 @@
+# Review: 01-prd.md (connector-presets-oauth)
+VERDICT: AMBER
+
+1. [minor] AC18 introduces a "delete (soft-delete) a connector" action that the Scope section never defines as distinct from "disconnect" (AC8) — a reader cannot tell if delete and disconnect are the same operation with two ACs or two separate UI actions with only one specified. — Scope (only mentions "disconnect") vs AC18 — fix: add one line to Scope naming "delete" as the connector-row soft-delete (distinct from "disconnect immediately revoking with the provider") or fold AC18 into AC8's language if they're the same action.
+2. [minor] Point 6 of the upstream request ("a clinic can go live in about 10 minutes, no developer") has no acceptance criterion and cannot be tested directly — it's addressed only indirectly via scope assumptions (platform-level OAuth app registration) and one-click presets. — Scope/AC13-15 vs upstream point 6 — fix: either explicitly note in Scope that this is a qualitative goal validated by UX review/QA timing rather than an AC, or add a rough measurable proxy (e.g., "N clicks/steps from zero to first live booking").
+
+Round-1 blocking findings verified fixed: AC10 now scopes the refresh/rotation write with an explicit `WHERE tenant_id = $1 AND id = $2` conditional UPDATE (lesson 8/36 compliant). AC19 now resolves the prior AC17 contradiction — reconnect after disconnect repoints and re-enables the existing disabled rows rather than duplicating, and explicitly references AC18's cascade as leaving rows in the state AC19 expects to find them in.
+
+All six upstream "points referenced" map to testable ACs or an explicit, reasoned out-of-scope line: (1) OAuth2 auth-code → AC1-12; (2) presets → AC13-20; (3) Yuviz-hosted scheduler → explicitly deferred with reason in Scope; (4) voice-specific booking (idempotency, spoken slots, latency filler, confirm-before-book) → AC21-24; (5) SSRF/state/PKCE/redirect-URI/no-token-logging → AC1,3,4,5,11,12,20; (6) 10-minute goal → not directly testable (finding 2 above, minor).
+
+Cited files/lines verified against repo: `database/schema.sql:866-867` (auth_scheme CHECK), `:870` (idempotency_header), `:882-883` (custom_apis_tenant_name_key), `:919-932` (agent_custom_apis), and `services/toolexec/custom_apis.py:508` (pg_advisory_xact_lock) all match.

@@ -306,6 +306,51 @@ async def test_partial_maps_to_failed_with_partial_flag():
     assert result.payload["partial"] is True
 
 
+async def test_the_call_direction_and_both_numbers_are_posted_unchanged_and_never_swapped():
+    import time
+
+    client = _FakeToolExecClient({"chain_status": "success", "data": {}})
+    context = ToolExecutionContext(
+        tenant_id="t1", agent_id="a1", call_id="c1", session_id="s1", turn_id="turn1", tool_iteration=0,
+        deadline=time.monotonic() + 6.0, request_id="r1",
+        caller_number="+14155550100", called_number="+919812345678", call_direction="outbound",
+    )
+    request = ToolExecutionRequest(
+        tool_call_id="call1", tool_name="execute_api", context=context,
+        # What the model says never becomes a call fact.
+        arguments={"api_name": "x", "inputs": {"caller_number": "+19998887777", "call_direction": "inbound"}},
+    )
+
+    await ApiExecExecutor(client).execute(request)
+
+    body = client.calls[0]
+    assert (body["caller_number"], body["called_number"], body["call_direction"]) == (
+        "+14155550100", "+919812345678", "outbound")
+    assert body["caller_arguments"] == {"caller_number": "+19998887777", "call_direction": "inbound"}
+
+
+async def test_confirmation_required_waits_for_the_caller_and_carries_exactly_one_payload_key():
+    client = _FakeToolExecClient({
+        "chain_status": "confirmation_required", "data": {}, "error": "confirmation_required",
+        "deterministic_response": "To confirm: Asha, on Thursday at 10 AM. Shall I book it?",
+        # Not something toolexec sends for this status, but the branch must not depend on that.
+        "missing_fields": [{"name": "start_time", "description": "when"}],
+    })
+
+    result = await ApiExecExecutor(client).execute(_request())
+
+    assert result.status == ToolStatus.INVALID_ARGUMENT
+    assert result.payload == {"awaiting_caller_confirmation": True}
+    assert result.error == "confirmation_required"
+    assert result.deterministic_response == "To confirm: Asha, on Thursday at 10 AM. Shall I book it?"
+
+
+async def test_confirmation_required_is_not_in_the_status_map_so_it_cannot_become_a_plain_failure_by_default():
+    from services.conversation.tools.executors import api_exec_executor
+
+    assert "confirmation_required" not in api_exec_executor._STATUS_MAP
+
+
 async def test_chain_status_mapping_table():
     mapping = {
         "failed": ToolStatus.FAILED,
@@ -596,12 +641,17 @@ async def test_orchestrator_wires_policy_sensitive_arg_keys_into_the_real_loggin
 #    the write-time gate in services/toolexec/agent_apis.py ──────────────
 
 
+def _setup_dsn() -> str:
+    import getpass
+    import os
+
+    return os.environ.get("POSTGRES_DSN") or f"postgresql://{getpass.getuser()}@localhost:5432/voiceai"
+
+
 async def _pg_pool():
     import asyncpg
-    import getpass
 
-    dsn = f"postgresql://{getpass.getuser()}@localhost:5432/voiceai"
-    return await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    return await asyncpg.create_pool(_setup_dsn(), min_size=1, max_size=2)
 
 
 async def test_specialize_execute_api_is_tenant_fenced_against_a_cross_tenant_agent_custom_apis_row():
@@ -657,9 +707,8 @@ def _app_dsn() -> str:
     """Swap only the user/password component of the setup pool's DSN for
     yuviz_app's — same convention as tests/test_rls_isolation.py."""
     import urllib.parse as up
-    import getpass
 
-    dsn = f"postgresql://{getpass.getuser()}@localhost:5432/voiceai"
+    dsn = _setup_dsn()
     parts = up.urlsplit(dsn)
     netloc = f"yuviz_app:{_APP_PASSWORD}@{parts.hostname}"
     if parts.port:

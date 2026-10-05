@@ -10,6 +10,7 @@ async def _make_kb(tenant):
     set_caller_tenant(str(tenant["id"]))
     embedding_cfg = await provider_configs.create_provider_config(
         tenant_id=tenant["id"], name="Embed", role="embedding", engine="ollama",
+        allow_pointer_schemes=False,
     )
     return await kb_service.create_knowledge_base(
         tenant_id=tenant["id"], slug="policies", name="Policies", embedding_config_id=embedding_cfg["id"],

@@ -17,6 +17,7 @@ from ..deps import (
     require_role,
     validate_id_exists,
 )
+from ..provider_configs import public_provider_config, ref_mask_required
 from ..schemas import ToolProviderConfigCreate, ToolProviderConfigUpdate
 
 tenant_scoped_router = APIRouter(
@@ -37,7 +38,8 @@ async def list_tool_provider_configs(
     tool_name: str | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    return await tool_provider_configs_service.list_tool_provider_configs(tenant_id, tool_name=tool_name)
+    rows = await tool_provider_configs_service.list_tool_provider_configs(tenant_id, tool_name=tool_name)
+    return [public_provider_config(r, masked=ref_mask_required(current_user)) for r in rows]
 
 
 @tenant_scoped_router.post("", status_code=201)
@@ -50,7 +52,7 @@ async def create_tool_provider_config(
     # toolexec is internal infrastructure with no credential; every other engine needs one.
     if body.engine != "toolexec" and not ((body.api_key_ref or "").strip() or (body.api_key or "").strip()):
         raise HTTPException(status_code=400, detail="api_key_ref or api_key is required")
-    return await tool_provider_configs_service.create_tool_provider_config(
+    created = await tool_provider_configs_service.create_tool_provider_config(
         tenant_id=tenant_id,
         name=body.name,
         tool_name=body.tool_name,
@@ -58,9 +60,11 @@ async def create_tool_provider_config(
         api_key_ref=body.api_key_ref,
         api_key=body.api_key,
         extra=body.extra,
+        allow_pointer_schemes=is_platform_scoped(current_user),
         user_id=current_user.id,
         user_email=current_user.email,
     )
+    return public_provider_config(created, masked=ref_mask_required(current_user))
 
 
 async def _authorize_tool_provider(tool_provider_config_id: str, current_user: CurrentUser) -> dict:
@@ -80,7 +84,8 @@ async def _authorize_tool_provider(tool_provider_config_id: str, current_user: C
 async def get_tool_provider_config(
     tool_provider_config_id: str, current_user: CurrentUser = Depends(get_current_user),
 ):
-    return await _authorize_tool_provider(tool_provider_config_id, current_user)
+    cfg = await _authorize_tool_provider(tool_provider_config_id, current_user)
+    return public_provider_config(cfg, masked=ref_mask_required(current_user))
 
 
 @router.patch("/{tool_provider_config_id}")
@@ -97,9 +102,14 @@ async def update_tool_provider_config(
     if "api_key_ref" in fields and not (fields["api_key_ref"] or "").strip() and not (fields.get("api_key") or "").strip():
         raise HTTPException(status_code=400, detail="api_key_ref must not be blank")
     set_target_tenant(cfg["tenant_id"])
-    return await tool_provider_configs_service.update_tool_provider_config(
-        tool_provider_config_id, user_id=current_user.id, user_email=current_user.email, **fields,
+    updated = await tool_provider_configs_service.update_tool_provider_config(
+        tool_provider_config_id,
+        allow_pointer_schemes=is_platform_scoped(current_user),
+        user_id=current_user.id,
+        user_email=current_user.email,
+        **fields,
     )
+    return public_provider_config(updated, masked=ref_mask_required(current_user))
 
 
 @router.delete("/{tool_provider_config_id}", status_code=204)

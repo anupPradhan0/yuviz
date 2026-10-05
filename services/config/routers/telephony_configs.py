@@ -21,7 +21,9 @@ from ..deps import (
     require_role,
     validate_id_exists,
 )
+from ..provider_configs import ref_mask_required
 from ..schemas import TelephonyConfigCreate, TelephonyConfigUpdate
+from ..telephony_configs import public_telephony_config
 
 tenant_scoped_router = APIRouter(
     prefix="/tenants/{tenant_id}/telephony-configs",
@@ -55,7 +57,8 @@ def _require_superadmin_for_native(provider: str, current_user: CurrentUser) -> 
 async def list_telephony_configs(
     tenant_id: str, current_user: CurrentUser = Depends(get_current_user),
 ):
-    return await telephony_configs_service.list_telephony_configs(tenant_id)
+    rows = await telephony_configs_service.list_telephony_configs(tenant_id)
+    return [public_telephony_config(r, masked=ref_mask_required(current_user)) for r in rows]
 
 
 @tenant_scoped_router.post("", status_code=201)
@@ -68,15 +71,17 @@ async def create_telephony_config(
     if body.provider == telephony_configs_service.NATIVE_PROVIDER and body.is_default_outbound:
         raise HTTPException(status_code=400, detail=_NATIVE_NOT_DEFAULT_OUTBOUND)
     await _resolve_tenant_id(tenant_id)
-    return await telephony_configs_service.create_telephony_config(
+    created = await telephony_configs_service.create_telephony_config(
         tenant_id=tenant_id,
         name=body.name,
         provider=body.provider,
         credentials=body.credentials,
         is_default_outbound=body.is_default_outbound,
+        allow_pointer_schemes=is_platform_scoped(current_user),
         user_id=current_user.id,
         user_email=current_user.email,
     )
+    return public_telephony_config(created, masked=ref_mask_required(current_user))
 
 
 @router.get("")
@@ -86,7 +91,8 @@ async def list_telephony_configs_by_provider(
     """Platform-scoped account preload for telephony services; api_keys stay sealed `enc:` tokens."""
     if not is_platform_scoped(current_user):
         raise HTTPException(status_code=403, detail="platform-scoped access required")
-    return await telephony_configs_service.list_configs_by_provider(provider)
+    rows = await telephony_configs_service.list_configs_by_provider(provider)
+    return [public_telephony_config(r, masked=ref_mask_required(current_user)) for r in rows]
 
 
 async def _authorize_telephony_config(config_id: str, current_user: CurrentUser) -> dict:
@@ -102,7 +108,8 @@ async def _authorize_telephony_config(config_id: str, current_user: CurrentUser)
 
 @router.get("/{config_id}")
 async def get_telephony_config(config_id: str, current_user: CurrentUser = Depends(get_current_user)):
-    return await _authorize_telephony_config(config_id, current_user)
+    cfg = await _authorize_telephony_config(config_id, current_user)
+    return public_telephony_config(cfg, masked=ref_mask_required(current_user))
 
 
 @router.patch("/{config_id}")
@@ -119,9 +126,14 @@ async def update_telephony_config(
     if not fields:
         raise HTTPException(status_code=400, detail="request body has no fields to update")
     set_target_tenant(cfg["tenant_id"])
-    return await telephony_configs_service.update_telephony_config(
-        config_id, user_id=current_user.id, user_email=current_user.email, **fields,
+    updated = await telephony_configs_service.update_telephony_config(
+        config_id,
+        allow_pointer_schemes=is_platform_scoped(current_user),
+        user_id=current_user.id,
+        user_email=current_user.email,
+        **fields,
     )
+    return public_telephony_config(updated, masked=ref_mask_required(current_user))
 
 
 @router.post("/{config_id}/set-default-outbound")
@@ -133,9 +145,10 @@ async def set_default_outbound(
     if cfg["provider"] == telephony_configs_service.NATIVE_PROVIDER:
         raise HTTPException(status_code=400, detail=_NATIVE_NOT_DEFAULT_OUTBOUND)
     set_target_tenant(cfg["tenant_id"])
-    return await telephony_configs_service.set_default_outbound(
+    updated = await telephony_configs_service.set_default_outbound(
         config_id, user_id=current_user.id, user_email=current_user.email,
     )
+    return public_telephony_config(updated, masked=ref_mask_required(current_user))
 
 
 @router.post("/{config_id}/sync-numbers")

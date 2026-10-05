@@ -5,6 +5,7 @@ Run: uvicorn services.config.app:app --reload
 
 from __future__ import annotations
 
+import os
 import logging
 import time  # noqa: F401
 from contextlib import asynccontextmanager
@@ -135,9 +136,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Voice AI Platform — Config Service", lifespan=lifespan)
 
+# Admin UI origin(s). Defaults to the Next.js dev server's usual port; set
+# ADMIN_UI_ORIGINS (comma-separated) when running the console on another
+# port, e.g. a second stack beside the normal one. Still a narrow list, not
+# a wildcard — request auth is per-route (JWT, see auth.py/deps.py), but CORS
+# is what stops a random page in the operator's browser driving this API.
+_ADMIN_UI_ORIGINS = [
+    o.strip() for o in os.environ.get("ADMIN_UI_ORIGINS", "http://localhost:3000").split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=_ADMIN_UI_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )

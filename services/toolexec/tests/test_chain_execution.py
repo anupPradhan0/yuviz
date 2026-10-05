@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 
 import httpx
 import pytest
 
+from libs.config_sdk.secrets import encrypt_tenant_secret
 from services.config.auth import CurrentUser
 from services.toolexec import admission, agent_apis, custom_apis, db, executor
 from services.toolexec.schemas import ChainExecuteRequest
@@ -781,7 +783,12 @@ async def test_credential_unavailable_no_request_ref_not_leaked(pool, tenant_age
     missing_ref = f"env:TENANT_{tenant_hex}_NEVER_SET_TOKEN"
     api = await _register_and_enable(
         pool, tenant, agent, f"credmissing_{uuid.uuid4().hex[:8]}", side_effecting=False,
-        auth_scheme="bearer", auth_config={"token_ref": missing_ref},
+        auth_scheme="bearer", auth_config={"token_ref": encrypt_tenant_secret(tenant["id"], "x")},
+    )
+    # env: refs can no longer be registered, only found on a row that predates that.
+    await pool.execute(
+        "UPDATE custom_apis SET auth_config = $2::jsonb WHERE id = $1",
+        api["id"], json.dumps({"token_ref": missing_ref}),
     )
     calls = []
 
@@ -810,10 +817,8 @@ async def test_credential_unavailable_no_request_ref_not_leaked(pool, tenant_age
 async def test_auth_injected_credential_absent_from_redacted_step_and_chain_runs(pool, tenant_agent, monkeypatch):
     """The injected bearer token is sent but never persisted (chain-runs is readable by any role)."""
     tenant, agent = tenant_agent
-    tenant_hex = uuid.UUID(str(tenant["id"])).hex.upper()
-    ref = f"env:TENANT_{tenant_hex}_LIVE_BEARER_TOKEN"
     secret_value = "sk-live-bearer-token-must-never-be-stored"
-    monkeypatch.setenv(f"TENANT_{tenant_hex}_LIVE_BEARER_TOKEN", secret_value)
+    ref = encrypt_tenant_secret(tenant["id"], secret_value)
     api = await _register_and_enable(
         pool, tenant, agent, f"authredact_{uuid.uuid4().hex[:8]}", side_effecting=False,
         auth_scheme="bearer", auth_config={"token_ref": ref},
@@ -853,9 +858,7 @@ async def test_auth_injected_credential_absent_from_redacted_step_and_chain_runs
 async def test_arguments_hash_stable_across_credential_rotation(pool, tenant_agent, monkeypatch):
     """Credential rotation doesn't change arguments_hash, so the repeat call is still deduped."""
     tenant, agent = tenant_agent
-    tenant_hex = uuid.UUID(str(tenant["id"])).hex.upper()
-    ref = f"env:TENANT_{tenant_hex}_ROTATING_TOKEN"
-    monkeypatch.setenv(f"TENANT_{tenant_hex}_ROTATING_TOKEN", "token-before-rotation")
+    ref = encrypt_tenant_secret(tenant["id"], "token-before-rotation")
     api = await _register_side_effecting(
         pool, tenant, agent, f"rotate_{uuid.uuid4().hex[:8]}",
         auth_scheme="bearer", auth_config={"token_ref": ref},
@@ -872,8 +875,12 @@ async def test_arguments_hash_stable_across_credential_rotation(pool, tenant_age
         "SELECT * FROM api_chain_steps WHERE run_id = $1", uuid.UUID(response1.run_id),
     )
 
-    # Rotate the value behind the same ref.
-    monkeypatch.setenv(f"TENANT_{tenant_hex}_ROTATING_TOKEN", "token-after-rotation")
+    # Rotate the credential — same declared arguments (none), only the
+    # resolved value behind the same ref changes.
+    await pool.execute(
+        "UPDATE custom_apis SET auth_config = $2::jsonb WHERE id = $1",
+        api["id"], json.dumps({"token_ref": encrypt_tenant_secret(tenant["id"], "token-after-rotation")}),
+    )
     response2 = await executor.execute_chain(_request(tenant, agent, api["name"]))
     step2 = await pool.fetchrow(
         "SELECT * FROM api_chain_steps WHERE run_id = $1", uuid.UUID(response2.run_id),

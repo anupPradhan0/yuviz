@@ -157,6 +157,29 @@ async def test_tool_call_executes_folds_result_and_continues_to_final_answer():
     assert len(llm.seen_messages[1]) == 3
 
 
+async def test_the_tool_context_carries_the_calls_direction_and_both_numbers():
+    llm = _ScriptedLLM([
+        [ToolCallEvent(tool_call_id="c1", tool_name="execute_api", arguments={"api_name": "x"})],
+        [TokenEvent(text="done")],
+    ])
+    executor = _FixedExecutor(ToolResult(status=ToolStatus.SUCCESS, payload={}))
+    registry = ExecutorRegistry()
+    registry.register("execute_api", lambda provider: executor)
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm), policy_resolver=_FakePolicyResolver([_policy()]),
+        provider_manager=_FakeProviderManager(), executor_registry=registry,
+    )
+
+    _ = [e async for e in orchestrator.run_turn(
+        "agent1", "t1", "c1", "s1", [ChatMessage(role="user", content="hi")],
+        caller_number="+14155550100", called_number="+919812345678", call_direction="outbound",
+    )]
+
+    context = executor.calls[0].context
+    assert (context.caller_number, context.called_number, context.call_direction) == (
+        "+14155550100", "+919812345678", "outbound")
+
+
 async def test_force_tool_name_forces_tool_choice_on_first_call_only():
     """force_tool_name sets tool_choice on the turn's first call only, not on later iterations."""
     llm = _ScriptedLLM([

@@ -51,6 +51,11 @@ class ApiExecExecutor:
             "caller_arguments": request.arguments.get("inputs") or {},
             "chain_budget_ms": chain_budget_ms,
             "max_chain_depth": max_chain_depth,
+            # The call's own metadata, verbatim. Which party is "the remote one"
+            # is toolexec's decision alone; the model never supplies any of these.
+            "caller_number": request.context.caller_number,
+            "called_number": request.context.called_number,
+            "call_direction": request.context.call_direction,
         }
 
         try:
@@ -62,8 +67,18 @@ class ApiExecExecutor:
         chain_status = response.get("chain_status")
         status = _STATUS_MAP.get(chain_status, ToolStatus.FAILED)
         payload: dict = {}
-        if chain_status == "partial":
-            # No ToolStatus counterpart: FAILED so the LLM never treats it as success; payload["partial"] marks it.
+        if chain_status == "confirmation_required":
+            # The read-back is in deterministic_response and the orchestrator ends the turn
+            # on it; the next call is the caller's answer. No _STATUS_MAP entry on purpose: an
+            # unknown status falls through to FAILED, and the model would apologise for a
+            # booking that is merely waiting on a yes. Checked first so the INVALID_ARGUMENT
+            # branch below never adds missing_fields.
+            status = ToolStatus.INVALID_ARGUMENT
+            payload["awaiting_caller_confirmation"] = True
+        elif chain_status == "partial":
+            # No direct ToolStatus counterpart — mapped to FAILED so the
+            # LLM never treats it as a success, with payload["partial"]
+            # flagging it distinct from an ordinary failure.
             status = ToolStatus.FAILED
             payload["partial"] = True
         elif status is ToolStatus.SUCCESS:

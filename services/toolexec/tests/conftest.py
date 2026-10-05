@@ -42,7 +42,7 @@ async def tenant_agent(pool):
     agent = dict(await pool.fetchrow(
         "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, 'sup', 'Support') RETURNING *", tenant["id"],
     ))
-    # Service functions open tenant_conn; the HTTP layer binds this in production.
+    # tenant_conn() refuses an unresolved scope; same as services/config's conftest.
     set_target_tenant(str(tenant["id"]))
     yield tenant, agent
     set_target_tenant(None)

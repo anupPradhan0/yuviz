@@ -14,7 +14,10 @@ from libs.tenancy import platform_conn, tenant_conn
 
 from . import db
 
-_SECRET_REF_FIELDS = {"api_key_ref", "auth_token_ref", "password_hash", "token_hash"}
+_SECRET_REF_FIELDS = {
+    "api_key_ref", "auth_token_ref", "password_hash", "token_hash",
+    "api_key", "auth_token", "credentials",
+}
 
 
 def _redact(value: dict[str, Any] | None) -> dict[str, Any] | None:

@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import SecretStr
 
 from services.config.auth import CurrentUser
 from services.config.deps import (
@@ -32,6 +33,12 @@ router = APIRouter(prefix="/custom-apis", tags=["custom_apis"])
 _NOT_FOUND_DETAIL = "custom_api not found"
 
 
+def _plain_secrets(auth_secrets: dict[str, SecretStr] | None) -> dict[str, str] | None:
+    if auth_secrets is None:
+        return None
+    return {field: secret.get_secret_value() for field, secret in auth_secrets.items()}
+
+
 async def _authorize_custom_api(
     custom_api_id: str, current_user: CurrentUser, *, platform_scoped: bool = False,
 ) -> dict[str, Any]:
@@ -47,7 +54,7 @@ async def _authorize_custom_api(
 @tenant_scoped_router.get("")
 async def list_custom_apis(tenant_id: str, current_user: CurrentUser = Depends(get_current_user)):
     await assert_tenant_access(tenant_id, current_user)
-    return await custom_apis_service.list_custom_apis(tenant_id)
+    return [custom_apis_service.public_custom_api(api) for api in await custom_apis_service.list_custom_apis(tenant_id)]
 
 
 @tenant_scoped_router.post("", status_code=201)
@@ -57,7 +64,7 @@ async def create_custom_api(
     current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
 ):
     await assert_tenant_access(tenant_id, current_user)
-    return await custom_apis_service.create_custom_api(
+    created = await custom_apis_service.create_custom_api(
         tenant_id=tenant_id,
         name=body.name,
         description=body.description,
@@ -66,6 +73,7 @@ async def create_custom_api(
         body_style=body.body_style,
         auth_scheme=body.auth_scheme,
         auth_config=body.auth_config,
+        auth_secrets=_plain_secrets(body.auth_secrets),
         side_effecting=body.side_effecting,
         idempotency_header=body.idempotency_header,
         timeout_ms=body.timeout_ms,
@@ -75,13 +83,14 @@ async def create_custom_api(
         user_id=current_user.id,
         user_email=current_user.email,
     )
+    return custom_apis_service.public_custom_api(created)
 
 
 @router.get("/{custom_api_id}")
 async def get_custom_api(custom_api_id: str, current_user: CurrentUser = Depends(get_current_user)):
-    return await _authorize_custom_api(
+    return custom_apis_service.public_custom_api(await _authorize_custom_api(
         custom_api_id, current_user, platform_scoped=is_platform_scoped(current_user),
-    )
+    ))
 
 
 @router.patch("/{custom_api_id}")
@@ -93,14 +102,16 @@ async def update_custom_api(
     await _authorize_custom_api(
         custom_api_id, current_user, platform_scoped=is_platform_scoped(current_user),
     )
-    fields = body.model_dump(exclude_unset=True, exclude={"params"})
-    if not fields and body.params is None:
+    fields = body.model_dump(exclude_unset=True, exclude={"params", "auth_secrets"})
+    if not fields and body.params is None and body.auth_secrets is None:
         raise HTTPException(status_code=400, detail="request body has no fields to update")
     params = [p.model_dump() for p in body.params] if body.params is not None else None
-    return await custom_apis_service.update_custom_api(
+    updated = await custom_apis_service.update_custom_api(
         custom_api_id, platform_scoped=is_platform_scoped(current_user),
-        params=params, user_id=current_user.id, user_email=current_user.email, **fields,
+        params=params, auth_secrets=_plain_secrets(body.auth_secrets),
+        user_id=current_user.id, user_email=current_user.email, **fields,
     )
+    return custom_apis_service.public_custom_api(updated)
 
 
 @router.delete("/{custom_api_id}", status_code=204)

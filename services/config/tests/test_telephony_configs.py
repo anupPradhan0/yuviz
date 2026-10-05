@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 
 import pytest
@@ -19,6 +20,7 @@ class TestNormalizeCredentials:
     async def test_vobiz_scalar_auth_token_seals_to_enc(self):
         result = telephony_configs._normalize_credentials(
             "vobiz", {"auth_id": "aid", "auth_token": "plaintext-token"},
+            allow_pointer_schemes=False,
         )
         assert result["auth_token"].startswith("enc:")
         assert result["auth_token"] != "plaintext-token"
@@ -26,6 +28,7 @@ class TestNormalizeCredentials:
     async def test_cloudonix_list_api_keys_seals_every_entry(self):
         result = telephony_configs._normalize_credentials(
             "cloudonix", {"domain": "a.cloudonix.io", "api_keys": ["key-1", "key-2"]},
+            allow_pointer_schemes=False,
         )
         assert all(k.startswith("enc:") for k in result["api_keys"])
         assert result["api_keys"] != ["key-1", "key-2"]
@@ -33,26 +36,106 @@ class TestNormalizeCredentials:
     async def test_already_enc_value_round_trips_un_double_encrypted(self):
         once = telephony_configs._normalize_credentials(
             "vobiz", {"auth_id": "aid", "auth_token": "plaintext-token"},
+            allow_pointer_schemes=False,
         )
-        twice = telephony_configs._normalize_credentials("vobiz", once)
+        twice = telephony_configs._normalize_credentials(
+            "vobiz", once, once, allow_pointer_schemes=False,
+        )
         assert once["auth_token"] == twice["auth_token"]
+
+    async def test_another_tenants_enc_value_is_refused_and_does_not_leak_it(self):
+        mine = telephony_configs._normalize_credentials(
+            "vobiz", {"auth_id": "aid", "auth_token": "mine"}, allow_pointer_schemes=False,
+        )
+        theirs = telephony_configs._normalize_credentials(
+            "vobiz", {"auth_id": "aid", "auth_token": "theirs"}, allow_pointer_schemes=False,
+        )
+        for old in (None, mine):
+            with pytest.raises(ValueError, match="auth_token: credential_ref_not_accepted") as exc:
+                telephony_configs._normalize_credentials(
+                    "vobiz", theirs, old, allow_pointer_schemes=False,
+                )
+            assert theirs["auth_token"] not in str(exc.value)
+
+    async def test_another_tenants_list_entry_is_refused(self):
+        mine = telephony_configs._normalize_credentials(
+            "cloudonix", {"domain": "a.cloudonix.io", "api_keys": ["m1", "m2"]}, allow_pointer_schemes=False,
+        )
+        theirs = telephony_configs._normalize_credentials(
+            "cloudonix", {"domain": "a.cloudonix.io", "api_keys": ["t1"]}, allow_pointer_schemes=False,
+        )
+        with pytest.raises(ValueError, match="credential_ref_not_accepted"):
+            telephony_configs._normalize_credentials(
+                "cloudonix", {"domain": "a.cloudonix.io", "api_keys": theirs["api_keys"]}, mine,
+                allow_pointer_schemes=False,
+            )
+
+    async def test_stored_sentinel_maps_to_the_old_entry_by_index(self):
+        mine = telephony_configs._normalize_credentials(
+            "cloudonix", {"domain": "a.cloudonix.io", "api_keys": ["m1", "m2"]}, allow_pointer_schemes=False,
+        )
+        result = telephony_configs._normalize_credentials(
+            "cloudonix", {"domain": "a.cloudonix.io", "api_keys": ["[stored]", "[stored]"]}, mine,
+            allow_pointer_schemes=False,
+        )
+        assert result["api_keys"] == mine["api_keys"]
+
+    async def test_stored_sentinel_without_an_old_entry_is_refused(self):
+        with pytest.raises(ValueError, match="credential_ref_not_accepted"):
+            telephony_configs._normalize_credentials(
+                "vobiz", {"auth_id": "aid", "auth_token": "[stored]"}, allow_pointer_schemes=True,
+            )
+        with pytest.raises(ValueError, match="credential_ref_not_accepted"):
+            telephony_configs._normalize_credentials(
+                "cloudonix", {"domain": "d", "api_keys": ["[stored]", "[stored]"]},
+                {"api_keys": ["enc:only-one"]}, allow_pointer_schemes=True,
+            )
+
+    async def test_pointer_schemes_pass_only_when_allowed(self):
+        creds = {"auth_id": "aid", "auth_token": "env:SOME_VAR"}
+        assert telephony_configs._normalize_credentials(
+            "vobiz", creds, allow_pointer_schemes=True,
+        )["auth_token"] == "env:SOME_VAR"
+        with pytest.raises(ValueError, match="credential_ref_not_accepted"):
+            telephony_configs._normalize_credentials("vobiz", creds, allow_pointer_schemes=False)
+
+    async def test_allow_pointer_schemes_is_required(self):
+        # Inspected, not called: a call without the keyword would trip the
+        # call-site tripwire in test_credential_masking.py.
+        for fn in (telephony_configs._normalize_credentials, telephony_configs._normalize_one):
+            param = inspect.signature(fn).parameters["allow_pointer_schemes"]
+            assert param.default is inspect.Parameter.empty
+            assert param.kind is inspect.Parameter.KEYWORD_ONLY
 
     async def test_env_ref_rejected_for_scalar_field(self):
         with pytest.raises(ValueError):
             telephony_configs._normalize_credentials(
                 "vobiz", {"auth_id": "aid", "auth_token": "env:SOME_VAR"},
+                allow_pointer_schemes=False,
             )
 
     async def test_k8s_ref_rejected_for_list_field(self):
         with pytest.raises(ValueError):
             telephony_configs._normalize_credentials(
                 "cloudonix", {"domain": "a.cloudonix.io", "api_keys": ["k8s:/etc/passwd"]},
+                allow_pointer_schemes=False,
             )
 
     async def test_native_provider_returns_credentials_verbatim(self):
         credentials = {"anything": "env:whatever-not-checked"}
-        result = telephony_configs._normalize_credentials("native", credentials)
+        result = telephony_configs._normalize_credentials("native", credentials, allow_pointer_schemes=False)
         assert result is credentials or result == credentials
+
+    async def test_public_telephony_config_masks_every_enc_string_including_native(self):
+        cfg = {"credentials": {
+            "auth_token": "enc:aaa", "api_keys": ["enc:b", "env:X"], "auth_id": "aid", "n": 3,
+        }}
+        masked = telephony_configs.public_telephony_config(cfg, masked=True)["credentials"]
+        assert masked == {"auth_token": "[stored]", "api_keys": ["[stored]", "env:X"], "auth_id": "aid", "n": 3}
+        assert cfg["credentials"]["auth_token"] == "enc:aaa"  # input is not mutated
+        assert telephony_configs.public_telephony_config(cfg, masked=False) is cfg
+        native = {"credentials": {"anything": "enc:zzz"}}
+        assert telephony_configs.public_telephony_config(native, masked=True)["credentials"] == {"anything": "[stored]"}
 
     async def test_native_provider_skips_validate(self):
         telephony_configs.validate_credentials("native", {"anything": "goes"})  # must not raise

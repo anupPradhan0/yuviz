@@ -47,7 +47,7 @@ BEGIN
         ('knowledge_base','knowledge_bases'), ('phone_number','phone_numbers'),
         ('provider_config','provider_configs'), ('purchased_number','purchased_numbers'),
         ('telephony_config','telephony_configs'), ('tool_provider_config','tool_provider_configs'),
-        ('user','users')
+        ('user','users'), ('oauth_connection','oauth_connections')
     ) AS v(entity_type, tbl) LOOP
         EXECUTE format(
             'UPDATE audit_log a SET tenant_id = t.tenant_id FROM %I t '
@@ -212,6 +212,28 @@ BEGIN
         WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
     ALTER TABLE custom_apis ENABLE ROW LEVEL SECURITY;
     ALTER TABLE custom_apis FORCE  ROW LEVEL SECURITY;
+END $$;
+
+DO $$
+BEGIN
+    DROP POLICY IF EXISTS oauth_connections_tenant_isolation ON oauth_connections;
+    CREATE POLICY oauth_connections_tenant_isolation ON oauth_connections
+        FOR ALL TO yuviz_app
+        USING      (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+        WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+    ALTER TABLE oauth_connections ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE oauth_connections FORCE  ROW LEVEL SECURITY;
+END $$;
+
+DO $$
+BEGIN
+    DROP POLICY IF EXISTS oauth_authorization_states_tenant_isolation ON oauth_authorization_states;
+    CREATE POLICY oauth_authorization_states_tenant_isolation ON oauth_authorization_states
+        FOR ALL TO yuviz_app
+        USING      (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+        WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+    ALTER TABLE oauth_authorization_states ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE oauth_authorization_states FORCE  ROW LEVEL SECURITY;
 END $$;
 
 DO $$

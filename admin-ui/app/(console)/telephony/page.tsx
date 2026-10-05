@@ -37,6 +37,7 @@ import {
   updateTelephonyConfig,
 } from "@/lib/api";
 import { Modal } from "@/components/Modal";
+import { secretPayload } from "@/components/SecretRefInput";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 
 const CARRIER_PROVIDER_LABEL: Record<CarrierProvider, string> = {
@@ -563,6 +564,21 @@ export default function TelephonyPage() {
   );
 }
 
+// The API never returns a saved credential: it sends "[stored]" in its place.
+// An edit form therefore starts these inputs empty, and an untouched one
+// submits "[stored]" so the server keeps what it already holds; a typed value
+// is plaintext for the server to encrypt (never an `enc:` ref).
+const STORED = "[stored]";
+const STORED_PLACEHOLDER = "Stored — type to replace";
+const isMasked = (v: unknown): boolean => typeof v === "string" && v === STORED;
+
+/** auth_token_ref/auth_token fields for a carrier from what was typed. */
+function carrierTokenFields(typed: string, stored: boolean): { auth_token_ref?: string; auth_token?: string } {
+  if (!typed) return stored ? { auth_token_ref: STORED } : {};
+  const { api_key_ref, api_key } = secretPayload(typed);
+  return { auth_token_ref: api_key_ref, auth_token: api_key };
+}
+
 function AddConfigModal({
   open, onClose, allTenants, defaultTenantId, isSuperadmin, onCreated,
 }: {
@@ -612,7 +628,7 @@ function AddConfigModal({
           name,
           provider: provider as CarrierProvider,
           auth_id: authId || undefined,
-          auth_token_ref: authTokenRef || undefined,
+          ...carrierTokenFields(authTokenRef, false),
           carrier_account_ref: carrierAccountRef || undefined,
         });
       } else if (isNative) {
@@ -760,14 +776,15 @@ function AddConfigModal({
           </div>
           <div className="form-group">
             <label className="form-label">
-              Auth Token Reference <span className="hint">e.g. env:TWILIO_AUTH_TOKEN — never a raw secret</span>
+              Auth Token <span className="hint">encrypted before it is stored</span>
             </label>
             <input
               className="form-input"
               style={{ fontFamily: "var(--mono)" }}
+              type="password"
+              autoComplete="off"
               value={authTokenRef}
               onChange={(e) => setAuthTokenRef(e.target.value)}
-              placeholder="env:TWILIO_AUTH_TOKEN"
             />
           </div>
           <div className="form-group">
@@ -1114,6 +1131,12 @@ function EditCredentialsModal({
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+  const creds = (config.telephonyConfig?.credentials ?? {}) as Record<string, unknown>;
+  const carrierTokenStored = isMasked(config.carrier?.auth_token_ref);
+  const secretStored = config.provider === "cloudonix"
+    ? Array.isArray(creds.api_keys) && isMasked(creds.api_keys[0])
+    : isMasked(creds.auth_token);
+
   useEffect(() => {
     if (!open) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -1121,7 +1144,7 @@ function EditCredentialsModal({
     if (config.kind === "carrier" && config.carrier) {
       setName(config.carrier.name);
       setAuthId(config.carrier.auth_id ?? "");
-      setAuthTokenRef(config.carrier.auth_token_ref ?? "");
+      setAuthTokenRef(isMasked(config.carrier.auth_token_ref) ? "" : config.carrier.auth_token_ref ?? "");
       setCarrierAccountRef(config.carrier.carrier_account_ref ?? "");
     } else if (config.kind === "telephony_config" && config.telephonyConfig) {
       const tc = config.telephonyConfig;
@@ -1130,10 +1153,10 @@ function EditCredentialsModal({
       setIsDefaultOutbound(tc.is_default_outbound);
       if (tc.provider === "cloudonix") {
         setDomain(String(creds.domain ?? ""));
-        setApiKey(Array.isArray(creds.api_keys) ? String(creds.api_keys[0]) : "");
+        setApiKey(Array.isArray(creds.api_keys) && !isMasked(creds.api_keys[0]) ? String(creds.api_keys[0]) : "");
       } else {
         setVobizAuthId(String(creds.auth_id ?? ""));
-        setVobizAuthToken(String(creds.auth_token ?? ""));
+        setVobizAuthToken(isMasked(creds.auth_token) ? "" : String(creds.auth_token ?? ""));
       }
     }
   }, [open, config]);
@@ -1146,13 +1169,18 @@ function EditCredentialsModal({
         await updateCarrier(config.id, {
           name,
           auth_id: authId || undefined,
-          auth_token_ref: authTokenRef || undefined,
+          // An untouched pointer is left out: only a platform operator may
+          // submit one, and renaming the carrier should not need that.
+          ...(authTokenRef === (config.carrier?.auth_token_ref ?? "")
+            ? {}
+            : carrierTokenFields(authTokenRef, carrierTokenStored)),
           carrier_account_ref: carrierAccountRef || undefined,
         });
       } else {
+        const secret = (typed: string) => typed || (secretStored ? STORED : typed);
         const credentials = config.provider === "cloudonix"
-          ? { domain, api_keys: [apiKey] }
-          : { auth_id: vobizAuthId, auth_token: vobizAuthToken };
+          ? { domain, api_keys: [secret(apiKey)] }
+          : { auth_id: vobizAuthId, auth_token: secret(vobizAuthToken) };
         await updateTelephonyConfig(config.id, { name, credentials, is_default_outbound: isDefaultOutbound });
       }
       onSaved();
@@ -1190,8 +1218,16 @@ function EditCredentialsModal({
             <input className="form-input" value={authId} onChange={(e) => setAuthId(e.target.value)} />
           </div>
           <div className="form-group">
-            <label className="form-label">Auth Token Reference</label>
-            <input className="form-input" style={{ fontFamily: "var(--mono)" }} value={authTokenRef} onChange={(e) => setAuthTokenRef(e.target.value)} />
+            <label className="form-label">Auth Token</label>
+            <input
+              className="form-input"
+              style={{ fontFamily: "var(--mono)" }}
+              type="password"
+              autoComplete="off"
+              value={authTokenRef}
+              placeholder={carrierTokenStored ? STORED_PLACEHOLDER : undefined}
+              onChange={(e) => setAuthTokenRef(e.target.value)}
+            />
           </div>
           <div className="form-group">
             <label className="form-label">Carrier Account Ref</label>
@@ -1208,7 +1244,14 @@ function EditCredentialsModal({
           </div>
           <div className="form-group">
             <label className="form-label">API Key</label>
-            <input className="form-input" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+            <input
+              className="form-input"
+              type="password"
+              autoComplete="off"
+              value={apiKey}
+              placeholder={secretStored ? STORED_PLACEHOLDER : undefined}
+              onChange={(e) => setApiKey(e.target.value)}
+            />
           </div>
         </>
       )}
@@ -1221,7 +1264,14 @@ function EditCredentialsModal({
           </div>
           <div className="form-group">
             <label className="form-label">Auth Token</label>
-            <input className="form-input" type="password" value={vobizAuthToken} onChange={(e) => setVobizAuthToken(e.target.value)} />
+            <input
+              className="form-input"
+              type="password"
+              autoComplete="off"
+              value={vobizAuthToken}
+              placeholder={secretStored ? STORED_PLACEHOLDER : undefined}
+              onChange={(e) => setVobizAuthToken(e.target.value)}
+            />
           </div>
         </>
       )}

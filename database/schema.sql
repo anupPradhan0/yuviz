@@ -770,7 +770,7 @@ CREATE TABLE IF NOT EXISTS custom_apis (
     method                   TEXT NOT NULL CHECK (method IN ('GET','POST','PUT','PATCH','DELETE')),
     body_style               TEXT NOT NULL DEFAULT 'json' CHECK (body_style IN ('json','form')),
     auth_scheme              TEXT NOT NULL DEFAULT 'none'
-                                CHECK (auth_scheme IN ('none','api_key','bearer','oauth2_client_credentials')),
+                                CHECK (auth_scheme IN ('none','api_key','bearer','oauth2_client_credentials','oauth2_authorization_code')),
     auth_config              JSONB NOT NULL DEFAULT '{}'::jsonb,
     side_effecting           BOOLEAN NOT NULL DEFAULT true,   -- UI defaults false only for GET
     idempotency_header       TEXT,                   -- NULL = downstream accepts no idempotency key
@@ -798,7 +798,7 @@ CREATE TABLE IF NOT EXISTS custom_api_params (
     json_type          TEXT NOT NULL CHECK (json_type IN ('string','number','integer','boolean','object','array')),
     description        TEXT NOT NULL DEFAULT '',
     required           BOOLEAN NOT NULL DEFAULT true,
-    source             TEXT NOT NULL CHECK (source IN ('literal','caller','upstream')),
+    source             TEXT NOT NULL CHECK (source IN ('literal','caller','upstream','caller_id')),
     literal_value      JSONB,
     upstream_api_id    UUID REFERENCES custom_apis(id),
     upstream_json_path TEXT,
@@ -809,7 +809,8 @@ CREATE TABLE IF NOT EXISTS custom_api_params (
     CONSTRAINT custom_api_params_source_shape CHECK (
         (source = 'literal'  AND literal_value IS NOT NULL AND upstream_api_id IS NULL)
      OR (source = 'caller'   AND upstream_api_id IS NULL)
-     OR (source = 'upstream' AND upstream_api_id IS NOT NULL AND upstream_json_path IS NOT NULL)),
+     OR (source = 'upstream' AND upstream_api_id IS NOT NULL AND upstream_json_path IS NOT NULL)
+     OR (source = 'caller_id' AND literal_value IS NULL AND upstream_api_id IS NULL)),
     CONSTRAINT custom_api_params_no_self_dep CHECK (upstream_api_id IS DISTINCT FROM custom_api_id)
 );
 CREATE INDEX IF NOT EXISTS idx_custom_api_params_api      ON custom_api_params (custom_api_id);
@@ -844,7 +845,7 @@ CREATE TABLE IF NOT EXISTS api_chain_runs (
     target_api_id   UUID NOT NULL REFERENCES custom_apis(id),
     status          TEXT NOT NULL DEFAULT 'running'
                        CHECK (status IN ('running','success','partial','failed','timeout',
-                                         'invalid_argument','unavailable')),
+                                         'invalid_argument','unavailable','confirmation_required')),
     error           TEXT,
     started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     finished_at     TIMESTAMPTZ,
@@ -864,7 +865,8 @@ CREATE TABLE IF NOT EXISTS api_chain_steps (
     level              INT  NOT NULL,
     session_id         TEXT,                   -- denormalized from the run, for history reads only
     status             TEXT NOT NULL CHECK (status IN ('claimed','success','failed','timeout',
-                                                       'skipped','invalid_argument','unavailable')),
+                                                       'skipped','invalid_argument','unavailable',
+                                                       'confirmation_required')),
     http_status        INT,
     error              TEXT,
     arguments_redacted JSONB,                  -- redaction.py applied BEFORE insert
@@ -899,6 +901,166 @@ CREATE TABLE IF NOT EXISTS api_side_effect_claims (
     UNIQUE (tenant_id, custom_api_id, arguments_hash)
 );
 CREATE INDEX IF NOT EXISTS idx_api_side_effect_claims_run ON api_side_effect_claims (run_id);
+
+-- ── oauth_connections — one per (tenant, provider); mutated in place ────────
+-- Connect/reconnect upsert this row; disconnect nulls the refs and flips status.
+-- Nothing soft-deletes it (deleted_at kept for the repo's partial-index
+-- convention), so preset rows' composite FK never dangles and reconnect needs
+-- no repoint. status='connected' <=> both refs present. Refs are tenant-bound
+-- (enc:t1., AAD = this row's tenant_id); a legacy Fernet ref cannot be stored.
+CREATE TABLE IF NOT EXISTS oauth_connections (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id          UUID NOT NULL REFERENCES tenants(id),
+    provider           TEXT NOT NULL CHECK (provider IN ('google','zoho','microsoft')),
+    status             TEXT NOT NULL CHECK (status IN ('connected','reconnect_needed','disconnected')),
+    account_label      TEXT,                      -- display only (email/name); never an auth input
+    -- The provider's immutable subject id for the authorizing account (id_token
+    -- 'sub' for Google/MS, ZUID for Zoho). Identity only, never an auth input,
+    -- never returned by a route. Lets disconnect tell "revoke this grant" from
+    -- "another tenant still holds the same grant" (round-4 finding 4). NULL on a
+    -- row connected before this change, which is treated as "not shared".
+    provider_sub       TEXT,
+    scopes             TEXT[] NOT NULL DEFAULT '{}',
+    accounts_server    TEXT,                      -- Zoho DC origin, allow-listed; NULL otherwise
+    access_token_ref   TEXT CHECK (access_token_ref  IS NULL OR access_token_ref  LIKE 'enc:t1.%'),
+    access_expires_at  TIMESTAMPTZ,
+    refresh_token_ref  TEXT CHECK (refresh_token_ref IS NULL OR refresh_token_ref LIKE 'enc:t1.%'),
+    connected_by       UUID REFERENCES users(id),
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at         TIMESTAMPTZ,
+    UNIQUE (id, tenant_id),                       -- target of custom_apis' composite FK
+    CONSTRAINT oauth_connections_token_shape CHECK (
+        (status = 'connected') =
+        (access_token_ref IS NOT NULL AND refresh_token_ref IS NOT NULL AND access_expires_at IS NOT NULL))
+);
+-- Tenant-SCOPED (lesson 3): tenant B's connection can never block tenant A's.
+CREATE UNIQUE INDEX IF NOT EXISTS oauth_connections_tenant_provider_key
+    ON oauth_connections (tenant_id, provider) WHERE deleted_at IS NULL;
+-- Deliberately NOT unique and NOT tenant-scoped: the shared-grant probe in
+-- disconnect is the one query in this design that must cross tenants, and a
+-- unique index here would let tenant B block tenant A from connecting the same
+-- Google account (lesson 3).
+CREATE INDEX IF NOT EXISTS idx_oauth_connections_provider_sub
+    ON oauth_connections (provider, provider_sub)
+    WHERE deleted_at IS NULL AND status = 'connected' AND provider_sub IS NOT NULL;
+
+-- ── oauth_authorization_states — single-use, 10-minute, user-bound ─────────
+-- state is stored only as sha256 hex; the raw value exists in the browser URL
+-- and nowhere server-side. Uniqueness is tenant-scoped; state is 32 server-
+-- random bytes, so no tenant can choose a colliding value either.
+CREATE TABLE IF NOT EXISTS oauth_authorization_states (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id          UUID NOT NULL REFERENCES tenants(id),
+    user_id            UUID NOT NULL REFERENCES users(id),
+    provider           TEXT NOT NULL CHECK (provider IN ('google','zoho','microsoft')),
+    state_hash         TEXT NOT NULL,
+    code_verifier_ref  TEXT NOT NULL CHECK (code_verifier_ref LIKE 'enc:t1.%'),
+    scopes             TEXT[] NOT NULL,
+    expires_at         TIMESTAMPTZ NOT NULL,
+    consumed_at        TIMESTAMPTZ,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (tenant_id, state_hash)
+);
+
+ALTER TABLE custom_apis ADD COLUMN IF NOT EXISTS oauth_connection_id    UUID;
+ALTER TABLE custom_apis ADD COLUMN IF NOT EXISTS preset_key             TEXT;   -- NULL = hand-registered
+ALTER TABLE custom_apis ADD COLUMN IF NOT EXISTS response_transform     JSONB;  -- preset-only; closed set of kinds
+ALTER TABLE custom_apis ADD COLUMN IF NOT EXISTS idempotency_body_field TEXT
+    CHECK (idempotency_body_field IS NULL OR idempotency_body_field ~ '^[A-Za-z_][A-Za-z0-9_]*$');
+-- Preset-only; non-NULL makes the row two-call confirm-gated (AC22).
+ALTER TABLE custom_apis ADD COLUMN IF NOT EXISTS confirmation_template TEXT;
+-- Preset-only (round-4 finding 3): max successful dispatches of this row per
+-- api_chain_runs.session_id. NULL = uncapped, which is every existing row.
+ALTER TABLE custom_apis ADD COLUMN IF NOT EXISTS session_send_cap INTEGER
+    CHECK (session_send_cap IS NULL OR session_send_cap > 0);
+ALTER TABLE custom_api_params ADD COLUMN IF NOT EXISTS body_path TEXT
+    CHECK (body_path IS NULL OR body_path ~ '^[A-Za-z_][A-Za-z0-9_]*(\.([A-Za-z_][A-Za-z0-9_]*|[0-9]{1,2}))*$');
+CREATE INDEX IF NOT EXISTS idx_custom_apis_tenant_preset
+    ON custom_apis (tenant_id, preset_key) WHERE deleted_at IS NULL AND preset_key IS NOT NULL;
+
+-- Preset-only: prepended to a caller_id value ('yuviz_phone=' on gcal_find_booking).
+ALTER TABLE custom_api_params ADD COLUMN IF NOT EXISTS value_prefix TEXT
+    CHECK (value_prefix IS NULL OR value_prefix ~ '^[a-z_]{1,32}=$');
+-- Preset-only sibling of value_prefix (round-4 finding 3): renders a caller_id
+-- value as bare digits instead of '+<digits>', for WhatsApp providers whose
+-- recipient field rejects the '+'. Both are shaped by the same CHECK below.
+ALTER TABLE custom_api_params ADD COLUMN IF NOT EXISTS value_digits_only BOOLEAN
+    NOT NULL DEFAULT false;
+
+-- caller_id = server-side ANI (finding 2). Widening only: every live row keeps
+-- satisfying both CHECKs, and DROP+ADD share one DO block (lessons 10, 13).
+DO $$ BEGIN
+  EXECUTE 'ALTER TABLE custom_api_params DROP CONSTRAINT IF EXISTS custom_api_params_source_check';
+  EXECUTE $sql$ALTER TABLE custom_api_params ADD CONSTRAINT custom_api_params_source_check
+    CHECK (source IN ('literal','caller','upstream','caller_id'))$sql$;
+  EXECUTE 'ALTER TABLE custom_api_params DROP CONSTRAINT IF EXISTS custom_api_params_source_shape';
+  EXECUTE $sql$ALTER TABLE custom_api_params ADD CONSTRAINT custom_api_params_source_shape CHECK (
+        (source = 'literal'   AND literal_value IS NOT NULL AND upstream_api_id IS NULL)
+     OR (source = 'caller'    AND upstream_api_id IS NULL)
+     OR (source = 'upstream'  AND upstream_api_id IS NOT NULL AND upstream_json_path IS NOT NULL)
+     OR (source = 'caller_id' AND literal_value IS NULL AND upstream_api_id IS NULL))$sql$;
+  EXECUTE 'ALTER TABLE custom_api_params DROP CONSTRAINT IF EXISTS custom_api_params_value_prefix_shape';
+  EXECUTE $sql$ALTER TABLE custom_api_params ADD CONSTRAINT custom_api_params_value_prefix_shape
+    CHECK (value_prefix IS NULL OR source = 'caller_id')$sql$;
+  EXECUTE 'ALTER TABLE custom_api_params DROP CONSTRAINT IF EXISTS custom_api_params_value_digits_shape';
+  EXECUTE $sql$ALTER TABLE custom_api_params ADD CONSTRAINT custom_api_params_value_digits_shape
+    CHECK (NOT value_digits_only OR source = 'caller_id')$sql$;
+END $$;
+
+-- Finding 1: no new legacy (non-tenant-bound) enc: ref can be written to
+-- custom_apis.auth_config. NOT VALID, so this apply never fails or skips on
+-- live legacy rows (lesson 13); reencrypt_tenant_refs converts them and then
+-- runs VALIDATE CONSTRAINT, and convalidated=true is the cutover's checkable
+-- end. Added only if absent, so re-applying schema.sql never drops a
+-- validated constraint back to NOT VALID.
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conname = 'custom_apis_auth_config_enc_bound'
+                    AND conrelid = 'custom_apis'::regclass) THEN
+    EXECUTE $sql$ALTER TABLE custom_apis ADD CONSTRAINT custom_apis_auth_config_enc_bound
+      CHECK (auth_config::text !~ '"enc:(?!t1\.)') NOT VALID$sql$;
+  END IF;
+END $$;
+
+-- One statement, so a failing ADD rolls back its DROP (lessons 10, 13).
+-- No data is rewritten: every existing row has a non-new scheme and a NULL
+-- oauth_connection_id, so both new CHECKs hold for live data.
+DO $$ BEGIN
+  EXECUTE 'ALTER TABLE custom_apis DROP CONSTRAINT IF EXISTS custom_apis_auth_scheme_check';
+  EXECUTE $sql$ALTER TABLE custom_apis ADD CONSTRAINT custom_apis_auth_scheme_check
+    CHECK (auth_scheme IN ('none','api_key','bearer','oauth2_client_credentials','oauth2_authorization_code'))$sql$;
+  EXECUTE 'ALTER TABLE custom_apis DROP CONSTRAINT IF EXISTS custom_apis_oauth_connection_shape';
+  EXECUTE $sql$ALTER TABLE custom_apis ADD CONSTRAINT custom_apis_oauth_connection_shape
+    CHECK ((auth_scheme = 'oauth2_authorization_code') = (oauth_connection_id IS NOT NULL))$sql$;
+  EXECUTE 'ALTER TABLE custom_apis DROP CONSTRAINT IF EXISTS custom_apis_oauth_connection_fk';
+  EXECUTE $sql$ALTER TABLE custom_apis ADD CONSTRAINT custom_apis_oauth_connection_fk
+    FOREIGN KEY (oauth_connection_id, tenant_id) REFERENCES oauth_connections(id, tenant_id)$sql$;
+  -- The gate needs the arguments_hash that only side-effecting steps compute.
+  EXECUTE 'ALTER TABLE custom_apis DROP CONSTRAINT IF EXISTS custom_apis_confirmation_shape';
+  EXECUTE $sql$ALTER TABLE custom_apis ADD CONSTRAINT custom_apis_confirmation_shape
+    CHECK (confirmation_template IS NULL OR side_effecting)$sql$;
+  -- The cap counts dispatched sends, which only side-effecting rows record.
+  EXECUTE 'ALTER TABLE custom_apis DROP CONSTRAINT IF EXISTS custom_apis_send_cap_shape';
+  EXECUTE $sql$ALTER TABLE custom_apis ADD CONSTRAINT custom_apis_send_cap_shape
+    CHECK (session_send_cap IS NULL OR side_effecting)$sql$;
+END $$;
+
+-- One DO block per table; each re-adds the existing values unchanged plus
+-- 'confirmation_required'. The implementer copies the current value lists
+-- verbatim from the api_chain_runs / api_chain_steps CREATE TABLEs
+-- (schema.sql ~:955 and ~:976) and updates those inline CHECKs to match for
+-- fresh DBs. Widening a CHECK cannot fail against live rows.
+DO $$ BEGIN
+  EXECUTE 'ALTER TABLE api_chain_runs DROP CONSTRAINT IF EXISTS api_chain_runs_status_check';
+  EXECUTE $sql$ALTER TABLE api_chain_runs ADD CONSTRAINT api_chain_runs_status_check
+    CHECK (status IN ('running','success','partial','failed','timeout','invalid_argument','unavailable', 'confirmation_required'))$sql$;
+END $$;
+DO $$ BEGIN
+  EXECUTE 'ALTER TABLE api_chain_steps DROP CONSTRAINT IF EXISTS api_chain_steps_status_check';
+  EXECUTE $sql$ALTER TABLE api_chain_steps ADD CONSTRAINT api_chain_steps_status_check
+    CHECK (status IN ('claimed','success','failed','timeout','skipped','invalid_argument','unavailable', 'confirmation_required'))$sql$;
+END $$;
 
 -- ── per-agent chain-depth override ──────────────────────────────────────────
 -- NULL = platform ceiling (MAX_CHAIN_LEVELS = 4).

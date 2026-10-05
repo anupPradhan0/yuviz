@@ -23,9 +23,9 @@ import httpx
 from libs.config_sdk.secret_resolver import CompositeSecretResolver
 from libs.tenancy import tenant_conn
 
-from . import admission, agent_apis, auth_schemes, db, graph, redaction
+from . import admission, agent_apis, auth_schemes, db, graph, presets, redaction
 from . import custom_apis as custom_apis_module
-from .custom_apis import resolve_and_validate_endpoint
+from .custom_apis import PinnedResolverTransport, resolve_and_validate_endpoint
 from .schemas import ChainExecuteRequest, ChainExecuteResponse, ChainStepReport
 
 log = logging.getLogger(__name__)
@@ -59,6 +59,25 @@ async def _resolve_tenant_uuid(conn: Any, tenant_id: str) -> str | None:
         "SELECT id FROM tenants WHERE slug = $1 AND deleted_at IS NULL", tenant_id,
     )
     return str(row["id"]) if row is not None else None
+
+
+async def _remote_party(tenant_id: str, request: ChainExecuteRequest) -> str | None:
+    """The number of the party on the other end of this call, or None when the
+    call metadata cannot name one. The only place the request's call numbers
+    are read. A number that is one of this tenant's own DIDs is refused too:
+    that is what an outbound call mislabelled `inbound` presents, with the
+    campaign DID as its caller."""
+    number = presets.remote_party_number(request.call_direction, request.caller_number, request.called_number)
+    if number is None:
+        return None
+    pool = await db.get_pool()
+    async with tenant_conn(pool) as conn:
+        is_own_did = await conn.fetchval(
+            "SELECT 1 FROM phone_numbers "
+            "WHERE tenant_id = $1 AND '+' || regexp_replace(did, '\\D', '', 'g') = $2 LIMIT 1",
+            tenant_id, number,
+        )
+    return None if is_own_did else number
 
 
 async def _verify_ownership(tenant_id: str, agent_id: str, api_name: str) -> dict | None:
@@ -211,22 +230,6 @@ async def _response_from_existing_run(run: dict) -> ChainExecuteResponse:
 
 # ── step 4: pinned outbound transport + capped response read ─────────────
 
-class PinnedResolverTransport(httpx.AsyncHTTPTransport):
-    """Dial a pre-validated IP (no re-resolve, defeats DNS rebinding); SNI/cert stay on the original host.
-
-    Never use verify=False.
-    """
-
-    def __init__(self, allowed_ips: list[str], **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._allowed_ips = allowed_ips
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        original_hostname = request.url.host
-        request.extensions["sni_hostname"] = original_hostname
-        request.url = request.url.copy_with(host=self._allowed_ips[0])
-        return await super().handle_async_request(request)
-
 
 def _step_transport(allowed_ips: list[str]) -> httpx.AsyncHTTPTransport:
     """Separate function so tests can inject an httpx.MockTransport."""
@@ -304,16 +307,51 @@ def _coerce(value: Any, json_type: str) -> Any:
     return value  # object/array — passed through as-is
 
 
+def _set_body_path(body: dict, path: str, value: Any) -> None:
+    """Places `value` at a dotted path ('start.dateTime', 'values.0.1'): a
+    digit segment is a list index, any other a dict key. A list slot skipped
+    over (an optional field left out) is filled with None."""
+    segments = path.split(".")
+    node: Any = body
+    for segment, following in zip(segments, segments[1:]):
+        default: Any = [] if following.isdigit() else {}
+        if isinstance(node, list):
+            index = int(segment)
+            node.extend([None] * (index + 1 - len(node)))
+            if node[index] is None:
+                node[index] = default
+            node = node[index]
+        else:
+            node = node.setdefault(segment, default)
+    last = segments[-1]
+    if isinstance(node, list):
+        index = int(last)
+        node.extend([None] * (index + 1 - len(node)))
+        node[index] = value
+    else:
+        node[last] = value
+
+
 def _resolve_arguments(
     api_row: dict, params: list[dict], caller_arguments: dict, prior_responses: dict[str, Any],
-) -> tuple[dict, dict, dict, list[str]]:
-    """Return (headers, query_params, body_fields, url, argument_sources, from_prior_step).
+    *, remote_party: str | None,
+) -> tuple[dict, dict, dict, str, dict, list[str], dict]:
+    """Returns (headers, query_params, body_fields, url, argument_sources,
+    from_prior_step, path_values). Raises _StepFailure for a missing required
+    caller value, an unresolved upstream path, or an injection attempt —
+    in every case BEFORE any request is built.
 
-    Raises _StepFailure on missing/unresolved/injected values before any request is built.
-    """
+    path_values holds each path param by its bare name: the value is part of
+    what the step does (which event a cancel deletes), so the caller hashes
+    and redacts it with the rest of the arguments.
+
+    A `caller_id` param is the call's remote party, from `remote_party` and
+    nowhere else: `caller_arguments` is never read for it, so nothing the model
+    says can change who a booking or a message is for."""
     headers: dict[str, str] = {}
     query_params: dict[str, Any] = {}
     body_fields: dict[str, Any] = {}
+    path_values: dict[str, str] = {}
     url = api_row["endpoint_url"]
     argument_sources: dict[str, str] = {}
     from_prior_step: list[str] = []
@@ -335,6 +373,12 @@ def _resolve_arguments(
                 continue
             raw_values[name] = caller_arguments[name]
             argument_sources[name] = "caller"
+        elif source == "caller_id":
+            if remote_party is None:
+                raise _StepFailure("invalid_argument", "caller_id_unavailable")
+            number = remote_party.lstrip("+") if param["value_digits_only"] else remote_party
+            raw_values[name] = (param["value_prefix"] or "") + number
+            argument_sources[name] = "caller_id"
         else:  # upstream
             upstream_id = str(param["upstream_api_id"])
             upstream_name = prior_responses.get("__names__", {}).get(upstream_id, upstream_id)
@@ -379,7 +423,10 @@ def _resolve_arguments(
         location = param["location"]
 
         if location == "body":
-            body_fields[name] = typed_value
+            if param.get("body_path"):
+                _set_body_path(body_fields, param["body_path"], typed_value)
+            else:
+                body_fields[name] = typed_value
             continue
 
         string_value = typed_value if isinstance(typed_value, str) else str(typed_value)
@@ -394,10 +441,30 @@ def _resolve_arguments(
                 # quote() leaves '.' unencoded, so this check is what blocks traversal.
                 raise _StepFailure("invalid_argument", "illegal_path_value")
             url = url.replace("{" + name + "}", quote(string_value, safe=""))
+            path_values[name] = string_value
         elif location == "query":
             query_params[name] = typed_value
 
-    return headers, query_params, body_fields, url, argument_sources, from_prior_step
+    return headers, query_params, body_fields, url, argument_sources, from_prior_step, path_values
+
+
+def _redaction_keys(params: list[dict]) -> list[str]:
+    """What redaction.redact matches a `sensitive` param by: its bare name, or
+    for one placed at a body_path its JSON path, since the outbound body (and
+    so the persisted arguments) holds it nested, not under its name."""
+    def key(param: dict) -> str:
+        if not param.get("body_path"):
+            return param["name"]
+        return "$" + "".join(
+            f"[{segment}]" if segment.isdigit() else f".{segment}" for segment in param["body_path"].split(".")
+        )
+
+    return [key(p) for p in params if p.get("sensitive")]
+
+
+def _form_fields(body_fields: dict) -> dict:
+    """A form body can only carry scalars: a nested value goes out as its JSON text."""
+    return {k: json.dumps(v) if isinstance(v, (dict, list)) else v for k, v in body_fields.items()}
 
 
 # ── step 6: side-effect fail-closed claim ─────────────────────────────────
@@ -456,8 +523,13 @@ def _claim_ttl() -> datetime.timedelta:
     return _parse_interval(os.environ.get(_CLAIM_TTL_ENV, _DEFAULT_CLAIM_TTL))
 
 
-async def _claim_side_effect(tenant_id: str, custom_api_id: str, arguments_hash: str, run_id: str, session_id: str) -> bool:
-    """Atomic claim taken before the call; False means a live claim exists, so don't fire."""
+async def _claim_side_effect(
+    tenant_id: str, custom_api_id: str, arguments_hash: str, run_id: str, session_id: str,
+) -> uuid.UUID | None:
+    """The atomic conditional insert (lesson 8) taken BEFORE the outbound
+    call — never a read-then-write. None = the loser's path: a live claim
+    already exists, so this step must not fire the call again. Otherwise the
+    claim row's id."""
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         row = await conn.fetchrow(
@@ -471,6 +543,80 @@ async def _claim_side_effect(tenant_id: str, custom_api_id: str, arguments_hash:
             "   OR api_side_effect_claims.claimed_at < now() - $6::interval "
             "RETURNING id",
             tenant_id, custom_api_id, arguments_hash, run_id, session_id, _claim_ttl(),
+        )
+    return row["id"] if row is not None else None
+
+
+_CONFIRMATION_WINDOW = "10 minutes"
+
+
+class _ConfirmationRequired(Exception):
+    """The step is gated and this is its first call for these arguments: the
+    read-back goes to the caller and nothing is dispatched."""
+
+    def __init__(self, read_back: str) -> None:
+        super().__init__("confirmation_required")
+        self.read_back = read_back
+
+
+async def _confirmed_in_prior_turn(
+    tenant_id: str, session_id: str, custom_api_id: str, arguments_hash: str, turn_id: str,
+) -> bool:
+    """True when this session already read these exact arguments back in an
+    EARLIER turn (so a caller utterance came in between, `turn_id` being a fresh
+    uuid per turn) and no successful dispatch has used that read-back since.
+    The NOT EXISTS makes each read-back good for one dispatch, so a cancel
+    followed by a rebook of the same slot has to be confirmed again."""
+    if not session_id:
+        return False  # nothing to scope a confirmation to
+    pool = await db.get_pool()
+    async with tenant_conn(pool) as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM api_chain_steps s "
+            "JOIN api_chain_runs r ON r.id = s.run_id "
+            "WHERE r.tenant_id = $1 AND r.session_id = $2 AND s.custom_api_id = $3 "
+            "  AND s.arguments_hash = $4 AND s.status = 'confirmation_required' "
+            "  AND r.turn_id <> $5 AND s.created_at > now() - $6::interval "
+            "  AND NOT EXISTS (SELECT 1 FROM api_chain_steps d "
+            "                    JOIN api_chain_runs dr ON dr.id = d.run_id "
+            "                   WHERE dr.tenant_id = $1 AND dr.session_id = $2 AND d.custom_api_id = $3 "
+            "                     AND d.arguments_hash = $4 AND d.status = 'success' "
+            "                     AND d.created_at > s.created_at) "
+            "LIMIT 1",
+            tenant_id, session_id, custom_api_id, arguments_hash, turn_id, _parse_interval(_CONFIRMATION_WINDOW),
+        )
+    return row is not None
+
+
+async def _sends_in_session(tenant_id: str, custom_api_id: str, session_id: str) -> int:
+    pool = await db.get_pool()
+    async with tenant_conn(pool) as conn:
+        return await conn.fetchval(
+            "SELECT count(*) FROM api_chain_steps s JOIN api_chain_runs r ON r.id = s.run_id "
+            "WHERE r.tenant_id = $1 AND s.custom_api_id = $2 AND s.session_id = $3 AND s.status = 'success'",
+            tenant_id, custom_api_id, session_id,
+        )
+
+
+async def _release_booking_claim(
+    tenant_id: str, preset_key: str, target_api_name: str, event_id: str,
+) -> bool:
+    """Frees the claim of the booking a successful cancel just deleted, so the
+    slot can be booked again this session. The booking's claim id IS the event
+    id (it was written into the event as its `id`), so `event_id` names exactly
+    one claim. DELETE, not a status flip: the rebook's insert then mints a fresh
+    id, where a kept row would hand it the cancelled event's id, which Google
+    refuses to reuse. An event_id that is not a uuid hex (an event the tenant
+    made by hand) raises before any SQL."""
+    claim_id = uuid.UUID(hex=event_id)
+    pool = await db.get_pool()
+    async with tenant_conn(pool) as conn:
+        row = await conn.fetchrow(
+            "DELETE FROM api_side_effect_claims c USING custom_apis b "
+            "WHERE c.tenant_id = $1 AND c.id = $2 AND c.status = 'success' "
+            "  AND b.tenant_id = $1 AND b.id = c.custom_api_id AND b.preset_key = $3 AND b.name = $4 "
+            "RETURNING c.id",
+            tenant_id, claim_id, preset_key, target_api_name,
         )
     return row is not None
 
@@ -584,9 +730,19 @@ async def _run_steps(
     failed_step: ChainStepReport | None = None
     chain_error: str | None = None
     missing_fields: list[dict] = []
+    read_back: str | None = None
     final_redacted_response: dict | None = None
     remaining_budget_ms = chain_budget_ms
     stop = False
+
+    # Once per chain, and only for a chain that has a use for it.
+    needs_remote_party = any(
+        p["source"] == "caller_id" for node in order for p in params_by_api.get(node["id"], [])
+    ) or any(
+        (api_rows[node["id"]].get("response_transform") or {}).get("kind") == "google_booking_lookup"
+        for node in order
+    )
+    remote_party = await _remote_party(tenant_id, request) if needs_remote_party else None
 
     for step_index, node in enumerate(order):
         api_id = node["id"]
@@ -607,43 +763,73 @@ async def _run_steps(
         headers: dict[str, str] = {}
         query_params: dict[str, Any] = {}
         body_fields: dict[str, Any] = {}
+        path_values: dict[str, str] = {}
         argument_sources: dict[str, str] | None = None
         arguments_hash: str | None = None
         injected_auth_keys: set[str] = set()
         started = time.monotonic()
 
         try:
-            headers, query_params, body_fields, url, argument_sources, from_prior_step = _resolve_arguments(
+            headers, query_params, body_fields, url, argument_sources, from_prior_step, path_values = _resolve_arguments(
                 api_row, params_by_api.get(api_id, []), request.caller_arguments, prior_responses,
+                remote_party=remote_party,
             )
 
             hostname, allowed_ips = await resolve_and_validate_endpoint(api_row["endpoint_url"])
 
             try:
                 injected_auth_keys = await auth_schemes.apply(api_row, headers, query_params)
+            except auth_schemes.ReconnectRequired:
+                raise _StepFailure("unavailable", "reconnect_required")
             except ValueError:
                 raise _StepFailure("unavailable", "credential_unavailable")
 
             # Exclude auth-injected keys: never persist credentials, and rotating tokens would break the hash dedupe.
             resolved_arguments = {
-                k: v for k, v in {**body_fields, **query_params, **headers}.items()
+                k: v for k, v in {**body_fields, **query_params, **headers, **path_values}.items()
                 if k not in injected_auth_keys
             }
+            arguments_redacted = redaction.redact(resolved_arguments, _redaction_keys(params_by_api.get(api_id, [])))
             side_effecting = bool(api_row["side_effecting"])
             idempotency_key_value = None
             if side_effecting:
                 arguments_hash = _derive("claim", tenant_id, api_id, resolved_arguments, key, kid)
+                if api_row.get("confirmation_template") and not await _confirmed_in_prior_turn(
+                    tenant_id, request.session_id, api_id, arguments_hash, request.turn_id,
+                ):
+                    upstream_responses = {
+                        api_rows[u]["name"]: prior_responses[u]
+                        for u in {str(p["upstream_api_id"]) for p in params_by_api.get(api_id, []) if p["source"] == "upstream"}
+                    }
+                    try:
+                        read_back = presets.render_confirmation(
+                            api_row["confirmation_template"], arguments_redacted, upstream_responses,
+                        )
+                    except ValueError:
+                        raise _StepFailure("failed", "confirmation_unrenderable") from None
+                    raise _ConfirmationRequired(read_back)
+                if api_row.get("session_send_cap") and (
+                    not request.session_id
+                    or await _sends_in_session(tenant_id, api_id, request.session_id) >= api_row["session_send_cap"]
+                ):
+                    # `unavailable`, never `invalid_argument`: that tells the model to retry with
+                    # different arguments, which is exactly how a recipient gets changed.
+                    raise _StepFailure("unavailable", "send_cap_reached")
                 idempotency_key_value = _derive("idem", tenant_id, api_id, resolved_arguments, key, kid)
                 if api_row.get("idempotency_header"):
                     headers[api_row["idempotency_header"]] = idempotency_key_value
                 claimed = await _claim_side_effect(tenant_id, api_id, arguments_hash, run_id, request.session_id)
                 if not claimed:
                     raise _StepFailure("failed", "side_effecting_step_already_completed")
+                if api_row.get("idempotency_body_field"):
+                    # The claim's own id: a cancel deletes the claim, so a rebook gets a fresh one
+                    # (Google keeps a deleted event's id and refuses to reuse it).
+                    body_fields[api_row["idempotency_body_field"]] = claimed.hex
 
             step_timeout_ms = min(api_row.get("timeout_ms") or 6000, remaining_budget_ms)
             body_style = api_row.get("body_style", "json")
             json_body = body_fields if body_style == "json" and body_fields else None
-            data_body = body_fields if body_style == "form" and body_fields else None
+            data_body = _form_fields(body_fields) if body_style == "form" and body_fields else None
 
             try:
                 status_code, body, truncated = await asyncio.wait_for(
@@ -673,10 +859,25 @@ async def _run_steps(
 
             if side_effecting:
                 await _mark_side_effect_success(tenant_id, api_id, arguments_hash)
+                if target := presets.claim_release_target(api_row):
+                    # The cancel already happened upstream: failing to free the slot must not
+                    # turn it into a reported failure. The rebook is then refused until the TTL.
+                    try:
+                        await _release_booking_claim(tenant_id, api_row["preset_key"], target, path_values["event_id"])
+                    except Exception:
+                        log.warning("booking_claim_release_failed", extra={"custom_api_id": api_id})
+
+            if api_row.get("response_transform"):
+                # Before anything below sees the response: a projection that drops fields
+                # keeps them out of the step row, the success template and the model.
+                try:
+                    raw_response = presets.apply_response_transform(
+                        api_row["response_transform"], raw_response, body_fields, caller_ani=remote_party,
+                    )
+                except ValueError:
+                    raise _StepFailure("failed", "response_transform_failed") from None
 
             prior_responses[api_id] = raw_response
-            sensitive_param_names = [p["name"] for p in params_by_api.get(api_id, []) if p.get("sensitive")]
-            arguments_redacted = redaction.redact(resolved_arguments, sensitive_param_names)
             response_redacted = redaction.redact(raw_response, api_row.get("sensitive_response_paths") or [])
             final_redacted_response = response_redacted
 
@@ -693,14 +894,30 @@ async def _run_steps(
             completed_steps.append(api_name)
             remaining_budget_ms -= duration_ms
 
+        except _ConfirmationRequired as gate:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            await _persist_step(
+                run_id, step_index, api_row, levels[api_id], request.session_id,
+                status="confirmation_required", http_status=None, error=None,
+                arguments_redacted=arguments_redacted, response_redacted=None,
+                argument_sources=argument_sources, arguments_hash=arguments_hash,
+                idempotency_key=None, duration_ms=duration_ms,
+            )
+            steps.append(ChainStepReport(
+                api_name=api_name, level=levels[api_id], status="confirmation_required",
+                from_prior_step=from_prior_step,
+            ))
+            read_back = gate.read_back
+            chain_error = "confirmation_required"
+            stop = True
+
         except _StepFailure as failure:
             duration_ms = int((time.monotonic() - started) * 1000)
-            sensitive_param_names = [p["name"] for p in params_by_api.get(api_id, []) if p.get("sensitive")]
             failure_arguments = {
-                k: v for k, v in {**body_fields, **query_params, **headers}.items()
+                k: v for k, v in {**body_fields, **query_params, **headers, **path_values}.items()
                 if k not in injected_auth_keys
             }
-            arguments_redacted = redaction.redact(failure_arguments, sensitive_param_names)
+            arguments_redacted = redaction.redact(failure_arguments, _redaction_keys(params_by_api.get(api_id, [])))
             await _persist_step(
                 run_id, step_index, api_row, levels[api_id], request.session_id,
                 status=failure.status, http_status=failure.http_status, error=failure.error,
@@ -715,7 +932,9 @@ async def _run_steps(
             missing_fields = failure.missing_fields
             stop = True
 
-    if failed_step is None:
+    if read_back is not None:
+        chain_status = "confirmation_required"
+    elif failed_step is None:
         chain_status = "success"
     elif chain_error == "upstream_no_match":
         # Not "partial": the chain ran fine and nothing matched; keeps missing_fields for the agent.
@@ -729,7 +948,7 @@ async def _run_steps(
 
     data = final_redacted_response if (chain_status == "success" and final_redacted_response is not None) else {}
 
-    deterministic_response = None
+    deterministic_response = read_back
     if chain_status == "success" and final_redacted_response is not None and order:
         template = api_rows[order[-1]["id"]].get("success_template")
         if template:

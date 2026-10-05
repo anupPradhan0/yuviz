@@ -932,7 +932,7 @@ class TestProviderConfigEndpoints:
         resp = await client.patch(f"/providers/{provider_id}", json={"api_key_ref": ""})
         assert resp.status_code == 400
 
-    async def test_update_to_blank_api_key_ref_with_new_api_key_is_allowed(self, client, test_tenant, monkeypatch):
+    async def test_update_to_blank_api_key_ref_with_new_api_key_is_allowed(self, client, pool, test_tenant, monkeypatch):
         monkeypatch.setenv("SECRET_ENCRYPTION_KEY", generate_key())
         create = await client.post(
             f"/tenants/{test_tenant['id']}/providers",
@@ -942,7 +942,10 @@ class TestProviderConfigEndpoints:
 
         resp = await client.patch(f"/providers/{provider_id}", json={"api_key_ref": "", "api_key": "dg_live_secret"})
         assert resp.status_code == 200
-        assert resp.json()["api_key_ref"].startswith("enc:")
+        assert resp.json()["api_key_ref"] == "[stored]"
+        # The sealed value is what is stored; the response only masks it.
+        stored = await pool.fetchval("SELECT api_key_ref FROM provider_configs WHERE id = $1", provider_id)
+        assert stored.startswith("enc:")
 
     async def test_update_with_both_api_key_and_a_real_api_key_ref_is_400(self, client, test_tenant, monkeypatch):
         # Both non-blank is ambiguous; a rotation pairs api_key with a blank api_key_ref.
@@ -1261,14 +1264,17 @@ class TestToolProviderConfigEndpoints:
         )
         assert resp.status_code == 400
 
-    async def test_create_with_api_key_encrypts_it(self, client, test_tenant, monkeypatch):
+    async def test_create_with_api_key_encrypts_it(self, client, pool, test_tenant, monkeypatch):
         monkeypatch.setenv("SECRET_ENCRYPTION_KEY", generate_key())
         resp = await client.post(
             f"/tenants/{test_tenant['id']}/tool-providers",
             json={"name": "X", "tool_name": "book_appointment", "engine": "cal_com", "api_key": "cal_live_secret"},
         )
         assert resp.status_code == 201
-        assert resp.json()["api_key_ref"].startswith("enc:")
+        assert resp.json()["api_key_ref"] == "[stored]"
+        # The sealed value is what is stored; the response only masks it.
+        stored = await pool.fetchval("SELECT api_key_ref FROM tool_provider_configs WHERE id = $1", resp.json()["id"])
+        assert stored.startswith("enc:")
 
     async def test_create_toolexec_engine_with_no_api_key_ref_succeeds(self, client, test_tenant):
         resp = await client.post(
@@ -1298,8 +1304,11 @@ class TestToolProviderConfigEndpoints:
         resp = await client.patch(f"/tool-providers/{tpc_id}", json={"api_key_ref": ""})
         assert resp.status_code == 400
 
-    async def test_update_to_blank_api_key_ref_with_new_api_key_is_allowed(self, client, test_tenant, monkeypatch):
-        # A rotation: blank api_key_ref is the UI's placeholder alongside a new api_key.
+    async def test_update_to_blank_api_key_ref_with_new_api_key_is_allowed(self, client, pool, test_tenant, monkeypatch):
+        # Not a clear — a rotation. The blank api_key_ref is the UI's
+        # placeholder for "nothing typed here", paired with a real replacement
+        # in api_key. `pool` is here to read the stored ciphertext back: the
+        # 200 and the masked response would look identical if nothing landed.
         monkeypatch.setenv("SECRET_ENCRYPTION_KEY", generate_key())
         create = await client.post(
             f"/tenants/{test_tenant['id']}/tool-providers",
@@ -1314,9 +1323,11 @@ class TestToolProviderConfigEndpoints:
             f"/tool-providers/{tpc_id}", json={"api_key_ref": "", "api_key": "cal_live_new_secret"},
         )
         assert resp.status_code == 200
-        assert resp.json()["api_key_ref"].startswith("enc:")
+        assert resp.json()["api_key_ref"] == "[stored]"
+        stored = await pool.fetchval("SELECT api_key_ref FROM tool_provider_configs WHERE id = $1", tpc_id)
+        assert stored.startswith("enc:")
 
-    async def test_update_with_api_key_encrypts_it(self, client, test_tenant, monkeypatch):
+    async def test_update_with_api_key_encrypts_it(self, client, pool, test_tenant, monkeypatch):
         monkeypatch.setenv("SECRET_ENCRYPTION_KEY", generate_key())
         create = await client.post(
             f"/tenants/{test_tenant['id']}/tool-providers",
@@ -1329,7 +1340,10 @@ class TestToolProviderConfigEndpoints:
 
         resp = await client.patch(f"/tool-providers/{tpc_id}", json={"api_key": "cal_live_new_secret"})
         assert resp.status_code == 200
-        assert resp.json()["api_key_ref"].startswith("enc:")
+        assert resp.json()["api_key_ref"] == "[stored]"
+        # The sealed value is what is stored; the response only masks it.
+        stored = await pool.fetchval("SELECT api_key_ref FROM tool_provider_configs WHERE id = $1", tpc_id)
+        assert stored.startswith("enc:")
 
 
 class TestAgentToolPolicyMaxChainDepth:

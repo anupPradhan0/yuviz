@@ -6,6 +6,7 @@ Run: uvicorn services.toolexec.app:app --reload --port 8600
 
 from __future__ import annotations
 
+import os
 import logging
 from contextlib import asynccontextmanager
 
@@ -14,8 +15,10 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from . import custom_apis, db, executor
-from .routers import agent_apis, chain_runs, custom_apis as custom_apis_router, execute
+from . import custom_apis, db, executor, presets
+from .routers import (
+    agent_apis, chain_runs, connector_presets, custom_apis as custom_apis_router, execute, oauth_connections,
+)
 
 log = logging.getLogger(__name__)
 
@@ -31,16 +34,28 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Voice AI Platform — Tool Execution Service", lifespan=lifespan)
 
-# Admin UI is the only browser client.
+# Admin UI is the only browser client — same narrow origin list as Config
+# Service's and Knowledge Service's app.py. ADMIN_UI_ORIGINS (comma-separated)
+# overrides it when the console runs on another port; still a list, not a
+# wildcard, because CORS is what stops a random page in the operator's browser
+# driving this API.
+_ADMIN_UI_ORIGINS = [
+    o.strip() for o in os.environ.get("ADMIN_UI_ORIGINS", "http://localhost:3000").split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=_ADMIN_UI_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(custom_apis_router.tenant_scoped_router)
 app.include_router(custom_apis_router.router)
+app.include_router(oauth_connections.tenant_scoped_router)
+app.include_router(oauth_connections.router)
+app.include_router(connector_presets.tenant_scoped_router)
+app.include_router(connector_presets.router)
 app.include_router(agent_apis.router)
 app.include_router(chain_runs.router)
 app.include_router(execute.router)
@@ -48,6 +63,11 @@ app.include_router(execute.router)
 
 @app.exception_handler(custom_apis.DependentApiExists)
 async def dependent_api_exists_handler(request: Request, exc: custom_apis.DependentApiExists) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+@app.exception_handler(presets.PresetConnectorRequired)
+async def preset_connector_required_handler(request: Request, exc: presets.PresetConnectorRequired) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 

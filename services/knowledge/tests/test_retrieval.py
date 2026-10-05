@@ -53,6 +53,7 @@ async def test_retrieve_end_to_end_with_real_ollama_embeddings(pool, tenant_agen
     set_caller_tenant(str(tenant["id"]))
     embedding_cfg = await provider_configs.create_provider_config(
         tenant_id=tenant["id"], name="Embed", role="embedding", engine="ollama",
+        allow_pointer_schemes=False,
     )
     kb = await kb_service.create_knowledge_base(
         tenant_id=tenant["id"], slug="policies", name="Policies", embedding_config_id=embedding_cfg["id"],
@@ -126,6 +127,7 @@ async def test_prompt_mode_document_coexists_with_vector_search_results(pool, te
     set_caller_tenant(str(tenant["id"]))
     embedding_cfg = await provider_configs.create_provider_config(
         tenant_id=tenant["id"], name="Embed", role="embedding", engine="ollama",
+        allow_pointer_schemes=False,
     )
     kb = await kb_service.create_knowledge_base(
         tenant_id=tenant["id"], slug="mixed", name="Mixed", embedding_config_id=embedding_cfg["id"],
@@ -179,6 +181,7 @@ async def test_prompt_mode_document_excluded_from_ordinary_vector_search(pool, t
     set_caller_tenant(str(tenant["id"]))
     embedding_cfg = await provider_configs.create_provider_config(
         tenant_id=tenant["id"], name="Embed", role="embedding", engine="ollama",
+        allow_pointer_schemes=False,
     )
     kb = await kb_service.create_knowledge_base(
         tenant_id=tenant["id"], slug="prompt-only", name="Prompt Only", embedding_config_id=embedding_cfg["id"],

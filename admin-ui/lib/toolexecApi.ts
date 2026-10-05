@@ -33,7 +33,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 export type CustomApiParamLocation = "body" | "query" | "header" | "path";
 export type CustomApiParamJsonType = "string" | "number" | "integer" | "boolean" | "object" | "array";
-export type CustomApiParamSource = "literal" | "caller" | "upstream";
+export type CustomApiParamSource = "literal" | "caller" | "upstream" | "caller_id";
 
 export interface CustomApiParamSpec {
   name: string;
@@ -49,7 +49,12 @@ export interface CustomApiParamSpec {
 }
 
 export type CustomApiMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-export type CustomApiAuthScheme = "none" | "api_key" | "bearer" | "oauth2_client_credentials";
+export type CustomApiAuthScheme =
+  | "none"
+  | "api_key"
+  | "bearer"
+  | "oauth2_client_credentials"
+  | "oauth2_authorization_code";
 
 export interface CustomApi {
   id: string;
@@ -69,8 +74,17 @@ export interface CustomApi {
   chain_levels: number;
   created_at: string;
   updated_at: string;
+  preset_key: string | null;
+  oauth_connection_id: string | null;
   params: CustomApiParamSpec[];
 }
+
+// Plaintext credentials, sealed to the tenant by the server. The API never
+// returns one: a saved credential reads back as "[stored]" in auth_config,
+// and an empty string means it was quarantined and must be entered again.
+export type CustomApiAuthSecrets = Partial<
+  Record<"key_ref" | "token_ref" | "client_id_ref" | "client_secret_ref", string>
+>;
 
 export interface CustomApiCreate {
   name: string;
@@ -80,6 +94,7 @@ export interface CustomApiCreate {
   body_style?: "json" | "form";
   auth_scheme?: CustomApiAuthScheme;
   auth_config?: Record<string, unknown>;
+  auth_secrets?: CustomApiAuthSecrets;
   side_effecting?: boolean;
   idempotency_header?: string | null;
   timeout_ms?: number | null;
@@ -98,6 +113,67 @@ export const updateCustomApi = (customApiId: string, body: CustomApiUpdate) =>
   request<CustomApi>(`/custom-apis/${customApiId}`, { method: "PATCH", body: JSON.stringify(body) });
 export const deleteCustomApi = (customApiId: string) =>
   request<void>(`/custom-apis/${customApiId}`, { method: "DELETE" });
+
+// ── OAuth connectors (services/toolexec/routers/oauth_connections.py) ───
+
+export type OAuthProviderKey = "google" | "zoho" | "microsoft";
+export type OAuthConnectionStatus = "connected" | "reconnect_needed" | "disconnected";
+
+export interface OAuthProvider {
+  key: OAuthProviderKey;
+  label: string;
+}
+
+export interface OAuthConnection {
+  id: string;
+  provider: OAuthProviderKey;
+  status: OAuthConnectionStatus;
+  account_label: string | null;
+  scopes: string[];
+  updated_at: string;
+}
+
+export const listOAuthProviders = () => request<OAuthProvider[]>("/oauth-providers");
+export const listOAuthConnections = (tenantId: string) =>
+  request<OAuthConnection[]>(`/tenants/${tenantId}/oauth-connections`);
+export const authorizeOAuthConnection = (tenantId: string, provider: string, presetKey: string | null) =>
+  request<{ authorize_url: string }>(`/tenants/${tenantId}/oauth-connections/${provider}/authorize`, {
+    method: "POST",
+    body: JSON.stringify({ preset_key: presetKey }),
+  });
+export const completeOAuthCallback = (
+  tenantId: string,
+  body: { state: string; code: string; accounts_server: string | null },
+) =>
+  request<OAuthConnection>(`/tenants/${tenantId}/oauth-connections/callback`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+export const disconnectOAuthConnection = (tenantId: string, connectionId: string) =>
+  request<{ disconnected: boolean }>(`/tenants/${tenantId}/oauth-connections/${connectionId}`, {
+    method: "DELETE",
+  });
+
+// ── Connector presets (services/toolexec/routers/connector_presets.py) ──
+
+export interface ConnectorPreset {
+  key: string;
+  title: string;
+  provider: OAuthProviderKey | null;
+  setup_schema: Record<string, unknown>;
+}
+
+// Each preset's own setup model; preset_key is the discriminator the server routes on.
+export type PresetSetup = { preset_key: string } & Record<string, string | number>;
+
+export const listConnectorPresets = () => request<ConnectorPreset[]>("/connector-presets");
+export const applyConnectorPreset = (tenantId: string, setup: PresetSetup) =>
+  request<CustomApi[]>(`/tenants/${tenantId}/connector-presets/${setup.preset_key}/apply`, {
+    method: "POST",
+    body: JSON.stringify(setup),
+  });
+export const removeConnectorPreset = (tenantId: string, presetKey: string) =>
+  request<void>(`/tenants/${tenantId}/connector-presets/${presetKey}`, { method: "DELETE" });
 
 // ── Agent ↔ Custom API enablement (services/toolexec/agent_apis.py) ─────
 

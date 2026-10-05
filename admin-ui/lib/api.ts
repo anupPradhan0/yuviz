@@ -509,6 +509,8 @@ export interface CarrierCreate {
   provider: CarrierProvider;
   auth_id?: string;
   auth_token_ref?: string;
+  /** Plaintext; the server encrypts it into auth_token_ref. */
+  auth_token?: string;
   carrier_account_ref?: string;
 }
 
@@ -516,6 +518,7 @@ export interface CarrierUpdate {
   name?: string;
   auth_id?: string;
   auth_token_ref?: string;
+  auth_token?: string;
   carrier_account_ref?: string;
 }
 

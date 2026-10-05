@@ -165,13 +165,16 @@ async def test_resolved_tts_config_id_null_for_cross_tenant_or_non_tts_provider(
     with _as_tenant(test_tenant["id"]):
         same_tenant_tts = await provider_configs.create_provider_config(
             tenant_id=test_tenant["id"], name="TTS", role="tts", engine="elevenlabs",
+            allow_pointer_schemes=False,
         )
         same_tenant_stt = await provider_configs.create_provider_config(
             tenant_id=test_tenant["id"], name="STT", role="stt", engine="deepgram",
+            allow_pointer_schemes=False,
         )
     with _as_tenant(other_tenant["id"]):
         other_tenant_tts = await provider_configs.create_provider_config(
             tenant_id=other_tenant["id"], name="Other TTS", role="tts", engine="elevenlabs",
+            allow_pointer_schemes=False,
         )
 
     async def _flow_with_start_voice(tts_config_id):

@@ -19,11 +19,14 @@ from services.config.app import app
 @pytest.fixture
 async def platform_client(pool):
     """role='viewer', tenant_id=None — the real shape of a platform service
-    account (lesson 24), not role=='superadmin'."""
+    account (lesson 24), not role=='superadmin'. is_service_account is part
+    of that shape: only such a principal is exempt from the `enc:` mask."""
     email = f"test-platform-{uuid.uuid4().hex[:8]}@example.com"
     user = await users_service.create_user(
         email=email, password="test-password-not-real", role="viewer", tenant_id=None,
     )
+    await pool.execute("UPDATE users SET is_service_account = true WHERE id = $1", user["id"])
+    user = {**user, "is_service_account": True}
     token = auth.create_access_token(user)
     transport = ASGITransport(app=app)
     try:

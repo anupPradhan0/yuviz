@@ -15,11 +15,15 @@ import socket
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
+
+from libs.config_sdk.secrets import QUARANTINED, encrypt_tenant_secret
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import audit, auth_schemes, db, graph
 
 log = logging.getLogger(__name__)
+
 
 # Absolute deny-list, checked against EVERY resolved A/AAAA record — not
 # just the first one a caller happens to control the order of.
@@ -106,20 +110,102 @@ async def resolve_and_validate_endpoint(url: str) -> tuple[str, list[str]]:
     return hostname, allowed_ips
 
 
+class PinnedResolverTransport(httpx.AsyncHTTPTransport):
+    """Connects to one of resolve_and_validate_endpoint()'s own
+    already-validated allowed_ips rather than letting the transport
+    re-resolve DNS itself at connect time (finding 6 — DNS rebinding): a
+    validate-then-connect design whose connect step does its own fresh
+    lookup can still land on a different, unvalidated address if the
+    record changes in between the two. SNI and certificate verification
+    stay on the ORIGINAL HOSTNAME via httpcore's `sni_hostname` request
+    extension; the Host header httpx already set from the original URL at
+    Request-construction time is untouched here. TLS therefore still
+    validates a real certificate against the real hostname — verify=False
+    is never used and is forbidden outright."""
+
+    def __init__(self, allowed_ips: list[str], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._allowed_ips = allowed_ips
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        original_hostname = request.url.host
+        request.extensions["sni_hostname"] = original_hostname
+        request.url = request.url.copy_with(host=self._allowed_ips[0])
+        return await super().handle_async_request(request)
+
+
 class DependentApiExists(Exception):
     """409 at soft-delete: a live custom_api still declares this one as upstream."""
 
 
-# auth_scheme -> auth_config fields that must be tenant-namespaced refs (enc:/env:/k8s:).
+# auth_scheme -> the auth_config field name(s) that must be a tenant-bound
+# `enc:t1.` ref, per custom_apis.auth_config's shape (see database/schema.sql's
+# custom_apis comment). 'none' needs nothing; the authorization-code scheme
+# keeps its tokens on the oauth_connections row, not here.
 _CREDENTIAL_REF_FIELDS = {
     "api_key": ("key_ref",),
     "bearer": ("token_ref",),
     "oauth2_client_credentials": ("client_id_ref", "client_secret_ref"),
+    "oauth2_authorization_code": (),
 }
+
+STORED_SENTINEL = "[stored]"
+
+
+def _seal_auth_secrets(
+    tenant_id: Any, auth_scheme: str, auth_config: dict, auth_secrets: dict[str, str] | None,
+    old_auth_config: dict | None,
+) -> dict:
+    """Turns what the client sent into the auth_config to store. No response
+    ever carries a ref, so every new credential arrives as plaintext in
+    `auth_secrets` and is sealed to `tenant_id` here. `old_auth_config` is
+    passed only on an update that keeps the row's scheme: it is the only
+    source `"[stored]"` may be copied from."""
+    fields = _CREDENTIAL_REF_FIELDS.get(auth_scheme, ())
+    auth_secrets = auth_secrets or {}
+    unknown = set(auth_secrets) - set(fields)
+    if unknown:
+        raise ValueError(f"credential_ref_not_a_reference: {sorted(unknown)[0]}")
+
+    sealed = dict(auth_config)
+    for field in fields:
+        current = auth_config.get(field)
+        if field in auth_secrets:
+            if current is not None and current != STORED_SENTINEL:
+                raise ValueError(f"credential_ref_ambiguous: {field}")
+            sealed[field] = encrypt_tenant_secret(tenant_id, auth_secrets[field])
+        elif current == STORED_SENTINEL:
+            if old_auth_config is None or field not in old_auth_config:
+                raise ValueError(f"credential_ref_not_a_reference: {field}")
+            sealed[field] = old_auth_config[field]
+    return sealed
+
+
+def _mask_ref(value: Any) -> Any:
+    if value == QUARANTINED:
+        return ""
+    return STORED_SENTINEL if value else value
+
+
+def public_custom_api(api: dict) -> dict:
+    """The registry view every console role may read: no `*_ref` value leaves
+    the service, pointers included. A quarantined credential reads as empty
+    so the panel asks for it again."""
+    config = {
+        key: _mask_ref(value) if key.endswith("_ref") else value
+        for key, value in (api.get("auth_config") or {}).items()
+    }
+    return {**api, "auth_config": config}
 
 
 def _validate_credential_ref(tenant_id: Any, auth_scheme: str, auth_config: dict) -> None:
-    """Reject missing/literal credential fields or refs outside the tenant's namespace."""
+    """Raises ValueError('credential_ref_not_a_reference: <field>') if a
+    required field is missing or a literal secret (no enc:/env:/k8s:
+    scheme), or ValueError('credential_ref_outside_tenant_namespace:
+    <field>') if auth_schemes.validate_tenant_ref() rejects it — only a
+    tenant-bound ref for this tenant passes, called again here at
+    registration (and again by resolve_tenant_ref at call time — never
+    only here)."""
     for field in _CREDENTIAL_REF_FIELDS.get(auth_scheme, ()):
         value = auth_config.get(field)
         if not isinstance(value, str) or not value.startswith(("enc:", "env:", "k8s:")):
@@ -238,8 +324,9 @@ async def _replace_params(conn, custom_api_id: Any, params: list[dict]) -> None:
         await conn.execute(
             "INSERT INTO custom_api_params "
             "(custom_api_id, name, location, json_type, description, required, source, "
-            " literal_value, upstream_api_id, upstream_json_path, sensitive) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)",
+            " literal_value, upstream_api_id, upstream_json_path, sensitive, "
+            " body_path, value_prefix, value_digits_only) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14)",
             custom_api_id,
             param["name"],
             param["location"],
@@ -251,6 +338,9 @@ async def _replace_params(conn, custom_api_id: Any, params: list[dict]) -> None:
             param.get("upstream_api_id"),
             param.get("upstream_json_path"),
             param.get("sensitive", False),
+            param.get("body_path"),
+            param.get("value_prefix"),
+            param.get("value_digits_only", False),
         )
 
 
@@ -263,6 +353,7 @@ def _decode_custom_api_row(row: Any) -> dict[str, Any]:
     result = dict(row)
     result["auth_config"] = db.json_col(result["auth_config"])
     result["sensitive_response_paths"] = db.json_col(result["sensitive_response_paths"])
+    result["response_transform"] = db.json_col(result["response_transform"])
     return result
 
 
@@ -351,6 +442,56 @@ async def list_custom_apis(tenant_id: Any) -> list[dict[str, Any]]:
     return apis
 
 
+async def _insert_custom_api(
+    conn,
+    *,
+    tenant_id: Any,
+    name: str,
+    description: str,
+    endpoint_url: str,
+    method: str,
+    body_style: str,
+    auth_scheme: str,
+    auth_config: dict,
+    side_effecting: bool,
+    idempotency_header: str | None,
+    timeout_ms: int | None,
+    sensitive_response_paths: list[str],
+    success_template: str | None,
+    params: list[dict],
+    oauth_connection_id: Any | None = None,
+    preset_key: str | None = None,
+    response_transform: dict | None = None,
+    idempotency_body_field: str | None = None,
+    confirmation_template: str | None = None,
+    session_send_cap: int | None = None,
+) -> dict[str, Any]:
+    """The row and its params, inside the caller's per-tenant advisory-locked
+    transaction. The preset-only fields (the last six) are written only from
+    presets.py; CustomApiCreate exposes none of them. The caller recomputes
+    chain_levels and writes the audit row."""
+    await _validate_upstream_params(conn, tenant_id, params)
+
+    row = await conn.fetchrow(
+        "INSERT INTO custom_apis "
+        "(tenant_id, name, description, endpoint_url, method, body_style, auth_scheme, "
+        " auth_config, side_effecting, idempotency_header, timeout_ms, "
+        " sensitive_response_paths, success_template, oauth_connection_id, preset_key, "
+        " response_transform, idempotency_body_field, confirmation_template, session_send_cap) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12::jsonb, $13, "
+        "        $14, $15, $16::jsonb, $17, $18, $19) "
+        "RETURNING *",
+        tenant_id, name, description, endpoint_url, method, body_style, auth_scheme,
+        _json_or_none(auth_config) or "{}", side_effecting, idempotency_header, timeout_ms,
+        _json_or_none(sensitive_response_paths) or "[]", success_template, oauth_connection_id,
+        preset_key, _json_or_none(response_transform), idempotency_body_field, confirmation_template,
+        session_send_cap,
+    )
+    result = _decode_custom_api_row(row)
+    await _replace_params(conn, result["id"], params)
+    return result
+
+
 async def create_custom_api(
     *,
     tenant_id: Any,
@@ -361,6 +502,7 @@ async def create_custom_api(
     body_style: str = "json",
     auth_scheme: str = "none",
     auth_config: dict | None = None,
+    auth_secrets: dict[str, str] | None = None,
     side_effecting: bool = True,
     idempotency_header: str | None = None,
     timeout_ms: int | None = None,
@@ -370,7 +512,7 @@ async def create_custom_api(
     user_id: Any | None = None,
     user_email: str | None = None,
 ) -> dict[str, Any]:
-    auth_config = auth_config or {}
+    auth_config = _seal_auth_secrets(tenant_id, auth_scheme, auth_config or {}, auth_secrets, None)
     sensitive_response_paths = sensitive_response_paths or []
     params = params or []
 
@@ -384,21 +526,13 @@ async def create_custom_api(
             # Per-tenant lock: concurrent edits could each pass the depth check and jointly break it.
             await conn.execute("SELECT pg_advisory_xact_lock(hashtext('custom_apis:' || $1::text))", str(tenant_id))
 
-            await _validate_upstream_params(conn, tenant_id, params)
-
-            row = await conn.fetchrow(
-                "INSERT INTO custom_apis "
-                "(tenant_id, name, description, endpoint_url, method, body_style, auth_scheme, "
-                " auth_config, side_effecting, idempotency_header, timeout_ms, "
-                " sensitive_response_paths, success_template) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12::jsonb, $13) "
-                "RETURNING *",
-                tenant_id, name, description, endpoint_url, method, body_style, auth_scheme,
-                _json_or_none(auth_config) or "{}", side_effecting, idempotency_header, timeout_ms,
-                _json_or_none(sensitive_response_paths) or "[]", success_template,
+            result = await _insert_custom_api(
+                conn, tenant_id=tenant_id, name=name, description=description, endpoint_url=endpoint_url,
+                method=method, body_style=body_style, auth_scheme=auth_scheme, auth_config=auth_config,
+                side_effecting=side_effecting, idempotency_header=idempotency_header, timeout_ms=timeout_ms,
+                sensitive_response_paths=sensitive_response_paths, success_template=success_template,
+                params=params,
             )
-            result = _decode_custom_api_row(row)
-            await _replace_params(conn, result["id"], params)
 
             await _recompute_tenant_chain_levels(conn, tenant_id)
 
@@ -426,6 +560,7 @@ async def update_custom_api(
     *,
     platform_scoped: bool = False,
     params: list[dict] | None = None,
+    auth_secrets: dict[str, str] | None = None,
     user_id: Any | None = None,
     user_email: str | None = None,
     **fields: Any,
@@ -458,11 +593,23 @@ async def update_custom_api(
             old = _decode_custom_api_row(old_row)
             tenant_id = old["tenant_id"]
 
+            # A preset's rows are read-only (the design's OQ2): to change one the
+            # tenant removes the preset and applies it again. Before the lock or
+            # any write, so nothing about the row or its params can move.
+            if old["preset_key"] is not None:
+                raise ValueError("preset_managed")
+
+            # Serialized per tenant — see create_custom_api's comment (lesson 8).
             await conn.execute("SELECT pg_advisory_xact_lock(hashtext('custom_apis:' || $1::text))", str(tenant_id))
 
             # Validate the merged final state, not just the patched fields.
             final_auth_scheme = fields.get("auth_scheme", old["auth_scheme"])
-            final_auth_config = fields.get("auth_config", old["auth_config"])
+            final_auth_config = _seal_auth_secrets(
+                tenant_id, final_auth_scheme, fields.get("auth_config", old["auth_config"]), auth_secrets,
+                old["auth_config"] if final_auth_scheme == old["auth_scheme"] else None,
+            )
+            if auth_secrets or "auth_config" in fields:
+                fields["auth_config"] = final_auth_config
             final_endpoint_url = fields.get("endpoint_url", old["endpoint_url"])
             final_success_template = fields.get("success_template", old["success_template"])
             final_sensitive_paths = fields.get("sensitive_response_paths", old["sensitive_response_paths"])

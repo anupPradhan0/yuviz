@@ -29,8 +29,11 @@ def resolver_must_not_be_called(monkeypatch):
 
 
 def _assert_rejected(ref: str, tenant_id: str = TENANT_ID) -> None:
+    """The read-side namespace check (a pre-existing env:/k8s: row). The
+    write side refuses these outright, which test_auth_schemes_tenant_bound.py
+    covers."""
     with pytest.raises(ValueError, match="credential_ref_outside_tenant_namespace"):
-        auth_schemes.validate_tenant_ref(tenant_id, ref)
+        auth_schemes._validate_pointer_ref(tenant_id, ref)
 
 
 def test_env_platform_jwt_secret_rejected(resolver_must_not_be_called):
@@ -88,7 +91,7 @@ def test_env_ref_accepted_when_tenant_id_is_asyncpg_uuid_object():
     from asyncpg.pgproto.pgproto import UUID as AsyncpgUUID
 
     tenant_id_obj = AsyncpgUUID(TENANT_ID)
-    auth_schemes.validate_tenant_ref(tenant_id_obj, f"env:TENANT_{TENANT_HEX}_TOKEN")  # must not raise
+    auth_schemes._validate_pointer_ref(tenant_id_obj, f"env:TENANT_{TENANT_HEX}_TOKEN")  # must not raise
 
 
 def test_k8s_ref_accepted_when_tenant_id_is_asyncpg_uuid_object():
@@ -98,7 +101,7 @@ def test_k8s_ref_accepted_when_tenant_id_is_asyncpg_uuid_object():
     os.makedirs(os.path.join(root, "tenants", TENANT_ID), exist_ok=True)
 
     tenant_id_obj = AsyncpgUUID(TENANT_ID)
-    auth_schemes.validate_tenant_ref(tenant_id_obj, f"k8s:tenants/{TENANT_ID}/token")  # must not raise
+    auth_schemes._validate_pointer_ref(tenant_id_obj, f"k8s:tenants/{TENANT_ID}/token")  # must not raise
 
 
 @pytest.mark.asyncio
@@ -110,9 +113,9 @@ async def test_env_own_namespace_resolves():
 
 @pytest.mark.asyncio
 async def test_enc_ref_resolves():
-    from libs.config_sdk.secrets import encrypt_secret
+    from libs.config_sdk.secrets import encrypt_tenant_secret
 
-    ref = encrypt_secret("my-api-key")
+    ref = encrypt_tenant_secret(TENANT_ID, "my-api-key")
     value = await auth_schemes.resolve_tenant_ref(TENANT_ID, ref)
     assert value == "my-api-key"
 

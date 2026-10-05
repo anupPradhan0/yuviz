@@ -63,10 +63,11 @@ async def create_tool_provider_config(
     api_key_ref: str | None = None,
     api_key: str | None = None,
     extra: dict[str, Any] | None = None,
+    allow_pointer_schemes: bool,
     user_id: Any | None = None,
     user_email: str | None = None,
 ) -> dict[str, Any]:
-    api_key_ref = resolve_api_key_input(api_key, api_key_ref)
+    api_key_ref = resolve_api_key_input(api_key, api_key_ref, allow_pointer_schemes=allow_pointer_schemes)
 
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
@@ -93,6 +94,7 @@ async def create_tool_provider_config(
 async def update_tool_provider_config(
     tool_provider_config_id: Any,
     *,
+    allow_pointer_schemes: bool,
     user_id: Any | None = None,
     user_email: str | None = None,
     **fields: Any,
@@ -100,10 +102,8 @@ async def update_tool_provider_config(
     # api_key is folded into api_key_ref; absent means untouched, empty means clear.
     had_api_key = "api_key" in fields
     typed_key = fields.pop("api_key", None)
-    if had_api_key or "api_key_ref" in fields:
-        fields["api_key_ref"] = resolve_api_key_input(typed_key, fields.get("api_key_ref"))
 
-    if not fields:
+    if not fields and not had_api_key:
         raise ValueError("update_tool_provider_config() called with no fields to update")
     unknown = set(fields) - _UPDATABLE_FIELDS
     if unknown:
@@ -120,6 +120,12 @@ async def update_tool_provider_config(
         if old_row is None:
             raise LookupError(f"tool_provider_config {tool_provider_config_id} not found")
         old = _row_to_dict(old_row)
+
+        if had_api_key or "api_key_ref" in fields:
+            fields["api_key_ref"] = resolve_api_key_input(
+                typed_key, fields.get("api_key_ref"),
+                current_ref=old["api_key_ref"], allow_pointer_schemes=allow_pointer_schemes,
+            )
 
         columns = list(fields.keys())
         set_parts = []

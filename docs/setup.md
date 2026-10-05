@@ -209,6 +209,142 @@ downstream API's own dedupe — for one `TOOLEXEC_SIDE_EFFECT_CLAIM_TTL`
 window, since both are derived from the same rotated secret. Plan a
 rotation around that window, not around the platform claim alone.
 
+#### OAuth connectors (Google, Zoho, Microsoft)
+
+Tenants connect their own Google, Zoho or Microsoft account from the console's
+**Integrations** page. The platform registers one OAuth app per provider, once,
+and supplies it through env vars. A provider with any of its three values unset
+is left out of `GET /oauth-providers`, so the console shows no Connect button
+for it; with `TOOLEXEC_OAUTH_REDIRECT_URI` unset no provider is offered at all.
+
+```bash
+# The console origin plus /integrations/callback. Sent to the provider as the
+# redirect URI on every authorize and token call; it is read from here, never
+# from a request. It must match, character for character, what you register
+# with each provider below.
+export TOOLEXEC_OAUTH_REDIRECT_URI="https://console.example.com/integrations/callback"
+
+export TOOLEXEC_OAUTH_GOOGLE_CLIENT_ID="..."
+export TOOLEXEC_OAUTH_GOOGLE_CLIENT_SECRET_REF="env:TOOLEXEC_OAUTH_GOOGLE_SECRET"
+export TOOLEXEC_OAUTH_ZOHO_CLIENT_ID="..."
+export TOOLEXEC_OAUTH_ZOHO_CLIENT_SECRET_REF="env:TOOLEXEC_OAUTH_ZOHO_SECRET"
+export TOOLEXEC_OAUTH_MICROSOFT_CLIENT_ID="..."
+export TOOLEXEC_OAUTH_MICROSOFT_CLIENT_SECRET_REF="env:TOOLEXEC_OAUTH_MICROSOFT_SECRET"
+```
+
+`*_CLIENT_SECRET_REF` is a platform secret ref (`env:` or `k8s:`), resolved by
+the platform resolver; the secret itself never goes in the variable. The
+console is the origin that receives the browser, so the redirect URI points at
+the admin UI (port 3000 in dev: `http://localhost:3000/integrations/callback`),
+not at the toolexec service.
+
+Per provider:
+
+- **Google.** Google Cloud console, APIs & Services, Credentials: create an
+  OAuth client of type *Web application* and add the redirect URI above under
+  *Authorized redirect URIs*. Enable the Google Calendar API and the Google
+  Sheets API for the project. On the consent screen add the scopes
+  `calendar.events`, `calendar.freebusy` and `drive.file`. The calendar scopes
+  are "sensitive", and Google's app verification can take weeks; until it
+  clears, only listed test users (up to 100) can consent. Start verification
+  when you register the app. Sheets lead capture uses only `drive.file`, which
+  is not sensitive.
+- **Zoho.** Zoho API console: register a *Server-based Application* and add the
+  redirect URI. Enable **multi-DC** on it: a tenant on `.in`, `.eu` and the
+  other regional data centres authorizes and is exchanged against its own
+  accounts host, and the console passes that host back as `accounts-server`.
+  The service accepts only the fixed list of Zoho accounts hosts.
+- **Microsoft.** Entra (Azure AD) app registration, supported account type
+  *any organizational directory and personal accounts*, platform *Web*, with the
+  redirect URI above, plus a client secret. Microsoft has no refresh-token
+  revoke endpoint, so a disconnect only clears Yuviz's copy.
+
+A disconnect always returns `{"disconnected": true}` and revokes upstream after
+the response is sent. The console therefore tells the admin to also remove Yuviz
+from the connected apps in the provider account.
+
+#### Credential refs: who may use `env:` and `k8s:`
+
+`env:` and `k8s:` pointer refs are platform-operator-only input. A tenant admin
+who types one into a credential field gets a 400 and pastes the plaintext key
+instead; the server encrypts it, bound to that tenant, and the console shows it
+back only as `[stored]`. A platform operator keeps the pointer form (for example
+`env:PLIVO_AUTH_TOKEN` on a BYOC carrier). Existing rows are untouched by this
+rule; only new writes are checked.
+
+A **quarantined** credential reads as an empty, required field in the console
+(its stored value is the literal `quarantined`, which no resolver accepts) and
+the integration using it fails until the tenant enters the key again.
+
+#### Release step: `reencrypt_tenant_refs.py`
+
+Run this straight after the toolexec rollout. Before it runs, every legacy
+`enc:` credential on a custom API fails closed with `credential_unavailable`
+(it is never decrypted), so the gap between rollout and script is an outage for
+those APIs. It runs under the superuser DSN (`POSTGRES_DSN`) and needs
+`SECRET_ENCRYPTION_KEY`, the same key the services use.
+
+```bash
+# 1. Dry run: does everything, then rolls back. Prints counts and exits 2 if the ceiling would trip.
+POSTGRES_DSN=... SECRET_ENCRYPTION_KEY=... ./venv/bin/python -m services.toolexec.reencrypt_tenant_refs --dry-run
+
+# 2. The real run, with a report for the per-tenant rotation notices.
+POSTGRES_DSN=... SECRET_ENCRYPTION_KEY=... ./venv/bin/python -m services.toolexec.reencrypt_tenant_refs --report /secure/path/quarantine.jsonl
+```
+
+What it does and what to expect:
+
+- A ciphertext held by exactly one tenant is **rebound** (decrypted once, sealed
+  to that tenant). A ciphertext that appears under **two or more tenants** is
+  **quarantined in every occurrence, the original holder included**: nothing in
+  the database says who copied from whom, so any guess would leave a live
+  cross-tenant credential behind. Every tenant that held one must re-enter that
+  key. Tell them to rotate it at the provider too, since a second tenant could
+  read it.
+- `--report <path>` writes one JSON object per quarantined row (JSON Lines), mode
+  `0600`, after the transaction commits. It holds ids only: no ciphertext, no
+  plaintext, no field value. Keep it with the release records. A dry run writes no
+  report. stdout is counts only.
+- Exit codes: **0** only when everything resolved (the
+  `custom_apis_auth_config_enc_bound` constraint is validated and no shared
+  ciphertext is left live); **1** when the run failed and rolled back, or finished
+  leaving legacy refs or shared ciphertexts behind; **2** when the blast-radius
+  ceiling stopped it before any write. Treat any non-zero exit as "not done" and do
+  not continue the rollout.
+- The whole run is one transaction, so a partial quarantine cannot happen.
+- **Blast-radius ceiling.** Quarantine is destructive and its inputs can be
+  planted: a viewer in one tenant can paste copies of that tenant's own live
+  ciphertext to get its credentials quarantined, and a wrong
+  `SECRET_ENCRYPTION_KEY` makes every ciphertext look undecryptable. The run
+  aborts with exit 2, writing nothing, if it would quarantine more than 25 rows
+  (`--max-quarantine`), more than 10% of all ref-bearing rows
+  (`--max-quarantine-pct`), more than 3 undecryptable ciphertexts, or any
+  platform-level `provider_configs` row.
+- **`--allow-large-quarantine`** proceeds past the ceiling. It is appropriate
+  when you have read the dry-run counts and can account for them: a large,
+  known multi-tenant install whose shared ciphertexts are real, with the
+  expected key. It is **not** appropriate to clear a failed run just to get a
+  zero exit. Exit 2 on a deployment you expected to be clean means find out why
+  first. In particular, do not override when the undecryptable count tripped:
+  that is the wrong-key signature, so check `SECRET_ENCRYPTION_KEY` instead.
+- **Restart after the script.** The quarantine takes effect in the database at
+  commit, but long-lived in-process caches keep the old credential until the
+  process restarts: `DidProviderManager` (`services/did/provider_manager.py`),
+  Conversation's `AIProviderManager` and Knowledge's `EmbeddingProviderManager`
+  each hold built provider instances in a per-process `_instances` dict.
+  **Restart the DID, Conversation and Knowledge services after a real run**;
+  until then a quarantined credential can keep working in a process that
+  loaded it earlier.
+
+#### `scripts/seed_default_config.py` and credentials
+
+The seed script's `main` creates and updates the default tenant's provider
+configs and agent through the Config service's own functions, passing
+`allow_pointer_schemes=False` on both calls. It supplies no key and no ref, so
+it needs no pointer scheme, and it is safe to re-run after the release step.
+It does not set credentials: add each provider's API key afterwards, as the
+tenant would, through the console (the plaintext key, never an `env:` ref).
+
 ## 6. Seed a default agent
 
 ```bash

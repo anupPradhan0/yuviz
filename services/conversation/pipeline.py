@@ -303,7 +303,9 @@ class PipelineConversationHandler:
         transcripts:   TranscriptBuilder | None = None,
         tenant_id:     str = "",
         call_id:       str = "",
-        direction:     str = "inbound",
+        # No default direction: a construction site that omits it must fail closed
+        # in toolexec's caller-id resolution, not be treated as an inbound call.
+        direction:     str = "",
         caller_number: str = "",
         called_number: str = "",
         knowledge:     IKnowledgeProvider | None = None,
@@ -452,9 +454,15 @@ class PipelineConversationHandler:
 
     async def greeting(self, session_id: str) -> list[bytes]:
         if self._transcripts is not None:
+            # One field, two sinks with opposite fail-closed directions. The
+            # empty direction that makes toolexec refuse to guess a remote
+            # party is not a value calls.direction accepts — its CHECK is
+            # ('inbound','outbound','test'), so writing "" here loses the call
+            # row and its whole transcript. The transcript's safe reading of
+            # an unset direction is the common case, inbound.
             self._transcripts.begin_call(
                 session_id, self._tenant_id, self._call_id,
-                self._direction, self._caller_number, self._called_number,
+                self._direction or "inbound", self._caller_number, self._called_number,
                 self._agent_id, self._agent_config_version,
             )
         # Speaking the instant the line opens gets the first syllable
@@ -1007,7 +1015,8 @@ class PipelineConversationHandler:
 
         async for event in self._tool_orchestrator.run_turn(
             self._agent_id or "", self._tenant_id, self._call_id, session_id, history,
-            caller_number=self._caller_number, cancel_event=cancel_event,
+            caller_number=self._caller_number, called_number=self._called_number,
+            call_direction=self._direction, cancel_event=cancel_event,
             local_tools=local_tools, only_tools=only_tools,
         ):
             if isinstance(event, ToolCallStartedEvent):

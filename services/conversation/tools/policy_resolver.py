@@ -147,7 +147,13 @@ class ToolPolicyResolver:
                     FROM agent_custom_apis aca
                     JOIN custom_apis ca ON ca.id = aca.custom_api_id AND ca.deleted_at IS NULL
                     JOIN agents      a  ON a.id  = aca.agent_id AND a.tenant_id = ca.tenant_id
+                    -- A connector-backed API is offered only while its connection is
+                    -- connected; the tenant predicate keeps another tenant's connected
+                    -- row from re-enabling it.
+                    LEFT JOIN oauth_connections oc ON oc.id = ca.oauth_connection_id
+                                                  AND oc.tenant_id = ca.tenant_id AND oc.deleted_at IS NULL
                     WHERE aca.agent_id = $1 AND aca.enabled
+                      AND (ca.oauth_connection_id IS NULL OR oc.status = 'connected')
                 ),
                 -- Every API reachable from each enabled API: itself, plus
                 -- its transitive upstream dependencies. The depth cap is a

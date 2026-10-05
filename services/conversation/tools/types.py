@@ -58,6 +58,10 @@ class ToolExecutionContext:
     request_id:                   str
     # Caller ANI; empty for webcall/browser sessions.
     caller_number:                 str = ""
+    # The call's other leg and its direction, passed through unchanged for
+    # toolexec, which alone decides which party is the remote one.
+    called_number:                 str = ""
+    call_direction:                str = ""
     conversation_history_snapshot: list[dict[str, Any]] = field(default_factory=list)
     # Per-call because executors are registered once at startup with no per-agent policy.
     max_chain_depth:                int | None = None
