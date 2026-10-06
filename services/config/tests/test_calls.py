@@ -260,6 +260,24 @@ async def test_get_usage_trend_groups_by_day(test_tenant, scoped, pool):
         await pool.execute("DELETE FROM calls WHERE session_id = $1", sid)
 
 
+async def test_trend_and_activity_report_containment_inputs(test_tenant, scoped, pool):
+    ids = [f"test-call-{uuid.uuid4().hex[:8]}" for _ in range(3)]
+    await pool.execute(
+        "INSERT INTO calls (session_id, tenant_id, direction, close_reason, started_at, ended_at) VALUES "
+        "($1, $4, 'inbound', 'stream_ended', NOW(), NOW()), "
+        "($2, $4, 'inbound', 'TRANSFER_FAILED', NOW(), NOW()), "
+        "($3, $4, 'inbound', NULL, NOW(), NULL)",
+        *ids, test_tenant["slug"],
+    )
+    try:
+        [day] = await calls.get_usage_trend(test_tenant["slug"], days=1)
+        assert (day["calls"], day["ended"], day["escalated"]) == (3, 2, 1)
+        [hour] = await calls.get_todays_activity(test_tenant["slug"])
+        assert (hour["ended"], hour["escalated"]) == (2, 1)
+    finally:
+        await pool.execute("DELETE FROM calls WHERE session_id = ANY($1)", ids)
+
+
 async def test_get_todays_activity_buckets_by_hour_and_direction(test_tenant, scoped, pool):
     inbound_id, outbound_id = (f"test-call-{uuid.uuid4().hex[:8]}" for _ in range(2))
     await pool.execute(

@@ -4,7 +4,7 @@
 // Stats show only stored values; storage/retrieval aren't metered.
 
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ApiError, getCurrentUser } from "@/lib/api";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 import {
@@ -77,6 +77,7 @@ export default function KnowledgeBasesPage() {
   const [pageError, setPageError] = useState<string | null>(null);
   const [addSourceOpen, setAddSourceOpen] = useState(false);
   const searchParams = useSearchParams();
+  const router = useRouter();
   const [tab, setTab] = useState<Tab>(searchParams.get("tab") === "apis" ? "apis" : "sources");
 
   const refresh = async () => {
@@ -362,12 +363,15 @@ export default function KnowledgeBasesPage() {
         does not delete it, remove it here.
       </div>
 
-      {addSourceOpen && (
+      {(addSourceOpen || (canManage && searchParams.get("add") === "1")) && (
         <AddSourceModal
           tenants={allTenants}
           knowledgeBases={kbs}
           canManage={canManage}
-          onClose={() => setAddSourceOpen(false)}
+          onClose={() => {
+            setAddSourceOpen(false);
+            if (searchParams.has("add")) router.replace("/knowledge-bases");
+          }}
           onCreated={refresh}
         />
       )}

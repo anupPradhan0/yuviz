@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { Check, ChevronDown, ChevronRight } from "lucide-react";
 import { ApiError, listProviders, ProviderConfig } from "@/lib/api";
 import {
@@ -87,11 +88,16 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
         .catch((e) => setProvidersError(e instanceof ApiError ? e.detail : String(e))),
     ]);
 
-    // Authoring lists documents per tenant KB; attach lists documents per
-    // the agent's assigned KBs only.
-    const kbIdsForDocs = agentId ? assigns.map((a) => a.kb_id) : kbs.map((kb) => kb.id);
-    const docEntries = await Promise.all(kbIdsForDocs.map(async (id) => [id, await listDocuments(id)] as const));
-    setDocsByKb(Object.fromEntries(docEntries));
+    const kbIdsForDocs = [...new Set([...kbs.map((kb) => kb.id), ...assigns.map((a) => a.kb_id)])];
+    const docResults = await Promise.allSettled(kbIdsForDocs.map((id) => listDocuments(id)));
+    setDocsByKb(
+      Object.fromEntries(
+        kbIdsForDocs.map((id, i) => {
+          const r = docResults[i];
+          return [id, r.status === "fulfilled" ? r.value : []];
+        }),
+      ),
+    );
     setLoading(false);
   };
 
@@ -209,10 +215,112 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
 
   if (loading) return <div className="empty-state">Loading…</div>;
 
-  // Authoring: every tenant KB. Attach: only the agent's assigned KBs.
-  const rows = agentId
-    ? assignments.map((a) => ({ id: a.kb_id, name: a.kb_name, enabled: a.enabled as boolean | null }))
-    : allKbs.map((kb) => ({ id: kb.id, name: kb.name, enabled: null as boolean | null }));
+  type Row = { id: string; name: string; enabled: boolean | null; attached: boolean };
+  // Authoring: every tenant KB. Attach: assigned KBs, plus the rest as "available to add".
+  const rows: Row[] = agentId
+    ? assignments.map((a) => ({ id: a.kb_id, name: a.kb_name, enabled: a.enabled, attached: true }))
+    : allKbs.map((kb) => ({ id: kb.id, name: kb.name, enabled: null, attached: false }));
+  const availableRows: Row[] = agentId
+    ? unassignedKbs.map((kb) => ({ id: kb.id, name: kb.name, enabled: null, attached: false }))
+    : [];
+
+  const renderRow = (row: Row) => {
+    const docs = docsByKb[row.id] || [];
+    const isExpanded = expanded[row.id] ?? true;
+    return (
+      <div key={row.id}>
+        <div className="kb-row">
+          <button
+            className="btn btn-ghost btn-sm btn-icon"
+            aria-label={isExpanded ? "Collapse" : "Expand"}
+            onClick={() => setExpanded({ ...expanded, [row.id]: !isExpanded })}
+          >
+            {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </button>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 500 }}>{row.name}</div>
+            <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>
+              {docs.length} document{docs.length === 1 ? "" : "s"}
+            </div>
+          </div>
+          {agentId && row.attached && (
+            <label className="toggle-switch" title={row.enabled ? "On: used when it's relevant" : "Off: not used"}>
+              <input
+                type="checkbox"
+                checked={!!row.enabled}
+                onChange={(e) => handleToggleEnabled(row.id, e.target.checked)}
+              />
+              <span className="toggle-slider" />
+            </label>
+          )}
+          {!agentId && (
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => {
+                setUploadKbId(row.id);
+                setUploadTitle("");
+                setUploadFile(null);
+                setUploadError(null);
+              }}
+            >
+              + Document
+            </button>
+          )}
+          {agentId && row.attached && (
+            <button className="btn btn-danger btn-sm" onClick={() => handleDetach(row.id)}>
+              Remove
+            </button>
+          )}
+          {agentId && !row.attached && (
+            <button className="btn btn-primary btn-sm" onClick={() => handleAttach(row.id)}>
+              + Use in this agent
+            </button>
+          )}
+        </div>
+        {isExpanded &&
+          (docs.length === 0 ? (
+            <div className="kb-doc-row" style={{ color: "var(--text-3)" }}>
+              No documents yet.
+            </div>
+          ) : (
+            docs.map((doc) => (
+              <div key={doc.id} className="kb-doc-row">
+                <div style={{ flex: 1 }}>
+                  <span className="mono">{doc.title}</span>
+                  {doc.error && <div style={{ color: "var(--red)", fontSize: ".68rem" }}>{doc.error}</div>}
+                </div>
+                {statusBadge(doc.status)}
+                {agentId ? (
+                  doc.usage_mode === "prompt" && (
+                    <span className="badge gray" title="The agent reads this on every call">
+                      always used
+                    </span>
+                  )
+                ) : (
+                  <label
+                    style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text-3)" }}
+                    title="The agent reads this whole document on every call, not just the parts that match the question"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={doc.usage_mode === "prompt"}
+                      onChange={() => handleUsageModeToggle(doc)}
+                      disabled={doc.status !== "ready"}
+                    />
+                    Always read this
+                  </label>
+                )}
+                {!agentId && (
+                  <button className="btn btn-danger btn-sm" onClick={() => handleDeleteDoc(doc)}>
+                    Delete
+                  </button>
+                )}
+              </div>
+            ))
+          ))}
+      </div>
+    );
+  };
 
   return (
     <div className="cols">
@@ -223,26 +331,8 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
 
         <div className="card">
           <div className="card-hdr">
-            <div className="card-title">{agentId ? "Knowledge this agent can use" : "Knowledge Bases"}</div>
+            <div className="card-title">{agentId ? "Documents this agent uses" : "Knowledge Bases"}</div>
             <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-              {agentId && unassignedKbs.length > 0 && (
-                <select
-                  className="form-select"
-                  style={{ width: 200 }}
-                  defaultValue=""
-                  onChange={(e) => {
-                    if (e.target.value) handleAttach(e.target.value);
-                    e.target.value = "";
-                  }}
-                >
-                  <option value="">+ Add a knowledge base…</option>
-                  {unassignedKbs.map((kb) => (
-                    <option key={kb.id} value={kb.id}>
-                      {kb.name}
-                    </option>
-                  ))}
-                </select>
-              )}
               {!agentId && (
                 <button className="btn btn-primary btn-sm" onClick={() => setCreateOpen(true)}>
                   + New Knowledge Base
@@ -254,109 +344,29 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
           {rows.length === 0 ? (
             <div className="empty-state">
               {agentId
-                ? unassignedKbs.length > 0
-                  ? "No knowledge added yet. Add a knowledge base above so the agent can answer from your documents."
-                  : "No knowledge added yet. Create a knowledge base in Knowledge Base, then add it here."
+                ? availableRows.length > 0
+                  ? "This agent isn't using any documents yet. Pick one from the list below."
+                  : (
+                    <>
+                      No documents yet. <Link href="/knowledge-bases?add=1" style={{ color: "var(--cyan)" }}>Add one on the Knowledge page</Link>, then come back here.
+                    </>
+                  )
                 : "No knowledge bases yet."}
             </div>
           ) : (
-            rows.map((row) => {
-              const docs = docsByKb[row.id] || [];
-              const isExpanded = !!expanded[row.id];
-              return (
-                <div key={row.id}>
-                  <div className="kb-row">
-                    <button
-                      className="btn btn-ghost btn-sm btn-icon"
-                      aria-label={isExpanded ? "Collapse" : "Expand"}
-                      onClick={() => setExpanded({ ...expanded, [row.id]: !isExpanded })}
-                    >
-                      {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                    </button>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 500 }}>{row.name}</div>
-                      <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>
-                        {docs.length} document{docs.length === 1 ? "" : "s"}
-                      </div>
-                    </div>
-                    {agentId && (
-                      <label
-                        className="toggle-switch"
-                        title={row.enabled ? "On: used when it's relevant" : "Off: not used"}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={!!row.enabled}
-                          onChange={(e) => handleToggleEnabled(row.id, e.target.checked)}
-                        />
-                        <span className="toggle-slider" />
-                      </label>
-                    )}
-                    {!agentId && (
-                      <button
-                        className="btn btn-ghost btn-sm"
-                        onClick={() => {
-                          setUploadKbId(row.id);
-                          setUploadTitle("");
-                          setUploadFile(null);
-                          setUploadError(null);
-                        }}
-                      >
-                        + Document
-                      </button>
-                    )}
-                    {agentId && (
-                      <button className="btn btn-danger btn-sm" onClick={() => handleDetach(row.id)}>
-                        Remove
-                      </button>
-                    )}
-                  </div>
-                  {isExpanded &&
-                    (docs.length === 0 ? (
-                      <div className="kb-doc-row" style={{ color: "var(--text-3)" }}>
-                        No documents yet.
-                      </div>
-                    ) : (
-                      docs.map((doc) => (
-                        <div key={doc.id} className="kb-doc-row">
-                          <div style={{ flex: 1 }}>
-                            <span className="mono">{doc.title}</span>
-                            {doc.error && <div style={{ color: "var(--red)", fontSize: ".68rem" }}>{doc.error}</div>}
-                          </div>
-                          {statusBadge(doc.status)}
-                          {agentId ? (
-                            doc.usage_mode === "prompt" && (
-                              <span className="badge gray" title="The agent reads this on every call">
-                                always used
-                              </span>
-                            )
-                          ) : (
-                            <label
-                              style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text-3)" }}
-                              title="Always inject this document's full content into the LLM prompt every turn, regardless of query relevance"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={doc.usage_mode === "prompt"}
-                                onChange={() => handleUsageModeToggle(doc)}
-                                disabled={doc.status !== "ready"}
-                              />
-                              Always include in prompt
-                            </label>
-                          )}
-                          {!agentId && (
-                            <button className="btn btn-danger btn-sm" onClick={() => handleDeleteDoc(doc)}>
-                              Delete
-                            </button>
-                          )}
-                        </div>
-                      ))
-                    ))}
-                </div>
-              );
-            })
+            rows.map(renderRow)
           )}
         </div>
+
+        {availableRows.length > 0 && (
+          <div className="card">
+            <div className="card-hdr">
+              <div className="card-title">Available to add</div>
+              <div className="card-sub">from your Knowledge library</div>
+            </div>
+            {availableRows.map(renderRow)}
+          </div>
+        )}
       </div>
 
       {agentId && (

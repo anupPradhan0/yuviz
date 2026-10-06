@@ -132,6 +132,11 @@ class PromptRevise(BaseModel):
     llm_config_id: str | None = None
 
 
+class PromptRewrite(BaseModel):
+    prompt:      str = Field(min_length=1, max_length=20_000)
+    instruction: str = Field(min_length=1, max_length=500)
+
+
 class PromptAccept(BaseModel):
     session_id:         str
     problem:            str = Field(min_length=1, max_length=1000)

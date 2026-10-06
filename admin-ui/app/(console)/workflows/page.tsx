@@ -1,6 +1,6 @@
 "use client";
 
-// IVR Flows (call_flows table), shareable by several agents via agents.call_flow_id.
+// Call Flows (call_flows table), shareable by several agents via agents.call_flow_id.
 // An agent's own conversation graph lives at /workflows/{tenant}/{agent} and isn't listed here.
 
 import { useEffect, useMemo, useState } from "react";
@@ -85,7 +85,7 @@ export default function CallFlowsPage() {
     <>
       <div className="card">
         <div className="card-hdr">
-          <span className="card-title">IVR Flows</span>
+          <span className="card-title">Call Flows</span>
           <input
             className="form-input"
             style={{ width: 200, marginLeft: "auto" }}

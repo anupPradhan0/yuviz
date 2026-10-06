@@ -408,7 +408,7 @@ export default function TelephonyPage() {
 
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
         <div>
-          <h1 style={{ fontSize: "1.5rem", fontWeight: 600, letterSpacing: "-.025em", margin: 0, color: "var(--text)" }}>Telephony</h1>
+          <h1 style={{ fontSize: "1.5rem", fontWeight: 600, letterSpacing: "-.025em", margin: 0, color: "var(--text)" }}>Phone Numbers</h1>
           <div className="form-hint" style={{ marginTop: 4 }}>{accountLine}</div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>

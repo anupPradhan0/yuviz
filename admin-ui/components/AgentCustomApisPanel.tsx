@@ -39,7 +39,7 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
 
   const [switchSaving, setSwitchSaving] = useState(false);
   const [switchError, setSwitchError] = useState<string | null>(null);
-  const [budgetDraft, setBudgetDraft] = useState(String(DEFAULT_CHAIN_BUDGET_MS));
+  const [budgetDraft, setBudgetDraft] = useState(String(DEFAULT_CHAIN_BUDGET_MS / 1000));
 
   // Each source is caught independently so one 403 doesn't blank the others.
   const refresh = async () => {
@@ -57,7 +57,7 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
         .then((policies) => {
           const policy = policies.find((p) => p.tool_name === EXECUTE_API_TOOL_NAME) ?? null;
           setExecuteApiPolicy(policy);
-          setBudgetDraft(String(policy?.timeout_ms ?? DEFAULT_CHAIN_BUDGET_MS));
+          setBudgetDraft(String((policy?.timeout_ms ?? DEFAULT_CHAIN_BUDGET_MS) / 1000));
         })
         .then(() => setExecuteApiPolicyError(null))
         .catch((e) => setExecuteApiPolicyError(e instanceof ApiError ? e.detail : String(e))),
@@ -116,7 +116,7 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
           tool_name: EXECUTE_API_TOOL_NAME,
           tool_provider_config_id: config.id,
           enabled,
-          timeout_ms: Number(budgetDraft) || DEFAULT_CHAIN_BUDGET_MS,
+          timeout_ms: Math.round(Number(budgetDraft) * 1000) || DEFAULT_CHAIN_BUDGET_MS,
         });
       }
       await refresh();
@@ -131,7 +131,7 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
     setSwitchSaving(true);
     setSwitchError(null);
     try {
-      const timeout_ms = Number(budgetDraft) || DEFAULT_CHAIN_BUDGET_MS;
+      const timeout_ms = Math.round(Number(budgetDraft) * 1000) || DEFAULT_CHAIN_BUDGET_MS;
       if (executeApiPolicy) {
         await updateAgentToolPolicy(agentId, EXECUTE_API_TOOL_NAME, { timeout_ms });
       } else {
@@ -167,16 +167,16 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
       <div className="col-main">
         <div className="card">
           <div className="card-hdr">
-            <div className="card-title">API access</div>
-            <div className="card-sub">let this agent use your APIs during calls</div>
+            <div className="card-title">Look things up during calls</div>
+            <div className="card-sub">like checking an order or a booking in your own systems</div>
           </div>
           {switchError && <div className="error-banner">{switchError}</div>}
           {executeApiPolicyError && <div className="error-banner">{executeApiPolicyError}</div>}
           <div className="kb-row">
             <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 500 }}>Allow this agent to use APIs</div>
+              <div style={{ fontWeight: 500 }}>Let this agent look things up</div>
               <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>
-                When off, the agent won&apos;t use any API below, even ones that are switched on.
+                When off, the agent won&apos;t use any of the connections below, even ones that are switched on.
               </div>
             </div>
             <label className="toggle-switch" title={executeApiPolicy?.enabled ? "On" : "Off"}>
@@ -191,13 +191,15 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
           </div>
           <div className="form-group">
             <label className="form-label">
-              Max wait per request (milliseconds)
-              <span className="hint"> how long the agent waits for an answer. 1000 = 1 second</span>
+              Longest wait for an answer
+              <span className="hint"> in seconds</span>
             </label>
             <div style={{ display: "flex", gap: 8 }}>
               <input
                 className="form-input"
                 type="number"
+                min={1}
+                step={0.5}
                 value={budgetDraft}
                 onChange={(e) => setBudgetDraft(e.target.value)}
                 style={{ maxWidth: 160 }}
@@ -211,7 +213,7 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
 
         <div className="card">
           <div className="card-hdr">
-            <div className="card-title">Your APIs</div>
+            <div className="card-title">Your connections</div>
             <div className="card-sub">choose which ones this agent can use</div>
           </div>
           {customApisError && <div className="error-banner">{customApisError}</div>}
@@ -227,8 +229,7 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
                 <div style={{ flex: 1 }}>
                   <div style={{ fontWeight: 500 }}>{api.name}</div>
                   <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>
-                    {api.method} {api.endpoint_url}
-                    {api.chain_levels > 1 ? ` · ${api.chain_levels} steps` : ""}
+                    {api.description}
                   </div>
                   {worstCaseExceedsBudget && (
                     <div style={{ fontSize: ".7rem", color: "var(--red)" }}>
@@ -257,7 +258,7 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
             );
           })}
 
-          {customApis.length === 0 && !customApisError && <div className="empty-state">No APIs set up yet. Add them in Knowledge Base, under APIs.</div>}
+          {customApis.length === 0 && !customApisError && <div className="empty-state">No connections set up yet. Add them in Knowledge Base, under APIs.</div>}
         </div>
       </div>
     </div>

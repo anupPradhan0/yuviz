@@ -265,7 +265,7 @@ export function ToolsPanel({ tenantId, agentId }: { tenantId: string; agentId: s
               <input className="form-input" value={configName} onChange={(e) => setConfigName(e.target.value)} />
             </div>
             <div className="form-group">
-              <label className="form-label">Provider</label>
+              <label className="form-label">Service</label>
               <input className="form-input" value={configuring.engine.display_name} disabled />
             </div>
             <div className="form-group">

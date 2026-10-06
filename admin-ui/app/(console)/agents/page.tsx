@@ -10,6 +10,7 @@ import { useActiveTenant } from "@/lib/useActiveTenant";
 import { listAgentKnowledgeBases } from "@/lib/knowledgeApi";
 import { listAgentCustomApis } from "@/lib/toolexecApi";
 import { AGENT_TEMPLATES } from "@/lib/agentTemplates";
+import { BUILTIN_TTS_ENGINE, LANGUAGES } from "@/lib/engineCatalog";
 import { AgentDraft, clearAgentDraft, draftSavedLabel, loadAgentDraft } from "@/lib/agentDraft";
 
 interface AgentRow extends Agent {
@@ -101,17 +102,17 @@ export default function AgentsPage() {
     if (!id) return "—";
     const p = providersById[id];
     if (!p) return "—";
-    return p.model || p.voice || p.engine;
+    return p.engine === BUILTIN_TTS_ENGINE ? "Built-in voice" : p.name;
   };
 
   const accountLine = isAllTenants
-    ? `${agents.length} agent${agents.length === 1 ? "" : "s"} across ${allTenants.length} tenant${allTenants.length === 1 ? "" : "s"}.` +
-      " Each carries its own voice stack, knowledge and guardrails."
+    ? `${agents.length} agent${agents.length === 1 ? "" : "s"} across ${allTenants.length} account${allTenants.length === 1 ? "" : "s"}.` +
+      " Each has its own voice, knowledge and rules."
     : tenant
       ? `${agents.length} agent${agents.length === 1 ? "" : "s"} in ${tenant.name}.` +
         (isPlatformScoped ? " Switch accounts from the header." : "") +
-        " Each carries its own voice stack, knowledge and guardrails."
-      : "Each agent carries its own voice stack, knowledge and guardrails.";
+        " Each has its own voice, knowledge and rules."
+      : "Each agent has its own voice, knowledge and rules.";
 
   return (
     <>
@@ -128,7 +129,7 @@ export default function AgentsPage() {
           onChange={(e) => setSearch(e.target.value)}
         />
         <button className="btn btn-primary btn-sm" onClick={() => router.push("/agents/new")}>
-          New agent
+          Create agent
         </button>
       </div>
 
@@ -138,7 +139,7 @@ export default function AgentsPage() {
             You have an unfinished agent{draft.name.trim() ? <> called <b>{draft.name.trim()}</b></> : ""}, saved{" "}
             {draftSavedLabel(draft.savedAt)}.
           </span>
-          <button className="btn btn-primary btn-sm" onClick={() => router.push("/agents/new")}>Continue</button>
+          <button className="btn btn-primary btn-sm" onClick={() => router.push("/agents/new?mode=advanced")}>Continue</button>
           <button
             className="btn btn-ghost btn-sm"
             onClick={() => {
@@ -186,20 +187,20 @@ export default function AgentsPage() {
                   <span className={`badge ${a.status === "active" ? "green" : "gray"}`}>
                     {a.status === "active" ? "Live" : "Paused"}
                   </span>
-                  <span className="mono agent-card-meta">
-                    v{a.config_version} {a.language || ""}
+                  <span className="agent-card-meta">
+                    {LANGUAGES.find((l) => l.value === a.language)?.label ?? a.language ?? ""}
                   </span>
                 </div>
 
                 <div className="agent-card-name">{a.name}</div>
                 <div className="agent-card-blurb">
-                  {a.system_prompt?.trim() || "No system prompt set yet."}
+                  {a.system_prompt?.trim() || "No instructions yet."}
                 </div>
 
                 <dl className="agent-card-stack">
-                  <div><dt>STT</dt><dd className="mono">{providerLabel(a.stt_config_id)}</dd></div>
-                  <div><dt>LLM</dt><dd className="mono">{providerLabel(a.llm_config_id)}</dd></div>
-                  <div><dt>TTS</dt><dd className="mono">{providerLabel(a.tts_config_id)}</dd></div>
+                  <div><dt>Hears with</dt><dd>{providerLabel(a.stt_config_id)}</dd></div>
+                  <div><dt>Thinks with</dt><dd>{providerLabel(a.llm_config_id)}</dd></div>
+                  <div><dt>Speaks with</dt><dd>{providerLabel(a.tts_config_id)}</dd></div>
                 </dl>
 
                 <div className="agent-card-counts">

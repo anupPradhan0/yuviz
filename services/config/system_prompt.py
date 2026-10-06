@@ -413,6 +413,29 @@ async def revise_system_prompt(
     return revised
 
 
+_REWRITE_SYSTEM = (
+    "You edit the instructions of a customer-facing AI phone agent. Apply the requested change "
+    "and return the full updated instructions. Keep everything the change does not touch, "
+    "including headings and layout. Do not use double curly brackets. "
+    "Return only the instructions text — no preamble, no quotes."
+)
+
+
+async def rewrite_system_prompt(
+    tenant_id: Any, llm_config_id: Any, *, base_prompt: str, instruction: str,
+    secret_resolver: SecretResolver,
+) -> str:
+    """Free-form edit of hand-written instructions; unlike revise, no structure is enforced."""
+    text = (await _complete(
+        tenant_id, llm_config_id,
+        [{"role": "user", "content": f"Current instructions:\n{base_prompt}\n\nChange requested:\n{instruction}"}],
+        system=_REWRITE_SYSTEM, max_tokens=_PROMPT_MAX_TOKENS, secret_resolver=secret_resolver,
+    )).strip()
+    if not text or adds_template_braces(text, base_prompt):
+        raise PromptStructureError("unusable rewrite")
+    return text
+
+
 async def chat_test_reply(
     tenant_id: Any, llm_config_id: Any, *, system_prompt: str,
     history: list[tuple[str | None, str | None]], message: str, secret_resolver: SecretResolver,

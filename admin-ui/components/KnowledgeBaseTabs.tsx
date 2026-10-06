@@ -17,7 +17,7 @@ export function KnowledgeBaseTabs({ tenantId, agentId }: { tenantId: string; age
           Documents
         </button>
         <button className={`tab${subTab === "apis" ? " active" : ""}`} onClick={() => setSubTab("apis")}>
-          APIs
+          {agentId ? "Connections" : "APIs"}
         </button>
       </div>
 
