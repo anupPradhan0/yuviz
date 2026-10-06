@@ -176,6 +176,8 @@ const PAGE_CTA: Record<string, { label: string; href: string }> = {
   "/agents": { label: "+ Create Agent", href: "/agents/new" },
   "/workflows": { label: "+ New Flow", href: "/workflows/new" },
   "/knowledge-bases": { label: "+ Add Document", href: "/knowledge-bases?add=1" },
+  "/telephony": { label: "+ Add Number", href: "/telephony?add=1" },
+  "/integrations": { label: "+ Connect App", href: "/integrations#connect" },
   "/campaigns": { label: "+ New Campaign", href: "/campaigns/new" },
 };
 

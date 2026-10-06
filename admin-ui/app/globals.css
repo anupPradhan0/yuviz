@@ -1645,7 +1645,7 @@ body {
 .ed2-menu-pop button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: 0; border-radius: 6px; background: none; color: var(--text); font-size: .78rem; text-align: left; cursor: pointer; }
 .ed2-menu-pop button:hover { background: var(--surf-2); }
 .ed2-menu-pop button.danger { color: var(--red); }
-.ed2-body { display: grid; grid-template-columns: 190px minmax(0, 1fr) 320px; gap: 16px; align-items: start; }
+.ed2-body { display: grid; grid-template-columns: 190px minmax(0, 1fr) 360px; gap: 16px; align-items: start; }
 .ed2-nav { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 2px; }
 .ed2-nav button { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border: 0; border-radius: var(--rs); background: none; color: var(--text-2); font-size: .8rem; text-align: left; cursor: pointer; }
 .ed2-nav button:hover { background: var(--surf-2); }
@@ -1661,17 +1661,23 @@ body {
 .ed2-lbl-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .ed2-undo { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none; color: var(--cyan); font-size: .72rem; cursor: pointer; }
 .ed2-side { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 12px; }
-.ed-test { display: flex; flex-direction: column; gap: 10px; padding: 14px; }
-.ed-test-hdr { display: flex; align-items: center; justify-content: space-between; font-size: .85rem; color: var(--text); }
-.ed-test-log { display: flex; flex-direction: column; gap: 6px; min-height: 140px; max-height: 320px; overflow-y: auto; }
-.ed-test-empty { font-size: .76rem; color: var(--text-3); line-height: 1.5; }
+.ed-test { display: flex; flex-direction: column; gap: 14px; padding: 18px; }
+.ed-test-hdr { display: flex; align-items: center; justify-content: space-between; font-size: .95rem; color: var(--text); }
+.ed-test-log { display: flex; flex-direction: column; gap: 6px; min-height: 260px; max-height: 440px; overflow-y: auto; }
+.ed-test-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 0 12px; text-align: center; font-size: .8rem; color: var(--text-3); line-height: 1.5; }
 .ed-bubble { align-self: flex-start; max-width: 88%; padding: 7px 10px; border-radius: 10px 10px 10px 3px; background: var(--surf-2); color: var(--text); font-size: .78rem; line-height: 1.4; }
 .ed-bubble.me { align-self: flex-end; border-radius: 10px 10px 3px 10px; background: var(--cyan-dim); color: var(--text); }
 .ed-test-status { font-size: .72rem; color: var(--text-3); }
-.ed-test-btn { width: 100%; justify-content: center; }
+.ed-test-btn { width: 100%; justify-content: center; padding: 10px 14px; font-size: .82rem; }
 .ed-test-actions { display: flex; gap: 6px; }
 .ed-test-actions .btn { flex: 1; justify-content: center; }
-.ed-test-hint { font-size: .68rem; color: var(--text-3); }
+.ed-test-hint { font-size: .68rem; color: var(--text-3); text-align: center; }
+.ed-test-modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; padding: 2px; border-radius: 8px; background: var(--surf-2); }
+.ed-test-mode { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 9px 4px; border: 0; border-radius: 6px; background: transparent; color: var(--text-3); cursor: pointer; white-space: nowrap; }
+.ed-test-mode.active { background: var(--surf); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
+.ed-test-mode:disabled { opacity: .5; cursor: not-allowed; }
+.ed-test-mode-name { display: flex; align-items: center; gap: 5px; font-size: .8rem; font-weight: 500; }
+.ed-test-coming { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 260px; text-align: center; font-size: .82rem; color: var(--text-2); line-height: 1.5; }
 .ed2-calls { padding: 12px 14px; }
 .ed2-calls-hdr { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; font-size: .8rem; color: var(--text); }
 .ed2-calls-hdr a { font-size: .72rem; color: var(--cyan); text-decoration: none; }

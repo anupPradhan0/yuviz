@@ -14,8 +14,8 @@ import {
   getCurrentUser, getLiveCalls, listCalls, listCampaigns, listPhoneNumbers, listProviders, rewritePrompt,
   undoPrompt, updateAgent,
 } from "@/lib/api";
-import { KnowledgeBaseTabs } from "@/components/KnowledgeBaseTabs";
-import { ToolsPanel } from "@/components/ToolsPanel";
+import { KnowledgeBasePanel } from "@/components/KnowledgeBasePanel";
+import { AgentCustomApisPanel } from "@/components/AgentCustomApisPanel";
 import { Modal } from "@/components/Modal";
 import { SipPanel } from "@/components/SipPanel";
 import { AgentVoiceSettings } from "@/components/AgentVoiceSettings";
@@ -488,9 +488,9 @@ export default function AgentDetailPage() {
 
           {section === "knowledge" && (
             <>
-              <KnowledgeBaseTabs tenantId={agent.tenant_id} agentId={agent.id} />
+              <KnowledgeBasePanel tenantId={agent.tenant_id} agentId={agent.id} />
               <div style={{ marginTop: 16 }}>
-                <ToolsPanel tenantId={agent.tenant_id} agentId={agent.id} />
+                <AgentCustomApisPanel tenantId={agent.tenant_id} agentId={agent.id} />
               </div>
             </>
           )}
