@@ -177,6 +177,50 @@ async def test_an_admin_of_another_tenant_is_refused_on_every_route(world):
     assert [r.status_code for r in responses] == [403, 403, 403, 403, 403]
 
 
+@pytest.mark.asyncio
+async def test_an_admin_demoted_after_authorize_cannot_redeem_the_state(pool, world, monkeypatch):
+    """Criterion 4. The state was legitimately issued and is still unexpired, and the JWT still says
+    `admin`; only the re-read of the users row can refuse it. Without that, the callback exchanges the
+    code and stores a connection on behalf of someone who no longer holds the role."""
+    from services.config.deps import forget_user
+
+    tenants, users = world
+    headers, user_id = users["admin_a"]["headers"], users["admin_a"]["id"]
+    async with _client() as c:
+        state = await _authorize(c, tenants["a"], headers)
+        await pool.execute("UPDATE users SET role = 'viewer' WHERE id = $1", uuid.UUID(user_id))
+        forget_user(app.state, user_id)  # the ~60s memo has lapsed (lesson 27)
+        seen = []
+        monkeypatch.setattr(oauth, "_provider_transport", lambda ips: httpx.MockTransport(
+            lambda request: seen.append(request) or httpx.Response(500)))
+        r = await c.post(
+            f"/tenants/{tenants['a']}/oauth-connections/callback", headers=headers, json={"state": state, "code": "c"},
+        )
+    assert r.status_code == 403
+    assert seen == []
+    assert await pool.fetchval("SELECT count(*) FROM oauth_connections WHERE tenant_id = $1", uuid.UUID(tenants["a"])) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_user_with_a_live_token_is_refused_on_every_write_route(pool, world):
+    """Criterion 10. The token is unexpired and signed; the account is gone."""
+    from services.config.deps import forget_user
+
+    tenants, users = world
+    headers, user_id = users["admin_a2"]["headers"], users["admin_a2"]["id"]
+    await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", uuid.UUID(user_id))
+    forget_user(app.state, user_id)
+    base = f"/tenants/{tenants['a']}/oauth-connections"
+    async with _client() as c:
+        statuses = [
+            (await c.post(f"{base}/google/authorize", headers=headers, json={})).status_code,
+            (await c.post(f"{base}/callback", headers=headers, json={"state": "s", "code": "c"})).status_code,
+            (await c.delete(f"{base}/{uuid.uuid4()}", headers=headers)).status_code,
+            (await c.post(f"{base}/calcom/api-key", headers=headers, json={"api_key": "k"})).status_code,
+        ]
+    assert statuses == [401, 401, 401, 401]
+
+
 # ── request models ────────────────────────────────────────────────────────
 
 def test_request_models_carry_no_tenant_or_redirect_field():

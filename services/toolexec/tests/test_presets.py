@@ -6,6 +6,7 @@ rule, the response transforms and the confirmation read-back. No database.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -532,3 +533,14 @@ def test_crm_scopes_live_only_in_presets_py():
 
 def test_gated_providers_have_no_preset_rows():
     assert not {"dynamics_crm", "calcom_scheduling"} & set(presets.PRESETS)
+
+
+def test_the_crm_presets_request_no_write_capable_scope():
+    """Criterion 31 (v1 is read-only). Salesforce's `api` cannot be narrowed in the grant (the runbook has the
+    operator bind a read-only profile instead), so it is pinned by name; HubSpot and Zoho can and must be read-only."""
+    assert presets.PRESETS["salesforce_crm"].scopes == {"api", "refresh_token"}
+    for key in ("hubspot_crm", "zoho_crm"):
+        for scope in presets.PRESETS[key].scopes:
+            assert not re.search(r"write|\.all$|\.ALL$|modify|create|update|delete", scope, re.I), (key, scope)
+    assert presets.PRESETS["hubspot_crm"].scopes == {"oauth", "crm.objects.contacts.read"}
+    assert presets.PRESETS["zoho_crm"].scopes == {"ZohoCRM.modules.contacts.READ"}
