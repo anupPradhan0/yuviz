@@ -1569,6 +1569,10 @@ body {
 .dash .d-head b { display: block; font-size: 1.25rem; font-weight: 700; letter-spacing: -.015em; color: var(--text); }
 .dash .d-head small { display: block; margin-top: 2px; font-size: .8rem; color: var(--text-2); }
 .dash .live-dot { display: inline-block; width: 7px; height: 7px; margin-right: 4px; border-radius: 50%; background: var(--green); }
+.dash .d-head-right { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.dash .d-live { display: inline-flex; align-items: center; gap: 6px; font-size: .74rem; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.dash .d-live i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: d-pulse 2s ease-in-out infinite; }
+@keyframes d-pulse { 50% { opacity: .35; } }
 .dash .d-seg { display: flex; border: 1px solid var(--border); border-radius: var(--rs); overflow: hidden; background: var(--surf); }
 .dash .d-seg button {
   padding: 5px 12px; border: none; background: none; font-family: var(--font); font-size: .76rem;

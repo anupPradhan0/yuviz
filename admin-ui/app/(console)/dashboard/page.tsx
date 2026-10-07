@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   AgentWithTenant,
@@ -140,6 +140,23 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
   );
 }
 
+const REFRESH_MS = 30_000;
+
+function LiveStatus({ updatedAt }: { updatedAt: number | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  if (updatedAt === null) return null;
+  const ago = Math.max(0, Math.floor((now - updatedAt) / 1000));
+  return (
+    <span className="d-live" title="This page updates itself every 30 seconds">
+      <i />Live updates on · Updated {ago < 60 ? `${ago}s` : `${Math.floor(ago / 60)}m`} ago
+    </span>
+  );
+}
+
 export default function DashboardPage() {
   const { tenant, allTenants, isAllTenants, loading: tenantLoading } = useActiveTenant();
   const targetTenants = useMemo(
@@ -161,12 +178,37 @@ export default function DashboardPage() {
   const [campaigns, setCampaigns] = useState<CampaignWithTenant[]>([]);
   const [progress, setProgress] = useState<Record<string, CampaignProgress>>({});
 
+  // Bumping `tick` reloads everything in the background, without the "Loading…" placeholders.
+  const [tick, setTick] = useState(0);
+  const lastTick = useRef(0);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+
+  // A hidden tab waits and refreshes as soon as it is shown again.
+  useEffect(() => {
+    if (updatedAt === null) return;
+    let onVisible: (() => void) | null = null;
+    const timer = setTimeout(() => {
+      if (!document.hidden) return setTick((t) => t + 1);
+      onVisible = () => {
+        if (document.hidden) return;
+        document.removeEventListener("visibilitychange", onVisible!);
+        setTick((t) => t + 1);
+      };
+      document.addEventListener("visibilitychange", onVisible);
+    }, REFRESH_MS);
+    return () => {
+      clearTimeout(timer);
+      if (onVisible) document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [updatedAt]);
+
   useEffect(() => {
     if (tenantLoading || targetTenants.length === 0) return;
     let cancelled = false;
     const since = new Date(Date.now() - range.hours * 3_600_000).toISOString();
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setLoading(true);
+    const background = tick !== lastTick.current;
+    lastTick.current = tick;
+    if (!background) setLoading(true);
     Promise.allSettled([
       listAllDashboardStats(targetTenants, range.hours),
       range.days
@@ -205,9 +247,10 @@ export default function DashboardPage() {
       const failed = [s, t, d, c].find((r): r is PromiseRejectedResult => r.status === "rejected");
       setError(failed ? (failed.reason instanceof ApiError ? failed.reason.detail : String(failed.reason)) : null);
       setLoading(false);
+      setUpdatedAt(Date.now());
     });
     return () => { cancelled = true; };
-  }, [targetTenants, tenantLoading, range]);
+  }, [targetTenants, tenantLoading, range, tick]);
 
   useEffect(() => {
     if (tenantLoading || targetTenants.length === 0) return;
@@ -228,7 +271,7 @@ export default function DashboardPage() {
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [targetTenants, tenantLoading]);
+  }, [targetTenants, tenantLoading, tick]);
 
   const kpi = useMemo(() => {
     if (!stats) return null;
@@ -369,18 +412,21 @@ export default function DashboardPage() {
             )}
           </small>
         </div>
-        <div className="d-seg" role="group" aria-label="Time range">
-          {RANGE_OPTIONS.map((o) => (
-            <button
-              key={o.label}
-              type="button"
-              className={range.label === o.label ? "on" : ""}
-              aria-pressed={range.label === o.label}
-              onClick={() => setRange(o)}
-            >
-              {o.label}
-            </button>
-          ))}
+        <div className="d-head-right">
+          <LiveStatus updatedAt={updatedAt} />
+          <div className="d-seg" role="group" aria-label="Time range">
+            {RANGE_OPTIONS.map((o) => (
+              <button
+                key={o.label}
+                type="button"
+                className={range.label === o.label ? "on" : ""}
+                aria-pressed={range.label === o.label}
+                onClick={() => setRange(o)}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
