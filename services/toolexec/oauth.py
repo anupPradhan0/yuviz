@@ -407,7 +407,7 @@ async def list_connections(tenant_id: str) -> list[dict[str, Any]]:
 
 async def get_connected(conn, tenant_id: str, provider: str) -> dict[str, Any] | None:
     row = await conn.fetchrow(
-        "SELECT id, scopes FROM oauth_connections "
+        "SELECT id, scopes, api_base_url FROM oauth_connections "
         "WHERE tenant_id = $1 AND provider = $2 AND deleted_at IS NULL AND status = 'connected'",
         tenant_id, provider,
     )
