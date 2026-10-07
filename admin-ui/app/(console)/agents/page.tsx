@@ -5,6 +5,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { BookOpen, Bot, Globe, Mic, Pencil, PhoneForwarded, Plug, Plus, Volume2 } from "lucide-react";
 import { Agent, ApiError, ProviderConfig, listAgents, listProviders } from "@/lib/api";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 import { listAgentKnowledgeBases } from "@/lib/knowledgeApi";
@@ -98,10 +99,10 @@ export default function AgentsPage() {
     );
   }, [agents, search]);
 
-  const providerLabel = (id: string | null) => {
-    if (!id) return "—";
-    const p = providersById[id];
-    if (!p) return "—";
+  // No voice on the agent means the account's default voice is used.
+  const voiceLabel = (id: string | null) => {
+    const p = id ? providersById[id] : undefined;
+    if (!p) return "Default voice";
     return p.engine === BUILTIN_TTS_ENGINE ? "Built-in voice" : p.name;
   };
 
@@ -149,60 +150,56 @@ export default function AgentsPage() {
         </div>
       )}
 
-      <div className="form-label" style={{ letterSpacing: ".06em", textTransform: "uppercase", fontSize: ".68rem" }}>
-        Start from a template
-      </div>
-      <div className="agent-template-row">
-        {AGENT_TEMPLATES.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            className="agent-template-card"
-            onClick={() => router.push(`/agents/new?template=${t.key}`)}
-          >
-            <div className="agent-template-title">{t.label}</div>
-            <div className="agent-template-blurb">{t.blurb}</div>
-          </button>
-        ))}
-      </div>
-
       {error && <div className="error-banner">{error}</div>}
 
       {loading ? (
         <div className="empty-state">Loading…</div>
       ) : rows.length === 0 ? (
-        <div className="empty-state">
-          No agents yet. Start from a template above, or create one from scratch.
+        <div className="agent-empty">
+          <div className="agent-empty-ico"><Bot size={22} /></div>
+          <h2>{search.trim() ? "No agents match your search" : "Create your first agent"}</h2>
+          <p>
+            {search.trim()
+              ? "Try a different name, or clear the search."
+              : "An agent answers or places phone calls for you. Pick a template below to get going in a minute."}
+          </p>
         </div>
       ) : (
         <div className="agent-card-grid">
           {rows.map((a) => {
             const att = attachments[a.id];
+            const language = LANGUAGES.find((l) => l.value === a.language)?.label ?? a.language;
             return (
-              <div key={a.id} className="agent-card">
+              <div key={a.id} className={`agent-card${a.status === "active" ? "" : " paused"}`}>
                 <div className="agent-card-top">
-                  <span className={`badge ${a.status === "active" ? "green" : "gray"}`}>
-                    {a.status === "active" ? "Live" : "Paused"}
-                  </span>
-                  <span className="agent-card-meta">
-                    {LANGUAGES.find((l) => l.value === a.language)?.label ?? a.language ?? ""}
+                  <div className="agent-card-avatar">{a.name.trim()[0]?.toUpperCase() ?? "A"}</div>
+                  <div className="agent-card-id">
+                    <div className="agent-card-name">{a.name}</div>
+                    {isAllTenants && <div className="agent-card-acct">{a.tenantName}</div>}
+                  </div>
+                  <span className={`agent-card-status${a.status === "active" ? " on" : ""}`}>
+                    <i />{a.status === "active" ? "Live" : "Paused"}
                   </span>
                 </div>
 
-                <div className="agent-card-name">{a.name}</div>
-                <div className="agent-card-blurb">
-                  {a.system_prompt?.trim() || "No instructions yet."}
+                <div className="agent-card-lbl">Opens with</div>
+                <div className="agent-card-quote">
+                  {a.greeting?.trim() ? `“${a.greeting.trim()}”` : "No opening line yet."}
                 </div>
 
-                <dl className="agent-card-stack">
-                  <div><dt>Hears with</dt><dd>{providerLabel(a.stt_config_id)}</dd></div>
-                  <div><dt>Thinks with</dt><dd>{providerLabel(a.llm_config_id)}</dd></div>
-                  <div><dt>Speaks with</dt><dd>{providerLabel(a.tts_config_id)}</dd></div>
-                </dl>
-
-                <div className="agent-card-counts">
-                  {att?.sources ?? "—"} source{att?.sources === 1 ? "" : "s"} ·{" "}
-                  {att?.tools ?? "—"} tool{att?.tools === 1 ? "" : "s"} · {a.tenantName}
+                <div className="agent-card-facts">
+                  <span><Volume2 size={13} />{voiceLabel(a.tts_config_id)}</span>
+                  {language && <span><Globe size={13} />{language}</span>}
+                  {att?.sources != null && (
+                    <span className={att.sources === 0 ? "muted" : ""}>
+                      <BookOpen size={13} />
+                      {att.sources === 0 ? "No knowledge yet" : `${att.sources} knowledge source${att.sources === 1 ? "" : "s"}`}
+                    </span>
+                  )}
+                  {!!att?.tools && (
+                    <span><Plug size={13} />{att.tools} connection{att.tools === 1 ? "" : "s"}</span>
+                  )}
+                  {a.transfer_type !== "none" && <span><PhoneForwarded size={13} />Can transfer to a person</span>}
                 </div>
 
                 <div className="agent-card-actions">
@@ -210,13 +207,13 @@ export default function AgentsPage() {
                     className="btn btn-ghost btn-sm"
                     onClick={() => router.push(`/agents/${a.tenantSlug}/${a.slug}`)}
                   >
-                    View &amp; edit
+                    <Pencil size={13} /> Edit
                   </button>
                   <button
                     className="btn btn-primary btn-sm"
                     onClick={() => router.push(`/agents/${a.tenantSlug}/${a.slug}/test`)}
                   >
-                    Test
+                    <Mic size={13} /> Test it
                   </button>
                 </div>
               </div>
@@ -225,6 +222,33 @@ export default function AgentsPage() {
         </div>
       )}
 
+      {!loading && (
+        <section className="agent-templates">
+          <div className="agent-templates-hdr">
+            <h2>{rows.length === 0 && !search.trim() ? "Start from a template" : "Create another agent"}</h2>
+            <span>Pre-filled for you. Change anything later.</span>
+          </div>
+          <div className="agent-template-row">
+            {AGENT_TEMPLATES.map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                className="agent-template-card"
+                onClick={() => router.push(`/agents/new?template=${t.key}`)}
+              >
+                <i className="tpl-ico"><t.icon size={15} /></i>
+                <div className="agent-template-title">{t.label}</div>
+                <div className="agent-template-blurb">{t.blurb}</div>
+              </button>
+            ))}
+            <button type="button" className="agent-template-card blank" onClick={() => router.push("/agents/new")}>
+              <i className="tpl-ico"><Plus size={15} /></i>
+              <div className="agent-template-title">Start blank</div>
+              <div className="agent-template-blurb">Describe the job in your own words.</div>
+            </button>
+          </div>
+        </section>
+      )}
     </>
   );
 }

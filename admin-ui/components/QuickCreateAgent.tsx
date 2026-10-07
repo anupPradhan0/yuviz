@@ -4,7 +4,9 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, ArrowRight } from "lucide-react";
+import {
+  ArrowLeft, ArrowRight, Mic, PenLine, Phone, PhoneIncoming, PhoneOutgoing, Sparkles,
+} from "lucide-react";
 import { ApiError, ProviderConfig, createAgent, createProvider, generateSystemPrompt, listProviders } from "@/lib/api";
 import { BUILTIN_TTS_ENGINE, BUILTIN_TTS_VOICE } from "@/lib/engineCatalog";
 import { useActiveTenant } from "@/lib/useActiveTenant";
@@ -174,34 +176,43 @@ export function QuickCreateAgent({ initialTemplate, onStepByStep }: {
         </div>
 
         <div className="qc-lbl">
-          <span className="qc-num">2</span>Start from a template <span className="qc-opt">(optional)</span>
+          <span className="qc-num">2</span>
+          {preset ? (
+            <>Your starting template <span className="qc-opt">— pre-filled for you, switch anytime</span></>
+          ) : (
+            <>Start from a template <span className="qc-opt">(optional)</span></>
+          )}
         </div>
-        <div className="qc-chips">
+        <div className="qc-tpls">
           {AGENT_TEMPLATES.map((t) => (
             <button
               key={t.key}
               type="button"
-              className={`qc-chip${template?.key === t.key ? " on" : ""}`}
+              className={`qc-tpl${template?.key === t.key ? " on" : ""}`}
               aria-pressed={template?.key === t.key}
               onClick={() => chooseTemplate(t)}
             >
-              {t.label}
+              <i className="tpl-ico"><t.icon size={15} /></i>
+              <b>{t.label}</b>
+              <span>{t.blurb}</span>
             </button>
           ))}
           <button
             type="button"
-            className={`qc-chip blank${template === null ? " on" : ""}`}
+            className={`qc-tpl blank${template === null ? " on" : ""}`}
             aria-pressed={template === null}
             onClick={() => chooseTemplate(null)}
           >
-            Blank
+            <i className="tpl-ico"><PenLine size={15} /></i>
+            <b>Blank</b>
+            <span>Start from scratch and describe the job yourself.</span>
           </button>
         </div>
 
         <div className="qc-lbl"><span className="qc-num">3</span>What should it do?</div>
         <textarea
           className="form-textarea"
-          style={{ minHeight: 84 }}
+          style={{ minHeight: 110 }}
           value={task}
           maxLength={600}
           placeholder={TASK_PLACEHOLDER[direction]}
@@ -229,6 +240,38 @@ export function QuickCreateAgent({ initialTemplate, onStepByStep }: {
           </button>
         </div>
       </div>
+
+      <aside className="qc-side">
+        <div className="card qc-preview">
+          <div className="qc-side-title">Preview</div>
+          <div className="qc-agent">
+            <div className="qc-avatar">{(name.trim()[0] ?? "A").toUpperCase()}</div>
+            <div className="qc-agent-text">
+              <b>{name.trim() || "Your agent"}</b>
+              <span>
+                {direction === "inbound" ? <PhoneIncoming size={12} /> : <PhoneOutgoing size={12} />}
+                {direction === "inbound" ? "Answers calls" : "Places calls"}
+                {template && <> · {template.label}</>}
+              </span>
+            </div>
+          </div>
+          <div className="qc-side-lbl">First thing it says</div>
+          <div className="qc-bubble">{template?.greeting ?? DEFAULT_GREETING[direction]}</div>
+          <div className="qc-side-lbl">Its job</div>
+          <p className={`qc-job${task.trim() ? "" : " empty"}`}>
+            {task.trim() || "Describe what it should do and it shows up here."}
+          </p>
+        </div>
+
+        <div className="card qc-next">
+          <div className="qc-side-title">What happens next</div>
+          <ol>
+            <li><Sparkles size={14} /><span><b>We write the instructions</b> from your description.</span></li>
+            <li><Mic size={14} /><span><b>Test it in your browser</b> by talking to it right away.</span></li>
+            <li><Phone size={14} /><span><b>Connect a phone number</b> when you&apos;re happy with it.</span></li>
+          </ol>
+        </div>
+      </aside>
     </div>
   );
 }

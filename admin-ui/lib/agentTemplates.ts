@@ -1,11 +1,14 @@
 // Creation templates: client-side prefill only, no backend entity.
 
+import { CalendarCheck, Headphones, LucideIcon, Target, Wallet } from "lucide-react";
+
 export type CallDirection = "inbound" | "outbound";
 
 export interface AgentTemplate {
   key: string;
   label: string;
   blurb: string;
+  icon: LucideIcon;
   direction: CallDirection;
   // One sentence for the quick create screen; purpose/persona/tone feed the step-by-step wizard.
   task: string;
@@ -21,6 +24,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     key: "book-appointments",
     label: "Book appointments",
     blurb: "Books, moves and cancels appointments, and answers opening-hours questions.",
+    icon: CalendarCheck,
     direction: "inbound",
     task: "Answer calls, book and reschedule appointments, and pass upset callers to the front desk.",
     purpose: "Book, reschedule and cancel appointments",
@@ -33,6 +37,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     key: "customer-support",
     label: "Customer support",
     blurb: "Answers common questions from your documents and hands off what it can't solve.",
+    icon: Headphones,
     direction: "inbound",
     task: "Answer customer questions using our documents, and transfer to a person when you can't help.",
     purpose: "Answer customer questions and solve common problems",
@@ -45,6 +50,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     key: "qualify-leads",
     label: "Qualify leads",
     blurb: "Calls new leads, asks a few questions and books a follow-up with sales.",
+    icon: Target,
     direction: "outbound",
     task: "Call new leads, ask about their needs and budget, and book a call with our sales team.",
     purpose: "Qualify new leads and book a follow-up with sales",
@@ -57,6 +63,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     key: "payment-reminder",
     label: "Payment reminders",
     blurb: "Confirms identity, states the amount due and captures a promise-to-pay date.",
+    icon: Wallet,
     direction: "outbound",
     task: "Remind customers about a due payment and note the date they promise to pay.",
     purpose: "Remind the customer of a due payment and capture a promise-to-pay date",
