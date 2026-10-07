@@ -128,9 +128,6 @@ export default function AgentsPage() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <button className="btn btn-primary btn-sm" onClick={() => router.push("/agents/new")}>
-          Create agent
-        </button>
       </div>
 
       {draft && (

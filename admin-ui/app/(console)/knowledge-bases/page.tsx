@@ -207,15 +207,6 @@ export default function KnowledgeBasesPage() {
             one index.
           </div>
         </div>
-        {canManage && tab === "sources" && (
-          <button
-            className="btn btn-primary btn-sm"
-            style={{ marginLeft: "auto" }}
-            onClick={() => setAddSourceOpen(true)}
-          >
-            Add source
-          </button>
-        )}
       </div>
 
       <div className="kb-stat-row">

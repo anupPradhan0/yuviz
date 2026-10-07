@@ -93,9 +93,6 @@ export default function CallFlowsPage() {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
-          <button className="btn btn-primary btn-sm" onClick={() => router.push("/workflows/new")}>
-            + New flow
-          </button>
         </div>
 
         {loading ? (
