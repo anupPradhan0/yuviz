@@ -116,7 +116,7 @@ export default function AgentsPage() {
 
   return (
     <>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 18 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: 12, marginBottom: 18 }}>
         <div>
           <h1 style={{ fontSize: "1.5rem", fontWeight: 600, margin: 0 }}>AI agents</h1>
           <div className="form-hint" style={{ marginTop: 4 }}>{accountLine}</div>

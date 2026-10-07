@@ -1230,7 +1230,7 @@ body {
   /* A search box with `width: 200px; margin-left: auto` set inline goes
      full-width here instead of shoving the action button off the row. */
   .card-hdr .form-input { width: 100% !important; margin-left: 0 !important; order: 3; }
-  .agent-card-actions { flex-direction: column; }
+  .agent-card-actions .btn { height: 36px; }
   .cf-header-actions { flex-wrap: wrap; }
   .wf-canvas { height: 54vh; min-height: 280px; }
 }
@@ -1698,8 +1698,35 @@ body {
   .ed2-side { grid-column: 1 / -1; position: static; }
 }
 @media (max-width: 760px) {
-  .ed2-body { grid-template-columns: 1fr; }
-  .ed2-nav { position: static; flex-direction: row; flex-wrap: wrap; }
+  .ed2-body { grid-template-columns: 1fr; gap: 12px; }
+  .ed2-nav { position: static; flex-direction: row; overflow-x: auto; scrollbar-width: none; }
+  .ed2-nav::-webkit-scrollbar { display: none; }
+  .ed2-nav button { flex-shrink: 0; white-space: nowrap; }
   .ed2-nav .ed2-nav-adv { margin-top: 0; }
+  .ed2-name { flex: 1 1 140px; min-width: 0; max-width: none; font-size: 1.05rem; }
+  .ed2-dir { display: none; }
+  .ed2-ready { flex-wrap: wrap; }
+  .ed2-ask .form-input { min-width: 0; }
+  .ed-test { padding: 14px; }
+  .ed-test-log { min-height: 180px; max-height: 50vh; }
+  .ed-test-coming { min-height: 180px; }
+  .qc-card { padding: 16px; }
   .qc-toggle { grid-template-columns: 1fr; }
+  .qc-foot { flex-direction: column; align-items: stretch; }
+  .qc-foot .btn { justify-content: center; height: 36px; }
+}
+
+@media (max-width: 860px) {
+  /* Below 16px, iOS Safari zooms the page when an input is focused. */
+  .form-input, .form-select, .form-textarea { font-size: 16px; }
+  .dash .d-tbl { display: block; overflow-x: auto; white-space: nowrap; }
+}
+
+@media (max-width: 560px) {
+  .tenant-switch-label, .topbar-divider { display: none; }
+  .topbar-page-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .topbar-cta { padding: 7px 10px; }
+  .dash .d-head b { font-size: 1.1rem; }
+  .dash .kpi-v { font-size: 1.3rem; }
+  .dash .d-card { padding: 12px; }
 }

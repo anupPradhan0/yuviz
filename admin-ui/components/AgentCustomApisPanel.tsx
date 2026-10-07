@@ -185,8 +185,8 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
             const worstCaseExceedsBudget = worstCaseMs > budgetMs;
             return (
               <div key={api.id} className="kb-row" style={{ flexWrap: "wrap" }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 500 }}>{api.name}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 500, overflowWrap: "anywhere" }}>{api.name}</div>
                   <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>
                     {api.description}
                   </div>

@@ -210,8 +210,8 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
             <div key={row.id} className="kb-row">
               <FileText size={16} style={{ color: "var(--text-3)", flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 500 }}>{single ? single.title : row.name}</div>
-                <div style={{ fontSize: ".7rem", color: "var(--text-3)", display: "flex", gap: 8, alignItems: "center" }}>
+                <div style={{ fontWeight: 500, overflowWrap: "anywhere" }}>{single ? single.title : row.name}</div>
+                <div style={{ fontSize: ".7rem", color: "var(--text-3)", display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
                   {status && <span className={`badge ${status.cls}`}>{status.text}</span>}
                   {single?.usage_mode === "prompt" && <span>Read on every call</span>}
                   {!single && `${row.docs.length} files: ${row.docs.map((d) => d.title).join(", ") || "none yet"}`}
