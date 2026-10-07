@@ -1046,6 +1046,47 @@ DO $$ BEGIN
     CHECK (session_send_cap IS NULL OR side_effecting)$sql$;
 END $$;
 
+-- ── CRM connectors: per-tenant API origin and a non-OAuth (API-key) connection ──
+-- Additive: every existing row is auth_kind='oauth2' / endpoint_base_source='literal'.
+-- auth_kind: a provider with no consent redirect (cal.com API key) stores a static key.
+ALTER TABLE oauth_connections ADD COLUMN IF NOT EXISTS auth_kind TEXT NOT NULL DEFAULT 'oauth2'
+    CHECK (auth_kind IN ('oauth2','api_key'));
+-- The per-tenant API origin discovered at connect time (Salesforce instance_url,
+-- Zoho api_domain). Origin only: https, no path, port or userinfo. The shape floor,
+-- not the authorization: connect-time suffix + SSRF checks and the per-row host
+-- binding at call time are the controls. NULL for fixed-origin providers.
+ALTER TABLE oauth_connections ADD COLUMN IF NOT EXISTS api_base_url TEXT
+    CHECK (api_base_url IS NULL OR api_base_url ~ '^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$');
+-- 'oauth_connection': endpoint_url holds a PATH and the origin comes from the row's
+-- connection at call time. Per row, so one shared connection serves both kinds.
+ALTER TABLE custom_apis ADD COLUMN IF NOT EXISTS endpoint_base_source TEXT NOT NULL DEFAULT 'literal'
+    CHECK (endpoint_base_source IN ('literal','oauth_connection'));
+
+-- DROP and re-ADD share one block (lessons 10, 13). Every live row satisfies both
+-- widened checks, so the re-ADD cannot fail against existing data.
+DO $$ BEGIN
+  EXECUTE 'ALTER TABLE oauth_connections DROP CONSTRAINT IF EXISTS oauth_connections_provider_check';
+  EXECUTE $sql$ALTER TABLE oauth_connections ADD CONSTRAINT oauth_connections_provider_check
+    CHECK (provider IN ('google','zoho','microsoft','salesforce','hubspot','calcom'))$sql$;
+  -- start_authorization writes the new provider keys into the state table too.
+  EXECUTE 'ALTER TABLE oauth_authorization_states DROP CONSTRAINT IF EXISTS oauth_authorization_states_provider_check';
+  EXECUTE $sql$ALTER TABLE oauth_authorization_states ADD CONSTRAINT oauth_authorization_states_provider_check
+    CHECK (provider IN ('google','zoho','microsoft','salesforce','hubspot','calcom'))$sql$;
+  EXECUTE 'ALTER TABLE oauth_connections DROP CONSTRAINT IF EXISTS oauth_connections_token_shape';
+  EXECUTE $sql$ALTER TABLE oauth_connections ADD CONSTRAINT oauth_connections_token_shape CHECK (
+       (auth_kind = 'oauth2'
+         AND (status = 'connected') = (access_token_ref IS NOT NULL
+                                       AND refresh_token_ref IS NOT NULL
+                                       AND access_expires_at IS NOT NULL))
+    OR (auth_kind = 'api_key'
+         AND (status = 'connected') = (access_token_ref IS NOT NULL)
+         AND refresh_token_ref IS NULL AND access_expires_at IS NULL))$sql$;
+  EXECUTE 'ALTER TABLE custom_apis DROP CONSTRAINT IF EXISTS custom_apis_endpoint_base_shape';
+  EXECUTE $sql$ALTER TABLE custom_apis ADD CONSTRAINT custom_apis_endpoint_base_shape CHECK (
+       endpoint_base_source = 'literal'
+    OR (oauth_connection_id IS NOT NULL AND endpoint_url ~ '^/'))$sql$;
+END $$;
+
 -- One DO block per table; each re-adds the existing values unchanged plus
 -- 'confirmation_required'. The implementer copies the current value lists
 -- verbatim from the api_chain_runs / api_chain_steps CREATE TABLEs

@@ -82,6 +82,12 @@ class OAuthCallbackRequest(BaseModel):
     accounts_server: str | None = None
 
 
+class ApiKeyConnectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: SecretStr = Field(min_length=1, max_length=2048)
+
+
 _CLOCK_PATTERN = r"^([01]\d|2[0-3]):[0-5]\d$"
 
 

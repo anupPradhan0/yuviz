@@ -26,8 +26,8 @@ import logging
 import os
 import secrets
 from dataclasses import dataclass
-from typing import Any
-from urllib.parse import urlsplit
+from typing import Any, Literal
+from urllib.parse import quote, urlsplit
 
 import httpx
 from starlette.background import BackgroundTasks
@@ -47,6 +47,7 @@ _platform_secret_resolver = CompositeSecretResolver()  # the PLATFORM resolver â
 _STATE_TTL_MINUTES = 10
 _EXPIRY_SKEW_SECONDS = 60
 _PROVIDER_TIMEOUT_S = 10.0
+_API_KEY_VERIFY_URLS = {"calcom": "https://api.cal.com/v2/me"}
 _REDIRECT_URI_ENV = "TOOLEXEC_OAUTH_REDIRECT_URI"
 
 # What a connection row may reveal: no *_ref, no provider_sub.
@@ -66,6 +67,12 @@ class OAuthProvider:
     userinfo_url: str | None = None   # set when identity is not in the id_token (Zoho)
     scope_separator: str = " "
     extra_authorize_params: tuple[tuple[str, str], ...] = ()
+    auth_kind: Literal["oauth2", "api_key"] = "oauth2"
+    supports_pkce: bool = True
+    api_host_suffixes: frozenset[str] = frozenset()   # consulted only at connect time, to decide whether an origin may be stored
+    api_base_claim: str | None = None                 # token-response field holding the per-tenant API origin
+    revoke_style: Literal["form", "path", "none"] = "form"
+    auth_header: tuple[str, str] = ("Authorization", "Bearer {token}")
 
 
 _ZOHO_TLDS = ("com", "eu", "in", "com.au", "jp", "ca", "sa", "uk")
@@ -92,6 +99,7 @@ PROVIDERS: dict[str, OAuthProvider] = {
         identity_scopes=frozenset({"openid", "email", "offline_access"}),
         api_hosts=frozenset({"graph.microsoft.com"}),
         extra_authorize_params=(("prompt", "consent"),),
+        api_host_suffixes=frozenset({".dynamics.com"}),
     ),
     "zoho": OAuthProvider(
         key="zoho",
@@ -105,6 +113,41 @@ PROVIDERS: dict[str, OAuthProvider] = {
         userinfo_url="{accounts_server}/oauth/user/info",
         scope_separator=",",
         extra_authorize_params=(("access_type", "offline"), ("prompt", "consent")),
+        api_host_suffixes=frozenset(f".zohoapis.{tld}" for tld in _ZOHO_TLDS),
+        api_base_claim="api_domain",
+    ),
+    "salesforce": OAuthProvider(
+        key="salesforce",
+        label="Salesforce",
+        authorize_url="https://login.salesforce.com/services/oauth2/authorize",
+        token_url="https://login.salesforce.com/services/oauth2/token",
+        revoke_url="https://login.salesforce.com/services/oauth2/revoke",
+        identity_scopes=frozenset({"openid"}),
+        api_hosts=frozenset(),
+        api_host_suffixes=frozenset({".my.salesforce.com", ".salesforce.com"}),
+        api_base_claim="instance_url",
+    ),
+    "calcom": OAuthProvider(
+        key="calcom",
+        label="Cal.com",
+        authorize_url="",         # no consent redirect: the admin pastes an API key
+        token_url="",
+        revoke_url=None,          # keys are revoked in cal.com
+        identity_scopes=frozenset(),
+        api_hosts=frozenset({"api.cal.com"}),
+        auth_kind="api_key",
+        revoke_style="none",
+    ),
+    "hubspot": OAuthProvider(
+        key="hubspot",
+        label="HubSpot",
+        authorize_url="https://app.hubspot.com/oauth/authorize",
+        token_url="https://api.hubapi.com/oauth/v1/token",
+        revoke_url="https://api.hubapi.com/oauth/v1/refresh-tokens/{token}",
+        identity_scopes=frozenset(),
+        api_hosts=frozenset({"api.hubapi.com"}),
+        supports_pkce=False,
+        revoke_style="path",
     ),
 }
 
@@ -146,6 +189,23 @@ async def _provider_call(
         return await client.request(method, url, data=data, json=json_body, headers=headers)
 
 
+def _validated_api_base(spec: OAuthProvider, claim: Any) -> str:
+    """The per-tenant API origin from a token response, or ValueError. Only an
+    exact `https://<host>` is accepted (no path, query, port or userinfo), the
+    host must sit under one of the provider's suffixes, and it must pass the
+    SSRF guard. This decides what may be stored; the per-row equality at call
+    time decides where a token may go."""
+    if not isinstance(claim, str):
+        raise ValueError
+    parts = urlsplit(claim)
+    host = parts.hostname
+    if host is None or claim != f"https://{host}" or parts.port is not None:
+        raise ValueError
+    if host not in spec.api_hosts and not host.endswith(tuple(spec.api_host_suffixes)):
+        raise ValueError
+    return claim
+
+
 def _expires_at(body: dict[str, Any]) -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=int(body.get("expires_in", 3600)))
 
@@ -158,7 +218,7 @@ def _id_token_claims(id_token: str) -> dict[str, Any]:
 
 
 async def start_authorization(*, tenant_id: str, user_id: str, provider: str, preset_key: str | None) -> str:
-    if provider not in configured_providers():
+    if provider not in configured_providers() or PROVIDERS[provider].auth_kind != "oauth2":
         raise ValueError("oauth_provider_unavailable")
     spec = PROVIDERS[provider]
     preset_scopes = frozenset()
@@ -172,8 +232,7 @@ async def start_authorization(*, tenant_id: str, user_id: str, provider: str, pr
         preset_scopes = preset.scopes
 
     state = secrets.token_urlsafe(32)
-    verifier = secrets.token_urlsafe(64)
-    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    verifier = secrets.token_urlsafe(64)  # sealed filler where the provider has no PKCE: the column is NOT NULL
 
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
@@ -193,14 +252,17 @@ async def start_authorization(*, tenant_id: str, user_id: str, provider: str, pr
             encrypt_tenant_secret(tenant_id, verifier), scopes, _STATE_TTL_MINUTES,
         )
 
+    pkce = {}
+    if spec.supports_pkce:
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+        pkce = {"code_challenge": challenge, "code_challenge_method": "S256"}
     query = httpx.QueryParams({
         "response_type": "code",
         "client_id": _client_id(spec),
         "redirect_uri": os.environ[_REDIRECT_URI_ENV],
         "scope": spec.scope_separator.join(scopes),
         "state": state,
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
+        **pkce,
         **dict(spec.extra_authorize_params),
     })
     return f"{spec.authorize_url}?{query}"
@@ -232,15 +294,21 @@ async def complete_authorization(
                 raise ValueError
         else:
             accounts_server = None
-        verifier = await auth_schemes.resolve_tenant_ref(tenant_id, redeemed["code_verifier_ref"])
         client_id, client_secret = await _client_credentials(spec)
-        resp = await _provider_call("POST", spec.token_url.format(accounts_server=accounts_server), data={
+        form = {
             "grant_type": "authorization_code", "client_id": client_id, "client_secret": client_secret,
-            "code": code, "code_verifier": verifier, "redirect_uri": os.environ[_REDIRECT_URI_ENV],
-        })
+            "code": code, "redirect_uri": os.environ[_REDIRECT_URI_ENV],
+        }
+        if spec.supports_pkce:
+            form["code_verifier"] = await auth_schemes.resolve_tenant_ref(tenant_id, redeemed["code_verifier_ref"])
+        resp = await _provider_call("POST", spec.token_url.format(accounts_server=accounts_server), data=form)
         resp.raise_for_status()
         body = resp.json()
         access_token, refresh_token = body["access_token"], body["refresh_token"]
+        api_base_url = None
+        if spec.api_base_claim is not None and body.get(spec.api_base_claim) is not None:
+            api_base_url = _validated_api_base(spec, body[spec.api_base_claim])
+            await resolve_and_validate_endpoint(api_base_url)
         if spec.userinfo_url is None:
             claims = _id_token_claims(body["id_token"]) if body.get("id_token") else {}
             account_label, provider_sub = claims.get("email"), claims.get("sub")
@@ -257,21 +325,36 @@ async def complete_authorization(
     except Exception:
         raise ValueError("oauth_connection_failed") from None
 
+    return await _upsert_connection(
+        tenant_id=tenant_id, provider=redeemed["provider"], user_id=user_id, user_email=user_email,
+        account_label=account_label, scopes=redeemed["scopes"], accounts_server=accounts_server,
+        access_ref=access_ref, access_expires_at=access_expires_at, refresh_ref=refresh_ref,
+        provider_sub=provider_sub, auth_kind=spec.auth_kind, api_base_url=api_base_url,
+    )
+
+
+async def _upsert_connection(
+    *, tenant_id: str, provider: str, user_id: str, user_email: str | None, account_label: str | None,
+    scopes: list[str], accounts_server: str | None, access_ref: str, access_expires_at: datetime.datetime | None,
+    refresh_ref: str | None, provider_sub: str | None, auth_kind: str, api_base_url: str | None,
+) -> dict[str, Any]:
+    pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         row = await conn.fetchrow(
             "INSERT INTO oauth_connections (tenant_id, provider, status, account_label, scopes, accounts_server, "
             "                               access_token_ref, access_expires_at, refresh_token_ref, connected_by, "
-            "                               provider_sub) "
-            "VALUES ($1, $2, 'connected', $3, $4, $5, $6, $7, $8, $9, $10) "
+            "                               provider_sub, auth_kind, api_base_url) "
+            "VALUES ($1, $2, 'connected', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) "
             "ON CONFLICT (tenant_id, provider) WHERE deleted_at IS NULL DO UPDATE SET "
             "  status = 'connected', account_label = EXCLUDED.account_label, scopes = EXCLUDED.scopes, "
             "  provider_sub = EXCLUDED.provider_sub, accounts_server = EXCLUDED.accounts_server, "
             "  access_token_ref = EXCLUDED.access_token_ref, access_expires_at = EXCLUDED.access_expires_at, "
             "  refresh_token_ref = EXCLUDED.refresh_token_ref, connected_by = EXCLUDED.connected_by, "
+            "  auth_kind = EXCLUDED.auth_kind, api_base_url = EXCLUDED.api_base_url, "
             "  updated_at = now() "
             f"RETURNING {_PUBLIC_COLUMNS}, (xmax = 0) AS inserted",  # xmax = 0 only on a fresh insert
-            tenant_id, redeemed["provider"], account_label, redeemed["scopes"], accounts_server,
-            access_ref, access_expires_at, refresh_ref, user_id, provider_sub,
+            tenant_id, provider, account_label, scopes, accounts_server,
+            access_ref, access_expires_at, refresh_ref, user_id, provider_sub, auth_kind, api_base_url,
         )
         connection = dict(row)
         inserted = connection.pop("inserted")
@@ -282,6 +365,33 @@ async def complete_authorization(
                        "scopes": connection["scopes"]},
         )
     return connection
+
+
+async def connect_api_key(
+    *, tenant_id: str, provider: str, api_key: str, user_id: str, user_email: str | None,
+) -> dict[str, Any]:
+    """Connect a provider that has no consent redirect. The pasted key is sealed
+    with encrypt_tenant_secret and nothing else: never a resolver that accepts
+    `env:`/`k8s:` pointers, because the value is tenant input (lesson 37). It is
+    verified with one provider call first, and nothing is stored on failure."""
+    spec = PROVIDERS.get(provider)
+    if spec is None or spec.auth_kind != "api_key":
+        raise ValueError("oauth_connection_failed")
+    try:
+        header_name, header_value = spec.auth_header
+        resp = await _provider_call(
+            "GET", _API_KEY_VERIFY_URLS[provider], headers={header_name: header_value.format(token=api_key)},
+        )
+        resp.raise_for_status()
+        account_label = resp.json()["data"].get("email")
+        access_ref = encrypt_tenant_secret(tenant_id, api_key)
+    except Exception:
+        raise ValueError("oauth_connection_failed") from None
+    return await _upsert_connection(
+        tenant_id=tenant_id, provider=provider, user_id=user_id, user_email=user_email,
+        account_label=account_label, scopes=[], accounts_server=None, access_ref=access_ref,
+        access_expires_at=None, refresh_ref=None, provider_sub=None, auth_kind="api_key", api_base_url=None,
+    )
 
 
 async def list_connections(tenant_id: str) -> list[dict[str, Any]]:
@@ -304,11 +414,31 @@ async def get_connected(conn, tenant_id: str, provider: str) -> dict[str, Any] |
     return dict(row) if row is not None else None
 
 
+def provider_host_allowed(
+    provider: OAuthProvider, host: str | None, api_base_url: str | None, *, base_source: str,
+) -> bool:
+    """Where a connector token may be sent. `api_host_suffixes` is not consulted:
+    it gates what may be stored at connect time, this is the per-row equality."""
+    if base_source == "oauth_connection":
+        return api_base_url is not None and host == urlsplit(api_base_url).hostname
+    return host in provider.api_hosts
+
+
+async def connection_api_base(tenant_id: str, connection_id: str) -> str | None:
+    pool = await db.get_pool()
+    async with tenant_conn(pool) as conn:
+        return await conn.fetchval(
+            "SELECT api_base_url FROM oauth_connections "
+            "WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL AND status = 'connected'",
+            tenant_id, connection_id,
+        )
+
+
 async def post_json(tenant_id: str, connection_id: Any, url: str, body: Any) -> Any:
     """One authenticated JSON POST to a connected provider's API, for a preset's
     setup calls (creating the leads sheet). The token goes only in the
     Authorization header and only to one of the provider's own API hosts."""
-    token, provider = await access_token_for(tenant_id, connection_id)
+    token, provider, _api_base_url, _auth_kind = await access_token_for(tenant_id, connection_id)
     if urlsplit(url).hostname not in provider.api_hosts:
         raise ValueError("credential_unavailable")
     resp = await _provider_call("POST", url, json_body=body, headers={"Authorization": f"Bearer {token}"})
@@ -316,7 +446,7 @@ async def post_json(tenant_id: str, connection_id: Any, url: str, body: Any) -> 
     return resp.json()
 
 
-async def access_token_for(tenant_id: str, connection_id: str) -> tuple[str, OAuthProvider]:
+async def access_token_for(tenant_id: str, connection_id: str) -> tuple[str, OAuthProvider, str | None, str]:
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         row = await conn.fetchrow(
@@ -326,10 +456,14 @@ async def access_token_for(tenant_id: str, connection_id: str) -> tuple[str, OAu
     if row is None or row["status"] != "connected":
         raise ReconnectRequired
     spec = PROVIDERS[row["provider"]]
-    remaining = row["access_expires_at"] - datetime.datetime.now(datetime.timezone.utc)
-    if remaining.total_seconds() > _EXPIRY_SKEW_SECONDS:
-        return await auth_schemes.resolve_tenant_ref(tenant_id, row["access_token_ref"]), spec
-    return await _refresh(tenant_id, row, spec), spec
+    # A static API key has no expiry and no refresh path: it never refreshes and never flips `status`.
+    if row["auth_kind"] == "api_key" or (
+        row["access_expires_at"] - datetime.datetime.now(datetime.timezone.utc)
+    ).total_seconds() > _EXPIRY_SKEW_SECONDS:
+        token = await auth_schemes.resolve_tenant_ref(tenant_id, row["access_token_ref"])
+    else:
+        token = await _refresh(tenant_id, row, spec)
+    return token, spec, row["api_base_url"], row["auth_kind"]
 
 
 async def _winners_token(tenant_id: str, connection_id: Any) -> str:
@@ -445,7 +579,7 @@ async def _revoke_upstream(
     """Best effort, after the response. The DB was cleared first on purpose: a
     revoke failure must never leave a usable credential in storage."""
     spec = PROVIDERS[provider]
-    if spec.revoke_url is None:
+    if spec.revoke_url is None or spec.revoke_style == "none":
         return
     try:
         if provider_sub is not None:
@@ -464,8 +598,13 @@ async def _revoke_upstream(
                 log.info("oauth_revoke_skipped_shared_grant", extra={"connection_id": connection_id})
                 return
         refresh_token = await auth_schemes.resolve_tenant_ref(tenant_id, old_ref)
-        await _provider_call(
-            "POST", spec.revoke_url.format(accounts_server=accounts_server), data={"token": refresh_token},
-        )
+        if spec.revoke_style == "path":
+            # The token is in the URL, so the one attempt is never retried and the URL goes nowhere:
+            # the except below logs only the connection id.
+            await _provider_call("DELETE", spec.revoke_url.format(token=quote(refresh_token, safe="")))
+        else:
+            await _provider_call(
+                "POST", spec.revoke_url.format(accounts_server=accounts_server), data={"token": refresh_token},
+            )
     except Exception:
         log.warning("oauth_revoke_failed", extra={"connection_id": connection_id})
