@@ -227,10 +227,6 @@ _CRM_SCOPES = {
     "zoho": frozenset({"ZohoCRM.modules.contacts.READ"}),
 }
 
-# Named, with no rows and no PRESETS entry: their providers are gated on
-# verification, so apply for them is unreachable until they ship.
-GATED_PRESET_KEYS = frozenset({"dynamics_crm", "calcom_scheduling"})
-
 
 def _crm_lookup_step(
     provider: str, *, method: str, endpoint_url: str, params: tuple[PresetParam, ...],

@@ -272,6 +272,7 @@ def calcom(monkeypatch):
     """Records every provider request. cal.com accepts exactly VALID_CAL_KEY,
     or any key at all once `accept_any` is set."""
     seen = _Recorded()
+    monkeypatch.setenv("TOOLEXEC_CALCOM_ENABLED", "1")
 
     def _handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
@@ -283,6 +284,21 @@ def calcom(monkeypatch):
 
     monkeypatch.setattr(oauth, "_provider_transport", lambda ips: httpx.MockTransport(_handler))
     return seen
+
+
+@pytest.mark.asyncio
+async def test_cal_com_is_dark_until_its_own_env_is_set(world, calcom, monkeypatch):
+    # The fixture's provider would accept VALID_CAL_KEY, so only the gate can refuse it.
+    monkeypatch.delenv("TOOLEXEC_CALCOM_ENABLED")
+    tenants, users = world
+    headers = users["admin_a"]["headers"]
+    async with _client() as c:
+        assert "calcom" not in [p["key"] for p in (await c.get("/oauth-providers", headers=headers)).json()]
+        refused = await _put_key(c, tenants["a"], headers)
+        monkeypatch.setenv("TOOLEXEC_CALCOM_ENABLED", "1")
+        assert "calcom" in [p["key"] for p in (await c.get("/oauth-providers", headers=headers)).json()]
+    assert (refused.status_code, refused.json()) == (400, {"detail": "oauth_connection_failed"})
+    assert calcom == []
 
 
 async def _put_key(c, tenant, headers, key=VALID_CAL_KEY, provider="calcom"):

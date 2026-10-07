@@ -159,12 +159,21 @@ def _client_secret_ref(provider: OAuthProvider) -> str | None:
     return os.environ.get(f"TOOLEXEC_OAUTH_{provider.key.upper()}_CLIENT_SECRET_REF")
 
 
+def _api_key_enabled(provider: OAuthProvider) -> bool:
+    return os.environ.get(f"TOOLEXEC_{provider.key.upper()}_ENABLED") == "1"
+
+
 def configured_providers() -> list[str]:
     """A provider with any of its env unset is hidden, so a tenant with no
-    platform configuration sees no connector and can reach nothing."""
-    if not os.environ.get(_REDIRECT_URI_ENV):
-        return []
-    return [key for key, p in PROVIDERS.items() if _client_id(p) and _client_secret_ref(p)]
+    platform configuration sees no connector and can reach nothing. An API-key
+    provider has no client credentials: it is on only when its own
+    TOOLEXEC_<PROVIDER>_ENABLED is "1", which an operator sets once the
+    provider's verify call has been confirmed against live docs."""
+    oauth_ready = bool(os.environ.get(_REDIRECT_URI_ENV))
+    return [
+        key for key, p in PROVIDERS.items()
+        if (_api_key_enabled(p) if p.auth_kind == "api_key" else oauth_ready and _client_id(p) and _client_secret_ref(p))
+    ]
 
 
 async def _client_credentials(provider: OAuthProvider) -> tuple[str, str]:
@@ -375,7 +384,7 @@ async def connect_api_key(
     `env:`/`k8s:` pointers, because the value is tenant input (lesson 37). It is
     verified with one provider call first, and nothing is stored on failure."""
     spec = PROVIDERS.get(provider)
-    if spec is None or spec.auth_kind != "api_key":
+    if spec is None or spec.auth_kind != "api_key" or provider not in configured_providers():
         raise ValueError("oauth_connection_failed")
     try:
         header_name, header_value = spec.auth_header

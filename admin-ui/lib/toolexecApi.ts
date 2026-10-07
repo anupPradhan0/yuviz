@@ -116,7 +116,7 @@ export const deleteCustomApi = (customApiId: string) =>
 
 // ── OAuth connectors (services/toolexec/routers/oauth_connections.py) ───
 
-export type OAuthProviderKey = "google" | "zoho" | "microsoft";
+export type OAuthProviderKey = "google" | "zoho" | "microsoft" | "salesforce" | "hubspot" | "calcom";
 export type OAuthConnectionStatus = "connected" | "reconnect_needed" | "disconnected";
 
 export interface OAuthProvider {
@@ -140,6 +140,12 @@ export const authorizeOAuthConnection = (tenantId: string, provider: string, pre
   request<{ authorize_url: string }>(`/tenants/${tenantId}/oauth-connections/${provider}/authorize`, {
     method: "POST",
     body: JSON.stringify({ preset_key: presetKey }),
+  });
+// A provider with no consent redirect (cal.com): the key is sent once, sealed by the server, never returned.
+export const connectApiKey = (tenantId: string, provider: string, apiKey: string) =>
+  request<OAuthConnection>(`/tenants/${tenantId}/oauth-connections/${provider}/api-key`, {
+    method: "POST",
+    body: JSON.stringify({ api_key: apiKey }),
   });
 export const completeOAuthCallback = (
   tenantId: string,

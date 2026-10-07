@@ -531,5 +531,4 @@ def test_crm_scopes_live_only_in_presets_py():
 
 
 def test_gated_providers_have_no_preset_rows():
-    assert presets.GATED_PRESET_KEYS == {"dynamics_crm", "calcom_scheduling"}
-    assert not presets.GATED_PRESET_KEYS & set(presets.PRESETS)
+    assert not {"dynamics_crm", "calcom_scheduling"} & set(presets.PRESETS)

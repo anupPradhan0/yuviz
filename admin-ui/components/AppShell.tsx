@@ -203,7 +203,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           return;
         }
         // Direct-URL guard matching the hidden nav item.
-        if (u.role !== "superadmin" && u.role !== "admin" && pathname.startsWith("/billing")) {
+        if (u.role !== "superadmin" && u.role !== "admin" && (pathname.startsWith("/billing") || pathname.startsWith("/integrations"))) {
           router.push("/no-access");
           return;
         }
@@ -287,8 +287,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const canManageUsers = isSuperadmin || user?.role === "admin";
   const matches = (label: string) => label.toLowerCase().includes(search.trim().toLowerCase());
   const visibleOverview = OVERVIEW_ITEMS.filter((item) => matches(item.label));
-  // Accounts is superadmin-only (tenants.py enforces it server-side).
-  const visibleManagement = MANAGEMENT_ITEMS.filter((item) => matches(item.label) && (item.href !== "/tenants" || isSuperadmin));
+  // Accounts is superadmin-only (tenants.py enforces it server-side); Integrations is superadmin/admin
+  // (its write routes are require_role("superadmin","admin")).
+  const visibleManagement = MANAGEMENT_ITEMS.filter((item) => matches(item.label) && (item.href !== "/tenants" || isSuperadmin) && (item.href !== "/integrations" || canManageUsers));
   const visibleUsers = isSuperadmin && matches(USERS_ITEM.label);
   // Live Calls is superadmin-only (LIVE_CALLS_ROLES enforces it server-side).
   const visibleCalling = CALLING_ITEMS.filter((item) => matches(item.label) && (item.href !== "/live-calls" || isSuperadmin));
