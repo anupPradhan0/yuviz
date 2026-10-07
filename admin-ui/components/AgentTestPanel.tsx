@@ -24,11 +24,13 @@ const MODES: { key: Mode; label: string; icon: LucideIcon; soon?: string }[] = [
   { key: "chat", label: "Chat", icon: MessageSquare, soon: "Type messages to your agent and read its replies." },
 ];
 
-export function AgentTestPanel({ tenantSlug, agentSlug, savePending }: {
+export function AgentTestPanel({ tenantSlug, agentSlug, savePending, saveHeld = false }: {
   tenantSlug: string;
   agentSlug: string;
   /** A test must run the latest edits, so starting waits for autosave. */
   savePending: boolean;
+  /** Edits on a live agent that wait for an explicit Save. */
+  saveHeld?: boolean;
 }) {
   const call = useWebCall(tenantSlug, agentSlug);
   const [mode, setMode] = useState<Mode>("browser");
@@ -124,7 +126,7 @@ export function AgentTestPanel({ tenantSlug, agentSlug, savePending }: {
 
           {!live ? (
             <button className="btn btn-primary btn-sm ed-test-btn" onClick={call.start} disabled={savePending}>
-              {savePending ? "Saving your changes…" : "Start test call"}
+              {saveHeld ? "Save your changes to test them" : savePending ? "Saving your changes…" : "Start test call"}
             </button>
           ) : (
             <div className="ed-test-actions">

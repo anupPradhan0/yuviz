@@ -646,9 +646,10 @@ export interface TranscriptEntry {
 
 export const listCalls = (
   tenantSlug: string,
-  opts?: { limit?: number; offset?: number; direction?: CallDirection } & CallTimeRange,
+  opts?: { limit?: number; offset?: number; direction?: CallDirection; agentId?: string } & CallTimeRange,
 ) => {
   const params = new URLSearchParams();
+  if (opts?.agentId) params.set("agent_id", opts.agentId);
   if (opts?.limit) params.set("limit", String(opts.limit));
   if (opts?.offset) params.set("offset", String(opts.offset));
   if (opts?.direction) params.set("direction", opts.direction);

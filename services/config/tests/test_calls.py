@@ -86,6 +86,35 @@ async def test_list_calls_filters_by_started_at_range(test_tenant, scoped, pool)
         await pool.execute("DELETE FROM calls WHERE session_id IN ($1, $2)", recent_id, old_id)
 
 
+async def test_list_calls_filters_by_agent_and_never_crosses_tenants(test_tenant, scoped, pool):
+    other = await pool.fetchrow(
+        "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+        "Agent Filter Cross Tenant", f"test-call-ag-{uuid.uuid4().hex[:8]}",
+    )
+    mine, sibling, foreign = [
+        await pool.fetchval(
+            "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, $2, 'A') RETURNING id",
+            tenant_id, f"test-agent-{uuid.uuid4().hex[:8]}",
+        )
+        for tenant_id in (test_tenant["id"], test_tenant["id"], other["id"])
+    ]
+    ids = [f"test-call-{uuid.uuid4().hex[:8]}" for _ in range(3)]
+    await pool.execute(
+        "INSERT INTO calls (session_id, tenant_id, direction, agent_id) VALUES "
+        "($1, $4, 'inbound', $6), ($2, $4, 'inbound', $7), ($3, $5, 'inbound', $8)",
+        *ids, test_tenant["slug"], other["slug"], mine, sibling, foreign,
+    )
+    try:
+        result = await calls.list_calls(test_tenant["slug"], agent_id=mine)
+        assert [c["session_id"] for c in result["items"]] == [ids[0]]
+        assert result["total"] == 1
+        assert (await calls.list_calls(test_tenant["slug"], agent_id=foreign))["items"] == []
+    finally:
+        await pool.execute("DELETE FROM calls WHERE session_id = ANY($1)", ids)
+        await pool.execute("DELETE FROM agents WHERE id = ANY($1)", [mine, sibling, foreign])
+        await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+
 async def test_get_call_unknown_returns_none():
     assert await calls.get_call("does-not-exist") is None
 

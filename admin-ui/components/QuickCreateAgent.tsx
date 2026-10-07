@@ -48,7 +48,9 @@ export function QuickCreateAgent({ initialTemplate, onStepByStep }: {
   const [task, setTask] = useState(preset?.task ?? "");
   const [name, setName] = useState(preset?.label ?? "");
   const [accountSlug, setAccountSlug] = useState("");
-  const [providers, setProviders] = useState<ProviderConfig[]>([]);
+  // null until loaded: creating before then would skip the AI model and add a duplicate built-in voice.
+  const [providers, setProviders] = useState<ProviderConfig[] | null>(null);
+  const [providersError, setProvidersError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -57,18 +59,23 @@ export function QuickCreateAgent({ initialTemplate, onStepByStep }: {
 
   useEffect(() => {
     if (!account) return;
-    listProviders(account.id).then(setProviders).catch(() => setProviders([]));
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setProviders(null);
+    setProvidersError(null);
+    listProviders(account.id)
+      .then(setProviders)
+      .catch((e) => setProvidersError(e instanceof ApiError ? e.detail : String(e)));
   }, [account]);
 
   const pick = (role: "stt" | "llm" | "tts", accountDefault: string | null) => {
-    const ofRole = providers.filter((p) => p.role === role);
+    const ofRole = (providers ?? []).filter((p) => p.role === role);
     if (accountDefault && ofRole.some((p) => p.id === accountDefault)) return accountDefault;
     return ofRole[0]?.id ?? null;
   };
 
   // The account's chosen voice if it has one, otherwise the built-in voice (set up on first use).
   const defaultVoiceId = async (accountId: string, accountDefault: string | null) => {
-    const tts = providers.filter((p) => p.role === "tts");
+    const tts = (providers ?? []).filter((p) => p.role === "tts");
     if (accountDefault && tts.some((p) => p.id === accountDefault)) return accountDefault;
     const builtin = tts.find((p) => p.engine === BUILTIN_TTS_ENGINE && p.voice === BUILTIN_TTS_VOICE)
       ?? tts.find((p) => p.engine === BUILTIN_TTS_ENGINE);
@@ -92,7 +99,7 @@ export function QuickCreateAgent({ initialTemplate, onStepByStep }: {
     if (t) setDirection(t.direction);
   };
 
-  const canCreate = account !== null && slugify(name) !== "" && task.trim() !== "" && busy === null;
+  const canCreate = account !== null && providers !== null && slugify(name) !== "" && task.trim() !== "" && busy === null;
 
   const handleCreate = async () => {
     if (!account || !canCreate) return;
@@ -228,6 +235,11 @@ export function QuickCreateAgent({ initialTemplate, onStepByStep }: {
           onChange={(e) => setName(e.target.value)}
         />
 
+        {providersError && (
+          <div className="error-banner" style={{ marginTop: 12 }}>
+            Couldn&apos;t load this account&apos;s voice and AI settings, so the agent can&apos;t be created yet: {providersError}
+          </div>
+        )}
         {error && <div className="error-banner" style={{ marginTop: 12 }}>{error}</div>}
 
         <div className="qc-foot">

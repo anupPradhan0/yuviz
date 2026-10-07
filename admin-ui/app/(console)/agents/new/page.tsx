@@ -321,7 +321,7 @@ export default function NewAgentPage() {
           max_call_duration_s: maxCallDuration === "" ? null : maxCallDuration,
           goodbye_grace_ms: goodbyeGraceMs === "" ? undefined : goodbyeGraceMs,
           transfer_type: transferType,
-          transfer_destination: transferType === "none" ? null : transferDestination.trim() || null,
+          transfer_destination: transferType === "none" ? null : transferDestination.replace(/[\s\-().]/g, "") || null,
           transfer_prompt: transferType === "none" ? null : transferCondition.trim() || null,
           transfer_announcement: transferType === "none" ? null : transferAnnouncement.trim() || null,
           escalation_threshold: escalationThreshold === "" ? null : escalationThreshold,

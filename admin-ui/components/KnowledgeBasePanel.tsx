@@ -89,15 +89,25 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId, agentId]);
 
-  const anyProcessing = Object.values(docsByKb).some((docs) =>
-    docs.some((d) => d.status === "pending" || d.status === "processing"),
-  );
+  // One request per KB adds up fast (upload makes a KB per file), so the poll only re-reads unfinished ones.
+  const processingKbIds = Object.entries(docsByKb)
+    .filter(([, docs]) => docs.some((d) => d.status === "pending" || d.status === "processing"))
+    .map(([id]) => id);
   useEffect(() => {
-    if (!anyProcessing) return;
-    const t = setTimeout(refresh, POLL_MS);
+    if (processingKbIds.length === 0) return;
+    const t = setTimeout(async () => {
+      const results = await Promise.allSettled(processingKbIds.map((id) => listDocuments(id)));
+      setDocsByKb((prev) => {
+        const next = { ...prev };
+        results.forEach((r, i) => {
+          if (r.status === "fulfilled") next[processingKbIds[i]] = r.value;
+        });
+        return next;
+      });
+    }, POLL_MS);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [anyProcessing, docsByKb]);
+  }, [docsByKb]);
 
   const assignmentByKb = new Map(assignments.map((a) => [a.kb_id, a]));
 

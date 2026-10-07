@@ -43,6 +43,10 @@ const TRANSFER_TYPES: { value: NonNullable<AgentUpdate["transfer_type"]>; title:
 const GRACE_OPTIONS_MS = [0, 500, 1000, 1500, 2000, 3000, 5000];
 const ESCALATION_OPTIONS = [1, 2, 3, 4, 5];
 const AUTOSAVE_DELAY_MS = 800;
+const LIVE_HELD_FIELDS = ["system_prompt", "transfer_destination", "platform_did", "custom_caller_id"] as const;
+
+// The server accepts only +digits; people type spaces, dashes and brackets.
+const phoneDigits = (v: string | null | undefined) => v?.replace(/[\s\-().]/g, "") || null;
 
 const formatSeconds = (ms: number) => (ms === 0 ? "No pause" : `${ms / 1000} second${ms === 1000 ? "" : "s"}`);
 
@@ -145,9 +149,8 @@ export default function AgentDetailPage() {
         listPhoneNumbers(a.tenant_id).then(setNumbers).catch(() => setNumbers(null));
         // Campaigns run in a separate service; if it's down the agent just counts as inbound.
         listCampaigns(a.tenant_id).then((cs) => setInCampaign(cs.some((c) => c.agent_id === a.id))).catch(() => {});
-        // No per-agent filter server-side; the latest page is enough for "last few".
-        listCalls(tenantSlug, { limit: 100 })
-          .then((r) => setRecentCalls(r.items.filter((c) => c.agent_id === a.id).slice(0, 5)))
+        listCalls(tenantSlug, { agentId: a.id, limit: 5 })
+          .then((r) => setRecentCalls(r.items))
           .catch(() => {});
         setProviders(await listProviders(a.tenant_id));
       })
@@ -155,27 +158,44 @@ export default function AgentDetailPage() {
       .finally(() => setLoading(false));
   }, [tenantSlug, agentSlug]);
 
+  // On a live agent these change the next real call, so half-typed edits wait for blur or Save.
+  const savedForm: AgentUpdate = baseline ? JSON.parse(baseline).form : {};
+  const held = agent?.status === "active" && LIVE_HELD_FIELDS.some((k) => (form[k] ?? null) !== (savedForm[k] ?? null));
+  const canSave = !!agent && dirty && !saving && snapshot !== rejected && !!form.name?.trim() && !!form.system_prompt?.trim();
+
+  const save = async () => {
+    if (!agent || !canSave) return;
+    const sent = snapshot;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      setAgent(await updateAgent(tenantSlug, agent.id, {
+        ...form,
+        language,
+        transfer_destination: phoneDigits(form.transfer_destination),
+        platform_did: phoneDigits(form.platform_did),
+        custom_caller_id: phoneDigits(form.custom_caller_id),
+      }));
+      setBaseline(sent);
+      setRejected(null);
+    } catch (e) {
+      setSaveError(e instanceof ApiError ? e.detail : String(e));
+      setRejected(sent);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const saveHeld = () => {
+    if (held) save();
+  };
+
   // Autosave. Re-runs when a save lands, so edits made during it are saved next.
   useEffect(() => {
-    if (!agent || !dirty || saving || snapshot === rejected || !form.name?.trim()) return;
-    const sent = snapshot;
-    const timer = setTimeout(async () => {
-      setSaving(true);
-      setSaveError(null);
-      try {
-        setAgent(await updateAgent(tenantSlug, agent.id, { ...form, language }));
-        setBaseline(sent);
-        setRejected(null);
-      } catch (e) {
-        setSaveError(e instanceof ApiError ? e.detail : String(e));
-        setRejected(sent);
-      } finally {
-        setSaving(false);
-      }
-    }, AUTOSAVE_DELAY_MS);
+    if (!canSave || held) return;
+    const timer = setTimeout(save, AUTOSAVE_DELAY_MS);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snapshot, baseline, saving]);
+  }, [snapshot, baseline, saving, held]);
 
   const handleAskAi = async () => {
     if (!agent || !askText.trim()) return;
@@ -320,6 +340,12 @@ export default function AgentDetailPage() {
     <span className="ed-save err" title={saveError}><AlertCircle size={13} /> Not saved</span>
   ) : dirty && !form.name?.trim() ? (
     <span className="ed-save err"><AlertCircle size={13} /> Name needed</span>
+  ) : dirty && !form.system_prompt?.trim() ? (
+    <span className="ed-save err"><AlertCircle size={13} /> Instructions needed</span>
+  ) : held && !saving ? (
+    <button className="btn btn-primary btn-sm" onClick={save} title="This agent is taking calls, so these changes wait for you">
+      Save changes
+    </button>
   ) : saving || dirty ? (
     <span className="ed-save"><Loader2 size={13} className="spin" /> Saving…</span>
   ) : (
@@ -465,6 +491,7 @@ export default function AgentDetailPage() {
                     value={form.system_prompt ?? ""}
                     placeholder={"Who you are: You are the friendly receptionist for Acme Dental.\nWhat you do: Book, move or cancel appointments.\nWhen you don't know: Offer to take a message.\nNever: Give medical advice."}
                     onChange={(e) => setForm({ ...form, system_prompt: e.target.value })}
+                    onBlur={saveHeld}
                   />
                   <div className="form-hint">
                     Say who the agent is, what it helps with, and what it must never do. Changes also update its call flow.
@@ -533,6 +560,7 @@ export default function AgentDetailPage() {
                           className="form-input"
                           value={form.transfer_destination || ""}
                           onChange={(e) => setForm({ ...form, transfer_destination: e.target.value || null })}
+                          onBlur={saveHeld}
                           placeholder="+1 800 555 0100"
                         />
                         <div className="form-hint">Include the country code, e.g. +1 800 555 0100.</div>
@@ -583,6 +611,7 @@ export default function AgentDetailPage() {
                             className="form-input"
                             value={form.platform_did || ""}
                             onChange={(e) => setForm({ ...form, platform_did: e.target.value || null })}
+                            onBlur={saveHeld}
                             placeholder="+1 800 555 0100"
                           />
                         </div>
@@ -594,6 +623,7 @@ export default function AgentDetailPage() {
                             className="form-input"
                             value={form.custom_caller_id || ""}
                             onChange={(e) => setForm({ ...form, custom_caller_id: e.target.value || null })}
+                            onBlur={saveHeld}
                             placeholder="+1 800 555 0100"
                           />
                         </div>
@@ -719,7 +749,7 @@ export default function AgentDetailPage() {
         </main>
 
         <aside className="ed2-side" id="agent-test">
-          <AgentTestPanel tenantSlug={tenantSlug} agentSlug={agentSlug} savePending={saving || (dirty && rejected !== snapshot)} />
+          <AgentTestPanel tenantSlug={tenantSlug} agentSlug={agentSlug} savePending={saving || (dirty && rejected !== snapshot)} saveHeld={held && !saving} />
           <div className="card ed2-calls">
             <div className="ed2-calls-hdr">
               <b>This agent&apos;s recent calls</b>
