@@ -904,6 +904,21 @@ body {
 .wf-page .wf-root { flex: 1; min-height: 0; }
 .wf-page .wf-layout { flex: 1; min-height: 0; }
 .wf-page .wf-canvas { height: auto; min-height: 0; }
+/* Once the side panel stacks under the canvas, the page scrolls and the canvas needs a real height. */
+@media (max-width: 1100px) {
+  .wf-page { height: auto; }
+  .wf-page .wf-canvas { flex: none; height: 55vh; min-height: 340px; }
+}
+@media (max-width: 560px) {
+  .wf-page .wf-canvas { height: 50vh; min-height: 300px; }
+  .wf-toolbar-right { flex-wrap: wrap; }
+  .wf-help { flex-wrap: wrap; }
+  .cf-header-title { flex-wrap: wrap; }
+  .cf-header-title h1 { overflow-wrap: anywhere; }
+  .wf-save-state { min-width: 0; }
+  .wf-save-state:empty { display: none; }
+  .cf-header-actions .btn { flex: 1 1 auto; justify-content: center; }
+}
 
 /* The single-prompt / workflow fork on the new-agent screen. */
 .wf-mode-choice { display: flex; gap: 10px; }
@@ -1693,9 +1708,12 @@ body {
 .ed2-sec-hdr h2 { margin: 0; font-size: 1rem; font-weight: 600; color: var(--text); }
 .ed2-sec-hdr p { margin: 2px 0 0; font-size: .76rem; color: var(--text-3); }
 .ed2-ready.err { border-color: var(--red-border); background: var(--red-dim); color: var(--red); }
+.ed2-test-jump { display: none; }
+.ed2-ready svg { flex-shrink: 0; }
 @media (max-width: 1200px) {
   .ed2-body { grid-template-columns: 170px minmax(0, 1fr); }
-  .ed2-side { grid-column: 1 / -1; position: static; }
+  .ed2-side { grid-column: 1 / -1; position: static; scroll-margin-top: 12px; }
+  .ed2-test-jump { display: inline-flex; }
 }
 @media (max-width: 760px) {
   .ed2-body { grid-template-columns: 1fr; gap: 12px; }
@@ -1705,8 +1723,13 @@ body {
   .ed2-nav .ed2-nav-adv { margin-top: 0; }
   .ed2-name { flex: 1 1 140px; min-width: 0; max-width: none; font-size: 1.05rem; }
   .ed2-dir { display: none; }
-  .ed2-ready { flex-wrap: wrap; }
-  .ed2-ask .form-input { min-width: 0; }
+  .ed2-save { min-width: 0; }
+  .ed2-ready { align-items: flex-start; line-height: 1.45; }
+  .ed2-ready svg { margin-top: 2px; }
+  .ed2-ready-act { flex-shrink: 0; }
+  .ed2-main .card-body { padding: 12px; }
+  .ed2-ask { padding-left: 10px; }
+  .ed2-ask .form-input { min-width: 0; padding: 7px 6px; }
   .ed-test { padding: 14px; }
   .ed-test-log { min-height: 180px; max-height: 50vh; }
   .ed-test-coming { min-height: 180px; }

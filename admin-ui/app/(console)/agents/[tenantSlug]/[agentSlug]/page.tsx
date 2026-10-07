@@ -353,6 +353,12 @@ export default function AgentDetailPage() {
         <span className="ed2-dir">{inCampaign ? "My agent calls people" : "People call my agent"}</span>
         <div className="ed2-top-right">
           <div className="ed2-save" aria-live="polite">{saveStatus}</div>
+          <button
+            className="btn btn-primary btn-sm ed2-test-jump"
+            onClick={() => document.getElementById("agent-test")?.scrollIntoView({ behavior: "smooth" })}
+          >
+            Test
+          </button>
           <button className="btn btn-ghost btn-sm" onClick={() => router.push(`/workflows/${tenantSlug}/${agentSlug}`)}>
             Call flow <ArrowRight size={13} />
           </button>
@@ -402,7 +408,7 @@ export default function AgentDetailPage() {
           )}
           {justCreated && (
             <div className="ed2-ready ok">
-              <Check size={14} /> Your agent is ready. Try it with a test call on the right, then fine-tune anything here.
+              <Check size={14} /> Your agent is ready. Try it with a test call, then fine-tune anything here.
             </div>
           )}
           {blocker && (
@@ -712,7 +718,7 @@ export default function AgentDetailPage() {
           )}
         </main>
 
-        <aside className="ed2-side">
+        <aside className="ed2-side" id="agent-test">
           <AgentTestPanel tenantSlug={tenantSlug} agentSlug={agentSlug} savePending={saving || (dirty && rejected !== snapshot)} />
           <div className="card ed2-calls">
             <div className="ed2-calls-hdr">
