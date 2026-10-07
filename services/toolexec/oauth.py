@@ -99,7 +99,6 @@ PROVIDERS: dict[str, OAuthProvider] = {
         identity_scopes=frozenset({"openid", "email", "offline_access"}),
         api_hosts=frozenset({"graph.microsoft.com"}),
         extra_authorize_params=(("prompt", "consent"),),
-        api_host_suffixes=frozenset({".dynamics.com"}),
     ),
     "zoho": OAuthProvider(
         key="zoho",
@@ -407,11 +406,19 @@ async def list_connections(tenant_id: str) -> list[dict[str, Any]]:
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         rows = await conn.fetch(
-            f"SELECT {_PUBLIC_COLUMNS} FROM oauth_connections "
+            f"SELECT {_PUBLIC_COLUMNS}, api_base_url FROM oauth_connections "
             "WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY provider",
             tenant_id,
         )
-    return [dict(r) for r in rows]
+    connections = []
+    for row in rows:
+        connection = dict(row)
+        # A grant made before the provider's API origin was captured cannot be used until reconnected.
+        if (connection.pop("api_base_url") is None and connection["status"] == "connected"
+                and PROVIDERS[connection["provider"]].api_base_claim is not None):
+            connection["status"] = "reconnect_needed"
+        connections.append(connection)
+    return connections
 
 
 async def get_connected(conn, tenant_id: str, provider: str) -> dict[str, Any] | None:
@@ -530,9 +537,11 @@ async def _refresh(tenant_id: str, row: Any, spec: OAuthProvider) -> str:
         updated = await conn.fetchrow(
             "UPDATE oauth_connections SET access_token_ref = $4, access_expires_at = $5, "
             "       refresh_token_ref = COALESCE($6, refresh_token_ref), updated_at = now() "
-            " WHERE tenant_id = $1 AND id = $2 AND refresh_token_ref = $3 AND status = 'connected' "
+            " WHERE tenant_id = $1 AND id = $2 AND refresh_token_ref = $3 AND access_token_ref = $7 "
+            "   AND status = 'connected' "
             "RETURNING id",
             tenant_id, row["id"], row["refresh_token_ref"], access_ref, access_expires_at, new_refresh_ref,
+            row["access_token_ref"],
         )
     if updated is None:
         return await _winners_token(tenant_id, row["id"])

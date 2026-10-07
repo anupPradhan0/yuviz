@@ -612,6 +612,27 @@ async def test_a_refresh_that_lost_the_race_uses_the_winners_token(pool, tenants
 
 
 @pytest.mark.asyncio
+async def test_a_refresh_that_lost_the_race_uses_the_winners_token_when_no_refresh_token_rotates(pool, tenants, fake):
+    made, users = tenants
+    connection = await _connect(made["a"], users["a"], fake, refresh="rt-original")
+    await _expire_access_token(pool, connection["id"])
+
+    async def _winner_lands_first(request):
+        await pool.execute(
+            "UPDATE oauth_connections SET access_token_ref = $2, access_expires_at = now() + interval '1 hour' "
+            "WHERE id = $1", connection["id"], encrypt_tenant_secret(made["a"], "at-winner"),
+        )
+        return httpx.Response(200, json={"access_token": "at-loser", "expires_in": 3600})
+
+    fake.token = _winner_lands_first
+    token, *_ = await oauth.access_token_for(made["a"], str(connection["id"]))
+
+    assert token == "at-winner"
+    row = await pool.fetchrow("SELECT * FROM oauth_connections WHERE id = $1", connection["id"])
+    assert decrypt_tenant_secret(made["a"], row["access_token_ref"]) == "at-winner"
+
+
+@pytest.mark.asyncio
 async def test_invalid_grant_flips_the_status_and_requires_reconnect(pool, tenants, fake):
     made, users = tenants
     connection = await _connect(made["a"], users["a"], fake)

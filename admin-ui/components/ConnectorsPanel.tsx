@@ -35,9 +35,6 @@ const STATUS_BADGE: Record<OAuthConnection["status"], { label: string; cls: stri
   disconnected: { label: "Disconnected", cls: "gray" },
 };
 
-// Providers connected by pasting a key instead of a consent redirect.
-const API_KEY_PROVIDERS = new Set(["calcom"]);
-
 // Catalogue entries that ship dark: each is shown as "Not available" until the
 // server lists it, so an operator's env switch is the only thing that turns it on.
 const DARK_ENTRIES = [
@@ -307,7 +304,7 @@ export function ConnectorsPanel({ tenantId }: { tenantId: string }) {
                       className="btn btn-indigo btn-sm"
                       disabled={busy !== null}
                       onClick={() => {
-                        if (!API_KEY_PROVIDERS.has(provider.key)) return connect(provider.key, null);
+                        if (provider.auth_kind !== "api_key") return connect(provider.key, null);
                         setPasting(provider);
                         setApiKey("");
                         setKeyError(null);

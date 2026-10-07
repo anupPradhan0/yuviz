@@ -354,10 +354,38 @@ async def test_an_injection_shaped_name_stays_one_json_string_and_one_carrier_se
     line = response.deterministic_response
     prefix = "Contact lookup: match.Caller matched: "
     assert line.startswith(prefix) and "\n" not in line and line.count("{{") == 0 and "}}" not in line
-    assert len(line) <= len("Contact lookup: match.") + 120
     name = response.data["items"][0]["full_name"]
     assert name in line and not set('"\\{}[]<>`|\n\t') & set(name)
     assert json.loads(json.dumps(response.data))["items"][0]["full_name"] == name
+
+
+@pytest.mark.asyncio
+async def test_the_spoken_line_drops_whole_fields_that_would_pass_the_cap(
+    pool, tenant_agent, crm_cleanup, monkeypatch,
+):
+    tenant, agent = tenant_agent
+    name, company, owner = "N" * 60, "C" * 30, "O" * 60
+    body = zoho_body(Full_Name=name, Account_Name={"name": company}, Owner={"name": owner})
+    response = await _lookup(pool, tenant, agent, "zoho", monkeypatch, Upstream(body=body))
+
+    assert response.deterministic_response == f"Contact lookup: match.Caller matched: {name} at {company}."
+    assert response.data["items"][0]["owner_name"] == owner
+
+
+@pytest.mark.asyncio
+async def test_a_remote_party_that_is_not_bare_e164_still_matches_on_digits(
+    pool, tenant_agent, crm_cleanup, monkeypatch,
+):
+    async def _formatted(tenant_id, request):
+        return "+1 555-123-4567"
+
+    monkeypatch.setattr(executor, "_remote_party", _formatted)
+    tenant, agent = tenant_agent
+    upstream = Upstream(body={"searchRecords": [{"Id": "003A", "Name": "Jane Doe", "Phone": "(555) 123-4567"}]})
+    response = await _lookup(pool, tenant, agent, "salesforce", monkeypatch, upstream)
+
+    assert upstream.requests[0].url.params["q"] == "15551234567"
+    assert response.deterministic_response == "Contact lookup: match.Caller matched: Jane Doe."
 
 
 @pytest.mark.asyncio

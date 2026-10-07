@@ -128,6 +128,21 @@ async def test_invalid_grant_flips_to_reconnect_needed_and_the_step_fails_fast(
 
 
 @pytest.mark.asyncio
+async def test_a_zoho_grant_with_no_stored_api_origin_lists_as_reconnect_needed(
+    pool, tenant_agent, crm_cleanup, admin_headers,
+):
+    tenant, _agent = tenant_agent
+    connection = await seed_connection(pool, tenant, "zoho", api_base_url=None)
+
+    async with _client() as c:
+        listed = await c.get(f"/tenants/{tenant['id']}/oauth-connections", headers=admin_headers)
+
+    assert [(x["id"], x["status"]) for x in listed.json()] == [(connection, "reconnect_needed")]
+    assert "api_base_url" not in listed.json()[0]
+    assert (await _connection(pool, connection))["status"] == "connected"
+
+
+@pytest.mark.asyncio
 async def test_a_5xx_or_slow_crm_gives_a_bounded_failure_and_leaves_the_connection_alone(
     pool, tenant_agent, crm_cleanup, provider, monkeypatch,
 ):

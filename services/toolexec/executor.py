@@ -376,7 +376,7 @@ def _resolve_arguments(
         elif source == "caller_id":
             if remote_party is None:
                 raise _StepFailure("invalid_argument", "caller_id_unavailable")
-            number = remote_party.lstrip("+") if param["value_digits_only"] else remote_party
+            number = presets.digits_only(remote_party) if param["value_digits_only"] else remote_party
             raw_values[name] = (param["value_prefix"] or "") + number
             argument_sources[name] = "caller_id"
         else:  # upstream

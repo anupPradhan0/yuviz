@@ -38,7 +38,10 @@ router = APIRouter(tags=["oauth_connections"])
 
 @router.get("/oauth-providers")
 async def list_oauth_providers(current_user: CurrentUser = Depends(get_current_user)):
-    return [{"key": key, "label": oauth.PROVIDERS[key].label} for key in oauth.configured_providers()]
+    return [
+        {"key": key, "label": oauth.PROVIDERS[key].label, "auth_kind": oauth.PROVIDERS[key].auth_kind}
+        for key in oauth.configured_providers()
+    ]
 
 
 @tenant_scoped_router.get("")

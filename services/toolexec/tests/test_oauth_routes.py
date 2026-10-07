@@ -108,7 +108,7 @@ async def test_providers_list_is_empty_until_the_platform_configures_one(world, 
     _tenants, users = world
     async with _client() as c:
         r = await c.get("/oauth-providers", headers=users["admin_a"]["headers"])
-        assert r.json() == [{"key": "google", "label": "Google"}]
+        assert r.json() == [{"key": "google", "label": "Google", "auth_kind": "oauth2"}]
 
         monkeypatch.delenv("TOOLEXEC_OAUTH_GOOGLE_CLIENT_ID")
         r = await c.get("/oauth-providers", headers=users["admin_a"]["headers"])
@@ -296,7 +296,8 @@ async def test_cal_com_is_dark_until_its_own_env_is_set(world, calcom, monkeypat
         assert "calcom" not in [p["key"] for p in (await c.get("/oauth-providers", headers=headers)).json()]
         refused = await _put_key(c, tenants["a"], headers)
         monkeypatch.setenv("TOOLEXEC_CALCOM_ENABLED", "1")
-        assert "calcom" in [p["key"] for p in (await c.get("/oauth-providers", headers=headers)).json()]
+        listed = (await c.get("/oauth-providers", headers=headers)).json()
+        assert [p["auth_kind"] for p in listed if p["key"] == "calcom"] == ["api_key"]
     assert (refused.status_code, refused.json()) == (400, {"detail": "oauth_connection_failed"})
     assert calcom == []
 

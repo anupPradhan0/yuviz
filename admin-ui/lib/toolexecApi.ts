@@ -122,6 +122,7 @@ export type OAuthConnectionStatus = "connected" | "reconnect_needed" | "disconne
 export interface OAuthProvider {
   key: OAuthProviderKey;
   label: string;
+  auth_kind: "oauth2" | "api_key";
 }
 
 export interface OAuthConnection {
