@@ -19,7 +19,7 @@ reconciliation problem (lesson 19: diff the named controls one by one).
 | The transform hook "must be **after** the `200 <= status_code < 300` check (`executor.py:870-871`), not at `:867`" — a re-check item | It **is** after it: the 2xx check is `executor.py:857-858`, the hook is `executor.py:870-876`, `{"_raw": …}` is built at `:855`, and the failure branches write `response_redacted=None` at `:902` and `:924` | The Placement paragraph is now a verified fact with corrected line numbers, not a gate |
 | `access_token_for` returning `(token, provider, api_base_url, auth_kind)` | Shipped signature is `async def access_token_for(tenant_id, connection_id) -> tuple[str, OAuthProvider]` (`oauth.py:319`) | The 4-tuple is named as **this design's delta** against that baseline, not as existing behaviour |
 | `apply_response_transform(kind, response, body_fields, *, caller_ani)` | Shipped is `apply_response_transform(transform: dict, response: Any, body_fields: dict, *, caller_ani: str \| None = None)` (`presets.py:366-378`), dispatching on `transform["kind"]` | Signature corrected in the projection block; `provider` is read off the same `transform` dict |
-| A **new** column `custom_api_params.value_format TEXT CHECK (… IN ('e164','digits'))` | `custom_api_params.value_digits_only BOOLEAN` already ships (`database/schema.sql:985-988`, CHECK `custom_api_params_value_digits_only_shape` at `:1008`, applied at `executor.py:379` as `remote_party.lstrip("+")`, authored via `presets._caller_id(…, digits_only=True)` at `presets.py:118-123`) | **The column, its CHECK, the `schemas.py` line, the `_resolve_arguments` change and the Risks justification are deleted.** The shipped boolean expresses exactly the two-value set this design needed; `digits_only=True` ≡ `'digits'`, the default ≡ `'e164'` |
+| A **new** column `custom_api_params.value_format TEXT CHECK (… IN ('e164','digits'))` | `custom_api_params.value_digits_only BOOLEAN` already ships (`database/schema.sql:985-988`, CHECK `custom_api_params_value_digits_shape` at `:1006-1008`, applied at `executor.py:379` as `remote_party.lstrip("+")`, authored via `presets._caller_id(…, digits_only=True)` at `presets.py:118-123`) | **The column, its CHECK, the `schemas.py` line, the `_resolve_arguments` change and the Risks justification are deleted.** The shipped boolean expresses exactly the two-value set this design needed; `digits_only=True` ≡ `'digits'`, the default ≡ `'e164'` |
 | "Adds … CRM scopes to the existing `zoho`/`microsoft` `PROVIDERS` entries" | Scopes are **not** in the registry: `start_authorization` reads `presets.PRESETS[preset_key].scopes` and unions them with the connection row's existing scopes (`oauth.py:160-185`); `OAuthProvider.identity_scopes` is identity only | The scope column below is a `Preset.scopes` table. **No second scope map is introduced**; `oauth.py` gains provider rows, not CRM scopes |
 | `DELETE …/oauth-connections/{id}` returning `{"revoked": false}` | `oauth.disconnect(*, tenant_id, connection_id, user_id, user_email, background_tasks: BackgroundTasks)` returns the **constant** `{"disconnected": True}` (`oauth.py:406-438`); the shared-grant probe and the upstream revoke run in a post-response `BackgroundTasks` callback (`_revoke_upstream`, `oauth.py:440-470`), so neither the body nor the latency varies with another tenant's state (lesson 2) | Every `{"revoked": …}` reference is replaced; cal.com's "no upstream revoke" is a registry fact (`revoke_url=None`), never a response field |
 | Inherited round-4 finding 4: "disconnect revokes the same upstream grant for another tenant — mitigation: none added here" | **Fixed upstream.** `_revoke_upstream` skips the revoke when another tenant holds a `connected`, non-deleted row with the same `(provider, provider_sub)` (`oauth.py:450-463`), read on `platform_conn(reason="oauth-shared-grant-check")` with `$2` taken from the disconnecting row's own subject | The Risk bullet is replaced by the shipped mechanism; the QA case becomes an assertion rather than "record what happens" |
@@ -31,7 +31,7 @@ reconciliation problem (lesson 19: diff the named controls one by one).
 | The coordination amendment as a request applied to another design document | **Shipped:** `admin-ui/app/(console)/integrations/page.tsx`, `admin-ui/app/(console)/integrations/callback/page.tsx`, `admin-ui/components/ConnectorsPanel.tsx`, and `docs/setup.md:225` documents `TOOLEXEC_OAUTH_REDIRECT_URI=…/integrations/callback` | The Integrations page is an **existing** file this design extends, not a `(new)` one |
 | "preset rows are read-only" | `custom_apis.update_custom_api` raises `ValueError("preset_managed")` → `400` for any row with `preset_key IS NOT NULL` (`custom_apis.py:599-600`) | Confirmed, cited at the one place that relies on it |
 | "the lookup key is server-side and absent from the LLM tool schema" | Confirmed: `executor.py:70` fills it from `presets.remote_party_number(call_direction, caller_number, called_number)` (`presets.py:332`) and never from `caller_arguments`; `policy_resolver.py:186` joins only `p.source = 'caller'` params into the model's tool schema, so `source='caller_id'` params are not in it | Confirmed with the two literal predicates |
-| The success template `{{$.spoken}}` against a return value of exactly `{"outcome","items"}` | `_interpolate_success_template` (`executor.py:652-665`) resolves placeholders against the **redacted** response only, **fails the whole step** with `unresolved_placeholder` when one is `MISSING` or `[redacted]`, strips control characters, and caps each placeholder at 120 characters | `spoken` is now a **declared third key**, always present, built by `presets.py` to ≤120 characters. See the findings-closure note — this is the one change to a round-3 "verified control" and it is a correction, not a relaxation |
+| The success template `{{$.spoken}}` against a return value of exactly `{"outcome","items"}` | `_interpolate_success_template` (`executor.py:652-665`) resolves placeholders against the **redacted** response only, strips control characters, and caps each placeholder at 120 characters. On a `MISSING` or `[redacted]` placeholder it **returns `None`, it does not fail the step**: the inner `_resolve` raises `_StepFailure`, but the function's own `try/except _StepFailure` at `executor.py:662-665` swallows it, so `deterministic_response` is `None` and the chain status stays `success` | `spoken` is now a **declared third key**, always present, built by `presets.py` to ≤120 characters. See the findings-closure note — this is the one change to a round-3 "verified control" and it is a correction, not a relaxation |
 | — (not cited, checked for blast radius) | `resolve_api_key_input` is Config's provider-config path only (`services/config/provider_configs.py:57-71`); its `allow_pointer_schemes` is **required and defaultless**, fed by `is_platform_scoped(current_user)` (`services/config/deps.py:64`) | `connect_api_key()` does **not** use it: a tenant-pasted cal.com key is sealed with `encrypt_tenant_secret` only, so no `env:`/`k8s:` pointer scheme is ever reachable from tenant input (lesson 37) |
 | — (not cited, checked for drift) | `voice_speed()` now lives at `services/conversation/ai_provider_manager.py:23` | On no path this design touches; listed so the check is on the record |
 
@@ -119,6 +119,7 @@ stays here.
 | `database/rls.sql` | **No change.** `oauth_connections` and `oauth_authorization_states` policies already arrive with connector-presets. | The new columns live on tables whose policies exist. |
 | `services/toolexec/oauth.py` | Adds `salesforce`, `hubspot` and `calcom` rows to `PROVIDERS`. **No scope is added here**: CRM scopes are `Preset.scopes` values in `presets.py`, which `start_authorization` already reads and unions (`oauth.py:160-185`); `OAuthProvider.identity_scopes` stays identity-only. `OAuthProvider` gains `auth_kind`, `supports_pkce`, `api_host_suffixes`, `api_base_claim`, `revoke_style`, `auth_header`. New `provider_host_allowed()`, `connection_api_base()`, `connect_api_key()`. `complete_authorization` validates and stores `api_base_url`, and **adds `api_base_url` and `auth_kind` to the upsert's `DO UPDATE SET` list** so a reconnect or a Zoho DC change never keeps a stale origin. `start_authorization` omits PKCE only where `supports_pkce` is false. `access_token_for` widens from its shipped `-> tuple[str, OAuthProvider]` (`oauth.py:319`) to `-> tuple[str, OAuthProvider, str | None, str]`; both existing call sites are updated in the same change. `_revoke_upstream` (`oauth.py:440-470`) gains the `revoke_style="path"` form for HubSpot, keeping its shared-grant skip and its "secret never in a logged URL" property (lesson 20). | D1, D2. One registry stays the only place a provider is described. |
 | `services/toolexec/presets.py` | Adds the `salesforce_crm`, `hubspot_crm` and `zoho_crm` preset definitions, one lookup row each. `dynamics_crm` and `calcom_scheduling` are named as gated keys only — their rows are deferred with their providers (see "Preset rows"). Adds the `crm_contact_projection` transform kind to the closed set in `validate_response_transform`/`apply_response_transform`, and `digits_only()`/`phone_suffix_match()`. | D3 and the catalogue itself. |
+| `services/toolexec/tests/test_oauth.py` | **Migrates, never deletes, the four shipped tests that call `auth_schemes.apply()` and would break on the new required keyword** — `test_apply_sets_the_bearer_for_a_provider_host` (`:727`), `test_apply_refuses_an_off_provider_host_before_setting_the_header` (`:739`), `test_apply_lets_reconnect_required_through_unwrapped` (`:751`) and `test_the_function_local_import_resolves_in_a_fresh_interpreter` (`:762`, whose subprocess script also constructs the call). Each gains `effective_url=<the same URL its `_api(...)` fixture already carries>` and keeps its existing assertion; `_api()` gains `"endpoint_base_source": "literal"`. | These are the shipped tripwires for the host-binding control and for the lazy-import fail-open. A signature change that deletes them lets the control regress with nothing left to notice (lesson 42). Required work, not collateral. |
 | `services/toolexec/auth_schemes.py` | Inside the **existing** `oauth2_authorization_code` branch: takes a required keyword `effective_url: str`, binds the token to that URL's host via `provider_host_allowed(provider, host, api_base_url, base_source=api["endpoint_base_source"])`, and branches on the `auth_kind` returned by `access_token_for` to choose the provider's `auth_header`. It no longer reads `api["endpoint_url"]`. **No new auth scheme, and no `auth_config` is read for these rows** (`_CREDENTIAL_REF_FIELDS["oauth2_authorization_code"]` stays `()`). | D1, D2, D4. The host binding must test the URL actually dialed (lessons 31, 32); a static key must not travel the `api_key` scheme's tenant-`auth_config` path (lesson 43). |
 | `services/toolexec/executor.py` | Composes `effective_url` once per step before `_resolve_arguments`, passes it in as a keyword, and passes the same local to `auth_schemes.apply(...)`. **`_resolve_arguments` is otherwise unchanged** — `value_digits_only` is already applied at `executor.py:379`. | One composed value, one source of truth at both call sites. |
 | `services/toolexec/routers/oauth_connections.py` | Adds `POST /tenants/{tenant_id}/oauth-connections/{provider}/api-key` behind `require_role("superadmin","admin")`. | cal.com has no consent redirect (D2). |
@@ -209,7 +210,8 @@ one next to the file they are editing):
    the transcript → `conversation_sessions` → any analytics built on it. Holds the projected fields only.
    **This claim holds only because the transform is total and fail-closed (projection step 0) and runs only on
    a 2xx body.** An unrecognised payload — including the `{"_raw": <whole body>}` the executor builds for a
-   non-JSON response — yields `{"outcome": "no_match", "items": []}` and no fragment of the body, so there is
+   non-JSON response — yields `{"outcome": "no_match", "items": [], "spoken": ""}` and no fragment of the body,
+   so there is
    no shape of upstream response that reaches these sinks unprojected.
 3. `api_chain_steps.arguments_redacted` — the lookup's only arguments are `caller_id` params, marked
    `sensitive`, so they store `[redacted]`.
@@ -247,8 +249,17 @@ auth_header: tuple[str, str] = ("Authorization", "Bearer {token}")
 def provider_host_allowed(provider: OAuthProvider, host: str, api_base_url: str | None,
                           *, base_source: str) -> bool
 async def connection_api_base(tenant_id: str, connection_id: str) -> str | None
-# shipped today (oauth.py:319) -> tuple[str, OAuthProvider]; this design widens it, and updates
-# both existing call sites in the same change.
+# shipped today (oauth.py:319) -> tuple[str, OAuthProvider]. This design widens it, and both
+# existing call sites are updated in the same change — with DIFFERENT rules, stated here because
+# widening a shared helper carries its original trust boundary into the new caller (lesson 37):
+#   (a) auth_schemes.apply()  — the new per-row rule: provider_host_allowed(..., base_source=
+#       api["endpoint_base_source"]). This is the only site that composes an origin.
+#   (b) oauth.post_json() (oauth.py:311-317) — UNCHANGED. It keeps its own literal binding
+#       `if urlsplit(url).hostname not in provider.api_hosts: raise ValueError("credential_unavailable")`.
+#       It serves a preset's setup calls against fixed provider hosts, has no custom_apis row and so no
+#       endpoint_base_source to branch on, and must NOT learn about api_base_url: giving it the composed
+#       origin would let a tenant-influenced instance_url widen a fixed-host setup call. It takes the
+#       extra tuple members and discards them.
 async def access_token_for(tenant_id: str, connection_id: str) -> tuple[str, OAuthProvider, str | None, str]
 ```
 - **`provider_host_allowed` branches on the row's own `endpoint_base_source`, not on whether the connection
@@ -420,7 +431,7 @@ All rows: `auth_scheme='oauth2_authorization_code'`, `side_effecting=false`, no 
   then `value_prefix` is prepended — so the boolean is applied **before** the prefix, and the result is what is
   hashed, sent and redacted. Preset rows author it through `presets._caller_id(name, digits_only=True)`
   (`presets.py:118-123`), it is CHECK-constrained to `source='caller_id'`
-  (`custom_api_params_value_digits_only_shape`, `schema.sql:1008`), and `CustomApiParamSpec` does not expose
+  (`custom_api_params_value_digits_shape`, `schema.sql:1006-1008`), and `CustomApiParamSpec` does not expose
   it. This design therefore adds **no** param column: `value_digits_only=true` is the design's former
   `'digits'` and the default is its former `'e164'`. Salesforce gets `digits` because `+` is a reserved SOSL character in `q` — sending it either errors
   or mis-parses, and escaping it would require a free-form template this design does not add. HubSpot's filter
@@ -489,7 +500,8 @@ and the transform is writable only by `presets.py`, because `CustomApiCreate`/`C
    and holds a `list`, and each element is a `dict`. Anything else — a non-JSON upstream body, which
    `executor.py:855` hands over as `{"_raw": "<the entire decoded body as one string>"}`; an API-version or
    envelope change; a `compositeResponse` wrapper; an error object returned with a 200; a record missing the
-   fields step 3 projects — returns the literal `{"outcome": "no_match", "items": []}` and **nothing else**.
+   fields step 3 projects — returns the literal `{"outcome": "no_match", "items": [], "spoken": ""}` (the same
+   three keys step 4 returns on every other path) and **nothing else**.
    It never returns its input, never copies any fragment of its input into the result, and never logs or
    includes the body in an exception message (the step then fails or succeeds on its own status, and the body
    is gone). "Unrecognised" and "recognised but no match" deliberately produce the identical value: the model
@@ -591,9 +603,13 @@ and the transform is writable only by `presets.py`, because `CustomApiCreate`/`C
    one record survived else [], "spoken": "<the step-3a carrier sentence, or \"\">"}` — **three keys, always,
    on every path including step 0's**, and nothing else.
    *Why three and not the two the round-3 review verified:* the success template below interpolates
-   `{{$.spoken}}`, and `_interpolate_success_template` **fails the whole step** with `unresolved_placeholder`
-   when a placeholder is `MISSING` (`executor.py:653-658`) — so a two-key return makes every lookup fail. The
-   two-key statement was unimplementable, not stricter. The control the review verified is preserved in full:
+   `{{$.spoken}}`, and on a `MISSING` placeholder `_interpolate_success_template` **returns `None` rather than
+   failing the step** — `_resolve` raises `_StepFailure("failed", "unresolved_placeholder")`
+   (`executor.py:653-658`) and the function's own `except _StepFailure` at `:662-665` swallows it. So a
+   two-key return would not have failed loudly; it would have produced `deterministic_response = None` on a
+   `success` chain, which is the worse outcome: **no deterministic line is spoken and the model narrates the
+   turn freely from `items`** — reopening round-3 finding 1's channel on exactly the path OQ9 Option A's
+   carrier sentence exists to control. A tester must assert the spoken line, not a step failure. The control the review verified is preserved in full:
    the key set is still a closed literal asserted exactly, `match_count` is still absent on every path, each
    `items` entry's key set is still exactly the four projected fields, and `spoken` carries no field the four
    do not already carry. On `no_match` and `ambiguous`, `spoken` is the empty string, so no outcome is
@@ -698,8 +714,10 @@ deterministically, and the outcome no longer depends on a provider data quirk.
 **One change to a round-3 "verified control", declared rather than slipped in.** The verified list records
 "the key set of every return value is exactly `{"outcome","items"}`". It is now exactly
 `{"outcome","items","spoken"}`. The reason is in step 4: the success template interpolates `{{$.spoken}}` and
-`_interpolate_success_template` fails the step on a `MISSING` placeholder (`executor.py:653-658`), so the
-two-key shape made every lookup fail — it was unimplementable, not stricter. The control's strength is
+`_interpolate_success_template` returns `None` on a `MISSING` placeholder — `_resolve` raises `_StepFailure`
+and the function's own `except _StepFailure` at `executor.py:662-665` swallows it, leaving the chain
+`success` with `deterministic_response = None`. So the two-key shape did not fail loudly; it silently dropped
+the deterministic line and handed the turn's narration back to the model. It was wrong, not stricter. The control's strength is
 unchanged: a closed literal key set asserted exactly, `match_count` absent on every path, `items` entries with
 exactly the four projected keys, and `spoken` carrying no field the four do not already carry. No other item
 in the verified-controls list is altered by this revision.
@@ -902,8 +920,9 @@ the existing `_provider_transport`/`_step_transport` MockTransport seams. Unit t
    does not; two surviving records give `outcome="ambiguous"` with `items == []`.    Assert the Salesforce row's
    `q` is sent as `15551234567` with **no `+`** (the shipped `value_digits_only` path, `executor.py:379`), and
    that HubSpot receives two filter groups carrying `+15551234567` and `15551234567`.
-   **Fail-closed cases (security finding 1), each asserting the result is exactly
-   `{"outcome": "no_match", "items": []}` and that no substring of the input appears anywhere in the step row,
+   **Fail-closed cases (round-1 security finding 1), each asserting the result is exactly
+   `{"outcome": "no_match", "items": [], "spoken": ""}` and that no substring of the input appears anywhere in
+   the step row,
    `prior_responses` or the captured logs:** `{"_raw": "<html>…victim@example.com…123 Main St…</html>"}`; a 200
    whose envelope is `{"compositeResponse": [...]}`; a 200 error object; a record list whose elements are
    strings; and `response` being a list rather than a dict. Assert the key set of **every** return value across
