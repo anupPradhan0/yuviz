@@ -91,3 +91,8 @@ async def test_synthesize_sends_per_call_language():
     tts._client = httpx.AsyncClient(base_url="https://api.cartesia.ai", transport=httpx.MockTransport(handler))
     await tts.synthesize("नमस्ते", 16000, language="hi")
     assert seen["language"] == "hi"
+
+
+def test_body_language_is_normalised_to_iso_639_1():
+    assert CartesiaTTS(api_key="k", voice="v", language="en-US")._body("hi", 16000)["language"] == "en"
+    assert CartesiaTTS(api_key="k", voice="v")._body("hi", 16000, "hi-IN")["language"] == "hi"

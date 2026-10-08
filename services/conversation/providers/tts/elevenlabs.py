@@ -12,6 +12,8 @@ from typing import Any
 import httpx
 import numpy as np
 
+from libs.config_sdk.languages import normalize_language
+
 from ..interfaces import INSTANCE_LANGUAGE
 
 log = logging.getLogger(__name__)
@@ -66,6 +68,8 @@ class ElevenLabsTTS:
         if not text.strip():
             return b""
         language_code = self._language_code if language is INSTANCE_LANGUAGE else language
+        # language_code is ISO 639-1; agents.language is often regional ("en-US").
+        language_code = normalize_language(language_code)
 
         output_rate = _nearest_supported_rate(sample_rate)
 

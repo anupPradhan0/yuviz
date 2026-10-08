@@ -36,6 +36,8 @@ class FasterWhisperSTT:
                   With `languages=` (the agent's supported languages) and no fixed
                   language, detection picks among those only, counting registry aliases
                   (Whisper labels spoken Hindi as Urdu), then decodes once in that language.
+                  `require_language=(lang, min_conf)` skips the decode (empty text) unless
+                  detection lands on lang at min_conf or above.
     """
 
     accepts_language = True
@@ -81,11 +83,14 @@ class FasterWhisperSTT:
     async def transcribe(
         self, audio: bytes, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE,
         languages: tuple[str, ...] | None = None,
+        require_language: tuple[str, float] | None = None,
     ) -> SttResult:
         if not audio or self._model is None:
             return SttResult(text="")
 
         language = self._language if language is INSTANCE_LANGUAGE else language
+        # Whisper takes bare ISO 639-1 codes only: agents.language is often "en-US".
+        language = normalize_language(language) if language else None
         if language is None and self._model_size.endswith(".en") and not self._warned_english_only:
             self._warned_english_only = True
             log.error(
@@ -95,7 +100,9 @@ class FasterWhisperSTT:
         async with self._lock:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
-                None, functools.partial(self._transcribe_sync, audio, sample_rate, language, languages),
+                None, functools.partial(
+                    self._transcribe_sync, audio, sample_rate, language, languages, require_language,
+                ),
             )
 
     async def feed_stream(
@@ -108,8 +115,11 @@ class FasterWhisperSTT:
     async def finalize_stream(
         self, session_id: str, audio: bytes, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE,
         languages: tuple[str, ...] | None = None,
+        require_language: tuple[str, float] | None = None,
     ) -> SttResult:
-        return await self.transcribe(audio, sample_rate, language=language, languages=languages)
+        return await self.transcribe(
+            audio, sample_rate, language=language, languages=languages, require_language=require_language,
+        )
 
     async def cancel_stream(self, session_id: str) -> None:
         return
@@ -135,6 +145,7 @@ class FasterWhisperSTT:
     def _transcribe_sync(
         self, audio: bytes, sample_rate: int, language: str | None,
         languages: tuple[str, ...] | None = None,
+        require_language: tuple[str, float] | None = None,
     ) -> SttResult:
         # Convert raw L16 PCM bytes → float32 numpy array in [-1, 1].
         pcm = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
@@ -143,9 +154,17 @@ class FasterWhisperSTT:
         if sample_rate != 16_000:
             pcm = self._resample(pcm, sample_rate, 16_000)
 
-        detected: tuple[str, float] | None = None
-        if language is None and languages:
+        detected: tuple[str, float | None] | None = None
+        # English-only (.en) models can't detect; ctranslate2 raises if asked. They decode
+        # English as they always did.
+        if language is None and languages and self._model.model.is_multilingual:
             detected = self._detect_among(pcm, tuple(languages))
+            # Short utterances are only kept in the session's language at high confidence;
+            # skip the decode for the ones that would be dropped anyway (noise on the line).
+            if require_language is not None and (
+                detected[0] != require_language[0] or (detected[1] or 0.0) < require_language[1]
+            ):
+                return SttResult(text="", language=detected[0], language_confidence=detected[1])
 
         segments, info = self._model.transcribe(
             pcm,

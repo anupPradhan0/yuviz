@@ -32,6 +32,8 @@ from typing import Any, AsyncGenerator
 
 import httpx
 
+from libs.config_sdk.languages import normalize_language
+
 from ..interfaces import INSTANCE_LANGUAGE
 
 log = logging.getLogger(__name__)
@@ -110,6 +112,8 @@ class CartesiaTTS:
             },
         }
         language = self._language if language is INSTANCE_LANGUAGE else language
+        # Bare ISO 639-1: agents.language is often regional ("en-US").
+        language = normalize_language(language)
         if language:
             body["language"] = language
         if self._speed is not None:
