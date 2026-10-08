@@ -197,7 +197,7 @@ whatever language the call was in; transliterate names to Latin script."* Nothin
 
 - **Chunking:** `chunk_text(..., language=None)` uses the document's `language` when set, otherwise it
   sniffs the script. When more than 30% of characters are Han, Kana, Hangul, Thai, Lao, Khmer or
-  Myanmar, it sizes by **characters**: `chunk_size × 2` characters, overlap scaled the same way.
+  Myanmar, it sizes by **characters**: `chunk_size × 1.5` characters, overlap scaled the same way.
   Otherwise the word-based path is unchanged.
 - **Embeddings:** no schema change (`VECTOR(768)` stays). The docs and the KB UI hint recommend OpenAI
   `text-embedding-3-small` with `dimensions=768` for multilingual KBs. The docs give a re-index step:
