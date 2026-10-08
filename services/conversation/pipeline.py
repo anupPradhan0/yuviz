@@ -31,10 +31,13 @@ from .directives import (
 )
 from .fillers import FillerSelector
 from .guardrails import GuardrailCounter, GuardrailDetector
+from . import language as lang_state
+from .language import LanguageTracker, reply_language_instruction, utterance_language
 from .metrics import IMetrics, NullMetrics
 from .provider_bundle import ProviderBundle
 from .tool_latency import ToolLatencyStore
 from .providers.interfaces import ChatMessage, SttResult
+from libs.config_sdk.languages import normalize_language
 from .session import HandlerResponse
 from .session_finalizer import FinalizationResult, SessionFinalizer
 from .tools.llm_adapter import DeterministicSpokenEvent
@@ -75,14 +78,19 @@ class _SessionState:
     first_turn_filler_spoken:        bool = False
     fabrication_triggered_transfer:  bool = False
     confirmed_booking_slot:          str | None = None
+    # Multilingual agents only; None = single-language (fixed language).
+    language:                        "LanguageTracker | None" = None
 
 
 # Split after ! or ?, and after . unless it follows a title abbreviation or middle initial.
+# Devanagari danda/double danda and CJK full stops end a sentence with or without a
+# following space (CJK writes none).
 _SENTENCE_RE = re.compile(
     r'(?<=[!?])\s+'
     r'|(?<!Mr\.)(?<!Ms\.)(?<!Dr\.)(?<!Sr\.)(?<!Jr\.)(?<!St\.)(?<!Mt\.)(?<!vs\.)'
     r'(?<![A-Z]\.)(?<=[.])\s+'
     r'|(?<=[.!?])$'
+    r'|(?<=[।॥。！？])\s*'
 )
 
 # Stripped before TTS; triggers EndCall once the turn's audio has streamed.
@@ -322,6 +330,8 @@ class PipelineConversationHandler:
         self._stt          = provider_bundle.stt
         self._llm          = provider_bundle.llm
         self._tts          = provider_bundle.tts
+        self._tts_by_language: dict[str, Any] = dict(getattr(provider_bundle, "tts_by_language", None) or {})
+        self._init_languages(runtime_config)
         self._sample_rate  = sample_rate
         self._max_history  = max_history
         self._transcripts  = transcripts
@@ -446,6 +456,67 @@ class PipelineConversationHandler:
             runtime_config.agent.slug, len(graph.nodes), graph.start.name,
         )
 
+    def _init_languages(self, runtime_config: RuntimeConfig) -> None:
+        """Effective STT/TTS languages and the multilingual path's state.
+
+        A language kwarg is only passed when it differs from the provider row's own
+        (or the agent is multilingual), so single-language agents whose agents.language
+        is unset call their providers exactly as before."""
+        media = runtime_config.media
+        providers = runtime_config.providers
+        self._supported_languages: tuple[str, ...] = tuple(getattr(media, "supported_languages", ()) or ())
+        self._multilingual = bool(self._supported_languages)
+        self._default_language = getattr(media, "default_language", None) or (
+            self._supported_languages[0] if self._multilingual else None
+        )
+        stt_language = getattr(media, "stt_language", None)
+        tts_language = getattr(media, "tts_language", None)
+        self._stt_kwargs: dict[str, Any] = (
+            {"language": stt_language}
+            if getattr(self._stt, "accepts_language", False) is True
+            and (self._multilingual or stt_language != providers.stt.language)
+            else {}
+        )
+        # Single-language: a fixed TTS language when agents.language overrides the row's.
+        self._tts_fixed_language: str | None = (
+            tts_language if (not self._multilingual and tts_language != providers.tts.language) else None
+        )
+        # Spoken system strings: the session language, else an explicit agents.language.
+        # Never a provider row's language, so agents without one keep their English strings.
+        self._strings_language = normalize_language(runtime_config.agent.language) or "en"
+        if self._multilingual:
+            log.info(
+                "Multilingual agent %s: default=%s supported=%s stt_language=%s voice_overrides=%s",
+                runtime_config.agent.slug, self._default_language, ",".join(self._supported_languages),
+                stt_language, ",".join(sorted(self._tts_by_language)) or "none",
+            )
+            self._prewarm_tts_languages()
+
+    def _prewarm_tts_languages(self) -> None:
+        """Build per-language TTS state (Kokoro pipelines) off the turn's critical path."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        for tts in {id(t): t for t in (self._tts, *self._tts_by_language.values())}.values():
+            prewarm = getattr(tts, "prewarm", None)
+            if prewarm is None:
+                continue
+            task = loop.create_task(prewarm(list(self._supported_languages)))
+            task.add_done_callback(
+                lambda t: t.cancelled() or t.exception() is None
+                or log.error("TTS language prewarm failed", exc_info=t.exception())
+            )
+
+    def _session_language(self, session_id: str) -> str | None:
+        """The language this session speaks now; None for single-language agents."""
+        tracker = self._session(session_id).language
+        return tracker.current if tracker is not None else None
+
+    def _spoken_language(self, session_id: str) -> str:
+        """Language for system strings (fillers, goodbyes, fallbacks)."""
+        return self._session_language(session_id) or self._strings_language
+
     def _on_variables_extracted(self, values: dict) -> None:
         """Merge extraction into the runner for later prompts and session-end persistence."""
         self._workflow.update_variables(values)
@@ -477,7 +548,7 @@ class PipelineConversationHandler:
     async def on_audio(self, session_id: str, payload: bytes) -> HandlerResponse:
         # Lets streaming STT transcribe continuously; no-op for batch providers.
         try:
-            await self._stt.feed_stream(session_id, payload, self._sample_rate)
+            await self._stt.feed_stream(session_id, payload, self._sample_rate, **self._stt_kwargs)
         except Exception:
             log.exception("STT feed_stream failed session=%s", session_id)
         return HandlerResponse()
@@ -497,14 +568,20 @@ class PipelineConversationHandler:
         # turn's extract/summarize would otherwise queue behind Ollama.
         self._interrupt_workflow_background_llm()
 
-        # Sub-1s blips make Whisper hallucinate text or a wrong language.
+        # Sub-1s blips make Whisper hallucinate text or a wrong language. Multilingual
+        # agents let 0.45-1.0 s through to STT so "haan"/"ji"/"sí" survive, but keep them
+        # only in the session's language at high confidence (checked after STT).
         min_bytes = int(1.0 * self._sample_rate) * 2  # 1000 ms of S16LE mono
-        if len(audio) < min_bytes:
+        floor_bytes = (
+            int(lang_state.SHORT_MIN_S * self._sample_rate) * 2 if self._multilingual else min_bytes
+        )
+        if len(audio) < floor_bytes:
             log.debug(
                 "Skipping short utterance (%d bytes < %d) session=%s",
-                len(audio), min_bytes, session_id,
+                len(audio), floor_bytes, session_id,
             )
             return
+        is_short = len(audio) < min_bytes
 
         # Voice-to-voice latency is measured from the end of the caller's speech.
         turn_start = time.monotonic()
@@ -512,7 +589,9 @@ class PipelineConversationHandler:
         # ── 1. STT ─────────────────────────────────────────────────────────────
         stt_t0 = time.monotonic()
         try:
-            stt_result: SttResult = await self._stt.finalize_stream(session_id, audio, self._sample_rate)
+            stt_result: SttResult = await self._stt.finalize_stream(
+                session_id, audio, self._sample_rate, **self._stt_kwargs,
+            )
         except Exception:
             log.exception("STT failed session=%s", session_id)
             return
@@ -521,6 +600,19 @@ class PipelineConversationHandler:
         if not stt_result.text or cancel_event.is_set():
             log.debug("STT empty or cancelled session=%s", session_id)
             return
+
+        tracker = self._session(session_id).language
+        if tracker is not None:
+            heard = utterance_language(stt_result, self._supported_languages)
+            if is_short:
+                if not tracker.accept_short(heard):
+                    log.debug(
+                        "Skipping short utterance %r lang=%s conf=%s (session language %s) session=%s",
+                        stt_result.text, heard.language, heard.confidence, tracker.current, session_id,
+                    )
+                    return
+            else:
+                tracker.observe(heard, session_id)
 
         log.info("STT result=%r session=%s", stt_result.text, session_id)
         yield HandlerResponse(stt_text=stt_result.text, stt_confidence=stt_result.confidence)
@@ -575,7 +667,7 @@ class PipelineConversationHandler:
         is_first_turn = not history
         # history[0] is the active node's prompt — refreshed every turn so a
         # mid-call transition lands before the next generation.
-        self._refresh_node_prompt(history)
+        self._refresh_node_prompt(history, session_id)
         history.append(ChatMessage(role="user", content=stt_result.text))
 
         if is_first_turn and not self._session(session_id).first_turn_filler_spoken:
@@ -826,7 +918,7 @@ class PipelineConversationHandler:
         self._session_finalizer.discard_pending_summary(session_id)
 
         history = self._get_history(session_id)
-        self._refresh_node_prompt(history)
+        self._refresh_node_prompt(history, session_id)
 
         notice = ChatMessage(
             role="user",
@@ -897,9 +989,14 @@ class PipelineConversationHandler:
 
     # ── Workflow helpers ─────────────────────────────────────────────────
 
-    def _refresh_node_prompt(self, history: list[ChatMessage]) -> None:
-        """Refresh history[0] with the active node's rendered prompt."""
-        prompt = ChatMessage(role="system", content=self._workflow.system_prompt())
+    def _refresh_node_prompt(self, history: list[ChatMessage], session_id: str | None = None) -> None:
+        """Refresh history[0] with the active node's rendered prompt, plus the reply-language
+        line on the multilingual path (per turn, so it follows a language switch)."""
+        content = self._workflow.system_prompt()
+        language = self._session_language(session_id) if session_id is not None else None
+        if language:
+            content += reply_language_instruction(language)
+        prompt = ChatMessage(role="system", content=content)
         if history and history[0].role == "system":
             history[0] = prompt
         else:
@@ -1185,8 +1282,11 @@ class PipelineConversationHandler:
     async def _synthesize_sentence_stream(self, text: str, session_id: str) -> AsyncGenerator[bytes, None]:
         # Every text source reaches TTS here, so strip markdown once for all of them.
         text = strip_markdown_chars(text)
+        language = self._session_language(session_id) or self._tts_fixed_language
+        tts = self._tts_by_language.get(language, self._tts) if language else self._tts
+        kwargs = {"language": language} if language and getattr(tts, "accepts_language", False) is True else {}
         try:
-            async for chunk in self._tts.synthesize_stream(text, self._sample_rate):
+            async for chunk in tts.synthesize_stream(text, self._sample_rate, **kwargs):
                 yield chunk
         except Exception:
             log.exception("TTS streaming failed text=%r session=%s", text, session_id)
@@ -1195,6 +1295,8 @@ class PipelineConversationHandler:
         state = self._sessions.get(session_id)
         if state is None:
             state = _SessionState()
+            if self._multilingual and self._default_language:
+                state.language = LanguageTracker(self._default_language, self._supported_languages)
             self._sessions[session_id] = state
         return state
 

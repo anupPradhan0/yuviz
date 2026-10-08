@@ -1,0 +1,316 @@
+"""Multilingual agents: LanguageTracker hysteresis + Hinglish rule, sentence splitting,
+and end-to-end from Config SDK resolution to the language the providers receive."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from libs.config_sdk import MockConfigProvider
+from libs.config_sdk.workflow import starter_graph
+
+from .. import language as lang_state
+from ..language import LanguageTracker, UtteranceLanguage, reply_language_instruction, utterance_language
+from ..pipeline import PipelineConversationHandler, _SENTENCE_RE
+from ..provider_bundle import ProviderBundle
+from ..providers.interfaces import INSTANCE_LANGUAGE, SttResult
+
+U = UtteranceLanguage
+
+
+# ── LanguageTracker ──────────────────────────────────────────────────────────
+
+def test_first_confident_utterance_switches_immediately():
+    t = LanguageTracker("en", ("en", "hi"))
+    assert t.observe(U("hi", 0.9)) is True
+    assert t.current == "hi"
+
+
+def test_first_utterance_in_default_language_establishes_it():
+    t = LanguageTracker("en", ("en", "hi"))
+    assert t.observe(U("en", 0.9)) is False
+    # Now a single Hindi utterance must not flip it…
+    assert t.observe(U("hi", 0.95)) is False
+    assert t.current == "en"
+    # …but a sustained switch does.
+    assert t.observe(U("hi", 0.95)) is True
+    assert t.current == "hi"
+
+
+def test_noisy_or_unsupported_utterance_breaks_the_streak():
+    t = LanguageTracker("en", ("en", "hi"))
+    t.observe(U("en", 0.9))
+    t.observe(U("hi", 0.9))
+    t.observe(U("hi", 0.4))   # low confidence: ignored, streak reset
+    t.observe(U("hi", 0.9))
+    assert t.current == "en"
+    t.observe(U("fr", 0.99))  # unsupported: ignored
+    assert t.current == "en"
+    assert t.detected == ["en", "hi"]
+
+
+def test_unsupported_language_never_becomes_session_language():
+    t = LanguageTracker("en", ("en", "hi"))
+    for _ in range(5):
+        assert t.observe(U("es", 0.99)) is False
+    assert t.current == "en"
+    assert t.detected == []
+
+
+def test_streak_length_is_tunable(monkeypatch):
+    monkeypatch.setattr(lang_state, "SWITCH_STREAK", 3)
+    t = LanguageTracker("en", ("en", "hi"))
+    t.observe(U("en", 0.9))
+    assert not t.observe(U("hi", 0.9))
+    assert not t.observe(U("hi", 0.9))
+    assert t.observe(U("hi", 0.9))
+
+
+def test_short_utterance_only_in_session_language():
+    t = LanguageTracker("hi", ("en", "hi"))
+    assert t.accept_short(U("hi", 0.9))
+    assert not t.accept_short(U("hi", 0.7))   # below the short-utterance confidence
+    assert not t.accept_short(U("en", 0.99))  # other language: dropped, never switches
+    assert t.current == "hi"
+
+
+# ── Hinglish rule ────────────────────────────────────────────────────────────
+
+SUPPORTED = ("en", "hi")
+
+
+def test_any_devanagari_counts_as_hindi():
+    r = SttResult(text="मुझे appointment chahiye", language="en", language_confidence=0.6)
+    assert utterance_language(r, SUPPORTED) == U("hi", 1.0)
+
+
+def test_hi_word_share_at_threshold_counts_as_hindi():
+    r = SttResult(text="mujhe appointment book karna", language="en", language_confidence=0.7,
+                  language_shares={"en": 0.7, "hi": 0.3})
+    assert utterance_language(r, SUPPORTED).language == "hi"
+
+
+def test_hi_word_share_below_threshold_stays_english():
+    r = SttResult(text="I want an appointment please ji", language="en", language_confidence=0.85,
+                  language_shares={"en": 0.85, "hi": 0.15})
+    assert utterance_language(r, SUPPORTED) == U("en", 0.85)
+
+
+def test_hinglish_session_does_not_flip_flop():
+    t = LanguageTracker("en", SUPPORTED)
+    hinglish = SttResult(text="haan mujhe kal ka slot chahiye", language="en", language_confidence=0.6,
+                         language_shares={"en": 0.4, "hi": 0.6})
+    english = SttResult(text="tomorrow at five works", language="en", language_confidence=1.0,
+                        language_shares={"en": 1.0})
+    t.observe(utterance_language(hinglish, SUPPORTED))
+    assert t.current == "hi"
+    for r in (english, hinglish, english, hinglish):
+        t.observe(utterance_language(r, SUPPORTED))
+        assert t.current == "hi"
+    # Two English-only utterances in a row is a real switch.
+    t.observe(utterance_language(english, SUPPORTED))
+    t.observe(utterance_language(english, SUPPORTED))
+    assert t.current == "en"
+
+
+def test_hinglish_rule_only_when_hindi_supported():
+    r = SttResult(text="नमस्ते", language="hi", language_confidence=0.9)
+    assert utterance_language(r, ("en", "es")) == U("hi", 0.9)
+
+
+def test_reply_instruction_names_language_and_script():
+    line = reply_language_instruction("hi")
+    assert "Reply in Hindi (हिन्दी)" in line and "Devanagari" in line and "mirror" in line
+    assert "Reply in English." in reply_language_instruction("en")
+
+
+# ── Sentence splitter ────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("text, first, rest", [
+    ("नमस्ते। आप कैसे हैं?", "नमस्ते।", "आप कैसे हैं?"),
+    ("धन्यवाद॥ फिर मिलेंगे", "धन्यवाद॥", "फिर मिलेंगे"),
+    ("こんにちは。元気ですか", "こんにちは。", "元気ですか"),
+    ("好的！我们开始吧", "好的！", "我们开始吧"),
+    ("真的？是的", "真的？", "是的"),
+    ("Dr. Smith will see you. Okay", "Dr. Smith will see you.", "Okay"),
+])
+def test_sentence_splitter(text, first, rest):
+    assert _SENTENCE_RE.split(text, maxsplit=1) == [first, rest]
+
+
+def test_splitter_keeps_english_abbreviation_guards():
+    assert len(_SENTENCE_RE.split("Talk to Mr. Rao now", maxsplit=1)) == 1
+
+
+# ── End to end: Config SDK -> handler -> providers ───────────────────────────
+
+class _RecordingSTT:
+    accepts_language = True
+
+    def __init__(self, results: list[SttResult]) -> None:
+        self._results = list(results)
+        self.languages: list[Any] = []
+
+    async def feed_stream(self, session_id, chunk, sample_rate, *, language=INSTANCE_LANGUAGE):
+        self.languages.append(language)
+
+    async def finalize_stream(self, session_id, audio, sample_rate, *, language=INSTANCE_LANGUAGE):
+        self.languages.append(language)
+        return self._results.pop(0)
+
+    async def cancel_stream(self, session_id):
+        return None
+
+
+class _RecordingTTS:
+    accepts_language = True
+
+    def __init__(self, name: str = "base") -> None:
+        self.name = name
+        self.calls: list[tuple[str, Any]] = []
+
+    async def synthesize_stream(self, text, sample_rate, *, language=INSTANCE_LANGUAGE):
+        self.calls.append((text, language))
+        yield b"\x00\x00"
+
+
+class _LegacyTTS:
+    """Predates the language keyword entirely."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    async def synthesize_stream(self, text, sample_rate):
+        self.texts.append(text)
+        yield b"\x00\x00"
+
+
+class _LLM:
+    def __init__(self) -> None:
+        self.system_prompts: list[str] = []
+
+    async def generate(self, messages):
+        self.system_prompts.append(messages[0].content)
+        yield "Okay."
+
+
+async def _runtime(agent_kwargs: dict, stt_language=None, tts_language=None, tts_engine="cartesia"):
+    provider = MockConfigProvider()
+    provider.add_tenant(slug="acme", name="Acme")
+    provider.add_provider_config(id="stt1", role="stt", engine="deepgram", model="nova-3", language=stt_language)
+    provider.add_provider_config(id="llm1", role="llm", engine="openai")
+    provider.add_provider_config(id="tts1", role="tts", engine=tts_engine, voice="v", language=tts_language)
+    provider.add_provider_config(id="tts-hi", role="tts", engine="cartesia", voice="v-hi", tenant_id="tenant-id")
+    provider.add_agent(
+        "acme", slug="bot", name="Bot", stt_config_id="stt1", llm_config_id="llm1", tts_config_id="tts1",
+        workflow=starter_graph("Hello!", "Be brief."), **agent_kwargs,
+    )
+    return await provider.get_runtime_config("acme", "bot")
+
+
+def _handler(rc, stt, llm, tts, tts_by_language=None):
+    bundle = ProviderBundle(stt=stt, llm=llm, tts=tts, tts_by_language=tts_by_language or {})
+    return PipelineConversationHandler(rc, bundle)
+
+
+_SPEECH = b"\x00" * 40_000   # 1.25 s at 16 kHz: clears every gate
+_SHORT = b"\x00" * 20_000    # 0.625 s: multilingual short-utterance band
+_BLIP = b"\x00" * 12_000     # 0.375 s: under the 0.45 s floor
+
+
+async def _turn(handler, session_id, audio=_SPEECH):
+    await handler.on_audio(session_id, b"\x00\x00")
+    return [r async for r in handler.on_speech_ended(session_id, audio, 1000, -20.0)]
+
+
+async def test_agent_language_reaches_stt_and_tts():
+    rc = await _runtime({"language": "hi"}, stt_language="en", tts_language="en")
+    stt = _RecordingSTT([SttResult(text="नमस्ते")])
+    tts = _RecordingTTS()
+    h = _handler(rc, stt, _LLM(), tts)
+
+    await _turn(h, "s1")
+
+    assert set(stt.languages) == {"hi"}
+    assert tts.calls and all(lang == "hi" for _, lang in tts.calls)
+
+
+async def test_single_language_agent_without_language_calls_providers_as_before():
+    rc = await _runtime({}, stt_language="en", tts_language=None)
+    stt = _RecordingSTT([SttResult(text="hello")])
+    tts = _RecordingTTS()
+    llm = _LLM()
+    h = _handler(rc, stt, llm, tts)
+
+    await _turn(h, "s1")
+
+    assert set(stt.languages) == {INSTANCE_LANGUAGE}
+    assert all(lang is INSTANCE_LANGUAGE for _, lang in tts.calls)
+    assert "Reply in" not in llm.system_prompts[0]
+
+
+async def test_single_language_non_english_agent_gets_no_prompt_injection():
+    rc = await _runtime({"language": "hi"})
+    llm = _LLM()
+    h = _handler(rc, _RecordingSTT([SttResult(text="नमस्ते")]), llm, _RecordingTTS())
+    await _turn(h, "s1")
+    assert "Reply in" not in llm.system_prompts[0]
+
+
+async def test_multilingual_switches_voice_prompt_and_stt_mode():
+    rc = await _runtime({"language": "en", "supported_languages": ("en", "hi"),
+                         "tts_config_by_language": {"hi": "tts-hi"}})
+    assert rc.media.stt_language == "multi"
+    stt = _RecordingSTT([
+        SttResult(text="hello there", language="en", language_confidence=1.0, language_shares={"en": 1.0}),
+        SttResult(text="मुझे अपॉइंटमेंट चाहिए", language="hi", language_confidence=1.0),
+        SttResult(text="कल पाँच बजे", language="hi", language_confidence=1.0),
+    ])
+    base, hindi = _RecordingTTS("base"), _RecordingTTS("hi")
+    llm = _LLM()
+    h = _handler(rc, stt, llm, base, {"hi": hindi})
+
+    await _turn(h, "s1")
+    assert "Reply in English." in llm.system_prompts[-1]
+    assert base.calls and not hindi.calls
+
+    await _turn(h, "s1")  # one Hindi utterance after English was established: no switch yet
+    assert "Reply in English." in llm.system_prompts[-1]
+
+    await _turn(h, "s1")  # sustained: switch
+    assert "Reply in Hindi" in llm.system_prompts[-1]
+    assert hindi.calls and all(lang == "hi" for _, lang in hindi.calls)
+    assert set(stt.languages) == {"multi"}
+
+
+async def test_multilingual_short_utterance_gate():
+    rc = await _runtime({"language": "hi", "supported_languages": ("hi", "en")})
+    stt = _RecordingSTT([
+        SttResult(text="haan", language="hi", language_confidence=0.9),
+        SttResult(text="Thank you.", language="en", language_confidence=0.99),
+    ])
+    llm = _LLM()
+    h = _handler(rc, stt, llm, _RecordingTTS())
+
+    assert await _turn(h, "s1", _BLIP) == []          # under the floor: STT never runs
+    responses = await _turn(h, "s1", _SHORT)          # "haan" in session language: kept
+    assert any(r.stt_text == "haan" for r in responses)
+    responses = await _turn(h, "s1", _SHORT)          # confident English blip: dropped
+    assert not any(r.stt_text for r in responses)
+    assert h._session_language("s1") == "hi"
+
+
+async def test_single_language_keeps_one_second_gate():
+    rc = await _runtime({})
+    stt = _RecordingSTT([SttResult(text="haan", language="hi", language_confidence=0.99)])
+    h = _handler(rc, stt, _LLM(), _RecordingTTS())
+    assert await _turn(h, "s1", _SHORT) == []
+
+
+async def test_legacy_tts_without_language_keyword_still_works():
+    rc = await _runtime({"language": "en", "supported_languages": ("en", "hi")})
+    tts = _LegacyTTS()
+    h = _handler(rc, _RecordingSTT([SttResult(text="hello", language="en", language_confidence=1.0)]), _LLM(), tts)
+    await _turn(h, "s1")
+    assert tts.texts
