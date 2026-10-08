@@ -27,7 +27,17 @@ def test_first_confident_utterance_switches_immediately():
     assert t.current == "hi"
 
 
-def test_first_utterance_in_default_language_establishes_it():
+def test_default_switches_on_one_confident_utterance():
+    t = LanguageTracker("en", ("en", "hi"))
+    t.observe(U("en", 0.9))
+    assert t.observe(U("hi", 0.9)) is True
+    assert t.observe(U("en", 0.9)) is True
+    assert t.observe(U("hi", 0.5)) is False  # still needs confidence
+    assert t.current == "en"
+
+
+def test_first_utterance_in_default_language_establishes_it(monkeypatch):
+    monkeypatch.setattr(lang_state, "SWITCH_STREAK", 2)
     t = LanguageTracker("en", ("en", "hi"))
     assert t.observe(U("en", 0.9)) is False
     # Now a single Hindi utterance must not flip it…
@@ -38,7 +48,8 @@ def test_first_utterance_in_default_language_establishes_it():
     assert t.current == "hi"
 
 
-def test_noisy_or_unsupported_utterance_breaks_the_streak():
+def test_noisy_or_unsupported_utterance_breaks_the_streak(monkeypatch):
+    monkeypatch.setattr(lang_state, "SWITCH_STREAK", 2)
     t = LanguageTracker("en", ("en", "hi"))
     t.observe(U("en", 0.9))
     t.observe(U("hi", 0.9))
@@ -97,7 +108,8 @@ def test_hi_word_share_below_threshold_stays_english():
     assert utterance_language(r, SUPPORTED) == U("en", 0.85)
 
 
-def test_hinglish_session_does_not_flip_flop():
+def test_hinglish_session_does_not_flip_flop(monkeypatch):
+    monkeypatch.setattr(lang_state, "SWITCH_STREAK", 2)
     t = LanguageTracker("en", SUPPORTED)
     hinglish = SttResult(text="haan mujhe kal ka slot chahiye", language="en", language_confidence=0.6,
                          language_shares={"en": 0.4, "hi": 0.6})
@@ -263,7 +275,8 @@ async def test_single_language_non_english_agent_gets_no_prompt_injection():
     assert "The caller is speaking" not in llm.system_prompts[0]
 
 
-async def test_multilingual_switches_voice_prompt_and_stt_mode():
+async def test_multilingual_switches_voice_prompt_and_stt_mode(monkeypatch):
+    monkeypatch.setattr(lang_state, "SWITCH_STREAK", 2)
     rc = await _runtime({"language": "en", "supported_languages": ("en", "hi"),
                          "tts_config_by_language": {"hi": "tts-hi"}})
     assert rc.media.stt_language == "multi"

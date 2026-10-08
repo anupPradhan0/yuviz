@@ -98,14 +98,14 @@ transition:
 
 - The **first** confident utterance switches immediately. The default language is a prior, so a caller
   who opens in Hindi gets Hindi on turn 1.
-- After that, a switch needs **two consecutive** qualifying utterances. One noisy utterance or a single
-  English phrase can't flip the language. A sustained switch flips it on the second turn.
-- **Hinglish:** once the session is `hi`, an utterance with both hi and en words stays `hi`. Going back
-  to `en` needs two consecutive utterances with no Hindi evidence at all, so there is no hi/en
-  flip-flop.
+- After that, a switch needs `VOICEAI_LANG_SWITCH_STREAK` consecutive qualifying utterances.
+  **Default 1** (changed from 2 after local testing: callers expected the very next reply to follow
+  them). Set 2+ for hysteresis, so one noisy utterance can't flip the language.
+- **Hinglish:** once the session is `hi`, an utterance with both hi and en words stays `hi`; an
+  English-only utterance switches back (after `SWITCH_STREAK` of them).
 - Every switch is logged, and the language is recorded for `calls.detected_languages`.
 - Every threshold is a module constant overridable by env: `VOICEAI_LANG_MIN_CONFIDENCE` (0.70),
-  `VOICEAI_LANG_SWITCH_STREAK` (2), `VOICEAI_LANG_HI_WORD_SHARE` (0.30),
+  `VOICEAI_LANG_SWITCH_STREAK` (1), `VOICEAI_LANG_HI_WORD_SHARE` (0.30),
   `VOICEAI_LANG_SHORT_MIN_S` (0.45), `VOICEAI_LANG_SHORT_MIN_CONFIDENCE` (0.80).
 
 ## 3. Provider resolution

@@ -77,14 +77,14 @@ Agents with no `supported_languages` behave exactly as before.
 The session starts in the default language. After each caller utterance, the STT result we already
 have (no extra call) says which language was spoken:
 
-- **The first** confident utterance of the call sets the language immediately. A caller who opens in
-  Hindi gets Hindi on the first reply.
-- **After that,** switching needs **two consecutive** confident utterances (confidence ≥ 0.70) in the
-  same new language, so one noisy utterance or a stray English phrase doesn't flip it.
+- **By default the reply follows the caller's latest language:** one confident utterance
+  (confidence ≥ 0.70) in another supported language switches the session, and the next reply uses
+  that language and its voice. Set `VOICEAI_LANG_SWITCH_STREAK=2` (or higher) to require that many
+  consecutive utterances instead, so one misheard utterance can't flip the call; the first confident
+  utterance of a call always switches immediately.
 - **Hinglish:** when Hindi is supported, an utterance counts as Hindi if it contains any Devanagari, or
   if at least 30% of its words are tagged Hindi (Deepgram tags every word). Otherwise it counts as
-  English. A Hinglish session stays in Hindi; it goes back to English only after two English-only
-  utterances in a row.
+  English. So mixed sentences keep a Hindi session in Hindi; an English-only sentence switches back.
 - **Unsupported or low-confidence utterances change nothing.**
 - **Short replies** such as "haan", "ji" or "sí" (0.45–1.0 s of audio) are transcribed. They are kept
   only if they are confidently (≥ 0.80) in the current session language. They can never switch the
@@ -107,7 +107,7 @@ no code change):
 | Variable | Default | Meaning |
 |---|---|---|
 | `VOICEAI_LANG_MIN_CONFIDENCE` | `0.70` | Minimum detection confidence that counts toward a switch |
-| `VOICEAI_LANG_SWITCH_STREAK` | `2` | Consecutive utterances needed to switch after the first |
+| `VOICEAI_LANG_SWITCH_STREAK` | `1` | Consecutive utterances needed to switch after the first. `1`: the reply follows the caller's latest language. `2`+: one misheard utterance can't flip it |
 | `VOICEAI_LANG_HI_WORD_SHARE` | `0.30` | Share of Hindi-tagged words that makes an utterance Hindi |
 | `VOICEAI_LANG_SHORT_MIN_S` | `0.45` | Utterances shorter than this are always dropped (multilingual agents) |
 | `VOICEAI_LANG_SHORT_MIN_CONFIDENCE` | `0.80` | Confidence a 0.45–1.0 s utterance needs to be kept |

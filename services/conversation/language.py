@@ -30,8 +30,9 @@ def _env_float(name: str, default: float) -> float:
 
 # Below this the detected language is ignored (and breaks a switch streak).
 MIN_CONFIDENCE = _env_float("VOICEAI_LANG_MIN_CONFIDENCE", 0.70)
-# Consecutive confident utterances in a new language needed to switch to it.
-SWITCH_STREAK = int(_env_float("VOICEAI_LANG_SWITCH_STREAK", 2))
+# Consecutive confident utterances in a new language needed to switch to it. 1 = the reply
+# follows the caller's latest language; 2+ = hysteresis against one misheard utterance.
+SWITCH_STREAK = int(_env_float("VOICEAI_LANG_SWITCH_STREAK", 1))
 # Hinglish: an utterance counts as Hindi at or above this share of hi-tagged words.
 HI_WORD_SHARE = _env_float("VOICEAI_LANG_HI_WORD_SHARE", 0.30)
 # Short utterances (multilingual agents): always dropped below SHORT_MIN_S; between it
@@ -75,7 +76,7 @@ class LanguageTracker:
 
     - The first confident utterance of the call switches immediately (the default
       language is only a prior).
-    - After that, a switch needs SWITCH_STREAK consecutive confident utterances in the
+    - After that, a switch needs SWITCH_STREAK (default 1) consecutive confident utterances in the
       same new language, so one noisy utterance can't flip it.
     - Unsupported or low-confidence utterances change nothing and break a streak.
     """
