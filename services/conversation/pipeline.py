@@ -670,7 +670,15 @@ class PipelineConversationHandler:
             else:
                 tracker.observe(heard, session_id)
 
-        log.info("STT result=%r session=%s", stt_result.text, session_id)
+        if tracker is not None:
+            log.info(
+                "STT result=%r language=%s conf=%s session_language=%s session=%s",
+                stt_result.text, heard.language,
+                f"{heard.confidence:.2f}" if heard.confidence is not None else None,
+                tracker.current, session_id,
+            )
+        else:
+            log.info("STT result=%r session=%s", stt_result.text, session_id)
         yield HandlerResponse(stt_text=stt_result.text, stt_confidence=stt_result.confidence)
 
         # A breach only stores a pending transfer; the agent still answers this turn first.

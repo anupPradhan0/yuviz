@@ -114,17 +114,23 @@ class FasterWhisperSTT:
     async def cancel_stream(self, session_id: str) -> None:
         return
 
-    def _detect_among(self, pcm: np.ndarray, candidates: tuple[str, ...]) -> tuple[str, float]:
-        """Best candidate language and its probability, aliases folded in. One extra
-        encoder pass, no decode; the transcribe that follows decodes once."""
+    def _detect_among(self, pcm: np.ndarray, candidates: tuple[str, ...]) -> tuple[str, float | None]:
+        """Best candidate language and its share of the candidates' probability (aliases
+        folded in). One extra encoder pass, no decode; the transcribe that follows decodes once.
+
+        The share, not the raw probability: Whisper spreads accented speech across many
+        languages the agent can't use, which would leave English at ~0.5 for clearly
+        English speech and block every switch back to it."""
         _top, _p, all_probs = self._model.detect_language(pcm)
         probs = dict(all_probs)
         def score(code: str) -> float:
             entry = LANGUAGES.get(code)
             aliases = entry.aliases if entry else ()
             return probs.get(code, 0.0) + sum(probs.get(a, 0.0) for a in aliases if a not in candidates)
-        best = max(candidates, key=score)
-        return best, min(score(best), 1.0)
+        scores = {code: score(code) for code in candidates}
+        best = max(scores, key=scores.get)
+        total = sum(scores.values())
+        return best, (scores[best] / total if total > 0 else None)
 
     def _transcribe_sync(
         self, audio: bytes, sample_rate: int, language: str | None,

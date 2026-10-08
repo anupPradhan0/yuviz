@@ -77,16 +77,33 @@ async def test_candidates_fold_urdu_into_hindi_and_decode_in_hindi(whisper_cls):
     result = await stt.finalize_stream("s1", b"\x00\x01" * 8000, 16000, language=None, languages=("en", "hi"))
     assert stt._model.calls[0]["language"] == "hi"  # one decode, in Hindi (Devanagari), not Urdu
     assert result.language == "hi"
-    assert result.language_confidence == pytest.approx(0.90)
+    # (ur 0.55 + hi 0.35) / (that + en 0.05): share among the agent's languages.
+    assert result.language_confidence == pytest.approx(0.90 / 0.95)
 
 
 async def test_candidates_pick_best_supported_language(whisper_cls):
     stt = _stt(whisper_cls, language=None, model=_DetectingModel())
     result = await stt.transcribe(b"\x00\x01" * 8000, 16000, language=None, languages=("en", "es"))
-    assert result.language == "en" and result.language_confidence == pytest.approx(0.05)
+    # ur folds into nothing here (hi unsupported): en 0.05 vs es 0.05 — a tie, never confident.
+    assert result.language in ("en", "es") and result.language_confidence == pytest.approx(0.5)
 
 
 async def test_fixed_language_ignores_candidates(whisper_cls):
     stt = _stt(whisper_cls, language="en", model=_DetectingModel())
     result = await stt.transcribe(b"\x00\x01" * 8000, 16000, languages=("en", "hi"))
     assert stt._model.calls[0]["language"] == "en" and result.language is None
+
+
+class _AccentedEnglishModel(_StubModel):
+    """Accented English: Whisper's top pick is English, but most mass is spread elsewhere."""
+
+    def detect_language(self, pcm):
+        probs = [("en", 0.48), ("cy", 0.2), ("nl", 0.15), ("hi", 0.06), ("ur", 0.04), ("de", 0.07)]
+        return probs[0][0], probs[0][1], probs
+
+
+async def test_accented_english_is_confidently_english_among_candidates(whisper_cls):
+    stt = _stt(whisper_cls, language=None, model=_AccentedEnglishModel())
+    result = await stt.transcribe(b"\x00\x01" * 8000, 16000, language=None, languages=("en", "hi"))
+    assert result.language == "en"
+    assert result.language_confidence == pytest.approx(0.48 / 0.58)  # 0.83: enough to switch back
