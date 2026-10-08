@@ -359,7 +359,7 @@ async def soft_delete_provider_config(
                 "SELECT name FROM agents WHERE tenant_id = $1 AND deleted_at IS NULL "
                 "AND EXISTS (SELECT 1 FROM jsonb_each_text(tts_config_by_language) o "
                 "WHERE o.value = $2::text)",
-                old["tenant_id"], str(provider_id),
+                old["tenant_id"], str(old["id"]),
             )
             if rows:
                 raise ProviderConfigInUse("agent", len(rows), [r["name"] for r in rows])

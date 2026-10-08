@@ -81,3 +81,11 @@ async def test_failed_pipeline_build_falls_back_once_and_is_not_retried(kokoro, 
     second = await tts.synthesize("फिर से", 16000, language="hi")
     assert first and second  # spoken with the row's pipeline, not silence
     assert sum("can't build pipeline" in r.message for r in caplog.records) == 1
+
+
+@pytest.mark.parametrize("language", ["en", "en-GB", "en-US"])
+async def test_same_language_as_row_keeps_the_rows_own_accent(kokoro, language):
+    tts = kokoro.KokoroTTS(lang_code="b")
+    assert tts._resolve_lang_code(language) == "b"
+    await tts.synthesize("hello", 16000, language=language)
+    assert [code for code, _ in _StubPipeline.built] == ["b"]

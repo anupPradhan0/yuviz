@@ -314,3 +314,25 @@ async def test_live_without_word_tags_falls_back_to_languages_list():
     await stt.feed_stream("s1", b"\x01\x02", 16000, language="multi")
     result = await stt.finalize_stream("s1", b"unused", 16000)
     assert result.language == "es" and result.language_confidence == 1.0
+
+
+async def test_underscore_language_tag_is_canonicalised_for_rest_and_live():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["language"] == "en-US"
+        return httpx.Response(200, json={"results": {"channels": [{"alternatives": [
+            {"transcript": "hello", "confidence": 0.9},
+        ]}]}})
+
+    await _make_stt(handler).transcribe(b"\x00\x01" * 100, 16000, language=" en_US ")
+    assert DeepgramSTT(api_key="k", language="en_US")._language == "en-US"
+
+    stt = DeepgramSTT(api_key="test-key")
+    urls = []
+
+    async def _fake_connect(url, **kwargs):
+        urls.append(url)
+        return _FakeLiveWs([])
+
+    stt._ws_connect = _fake_connect
+    await stt.feed_stream("s1", b"\x01\x02", 16000, language="en_US")
+    assert "language=en-US" in urls[0]

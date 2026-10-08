@@ -245,7 +245,7 @@ _LANGUAGE_FIELDS = (
 )
 _MAX_GREETING_CHARS = 2000
 # BCP-47-ish: "en", "hi", "en-US", "zh-Hant-TW". Providers get a per-engine normalised form.
-_LANGUAGE_TAG_RE = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
+_LANGUAGE_TAG_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 
 
 def _check_language_tag(value: Any) -> None:
@@ -257,10 +257,11 @@ def _check_language_tag(value: Any) -> None:
         raise ValueError(f"language {value!r} is not a language code (e.g. 'en', 'hi', 'en-US')")
 
 
-async def _tts_row(conn: Any, config_id: Any) -> Any:
+async def _tts_row(conn: Any, config_id: Any, tenant_id: Any) -> Any:
+    """A provider row of this tenant; another tenant's row reads as absent."""
     return await conn.fetchrow(
         "SELECT id, tenant_id, name, role, engine, model, voice, extra FROM provider_configs "
-        "WHERE id = $1 AND deleted_at IS NULL FOR SHARE", config_id,
+        "WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL FOR SHARE", config_id, tenant_id,
     )
 
 
@@ -301,9 +302,8 @@ async def _validate_languages(conn: Any, tenant_id: Any, merged: dict[str, Any])
             uuid.UUID(str(config_id))
         except ValueError:
             raise ValueError(f"tts_config_by_language[{lang!r}]={config_id!r} is not a valid id") from None
-        row = await _tts_row(conn, str(config_id))
-        # Another tenant's id is indistinguishable from a missing one.
-        if row is None or str(row["tenant_id"]) != str(tenant_id):
+        row = await _tts_row(conn, str(config_id), tenant_id)
+        if row is None:
             raise ValueError(f"tts_config_by_language[{lang!r}] not found")
         if row["role"] != "tts":
             raise ValueError(f"tts_config_by_language[{lang!r}]={config_id!r} has role {row['role']!r}, expected 'tts'")
@@ -348,7 +348,7 @@ async def _validate_languages(conn: Any, tenant_id: Any, merged: dict[str, Any])
         stt_id = merged.get("stt_config_id") or await conn.fetchval(
             "SELECT default_stt_config_id FROM tenants WHERE id = $1", tenant_id,
         )
-        stt = await _tts_row(conn, str(stt_id)) if stt_id else None
+        stt = await _tts_row(conn, str(stt_id), tenant_id) if stt_id else None
         if stt is not None and stt["role"] == "stt":
             name = f"{stt['name']!r} ({stt['engine']} {stt['model'] or 'default model'})"
             if stt["engine"] == "faster_whisper" and (stt["model"] or "").endswith(".en"):
@@ -368,7 +368,7 @@ async def _validate_languages(conn: Any, tenant_id: Any, merged: dict[str, Any])
     base_id = merged.get("tts_config_id") or await conn.fetchval(
         "SELECT default_tts_config_id FROM tenants WHERE id = $1", tenant_id,
     )
-    base = await _tts_row(conn, str(base_id)) if base_id else None
+    base = await _tts_row(conn, str(base_id), tenant_id) if base_id else None
     base_langs = _row_tts_languages(base) if base is not None else frozenset({"en"})
     for lang in supported:
         if lang == "en" or lang in overrides or lang in base_langs:

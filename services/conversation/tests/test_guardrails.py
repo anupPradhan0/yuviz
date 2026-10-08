@@ -158,3 +158,8 @@ def test_hindi_lexicon_not_used_for_english_sessions():
 def test_unknown_language_fails_safe(language):
     assert not GuardrailDetector.supports(language)
     assert GuardrailDetector.check("this is fucking useless", language) is None
+
+
+def test_romanised_hindi_abuse_does_not_flag_english_sale():
+    assert GuardrailDetector.check("kya sale abhi chal rahi hai", "hi") is None
+    assert GuardrailDetector.check("saale", "hi") is not None

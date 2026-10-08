@@ -26,8 +26,9 @@ class FakeConn:
         self.default_stt = default_stt
         self.agents = agents or []
 
-    async def fetchrow(self, _sql, config_id):
-        return self.rows.get(str(config_id))
+    async def fetchrow(self, _sql, config_id, tenant_id):
+        row = self.rows.get(str(config_id))
+        return row if row is not None and str(row["tenant_id"]) == str(tenant_id) else None
 
     async def fetchval(self, sql, _tenant_id):
         return self.default_stt if "default_stt_config_id" in sql else self.default_tts
@@ -222,6 +223,18 @@ async def test_provider_used_as_voice_override_cannot_be_deleted(test_tenant, sc
         await provider_configs.soft_delete_provider_config(hi_voice["id"])
 
 
+async def test_provider_used_as_voice_override_cannot_be_deleted_via_uppercase_id(test_tenant, scoped):
+    base = await _cartesia(test_tenant["id"])
+    hi_voice = await _cartesia(test_tenant["id"], name="Hindi voice")
+    await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="ml-agent-upper", name="ML", tts_config_id=str(base["id"]),
+        language="en", supported_languages=["en", "hi"],
+        tts_config_by_language={"hi": str(hi_voice["id"])},
+    )
+    with pytest.raises(provider_configs.ProviderConfigInUse):
+        await provider_configs.soft_delete_provider_config(str(hi_voice["id"]).upper())
+
+
 async def test_kokoro_english_voice_rejected_for_hindi():
     sarah_id, sarah = _tts("kokoro", name="Kokoro Sarah", voice="af_sarah")
     with pytest.raises(ValueError, match=r"Hindi \(hi\).*'Kokoro Sarah' \(kokoro\)"):
@@ -294,7 +307,7 @@ def test_language_tag_shape_accepted(value):
     agents._check_language_tag(value)
 
 
-@pytest.mark.parametrize("value", ["", "english", "en US", "1234", "en-", 5])
+@pytest.mark.parametrize("value", ["", "english", "en US", "1234", "en-", "en_US", 5])
 def test_language_tag_shape_rejected(value):
     with pytest.raises(ValueError, match="not a language code"):
         agents._check_language_tag(value)

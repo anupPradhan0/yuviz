@@ -28,6 +28,13 @@ def kokoro_lang_code(language: str | None) -> str | None:
     return lang.kokoro_code if lang else None
 
 
+def _row_language(lang_code: str) -> str | None:
+    """ISO 639-1 language a KPipeline lang_code speaks ('a'/'b' are both English)."""
+    if lang_code in ("a", "b"):
+        return "en"
+    return next((iso for iso, lang in LANGUAGES.items() if lang.kokoro_code == lang_code), None)
+
+
 class KokoroTTS:
     """
     ITTS implementation backed by kokoro (KPipeline).
@@ -65,6 +72,8 @@ class KokoroTTS:
     def _resolve_lang_code(self, language: Any) -> str:
         if language is INSTANCE_LANGUAGE or language is None:
             return self._lang_code
+        if normalize_language(language) == _row_language(self._lang_code):
+            return self._lang_code  # same language as the row: keep its own accent (e.g. British 'b')
         code = kokoro_lang_code(language)
         if code is None:
             if language not in self._warned_languages:

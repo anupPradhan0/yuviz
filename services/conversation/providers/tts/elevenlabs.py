@@ -24,6 +24,11 @@ _DEFAULT_BASE_URL = "https://api.elevenlabs.io"
 _SUPPORTED_PCM_RATES = (8000, 16000, 22050, 24000, 44100)
 
 
+def _supports_language_code(model_id: str) -> bool:
+    """Only the *_v2_5 models accept language_code; multilingual_v2 detects the language from the text."""
+    return model_id.endswith("_v2_5")
+
+
 def _nearest_supported_rate(requested: int) -> int:
     for rate in _SUPPORTED_PCM_RATES:
         if rate >= requested:
@@ -34,8 +39,8 @@ def _nearest_supported_rate(requested: int) -> int:
 class ElevenLabsTTS:
     """ITTS backed by ElevenLabs' /v1/text-to-speech/{voice_id}.
 
-    language_code forces output language on multilingual models; None = auto-detect.
-    A per-call `language=` overrides it (accepts_language).
+    language_code forces output language on *_v2_5 models (other models ignore it and
+    auto-detect from the text); None = auto-detect. A per-call `language=` overrides it (accepts_language).
     """
 
     accepts_language = True
@@ -70,6 +75,8 @@ class ElevenLabsTTS:
         language_code = self._language_code if language is INSTANCE_LANGUAGE else language
         # language_code is ISO 639-1; agents.language is often regional ("en-US").
         language_code = normalize_language(language_code)
+        if not _supports_language_code(self._model_id):
+            language_code = None
 
         output_rate = _nearest_supported_rate(sample_rate)
 

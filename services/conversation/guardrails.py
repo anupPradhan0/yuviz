@@ -67,7 +67,7 @@ _HI_FRUSTRATION_PHRASES = [
 _HI_ABUSE_PHRASES = [
     r"बकवास", r"चुप (?:रहो|कर|करो)", r"बेवकू(?:फ़|फ)", r"साला", r"साले", r"कमीन(?:ा|े)", r"हरामी",
     r"भाड़ में जा(?:ओ)?",
-    r"bakwa(?:a)?s", r"chup (?:raho|kar|karo)", r"be?w[ae]?koo?f", r"saa?le", r"saala",
+    r"bakwa(?:a)?s", r"chup (?:raho|kar|karo)", r"be?w[ae]?koo?f", r"saale", r"saala",
     r"kamine?a?", r"harami", r"bhaa?d (?:me|mein) jao?",
 ]
 

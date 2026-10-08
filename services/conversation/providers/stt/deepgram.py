@@ -29,6 +29,11 @@ _LIVE_WS_URL = "wss://api.deepgram.com/v1/listen"
 _KEEPALIVE_INTERVAL_S = 8.0
 
 
+def _canonical_language(language: str | None) -> str:
+    """Deepgram wants hyphenated tags ("en-US"); None means English (no live auto-detect)."""
+    return language.strip().replace("_", "-") if language and language.strip() else "en"
+
+
 def _word_languages(alt: dict[str, Any]) -> Counter:
     """Per-word language tags (language=multi only); empty when untagged."""
     counts: Counter = Counter()
@@ -89,7 +94,7 @@ class DeepgramSTT:
     ) -> None:
         self._api_key = api_key
         self._model  = model
-        self._language = language or "en"
+        self._language = _canonical_language(language)
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             headers={"Authorization": f"Token {api_key}"},
@@ -101,7 +106,7 @@ class DeepgramSTT:
         log.info("DeepgramSTT model=%s language=%s", model, self._language)
 
     def _effective_language(self, language: Any) -> str:
-        return self._language if language is INSTANCE_LANGUAGE else (language or "en")
+        return self._language if language is INSTANCE_LANGUAGE else _canonical_language(language)
 
     async def transcribe(self, audio: bytes, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE) -> SttResult:
         if not audio:
