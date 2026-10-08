@@ -531,14 +531,14 @@ class PipelineConversationHandler:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        for tts in {id(t): t for t in (self._tts, *self._tts_by_language.values())}.values():
+        for tts in {id(p): p for p in (self._tts, *self._tts_by_language.values())}.values():
             prewarm = getattr(tts, "prewarm", None)
             if prewarm is None:
                 continue
             task = loop.create_task(prewarm(list(self._supported_languages)))
             task.add_done_callback(
-                lambda t: t.cancelled() or t.exception() is None
-                or log.error("TTS language prewarm failed", exc_info=t.exception())
+                lambda done: done.cancelled() or done.exception() is None
+                or log.error("TTS language prewarm failed", exc_info=done.exception())
             )
 
     def _greeting_text(self) -> str | None:
