@@ -9,7 +9,7 @@ import { KnowledgeBaseTabs } from "@/components/KnowledgeBaseTabs";
 import { ToolsPanel } from "@/components/ToolsPanel";
 import { Modal } from "@/components/Modal";
 import { SipPanel } from "@/components/SipPanel";
-import { AgentVoiceSettings } from "@/components/AgentVoiceSettings";
+import { AgentVoiceSettings, isLanguageError, multilingualPayload } from "@/components/AgentVoiceSettings";
 import { LANGUAGES, OTHER } from "@/lib/engineCatalog";
 
 type Tab = "identity" | "prompt" | "voice" | "knowledge" | "advanced" | "limits" | "sip";
@@ -38,6 +38,26 @@ const ESCALATION_OPTIONS = [1, 2, 3, 4, 5];
 
 const formatSeconds = (ms: number) => (ms === 0 ? "No pause" : `${ms / 1000} second${ms === 1000 ? "" : "s"}`);
 
+// Language form state from a saved agent; reused after save so server normalisation
+// (default language moved first, blank entries dropped) shows up as the new baseline.
+function languageState(a: Agent) {
+  let choice = "";
+  let custom = "";
+  if (a.language && LANGUAGES.some((l) => l.value === a.language)) {
+    choice = a.language;
+  } else if (a.language) {
+    choice = OTHER;
+    custom = a.language;
+  }
+  const fields: AgentUpdate = {
+    language: a.language,
+    supported_languages: a.supported_languages ?? [],
+    tts_config_by_language: a.tts_config_by_language ?? {},
+    greeting_by_language: a.greeting_by_language ?? {},
+  };
+  return { choice, custom, fields };
+}
+
 export default function AgentDetailPage() {
   const params = useParams<{ tenantSlug: string; agentSlug: string }>();
   const router = useRouter();
@@ -51,6 +71,7 @@ export default function AgentDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [languagesError, setLanguagesError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -90,7 +111,6 @@ export default function AgentDetailPage() {
           greeting: a.greeting,
           system_prompt: a.system_prompt,
           goodbye_grace_ms: a.goodbye_grace_ms,
-          language: a.language,
           stt_config_id: a.stt_config_id,
           llm_config_id: a.llm_config_id,
           tts_config_id: a.tts_config_id,
@@ -108,15 +128,9 @@ export default function AgentDetailPage() {
           transfer_prompt: a.transfer_prompt,
           farewell_message: a.farewell_message,
           transfer_announcement: a.transfer_announcement,
+          ...languageState(a).fields,
         };
-        let choice = "";
-        let custom = "";
-        if (a.language && LANGUAGES.some((l) => l.value === a.language)) {
-          choice = a.language;
-        } else if (a.language) {
-          choice = OTHER;
-          custom = a.language;
-        }
+        const { choice, custom } = languageState(a);
         setForm(initialForm);
         setLanguageChoice(choice);
         setCustomLanguage(custom);
@@ -132,17 +146,29 @@ export default function AgentDetailPage() {
     if (!agent) return;
     setSaving(true);
     setSaveError(null);
+    setLanguagesError(null);
     setSaved(false);
     try {
       const language =
         languageChoice === "" ? null : languageChoice === OTHER ? customLanguage.trim() || null : languageChoice;
-      const updated = await updateAgent(tenantSlug, agent.id, { ...form, language });
+      const updated = await updateAgent(tenantSlug, agent.id, {
+        ...form,
+        language,
+        ...multilingualPayload(language, form.supported_languages, form.tts_config_by_language, form.greeting_by_language),
+      });
       setAgent(updated);
-      setBaseline(snapshot);
+      const { choice, custom, fields } = languageState(updated);
+      const synced = { ...form, ...fields };
+      setForm(synced);
+      setLanguageChoice(choice);
+      setCustomLanguage(custom);
+      setBaseline(JSON.stringify({ form: synced, languageChoice: choice, customLanguage: custom }));
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
-      setSaveError(e instanceof ApiError ? e.detail : String(e));
+      const detail = e instanceof ApiError ? e.detail : String(e);
+      setSaveError(detail);
+      if (e instanceof ApiError && e.status === 400 && isLanguageError(detail)) setLanguagesError(detail);
     } finally {
       setSaving(false);
     }
@@ -391,6 +417,13 @@ export default function AgentDetailPage() {
               onLanguageChoice={setLanguageChoice}
               customLanguage={customLanguage}
               onCustomLanguage={setCustomLanguage}
+              supportedLanguages={form.supported_languages ?? []}
+              onSupportedLanguages={(v) => setForm((prev) => ({ ...prev, supported_languages: v }))}
+              ttsByLanguage={form.tts_config_by_language ?? {}}
+              onTtsByLanguage={(v) => setForm((prev) => ({ ...prev, tts_config_by_language: v }))}
+              greetingByLanguage={form.greeting_by_language ?? {}}
+              onGreetingByLanguage={(v) => setForm((prev) => ({ ...prev, greeting_by_language: v }))}
+              languagesError={languagesError}
               sttId={form.stt_config_id}
               llmId={form.llm_config_id}
               ttsId={form.tts_config_id}
@@ -660,6 +693,7 @@ export default function AgentDetailPage() {
                 setForm(prev.form);
                 setLanguageChoice(prev.languageChoice);
                 setCustomLanguage(prev.customLanguage);
+                setLanguagesError(null);
               }}
             >
               Discard

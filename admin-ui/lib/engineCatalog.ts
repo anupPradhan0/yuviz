@@ -38,6 +38,8 @@ export const ENGINES_BY_ROLE: Record<ProviderRole, EngineOption[]> = {
     { value: "macos", label: "macOS say (local)" },
     { value: "kokoro", label: "Kokoro (local)" },
     { value: "elevenlabs", label: "ElevenLabs (cloud)" },
+    { value: "cartesia", label: "Cartesia (cloud)" },
+    { value: "deepgram", label: "Deepgram Aura (cloud)" },
   ],
   embedding: [
     { value: "ollama", label: "Ollama (local)" },
@@ -47,8 +49,9 @@ export const ENGINES_BY_ROLE: Record<ProviderRole, EngineOption[]> = {
 
 // null = no fixed list; render a free-text input instead of a dropdown.
 export const MODELS_BY_ENGINE: Record<string, string[] | null> = {
-  // .en variants skip language auto-detection (avoids wrong-language hallucinations on noise).
-  faster_whisper: ["small.en", "tiny.en", "base.en", "medium.en", "tiny", "base", "small", "medium", "large-v3"],
+  // Plain models auto-detect the language per utterance, which multilingual agents need.
+  // .en variants are English-only (no detection) — fine, and steadier, for English-only agents.
+  faster_whisper: ["small", "tiny", "base", "medium", "large-v3", "small.en", "tiny.en", "base.en", "medium.en"],
   deepgram: ["nova-3", "nova-2"],
   // Must be pulled locally first. gemma4:e2b needs extra.think:false or voice latency regresses.
   ollama: ["llama3.2", "llama3", "qwen2.5", "mistral", "phi3", "gemma3:4b", "gemma4:e2b"],
@@ -79,8 +82,8 @@ export interface VoiceOption {
   gender:   VoiceGender;
   // Same format as LANGUAGES values, so a voice pick can set agent.language.
   language: string;
-  // Pre-rendered by scripts/generate_voice_samples.py.
-  sampleUrl: string;
+  // Pre-rendered by scripts/generate_voice_samples.py; absent = no preview yet.
+  sampleUrl?: string;
 }
 
 export const VOICES_BY_ENGINE: Record<string, VoiceOption[] | null> = {
@@ -102,8 +105,21 @@ export const VOICES_BY_ENGINE: Record<string, VoiceOption[] | null> = {
     { id: "am_michael", label: "Michael (US)", gender: "male",  language: "en-US", sampleUrl: "/voice-samples/kokoro/am_michael.wav" },
     { id: "bm_george", label: "George (UK)",  gender: "male",   language: "en-GB", sampleUrl: "/voice-samples/kokoro/bm_george.wav" },
     { id: "bm_lewis",  label: "Lewis (UK)",   gender: "male",   language: "en-GB", sampleUrl: "/voice-samples/kokoro/bm_lewis.wav" },
+    // hf_/hm_ = Hindi female/male.
+    { id: "hf_alpha",  label: "Alpha (Hindi)", gender: "female", language: "hi" },
+    { id: "hf_beta",   label: "Beta (Hindi)",  gender: "female", language: "hi" },
+    { id: "hm_omega",  label: "Omega (Hindi)", gender: "male",   language: "hi" },
+    { id: "hm_psi",    label: "Psi (Hindi)",   gender: "male",   language: "hi" },
+  ],
+  // Aura voices are English-only; the voice id is the Aura model name.
+  deepgram: [
+    { id: "aura-asteria-en", label: "Asteria", gender: "female", language: "en-US" },
+    { id: "aura-luna-en",    label: "Luna",    gender: "female", language: "en-US" },
+    { id: "aura-orion-en",   label: "Orion",   gender: "male",   language: "en-US" },
+    { id: "aura-arcas-en",   label: "Arcas",   gender: "male",   language: "en-US" },
   ],
   elevenlabs: null, // account-specific voice_id — never guessed, always free text
+  cartesia: null,   // voice id is a UUID from the account's Cartesia voice list
 };
 
 // Suggested values for agents.language; not enforced (free text via "Other").
@@ -125,6 +141,34 @@ export const LANGUAGES = [
 ];
 
 export const OTHER = "__other__";
+
+// Mirrors libs/config_sdk/languages.py LANGUAGES: the only codes a multilingual agent
+// (supported_languages, per-language voices/greetings) accepts. ISO 639-1.
+export const SUPPORTED_LANGUAGES = [
+  { value: "en", label: "English", native: "English" },
+  { value: "hi", label: "Hindi", native: "हिन्दी" },
+  { value: "es", label: "Spanish", native: "Español" },
+  { value: "fr", label: "French", native: "Français" },
+  { value: "de", label: "German", native: "Deutsch" },
+  { value: "pt", label: "Portuguese", native: "Português" },
+  { value: "it", label: "Italian", native: "Italiano" },
+  { value: "ja", label: "Japanese", native: "日本語" },
+  { value: "zh", label: "Chinese", native: "中文" },
+];
+
+// Deepgram STT code-switching mode (nova-2/nova-3 only); valid as a provider language, never an agent's.
+export const DEEPGRAM_MULTI = "multi";
+
+// Same as the server's normalize_language(): "hi-IN" / "HI" -> "hi".
+export function baseLanguage(code: string | null | undefined): string | null {
+  const m = code?.trim().match(/^([A-Za-z]{2,3})(?:[-_].*)?$/);
+  return m ? m[1].toLowerCase() : null;
+}
+
+export function languageLabel(code: string): string {
+  const l = SUPPORTED_LANGUAGES.find((x) => x.value === code);
+  return l ? (l.native !== l.label ? `${l.label} (${l.native})` : l.label) : code;
+}
 
 // Languages ElevenLabs multilingual models accept via language_code (any voice can speak any of them).
 export const ELEVENLABS_LANGUAGES = [
