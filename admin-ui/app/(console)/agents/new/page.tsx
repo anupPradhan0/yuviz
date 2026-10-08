@@ -328,6 +328,9 @@ export default function NewAgentPage() {
           stt_config_id: known(sttId),
           llm_config_id: known(llmId),
           tts_config_id: known(ttsId),
+          // Sent here so a language 400 rejects the create instead of leaving a half-set-up agent.
+          language,
+          ...multilingualPayload(language, supportedLanguages, ttsByLanguage, greetingByLanguage),
         });
         createdAgent.current = agent;
       }

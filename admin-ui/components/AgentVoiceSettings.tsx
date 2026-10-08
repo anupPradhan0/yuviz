@@ -8,7 +8,7 @@ import Link from "next/link";
 import { AlertCircle, Check } from "lucide-react";
 import { AgentUpdate, ApiError, ProviderConfig, createProvider, listProviders, updateProvider } from "@/lib/api";
 import {
-  BUILTIN_TTS_ENGINE, LANGUAGES, OTHER, SUPPORTED_LANGUAGES, baseLanguage, languageLabel, ttsLanguages,
+  BUILTIN_TTS_ENGINE, LANGUAGES, OTHER, SUPPORTED_LANGUAGES, baseLanguage, deepgramSupportsMulti, languageLabel, ttsLanguages,
 } from "@/lib/engineCatalog";
 import { LocalVoicePicker } from "@/components/LocalVoicePicker";
 import { ElevenLabsVoicePicker } from "@/components/ElevenLabsVoicePicker";
@@ -81,7 +81,7 @@ export function AgentVoiceSettings({
   tenantId, providers, setProviders,
   languageChoice, onLanguageChoice, customLanguage, onCustomLanguage,
   supportedLanguages, onSupportedLanguages, ttsByLanguage, onTtsByLanguage,
-  greetingByLanguage, onGreetingByLanguage, languagesError,
+  greetingByLanguage, onGreetingByLanguage, onGreetingBlur, languagesError,
   sttId, llmId, ttsId, onAssign, onError, part,
 }: {
   /** Omitted = everything; the agent editor splits voice and engines across two sections. */
@@ -99,6 +99,8 @@ export function AgentVoiceSettings({
   onTtsByLanguage: (v: Record<string, string>) => void;
   greetingByLanguage: Record<string, string>;
   onGreetingByLanguage: (v: Record<string, string>) => void;
+  /** Called when a per-language greeting loses focus (the editor saves held edits on blur). */
+  onGreetingBlur?: () => void;
   // The server's 400 detail for the language fields, shown inline.
   languagesError?: string | null;
   sttId: string | null | undefined;
@@ -163,8 +165,8 @@ export function AgentVoiceSettings({
     ? null
     : selectedStt.engine === "faster_whisper" && selectedStt.model?.endsWith(".en")
       ? `${selectedStt.model} only understands English. Use a multilingual model (e.g. small) so callers can be heard in every language.`
-      : selectedStt.engine === "deepgram" && selectedStt.model && !/^nova-[23]/.test(selectedStt.model)
-        ? `${selectedStt.model} can't switch languages mid-call; it will listen in the default language only. Use nova-2 or nova-3.`
+      : selectedStt.engine === "deepgram" && selectedStt.model && !deepgramSupportsMulti(selectedStt.model, languages)
+        ? `${selectedStt.model} can't switch between ${languages.map(languageLabel).join(", ")} mid-call; it will listen in the default language only. Use nova-2 or nova-3, which cover en, hi, es, fr, de, pt, it and ja.`
         : null;
   const connectedVoices = byRole("tts").filter((p) => p.engine !== BUILTIN_TTS_ENGINE);
   const voiceMode = chosenMode ?? (selectedTts && selectedTts.engine !== BUILTIN_TTS_ENGINE ? "own" : "builtin");
@@ -182,6 +184,7 @@ export function AgentVoiceSettings({
   };
 
   const applyDetectedLanguage = (l: string) => {
+    if (multilingual) return; // picking a voice must not move the default of a multilingual agent
     if (LANGUAGES.some((x) => x.value === l)) {
       onLanguageChoice(l);
     } else {
@@ -369,6 +372,7 @@ export function AgentVoiceSettings({
                         style={{ minHeight: 56 }}
                         value={greetingByLanguage[lang] ?? ""}
                         onChange={(e) => setLanguageEntry(greetingByLanguage, onGreetingByLanguage, lang, e.target.value)}
+                        onBlur={onGreetingBlur}
                         placeholder={lang === startLanguage ? "Leave blank to use the opening line" : "Optional"}
                       />
                     </div>

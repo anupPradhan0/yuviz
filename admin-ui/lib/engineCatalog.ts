@@ -172,6 +172,15 @@ const KOKORO_VOICE_PREFIX: Record<string, string> = {
   a: "en", b: "en", h: "hi", e: "es", f: "fr", p: "pt", i: "it",
 };
 
+// Mirrors deepgram_supports_multi() in libs/config_sdk/languages.py: Deepgram code-switches
+// only on nova-2/nova-3, and only across the languages it covers in multi mode.
+const DEEPGRAM_MULTI_LANGUAGES = ["en", "hi", "es", "fr", "de", "pt", "it", "ja"];
+
+export function deepgramSupportsMulti(model: string, languages: string[]): boolean {
+  const m = model.toLowerCase();
+  return (m.startsWith("nova-2") || m.startsWith("nova-3")) && languages.every((l) => DEEPGRAM_MULTI_LANGUAGES.includes(l));
+}
+
 export function ttsLanguages(p: { engine: string; model: string | null; voice: string | null; extra?: Record<string, unknown> | null }): string[] {
   const extra = p.extra ?? {};
   if (p.engine === "cartesia") {

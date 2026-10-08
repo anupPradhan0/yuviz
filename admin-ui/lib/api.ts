@@ -280,6 +280,11 @@ export interface AgentCreate {
   llm_config_id?: string | null;
   tts_config_id?: string | null;
   status?: "active" | "inactive";
+  // Validated with the rest on create, so a bad language setting creates nothing.
+  language?: string | null;
+  supported_languages?: string[] | null;
+  tts_config_by_language?: Record<string, string> | null;
+  greeting_by_language?: Record<string, string> | null;
 }
 
 export interface AgentUpdate {

@@ -46,7 +46,7 @@ const ESCALATION_OPTIONS = [1, 2, 3, 4, 5];
 const AUTOSAVE_DELAY_MS = 800;
 // Free text that callers hear or that steers a live call; on an active agent it waits for blur or Save.
 const LIVE_HELD_FIELDS = [
-  "greeting", "system_prompt", "end_call_prompt", "farewell_message", "transfer_prompt",
+  "greeting", "greeting_by_language", "system_prompt", "end_call_prompt", "farewell_message", "transfer_prompt",
   "transfer_announcement", "transfer_destination", "platform_did", "custom_caller_id",
 ] as const;
 const DIAL_FIELDS = ["transfer_destination", "platform_did", "custom_caller_id"] as const;
@@ -64,6 +64,18 @@ const formatLength = (ms: number | null) => {
 
 const toLanguage = (choice: string, custom: string) =>
   choice === "" ? null : choice === OTHER ? custom.trim() || null : choice;
+
+// The language-related editor state for a stored agent, in the shape the form and baseline hold it.
+function languageState(a: Agent) {
+  const known = !a.language || LANGUAGES.some((l) => l.value === a.language);
+  return {
+    languageChoice: !a.language ? "" : known ? a.language : OTHER,
+    customLanguage: known ? "" : a.language ?? "",
+    supported_languages: a.supported_languages ?? [],
+    tts_config_by_language: a.tts_config_by_language ?? {},
+    greeting_by_language: a.greeting_by_language ?? {},
+  };
+}
 
 export default function AgentDetailPage() {
   const { tenantSlug, agentSlug } = useParams<{ tenantSlug: string; agentSlug: string }>();
@@ -121,6 +133,7 @@ export default function AgentDetailPage() {
     getAgent(tenantSlug, agentSlug)
       .then(async (a) => {
         setAgent(a);
+        const lang = languageState(a);
         const initialForm: AgentUpdate = {
           name: a.name,
           greeting: a.greeting,
@@ -143,17 +156,16 @@ export default function AgentDetailPage() {
           transfer_prompt: a.transfer_prompt,
           farewell_message: a.farewell_message,
           transfer_announcement: a.transfer_announcement,
-          supported_languages: a.supported_languages ?? [],
-          tts_config_by_language: a.tts_config_by_language ?? {},
-          greeting_by_language: a.greeting_by_language ?? {},
+          supported_languages: lang.supported_languages,
+          tts_config_by_language: lang.tts_config_by_language,
+          greeting_by_language: lang.greeting_by_language,
         };
-        const known = !a.language || LANGUAGES.some((l) => l.value === a.language);
-        const choice = !a.language ? "" : known ? a.language : OTHER;
-        const custom = known ? "" : a.language ?? "";
         setForm(initialForm);
-        setLanguageChoice(choice);
-        setCustomLanguage(custom);
-        setBaseline(JSON.stringify({ form: initialForm, languageChoice: choice, customLanguage: custom }));
+        setLanguageChoice(lang.languageChoice);
+        setCustomLanguage(lang.customLanguage);
+        setBaseline(JSON.stringify({
+          form: initialForm, languageChoice: lang.languageChoice, customLanguage: lang.customLanguage,
+        }));
         listPhoneNumbers(a.tenant_id).then(setNumbers).catch(() => setNumbers(null));
         // Campaigns run in a separate service; if it's down the agent just counts as inbound.
         listCampaigns(a.tenant_id).then((cs) => setInCampaign(cs.some((c) => c.agent_id === a.id))).catch(() => {});
@@ -168,7 +180,8 @@ export default function AgentDetailPage() {
 
   // On a live agent these change the next real call, so half-typed edits wait for blur or Save.
   const savedForm: AgentUpdate = baseline ? JSON.parse(baseline).form : {};
-  const held = agent?.status === "active" && LIVE_HELD_FIELDS.some((k) => (form[k] ?? null) !== (savedForm[k] ?? null));
+  const held = agent?.status === "active"
+    && LIVE_HELD_FIELDS.some((k) => JSON.stringify(form[k] ?? null) !== JSON.stringify(savedForm[k] ?? null));
   const canSave = !!agent && dirty && !saving && snapshot !== rejected && !!form.name?.trim() && !!form.system_prompt?.trim();
 
   // Only changed fields are sent, so untouched values are never rewritten.
@@ -203,8 +216,18 @@ export default function AgentDetailPage() {
     setSaveError(null);
     setLanguagesError(null);
     try {
-      setAgent(await updateAgent(tenantSlug, agent.id, changes as AgentUpdate));
-      setBaseline(sent);
+      const updated = await updateAgent(tenantSlug, agent.id, changes as AgentUpdate);
+      setAgent(updated);
+      // The server normalises the language fields (e.g. picks a default when none was set), so
+      // show what it stored; other fields keep any edits typed while the save was in flight.
+      const { languageChoice: choice, customLanguage: custom, ...stored } = languageState(updated);
+      setLanguageChoice(choice);
+      setCustomLanguage(custom);
+      setForm((prev) => ({ ...prev, ...stored }));
+      const sentState = JSON.parse(sent);
+      setBaseline(JSON.stringify({
+        form: { ...sentState.form, ...stored }, languageChoice: choice, customLanguage: custom,
+      }));
       setRejected(null);
     } catch (e) {
       const detail = e instanceof ApiError ? e.detail : String(e);
@@ -559,6 +582,7 @@ export default function AgentDetailPage() {
               onTtsByLanguage={(v) => setForm((prev) => ({ ...prev, tts_config_by_language: v }))}
               greetingByLanguage={form.greeting_by_language ?? {}}
               onGreetingByLanguage={(v) => setForm((prev) => ({ ...prev, greeting_by_language: v }))}
+              onGreetingBlur={saveHeld}
               languagesError={languagesError}
               sttId={form.stt_config_id}
               llmId={form.llm_config_id}
