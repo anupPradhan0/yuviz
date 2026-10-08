@@ -159,6 +159,7 @@ async def create_agent(
             llm_config_id=body.llm_config_id,
             tts_config_id=body.tts_config_id,
             workflow=body.workflow,
+            status=body.status,
             tenant_slug=tenant_slug,
             user_id=current_user.id,
             user_email=current_user.email,

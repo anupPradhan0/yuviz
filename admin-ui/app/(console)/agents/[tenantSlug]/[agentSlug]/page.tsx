@@ -21,6 +21,7 @@ import { SipPanel } from "@/components/SipPanel";
 import { AgentVoiceSettings } from "@/components/AgentVoiceSettings";
 import { AgentTestPanel } from "@/components/AgentTestPanel";
 import { LANGUAGES, OTHER } from "@/lib/engineCatalog";
+import { normalizeDialTarget } from "@/lib/dialTargets";
 
 type Section = "instructions" | "voice" | "knowledge" | "transfers" | "phone" | "advanced";
 
@@ -43,10 +44,12 @@ const TRANSFER_TYPES: { value: NonNullable<AgentUpdate["transfer_type"]>; title:
 const GRACE_OPTIONS_MS = [0, 500, 1000, 1500, 2000, 3000, 5000];
 const ESCALATION_OPTIONS = [1, 2, 3, 4, 5];
 const AUTOSAVE_DELAY_MS = 800;
-const LIVE_HELD_FIELDS = ["system_prompt", "transfer_destination", "platform_did", "custom_caller_id"] as const;
-
-// The server accepts only +digits; people type spaces, dashes and brackets.
-const phoneDigits = (v: string | null | undefined) => v?.replace(/[\s\-().]/g, "") || null;
+// Free text that callers hear or that steers a live call; on an active agent it waits for blur or Save.
+const LIVE_HELD_FIELDS = [
+  "greeting", "system_prompt", "end_call_prompt", "farewell_message", "transfer_prompt",
+  "transfer_announcement", "transfer_destination", "platform_did", "custom_caller_id",
+] as const;
+const DIAL_FIELDS = ["transfer_destination", "platform_did", "custom_caller_id"] as const;
 
 const formatSeconds = (ms: number) => (ms === 0 ? "No pause" : `${ms / 1000} second${ms === 1000 ? "" : "s"}`);
 
@@ -163,19 +166,25 @@ export default function AgentDetailPage() {
   const held = agent?.status === "active" && LIVE_HELD_FIELDS.some((k) => (form[k] ?? null) !== (savedForm[k] ?? null));
   const canSave = !!agent && dirty && !saving && snapshot !== rejected && !!form.name?.trim() && !!form.system_prompt?.trim();
 
+  // Only changed fields are sent, so untouched values are never rewritten.
   const save = async () => {
     if (!agent || !canSave) return;
     const sent = snapshot;
+    const base = JSON.parse(baseline);
+    const changes: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(form)) {
+      if (JSON.stringify(v ?? null) !== JSON.stringify(base.form[k] ?? null)) changes[k] = v;
+    }
+    for (const k of DIAL_FIELDS) if (k in changes) changes[k] = normalizeDialTarget(form[k]);
+    if (language !== toLanguage(base.languageChoice, base.customLanguage)) changes.language = language;
+    if (Object.keys(changes).length === 0) {
+      setBaseline(sent);
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     try {
-      setAgent(await updateAgent(tenantSlug, agent.id, {
-        ...form,
-        language,
-        transfer_destination: phoneDigits(form.transfer_destination),
-        platform_did: phoneDigits(form.platform_did),
-        custom_caller_id: phoneDigits(form.custom_caller_id),
-      }));
+      setAgent(await updateAgent(tenantSlug, agent.id, changes as AgentUpdate));
       setBaseline(sent);
       setRejected(null);
     } catch (e) {
@@ -244,6 +253,7 @@ export default function AgentDetailPage() {
     setMenuOpen(false);
     setDuplicating(true);
     setSaveError(null);
+    // Created paused, so a failed second step never leaves a half-copy taking calls.
     const body = {
       name: `${form.name?.trim() || agent.name} (copy)`,
       greeting: form.greeting,
@@ -251,7 +261,9 @@ export default function AgentDetailPage() {
       stt_config_id: form.stt_config_id,
       llm_config_id: form.llm_config_id,
       tts_config_id: form.tts_config_id,
+      status: "inactive" as const,
     };
+    const dialTargets = Object.fromEntries(DIAL_FIELDS.map((k) => [k, normalizeDialTarget(form[k])]));
     try {
       let copy: Agent | null = null;
       for (const slug of [`${agent.slug}-copy`, `${agent.slug}-copy-${Math.random().toString(36).slice(2, 6)}`]) {
@@ -263,7 +275,7 @@ export default function AgentDetailPage() {
         }
       }
       if (!copy) throw new Error("Couldn't find a free name for the copy.");
-      await updateAgent(tenantSlug, copy.id, { ...form, name: copy.name, language, status: "inactive" });
+      await updateAgent(tenantSlug, copy.id, { ...form, ...dialTargets, name: copy.name, language, status: "inactive" });
       router.push(`/agents/${tenantSlug}/${copy.slug}`);
     } catch (e) {
       setSaveError(e instanceof ApiError ? e.detail : String(e));
@@ -396,8 +408,13 @@ export default function AgentDetailPage() {
               <>
                 <div className="ed2-menu-backdrop" onClick={() => setMenuOpen(false)} />
                 <div className="ed2-menu-pop" role="menu">
-                  <button role="menuitem" onClick={handleDuplicate} disabled={duplicating}>
-                    <Copy size={13} /> Duplicate agent
+                  <button
+                    role="menuitem"
+                    onClick={handleDuplicate}
+                    disabled={duplicating}
+                    title="Copies the settings. Documents, connections and the call flow are not copied, and the copy starts paused."
+                  >
+                    <Copy size={13} /> Duplicate settings
                   </button>
                   <button role="menuitem" className="danger" onClick={openDeleteConfirm}>
                     <Trash2 size={13} /> Delete agent
@@ -473,6 +490,7 @@ export default function AgentDetailPage() {
                     value={form.greeting ?? ""}
                     placeholder="Hi, thanks for calling Acme Dental. How can I help you today?"
                     onChange={(e) => setForm({ ...form, greeting: e.target.value })}
+                    onBlur={saveHeld}
                   />
                   <div className="form-hint">The first thing callers hear when the agent picks up.</div>
                 </div>
@@ -572,6 +590,7 @@ export default function AgentDetailPage() {
                           style={{ minHeight: 56 }}
                           value={form.transfer_prompt || ""}
                           onChange={(e) => setForm({ ...form, transfer_prompt: e.target.value || null })}
+                          onBlur={saveHeld}
                           placeholder="If the caller asks to speak to a person."
                         />
                         <div className="form-hint">Describe the moment, not the words. Leave blank to use the default.</div>
@@ -583,6 +602,7 @@ export default function AgentDetailPage() {
                           style={{ minHeight: 56 }}
                           value={form.transfer_announcement || ""}
                           onChange={(e) => setForm({ ...form, transfer_announcement: e.target.value || null })}
+                          onBlur={saveHeld}
                           placeholder="Please hold while I connect you."
                         />
                         <div className="form-hint">Spoken exactly as written. Leave blank to let the agent choose its own words.</div>
@@ -659,6 +679,7 @@ export default function AgentDetailPage() {
                       style={{ minHeight: 56 }}
                       value={form.end_call_prompt || ""}
                       onChange={(e) => setForm({ ...form, end_call_prompt: e.target.value || null })}
+                      onBlur={saveHeld}
                       placeholder="When the caller says goodbye, has no more questions, or their issue is sorted."
                     />
                     <div className="form-hint">Describe the moment, not the words. Leave blank to use the default.</div>
@@ -670,6 +691,7 @@ export default function AgentDetailPage() {
                       style={{ minHeight: 56 }}
                       value={form.farewell_message || ""}
                       onChange={(e) => setForm({ ...form, farewell_message: e.target.value || null })}
+                      onBlur={saveHeld}
                       placeholder="Thanks for calling. Have a great day. Goodbye!"
                     />
                     <div className="form-hint">Spoken exactly as written. Leave blank to let the agent choose its own words.</div>
@@ -749,7 +771,18 @@ export default function AgentDetailPage() {
         </main>
 
         <aside className="ed2-side" id="agent-test">
-          <AgentTestPanel tenantSlug={tenantSlug} agentSlug={agentSlug} savePending={saving || (dirty && rejected !== snapshot)} saveHeld={held && !saving} />
+          <AgentTestPanel
+            tenantSlug={tenantSlug}
+            agentSlug={agentSlug}
+            savePending={saving || (canSave && !held)}
+            blockedReason={
+              saving || !dirty ? null
+                : !form.name?.trim() ? "Add a name to test"
+                : !form.system_prompt?.trim() ? "Add instructions to test"
+                : held ? "Save your changes to test them"
+                : null
+            }
+          />
           <div className="card ed2-calls">
             <div className="ed2-calls-hdr">
               <b>This agent&apos;s recent calls</b>

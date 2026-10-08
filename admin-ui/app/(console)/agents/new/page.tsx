@@ -24,6 +24,7 @@ import { AgentVoiceSettings } from "@/components/AgentVoiceSettings";
 import { OTHER } from "@/lib/engineCatalog";
 import { buildSystemPrompt } from "@/lib/systemPromptBuilder";
 import { templateByKey } from "@/lib/agentTemplates";
+import { normalizeDialTarget } from "@/lib/dialTargets";
 import { QuickCreateAgent } from "@/components/QuickCreateAgent";
 import { AgentDraft, clearAgentDraft, draftSavedLabel, loadAgentDraft, saveAgentDraft } from "@/lib/agentDraft";
 
@@ -321,7 +322,7 @@ export default function NewAgentPage() {
           max_call_duration_s: maxCallDuration === "" ? null : maxCallDuration,
           goodbye_grace_ms: goodbyeGraceMs === "" ? undefined : goodbyeGraceMs,
           transfer_type: transferType,
-          transfer_destination: transferType === "none" ? null : transferDestination.replace(/[\s\-().]/g, "") || null,
+          transfer_destination: transferType === "none" ? null : normalizeDialTarget(transferDestination),
           transfer_prompt: transferType === "none" ? null : transferCondition.trim() || null,
           transfer_announcement: transferType === "none" ? null : transferAnnouncement.trim() || null,
           escalation_threshold: escalationThreshold === "" ? null : escalationThreshold,

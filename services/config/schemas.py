@@ -83,6 +83,7 @@ class AgentCreate(BaseModel):
     stt_config_id:  str | None = None
     llm_config_id:  str | None = None
     tts_config_id:  str | None = None
+    status:         Literal["active", "inactive"] = "active"
     workflow: dict | None = None  # None/{} → starter_graph; validated like publish
 
     @field_validator("workflow")

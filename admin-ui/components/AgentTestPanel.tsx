@@ -24,13 +24,13 @@ const MODES: { key: Mode; label: string; icon: LucideIcon; soon?: string }[] = [
   { key: "chat", label: "Chat", icon: MessageSquare, soon: "Type messages to your agent and read its replies." },
 ];
 
-export function AgentTestPanel({ tenantSlug, agentSlug, savePending, saveHeld = false }: {
+export function AgentTestPanel({ tenantSlug, agentSlug, savePending, blockedReason = null }: {
   tenantSlug: string;
   agentSlug: string;
   /** A test must run the latest edits, so starting waits for autosave. */
   savePending: boolean;
-  /** Edits on a live agent that wait for an explicit Save. */
-  saveHeld?: boolean;
+  /** Why unsaved edits can't be saved yet (held on a live agent, or a required field is empty). */
+  blockedReason?: string | null;
 }) {
   const call = useWebCall(tenantSlug, agentSlug);
   const [mode, setMode] = useState<Mode>("browser");
@@ -125,8 +125,8 @@ export function AgentTestPanel({ tenantSlug, agentSlug, savePending, saveHeld = 
           {call.errorMsg && <div className="error-banner">{call.errorMsg}</div>}
 
           {!live ? (
-            <button className="btn btn-primary btn-sm ed-test-btn" onClick={call.start} disabled={savePending}>
-              {saveHeld ? "Save your changes to test them" : savePending ? "Saving your changes…" : "Start test call"}
+            <button className="btn btn-primary btn-sm ed-test-btn" onClick={call.start} disabled={savePending || !!blockedReason}>
+              {blockedReason ?? (savePending ? "Saving your changes…" : "Start test call")}
             </button>
           ) : (
             <div className="ed-test-actions">

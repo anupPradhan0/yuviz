@@ -273,6 +273,7 @@ export interface AgentCreate {
   stt_config_id?: string | null;
   llm_config_id?: string | null;
   tts_config_id?: string | null;
+  status?: "active" | "inactive";
 }
 
 export interface AgentUpdate {
@@ -864,6 +865,8 @@ const DISPOSITION_LABELS: Record<string, string> = {
   session_destroyed: "Session destroyed",
   transport_error: "Transport error",
   reconciled_inactive: "Reconciled (node went silent)",
+  reconciled_stale: "Reconciled (call went stale)",
+  reconciled_dead_node: "Reconciled (node stopped)",
   TRANSFER_SUCCESS: "Transferred to human",
   TRANSFER_FAILED: "Transfer failed",
   TRANSFER_TIMEOUT: "Transfer timed out",

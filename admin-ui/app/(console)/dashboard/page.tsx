@@ -68,6 +68,8 @@ function outcomeOf(reason: string | null): Outcome {
     case "transport_error":
     case "close_timeout":
     case "reconciled_inactive":
+    case "reconciled_stale":
+    case "reconciled_dead_node":
       return { label: "Call dropped", short: "Dropped", tone: "r" };
     default:
       return { label: "Not recorded", short: "—", tone: "n" };
