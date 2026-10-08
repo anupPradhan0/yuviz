@@ -9,22 +9,39 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from typing import Any
 
 import numpy as np
+
+from libs.config_sdk.languages import LANGUAGES, normalize_language
+
+from ..interfaces import INSTANCE_LANGUAGE
 
 log = logging.getLogger(__name__)
 
 _KOKORO_NATIVE_RATE = 24_000  # Hz — kokoro's output sample rate
 
 
+def kokoro_lang_code(language: str | None) -> str | None:
+    """ISO 639-1 -> KPipeline lang_code (en->a, hi->h, ...); None when Kokoro has no voice for it."""
+    lang = LANGUAGES.get(normalize_language(language) or "")
+    return lang.kokoro_code if lang else None
+
+
 class KokoroTTS:
     """
     ITTS implementation backed by kokoro (KPipeline).
 
-    voice       — kokoro voice name (e.g. "af_sarah", "am_adam", "bf_emma")
+    voice       — kokoro voice name (e.g. "af_sarah", "am_adam", "hf_alpha")
     speed       — speech rate multiplier (1.0 = normal)
-    lang_code   — language code passed to KPipeline ('a' = American English)
+    lang_code   — KPipeline language code for this row ('a' = American English)
+
+    A per-call `language=` (ISO 639-1) picks another KPipeline, created lazily and
+    cached per lang_code. Every pipeline shares the first one's KModel, so the
+    weights load once; only the per-language G2P is new.
     """
+
+    accepts_language = True
 
     def __init__(
         self,
@@ -34,28 +51,64 @@ class KokoroTTS:
     ) -> None:
         from kokoro import KPipeline
         log.info("Loading Kokoro TTS voice=%s lang=%s", voice, lang_code)
-        self._pipeline = KPipeline(lang_code=lang_code)
+        self._KPipeline = KPipeline
+        self._lang_code = lang_code
+        self._pipelines: dict[str, Any] = {lang_code: KPipeline(lang_code=lang_code)}
         self._voice    = voice
         self._speed    = speed
         self._lock     = asyncio.Lock()  # KPipeline is not thread-safe for concurrent calls
+        self._warned_languages: set[str] = set()
         log.info("Kokoro TTS ready")
 
-    async def synthesize(self, text: str, sample_rate: int) -> bytes:
+    def _resolve_lang_code(self, language: Any) -> str:
+        if language is INSTANCE_LANGUAGE or language is None:
+            return self._lang_code
+        code = kokoro_lang_code(language)
+        if code is None:
+            if language not in self._warned_languages:
+                self._warned_languages.add(language)
+                log.warning("Kokoro has no pipeline for language=%r — using lang_code=%s", language, self._lang_code)
+            return self._lang_code
+        return code
+
+    def _pipeline_sync(self, lang_code: str) -> Any:
+        """Get or build the KPipeline for lang_code. Call under self._lock (in the executor)."""
+        pipeline = self._pipelines.get(lang_code)
+        if pipeline is None:
+            log.info("Kokoro: building pipeline lang_code=%s", lang_code)
+            base = self._pipelines[self._lang_code]
+            pipeline = self._KPipeline(lang_code=lang_code, model=base.model)
+            self._pipelines[lang_code] = pipeline
+        return pipeline
+
+    async def prewarm(self, languages: list[str]) -> None:
+        """Build the pipelines for these ISO languages now, so the first sentence
+        in a new language doesn't pay the G2P load on the turn's critical path."""
+        loop = asyncio.get_running_loop()
+        for code in {self._resolve_lang_code(lang) for lang in languages}:
+            if code in self._pipelines:
+                continue
+            async with self._lock:
+                await loop.run_in_executor(None, self._pipeline_sync, code)
+
+    async def synthesize(self, text: str, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE) -> bytes:
         if not text.strip():
             return b""
+        lang_code = self._resolve_lang_code(language)
         loop = asyncio.get_running_loop()
         async with self._lock:
-            return await loop.run_in_executor(None, self._synthesize_sync, text, sample_rate)
+            return await loop.run_in_executor(None, self._synthesize_sync, text, sample_rate, lang_code)
 
-    async def synthesize_stream(self, text: str, sample_rate: int):
-        audio = await self.synthesize(text, sample_rate)
+    async def synthesize_stream(self, text: str, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE):
+        audio = await self.synthesize(text, sample_rate, language=language)
         if audio:
             yield audio
 
-    def _synthesize_sync(self, text: str, sample_rate: int) -> bytes:
+    def _synthesize_sync(self, text: str, sample_rate: int, lang_code: str | None = None) -> bytes:
         chunks: list[np.ndarray] = []
 
-        for _gs, _ps, audio in self._pipeline(
+        pipeline = self._pipeline_sync(lang_code or self._lang_code)
+        for _gs, _ps, audio in pipeline(
             text, voice=self._voice, speed=self._speed
         ):
             if audio is not None and len(audio) > 0:

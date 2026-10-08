@@ -108,3 +108,15 @@ async def test_synthesize_omits_language_code_when_unset():
 
     tts = _make_tts(handler)
     await tts.synthesize("hello", 16000)
+
+
+async def test_synthesize_per_call_language_overrides_row():
+    import json as _json
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert _json.loads(request.content)["language_code"] == "hi"
+        return httpx.Response(200, content=_silence_pcm(1600))
+
+    tts = _make_tts(handler, language_code="en")
+    chunks = [c async for c in tts.synthesize_stream("नमस्ते", 16000, language="hi")]
+    assert chunks

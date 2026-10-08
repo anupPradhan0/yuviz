@@ -290,6 +290,7 @@ async def _make_cartesia_tts(cfg: ProviderConfig, api_key: str | None) -> Any:
         voice=voice,
         model=str(extra.get("model") or "sonic-2"),
         speed=speed,
+        language=cfg.language,
     )
 
 

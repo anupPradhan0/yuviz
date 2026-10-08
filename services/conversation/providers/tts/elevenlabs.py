@@ -7,9 +7,12 @@ Only fixed PCM rates are served, so request the nearest rate >= target and downs
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import httpx
 import numpy as np
+
+from ..interfaces import INSTANCE_LANGUAGE
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +33,10 @@ class ElevenLabsTTS:
     """ITTS backed by ElevenLabs' /v1/text-to-speech/{voice_id}.
 
     language_code forces output language on multilingual models; None = auto-detect.
+    A per-call `language=` overrides it (accepts_language).
     """
+
+    accepts_language = True
 
     def __init__(
         self,
@@ -56,9 +62,10 @@ class ElevenLabsTTS:
             voice_id, model_id, language_code,
         )
 
-    async def synthesize(self, text: str, sample_rate: int) -> bytes:
+    async def synthesize(self, text: str, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE) -> bytes:
         if not text.strip():
             return b""
+        language_code = self._language_code if language is INSTANCE_LANGUAGE else language
 
         output_rate = _nearest_supported_rate(sample_rate)
 
@@ -73,7 +80,7 @@ class ElevenLabsTTS:
                         {"voice_settings": {"speed": self._speed}}
                         if self._speed != 1.0 else {}
                     ),
-                    **({"language_code": self._language_code} if self._language_code else {}),
+                    **({"language_code": language_code} if language_code else {}),
                 },
             )
             resp.raise_for_status()
@@ -87,8 +94,8 @@ class ElevenLabsTTS:
 
         return self._resample(pcm, output_rate, sample_rate)
 
-    async def synthesize_stream(self, text: str, sample_rate: int):
-        audio = await self.synthesize(text, sample_rate)
+    async def synthesize_stream(self, text: str, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE):
+        audio = await self.synthesize(text, sample_rate, language=language)
         if audio:
             yield audio
 
