@@ -114,7 +114,7 @@ TEST_F(ColdTransferCoordinatorTest, DisabledEslResolvesSynchronouslyAsFailure) {
     };
 
     coordinator.start(
-        TransferCoordinatorContext{"call-uuid-1", "1001", "caller_requested_human", "tid-1"},
+        TransferCoordinatorContext{"call-uuid-1", "1001", "caller_requested_human", "tid-1", "", "", ""},
         std::move(cbs));
 
     EXPECT_TRUE(fired);
@@ -131,7 +131,7 @@ TEST_F(ColdTransferCoordinatorTest, CallbackReceivesTheRequestedDestination) {
     };
 
     coordinator.start(
-        TransferCoordinatorContext{"call-uuid-1", "+18005550100", "x", "tid-2"},
+        TransferCoordinatorContext{"call-uuid-1", "+18005550100", "x", "tid-2", "", "", ""},
         std::move(cbs));
 
     EXPECT_EQ(seen_destination, "+18005550100");
@@ -141,7 +141,7 @@ TEST_F(ColdTransferCoordinatorTest, ShutdownAfterCompletionIsSafeAndIdempotent) 
     TransferCoordinatorCallbacks cbs;
     cbs.on_transfer_completed = [](bool, std::string, std::string) {};
     coordinator.start(
-        TransferCoordinatorContext{"call-uuid-1", "1001", "x", "tid-3"}, std::move(cbs));
+        TransferCoordinatorContext{"call-uuid-1", "1001", "x", "tid-3", "", "", ""}, std::move(cbs));
 
     ASSERT_EQ(coordinator.state(), CoordinatorState::Completed);
     coordinator.shutdown();  // must not throw, crash, or double-fire anything
@@ -162,7 +162,7 @@ TEST_F(ColdTransferCoordinatorTest, CancelIsANoOpAtAnyState) {
     TransferCoordinatorCallbacks cbs;
     cbs.on_transfer_completed = [](bool, std::string, std::string) {};
     coordinator.start(
-        TransferCoordinatorContext{"call-uuid-1", "1001", "x", "tid-4"}, std::move(cbs));
+        TransferCoordinatorContext{"call-uuid-1", "1001", "x", "tid-4", "", "", ""}, std::move(cbs));
 
     coordinator.cancel();  // after resolution — still a no-op, not a crash
     EXPECT_EQ(coordinator.state(), CoordinatorState::Completed);
@@ -172,7 +172,7 @@ TEST_F(ColdTransferCoordinatorTest, MissingCallbackDoesNotCrash) {
     // No on_transfer_completed set: the coordinator must guard the empty std::function.
     TransferCoordinatorCallbacks cbs;  // on_transfer_completed left unset
     coordinator.start(
-        TransferCoordinatorContext{"call-uuid-1", "1001", "x", "tid-5"}, std::move(cbs));
+        TransferCoordinatorContext{"call-uuid-1", "1001", "x", "tid-5", "", "", ""}, std::move(cbs));
     SUCCEED();
 }
 
@@ -203,7 +203,7 @@ TEST(ColdTransferCoordinatorAcceptedPathTest, OnMediaHandoffFiresWhenCommandAcce
     cbs.on_transfer_completed = [&](bool, std::string, std::string) { completed_fired = true; };
 
     coordinator.start(
-        TransferCoordinatorContext{"call-uuid-1", "1001", "x", "tid-6"}, std::move(cbs));
+        TransferCoordinatorContext{"call-uuid-1", "1001", "x", "tid-6", "", "", ""}, std::move(cbs));
 
     EXPECT_TRUE(handoff_fired);
     // CHANNEL_BRIDGE hasn't arrived; only the handoff fires on command acceptance.
@@ -220,7 +220,7 @@ TEST_F(ColdTransferCoordinatorTest, OnMediaHandoffDoesNotFireOnImmediateRejectio
     cbs.on_transfer_completed = [](bool, std::string, std::string) {};
 
     coordinator.start(
-        TransferCoordinatorContext{"call-uuid-1", "1001", "x", "tid-7"}, std::move(cbs));
+        TransferCoordinatorContext{"call-uuid-1", "1001", "x", "tid-7", "", "", ""}, std::move(cbs));
 
     EXPECT_FALSE(handoff_fired);
 }
