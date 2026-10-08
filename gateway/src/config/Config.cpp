@@ -271,7 +271,7 @@ PhoneRoute PhoneRoute::from_redis(RedisClient& redis, const std::string& did) no
 }
 
 CallMetadata CallMetadata::parse(const std::optional<std::string>& raw) noexcept {
-    CallMetadata md;   // defaults: did="", ani="", direction="inbound"
+    CallMetadata md;   // defaults: did="", ani="", direction="inbound", freeswitch_host=""
     if (!raw.has_value()) return md;
 
     try {
@@ -282,6 +282,8 @@ CallMetadata CallMetadata::parse(const std::optional<std::string>& raw) noexcept
             md.ani = j["ani"].get<std::string>();
         if (j.contains("direction") && j["direction"].is_string())
             md.direction = j["direction"].get<std::string>();
+        if (j.contains("freeswitch_host") && j["freeswitch_host"].is_string())
+            md.freeswitch_host = j["freeswitch_host"].get<std::string>();
     } catch (const nlohmann::json::exception&) {
         return CallMetadata{};
     }
