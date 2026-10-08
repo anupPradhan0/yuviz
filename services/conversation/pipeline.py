@@ -30,6 +30,7 @@ from .directives import (
     strip_markdown_chars,
 )
 from .fillers import FillerSelector
+from .i18n import t
 from .guardrails import GuardrailCounter, GuardrailDetector
 from . import language as lang_state
 from .language import LanguageTracker, reply_language_instruction, utterance_language
@@ -192,25 +193,24 @@ def _build_end_call_instruction(condition: str | None, scripted: bool = False) -
         "call — never say it out loud or explain it to the caller."
     )
 
+# Spoken system strings live in i18n/ per language; these are the English texts.
 # Spoken when END_CALL comes with no text: the servicer drops EndCall unless some TTS was sent.
-_FALLBACK_GOODBYE = "Goodbye."
+_FALLBACK_GOODBYE = t("fallback_goodbye", "en")
 
 # Bound LLM wait on hangup / pre-transfer flush; outcome is always persisted.
 _FINISH_WORKFLOW_TIMEOUT_S = 3.0
 _TRANSFER_FLUSH_TIMEOUT_S = 1.5
 
 # Spoken when max_call_duration_s is exceeded; not farewell_message, which implies a natural end.
-_MAX_DURATION_GOODBYE = (
-    "We're at the time limit for this call now. Thanks for calling — goodbye."
-)
+_MAX_DURATION_GOODBYE = t("max_duration_goodbye", "en")
 
 # Spoken when the LLM stream raises mid-turn, so the caller doesn't hear dead air.
-_FALLBACK_LLM_ERROR = "Sorry, I'm having a little trouble right now. Could you say that again?"
+_FALLBACK_LLM_ERROR = t("fallback_llm_error", "en")
 
 _TOOL_CALL_FILLER_MIN_GAP_S = 4.0
 
 # Masks turn-1 LLM latency; generic so it fits any first utterance.
-_FIRST_TURN_FILLER = "Mm-hmm, one moment."
+_FIRST_TURN_FILLER = t("first_turn_filler", "en")
 
 # Auto-appended when a transfer is configured, so the destination comes only from config.
 # Condition is per-agent (agents.transfer_prompt); token mechanics are fixed.
@@ -281,14 +281,11 @@ def _build_transfer_failed_system_event(reason: str) -> str:
     )
 
 # Used if the LLM produces no apology text.
-_TRANSFER_FAILED_FALLBACK = "I'm sorry, I couldn't connect you to an agent right now."
+_TRANSFER_FAILED_FALLBACK = t("transfer_failed_fallback", "en")
 
 # Replaces transfer_announcement for a fabrication-triggered transfer, so the handoff
 # doesn't look like a failure to a caller who just heard "Confirmed!".
-_BOOKING_FABRICATION_TRANSFER_ANNOUNCEMENT = (
-    "Let me just double-check that booking with a team member to make sure "
-    "it's set up correctly — one moment."
-)
+_BOOKING_FABRICATION_TRANSFER_ANNOUNCEMENT = t("booking_fabrication_transfer_announcement", "en")
 
 
 class PipelineConversationHandler:
@@ -481,6 +478,8 @@ class PipelineConversationHandler:
         self._tts_fixed_language: str | None = (
             tts_language if (not self._multilingual and tts_language != providers.tts.language) else None
         )
+        self._agent_language = runtime_config.agent.language
+        self._greeting_by_language = getattr(runtime_config.conversation, "greeting_by_language", None)
         # Spoken system strings: the session language, else an explicit agents.language.
         # Never a provider row's language, so agents without one keep their English strings.
         self._strings_language = normalize_language(runtime_config.agent.language) or "en"
@@ -507,6 +506,15 @@ class PipelineConversationHandler:
                 lambda t: t.cancelled() or t.exception() is None
                 or log.error("TTS language prewarm failed", exc_info=t.exception())
             )
+
+    def _greeting_text(self) -> str | None:
+        """The per-language greeting for the starting language when the agent has one,
+        rendered like the workflow's; otherwise the workflow start node's greeting."""
+        language = self._default_language or normalize_language(self._agent_language)
+        localized = (self._greeting_by_language or {}).get(language) if language else None
+        if localized and localized.strip():
+            return self._workflow.render(localized).strip() or None
+        return self._workflow.greeting()
 
     def _session_language(self, session_id: str) -> str | None:
         """The language this session speaks now; None for single-language agents."""
@@ -540,7 +548,7 @@ class PipelineConversationHandler:
         # clipped on some outbound carriers — the start node can hold off.
         if self._workflow.delayed_start_ms > 0:
             await asyncio.sleep(self._workflow.delayed_start_ms / 1000)
-        text = self._workflow.greeting() or ""
+        text = self._greeting_text() or ""
         if not text:
             return []
         return [chunk async for chunk in self._synthesize_sentence_stream(text, session_id)]
@@ -640,17 +648,19 @@ class PipelineConversationHandler:
                 self._max_call_duration_s, session_id,
             )
             got_audio = False
-            async for chunk in self._synthesize_sentence_stream(_MAX_DURATION_GOODBYE, session_id):
+            spoken = self._spoken_language(session_id)
+            max_duration_goodbye = t("max_duration_goodbye", spoken)
+            async for chunk in self._synthesize_sentence_stream(max_duration_goodbye, session_id):
                 got_audio = True
                 yield HandlerResponse(tts_payloads=[chunk])
             if not got_audio:
                 # Some TTS must be sent or EndCall is dropped.
-                async for chunk in self._synthesize_sentence_stream(_FALLBACK_GOODBYE, session_id):
+                async for chunk in self._synthesize_sentence_stream(t("fallback_goodbye", spoken), session_id):
                     yield HandlerResponse(tts_payloads=[chunk])
             if self._transcripts is not None:
                 self._transcripts.record_turn(
                     session_id, stt_result.text, stt_result.confidence,
-                    _MAX_DURATION_GOODBYE, False,
+                    max_duration_goodbye, False,
                     latency=TurnLatency(
                         stt_ms=stt_ms, stt_engine=type(self._stt).__name__,
                         tts_engine=type(self._tts).__name__,
@@ -672,7 +682,8 @@ class PipelineConversationHandler:
 
         if is_first_turn and not self._session(session_id).first_turn_filler_spoken:
             self._session(session_id).first_turn_filler_spoken = True
-            async for chunk in self._synthesize_sentence_stream(_FIRST_TURN_FILLER, session_id):
+            first_turn_filler = t("first_turn_filler", self._spoken_language(session_id))
+            async for chunk in self._synthesize_sentence_stream(first_turn_filler, session_id):
                 yield HandlerResponse(tts_payloads=[chunk])
 
         # Knowledge retrieval is the `search_knowledge` local tool, called only when needed.
@@ -811,7 +822,8 @@ class PipelineConversationHandler:
                     yield HandlerResponse(tts_payloads=[chunk])
             if not any_audio and not got_farewell_audio:
                 # The servicer needs some audio to key EndCall off.
-                async for chunk in self._synthesize_sentence_stream(_FALLBACK_GOODBYE, session_id):
+                goodbye = t("fallback_goodbye", self._spoken_language(session_id))
+                async for chunk in self._synthesize_sentence_stream(goodbye, session_id):
                     yield HandlerResponse(tts_payloads=[chunk])
             yield HandlerResponse(
                 end_call=True,
@@ -820,7 +832,7 @@ class PipelineConversationHandler:
 
         if transfer_request is not None:
             announcement = (
-                _BOOKING_FABRICATION_TRANSFER_ANNOUNCEMENT
+                t("booking_fabrication_transfer_announcement", self._spoken_language(session_id))
                 if self._session(session_id).fabrication_triggered_transfer
                 else self._transfer_announcement
             )
@@ -945,7 +957,7 @@ class PipelineConversationHandler:
         assistant_text = DirectiveParser.parse("".join(full_response)).clean_text.strip()
 
         if not assistant_text and not any_audio and not cancel_event.is_set():
-            assistant_text = _TRANSFER_FAILED_FALLBACK
+            assistant_text = t("transfer_failed_fallback", self._spoken_language(session_id))
             async for chunk in self._synthesize_sentence_stream(assistant_text, session_id):
                 yield HandlerResponse(tts_payloads=[chunk])
 
@@ -1178,6 +1190,8 @@ class PipelineConversationHandler:
                         )
                         phrase = self._filler_selector.select_tool_filler(
                             item.tool_name, state.tool_call_filler_last_phrase, average_ms,
+                            **({"language": self._spoken_language(session_id)}
+                               if self._spoken_language(session_id) != "en" else {}),
                         )
                         state.tool_call_filler_last_phrase = phrase
                         any_filler_chunk = False
@@ -1213,8 +1227,8 @@ class PipelineConversationHandler:
         except Exception:
             log.exception("LLM streaming failed session=%s", session_id)
             if not cancel_event.is_set():
-                fallback_text = _FALLBACK_LLM_ERROR
-                async for chunk in self._synthesize_sentence_stream(_FALLBACK_LLM_ERROR, session_id):
+                fallback_text = t("fallback_llm_error", self._spoken_language(session_id))
+                async for chunk in self._synthesize_sentence_stream(fallback_text, session_id):
                     yield fallback_text, chunk, False
                     fallback_text = ""  # yielded once — see full_response.append(chunk) at the call site
 

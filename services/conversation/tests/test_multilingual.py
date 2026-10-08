@@ -314,3 +314,38 @@ async def test_legacy_tts_without_language_keyword_still_works():
     h = _handler(rc, _RecordingSTT([SttResult(text="hello", language="en", language_confidence=1.0)]), _LLM(), tts)
     await _turn(h, "s1")
     assert tts.texts
+
+
+# ── Localised greeting and system strings ────────────────────────────────────
+
+async def test_greeting_uses_default_language_greeting_map():
+    rc = await _runtime({"language": "hi", "supported_languages": ("hi", "en"),
+                         "greeting_by_language": {"hi": "नमस्ते, मैं {{agent_name}} हूँ।", "en": "Hi!"}})
+    tts = _RecordingTTS()
+    h = _handler(rc, _RecordingSTT([]), _LLM(), tts)
+    await h.greeting("s1")
+    assert tts.calls == [("नमस्ते, मैं Bot हूँ।", "hi")]
+
+
+async def test_greeting_without_map_uses_workflow_greeting():
+    rc = await _runtime({"language": "hi", "supported_languages": ("hi", "en")})
+    tts = _RecordingTTS()
+    h = _handler(rc, _RecordingSTT([]), _LLM(), tts)
+    await h.greeting("s1")
+    assert tts.calls == [("Hello!", "hi")]
+
+
+async def test_first_turn_filler_follows_session_language():
+    rc = await _runtime({"language": "en", "supported_languages": ("en", "hi")})
+    tts = _RecordingTTS()
+    stt = _RecordingSTT([SttResult(text="नमस्ते जी", language="hi", language_confidence=1.0)])
+    h = _handler(rc, stt, _LLM(), tts)
+    await _turn(h, "s1")
+    assert tts.calls[0] == ("जी, एक पल।", "hi")
+
+
+async def test_farewell_message_override_still_wins():
+    rc = await _runtime({"language": "hi", "supported_languages": ("hi", "en"), "farewell_message": "Bye from Acme."})
+    assert rc.conversation.farewell_message == "Bye from Acme."
+    h = _handler(rc, _RecordingSTT([]), _LLM(), _RecordingTTS())
+    assert h._farewell_message == "Bye from Acme."
