@@ -63,7 +63,7 @@ def test_tts_language_capability():
     assert tts_languages("macos", None) == frozenset({"en"})
     assert tts_languages("elevenlabs", "eleven_turbo_v2") == frozenset({"en"})
     assert "hi" in tts_languages("elevenlabs", "eleven_turbo_v2_5")
-    assert "hi" in tts_languages("kokoro", None)
+    assert "hi" in tts_languages("kokoro", None, "hf_alpha")
 
 
 # ── agent.language now reaches the providers ────────────────────────────────
@@ -154,7 +154,8 @@ def test_kokoro_voice_speaks_only_its_own_language():
     assert tts_languages("kokoro", None, "af_sarah") == frozenset({"en"})
     assert tts_languages("kokoro", None, "bm_george") == frozenset({"en"})
     assert tts_languages("kokoro", None, "hf_alpha") == frozenset({"hi"})
-    assert "hi" in tts_languages("kokoro", None, None)
+    # No voice: the factory's default (an English voice) is what speaks.
+    assert tts_languages("kokoro", None, None) == frozenset({"en"})
 
 
 

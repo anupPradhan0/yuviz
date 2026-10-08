@@ -650,10 +650,10 @@ class PipelineConversationHandler:
         tracker = self._session(session_id).language
         if is_short and tracker is not None and "languages" in stt_kwargs:
             # Whisper detects first and skips the decode for a short blip the gate would drop.
-            stt_kwargs = {
-                **stt_kwargs,
-                "require_language": (tracker.current, lang_state.SHORT_MIN_CONFIDENCE),
-            }
+            # Hindi keeps decoding low-confidence matches: Devanagari text makes it Hindi for the
+            # gate (utterance_language), so a short "हाँ" isn't lost to Whisper's English prior.
+            min_confidence = 0.0 if tracker.current == "hi" else lang_state.SHORT_MIN_CONFIDENCE
+            stt_kwargs = {**stt_kwargs, "require_language": (tracker.current, min_confidence)}
         try:
             stt_result: SttResult = await self._stt.finalize_stream(
                 session_id, audio, self._sample_rate, **stt_kwargs,

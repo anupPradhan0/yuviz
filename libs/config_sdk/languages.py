@@ -101,6 +101,9 @@ _ELEVENLABS_MULTILINGUAL = frozenset({"en", "hi", "es", "fr", "de", "pt", "it", 
 # ElevenLabs models that speak English only.
 _ELEVENLABS_ENGLISH_ONLY_MODELS = ("eleven_monolingual_v1", "eleven_turbo_v2", "eleven_flash_v2")
 _KOKORO_LANGUAGES = frozenset(code for code, l in LANGUAGES.items() if l.kokoro_code)
+# The voice a Kokoro row without one speaks with (the provider factory uses this too), so the
+# capability check and the runtime agree about a voiceless row.
+KOKORO_DEFAULT_VOICE = "af_sarah"
 # Kokoro voice ids start with their language's lang_code ('af_sarah' = a, 'hf_alpha' = h);
 # 'b' is British English. Each voice is trained on that one language.
 _KOKORO_VOICE_PREFIX_LANGUAGE = {
@@ -123,8 +126,7 @@ def tts_languages(engine: str, model: str | None, voice: str | None = None) -> f
     if engine == "kokoro":
         # A Kokoro voice speaks its own language only: an English voice reading Hindi
         # phonemes comes out barely intelligible.
-        if not voice:
-            return _KOKORO_LANGUAGES
+        voice = voice or KOKORO_DEFAULT_VOICE
         voice_lang = _KOKORO_VOICE_PREFIX_LANGUAGE.get(voice[:1].lower())
         # A voice of a language we can't run (e.g. jf_alpha) speaks none of ours.
         return frozenset({voice_lang}) if voice_lang else frozenset()

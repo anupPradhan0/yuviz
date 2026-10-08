@@ -168,6 +168,7 @@ const MULTILINGUAL_TTS = ["en", "hi", "es", "fr", "de", "pt", "it", "ja", "zh"];
 const ELEVENLABS_ENGLISH_ONLY_MODELS = ["eleven_monolingual_v1", "eleven_turbo_v2", "eleven_flash_v2"];
 // Kokoro voice ids start with their language's lang_code; each voice speaks only that language.
 // No ja/zh: their pipelines need G2P extras the services don't install (server agrees).
+const KOKORO_DEFAULT_VOICE = "af_sarah";
 const KOKORO_VOICE_PREFIX: Record<string, string> = {
   a: "en", b: "en", h: "hi", e: "es", f: "fr", p: "pt", i: "it",
 };
@@ -192,9 +193,10 @@ export function ttsLanguages(p: { engine: string; model: string | null; voice: s
     return ELEVENLABS_ENGLISH_ONLY_MODELS.includes(model) ? ["en"] : MULTILINGUAL_TTS;
   }
   if (p.engine === "kokoro") {
-    // No voice: every language Kokoro can run. A voice of another language (e.g. jf_alpha): none.
-    if (!p.voice) return ["en", "hi", "es", "fr", "pt", "it"];
-    const lang = KOKORO_VOICE_PREFIX[p.voice.charAt(0).toLowerCase()];
+    // No voice: the provider uses KOKORO_DEFAULT_VOICE (server: libs/config_sdk/languages.py), an
+    // English voice. A voice of another language (e.g. jf_alpha): none of ours.
+    const voice = p.voice || KOKORO_DEFAULT_VOICE;
+    const lang = KOKORO_VOICE_PREFIX[voice.charAt(0).toLowerCase()];
     return lang ? [lang] : [];
   }
   return ["en"];

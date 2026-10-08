@@ -422,3 +422,14 @@ async def test_create_rejects_other_tenants_voice_override(test_tenant, scoped, 
             tts_config_by_language={"hi": other_tenant_tts},
         )
     assert await agents.get_agent(test_tenant["slug"], "ml-create") is None
+
+
+
+async def test_voiceless_kokoro_base_is_rejected_for_hindi():
+    # The factory voices it with the default English voice, so it can't be the Hindi voice.
+    kokoro_id, kokoro = _tts("kokoro", name="Kokoro (no voice)", voice=None)
+    with pytest.raises(ValueError, match=r"Hindi \(hi\).*'Kokoro \(no voice\)'"):
+        await agents._validate_languages(
+            FakeConn({kokoro_id: kokoro}), TENANT,
+            {"language": "en", "supported_languages": ["en", "hi"], "tts_config_id": kokoro_id},
+        )

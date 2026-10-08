@@ -530,7 +530,8 @@ async def test_short_audio_asks_whisper_to_reject_before_decoding():
     h = _handler(rc, stt, _LLM(), _RecordingTTS())
     assert await _turn(h, "s1", _SHORT) == []  # rejected inside STT: nothing heard
     await _turn(h, "s1", _SPEECH)
-    assert stt.languages[0]["require_language"] == ("hi", lang_state.SHORT_MIN_CONFIDENCE)
+    # Hindi session: any matching blip is decoded (Devanagari text decides), so the bar is 0.
+    assert stt.languages[0]["require_language"] == ("hi", 0.0)
     assert "require_language" not in stt.languages[1]
 
 
@@ -547,3 +548,29 @@ async def test_pipeline_uses_the_bundles_override_rule():
     h = PipelineConversationHandler(rc, _Bundle(stt=_RecordingSTT([]), llm=_LLM(), tts=tts))
     await h.greeting("s1")
     assert seen == ["hi"] and tts.calls
+
+
+
+async def test_short_audio_in_english_session_asks_for_the_confidence_bar():
+    class _CandidateSTT(_RecordingSTT):
+        accepts_language_candidates = True
+
+        async def finalize_stream(self, session_id, audio, sample_rate, **kwargs):
+            self.languages.append(kwargs)
+            return self._results.pop(0)
+
+        async def feed_stream(self, session_id, chunk, sample_rate, **kwargs):
+            return None
+
+    provider = MockConfigProvider()
+    provider.add_tenant(slug="acme", name="Acme")
+    provider.add_provider_config(id="stt1", role="stt", engine="faster_whisper", model="small")
+    provider.add_provider_config(id="llm1", role="llm", engine="openai")
+    provider.add_provider_config(id="tts1", role="tts", engine="kokoro", voice="af_heart")
+    provider.add_agent("acme", slug="bot", name="Bot", stt_config_id="stt1", llm_config_id="llm1",
+                       tts_config_id="tts1", workflow=starter_graph("Hi", "Be brief."),
+                       language="en", supported_languages=("en", "hi"))
+    rc = await provider.get_runtime_config("acme", "bot")
+    stt = _CandidateSTT([SttResult(text="", language="en", language_confidence=0.5)])
+    assert await _turn(_handler(rc, stt, _LLM(), _RecordingTTS()), "s1", _SHORT) == []
+    assert stt.languages[0]["require_language"] == ("en", lang_state.SHORT_MIN_CONFIDENCE)
