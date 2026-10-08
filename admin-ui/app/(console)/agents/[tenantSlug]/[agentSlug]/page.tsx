@@ -779,6 +779,7 @@ export default function AgentDetailPage() {
               saving || !dirty ? null
                 : !form.name?.trim() ? "Add a name to test"
                 : !form.system_prompt?.trim() ? "Add instructions to test"
+                : snapshot === rejected ? "Fix the error above to test"
                 : held ? "Save your changes to test them"
                 : null
             }
