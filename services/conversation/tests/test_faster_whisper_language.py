@@ -151,3 +151,22 @@ async def test_short_utterance_in_session_language_is_decoded(whisper_cls):
         require_language=("hi", 0.8),
     )
     assert result.text == "haan ji" and stt._model.calls[0]["language"] == "hi"
+
+
+class _UnsureHindiModel(_StubModel):
+    """A short Hindi "haan": Hindi tops the agent's languages, but not confidently."""
+
+    def detect_language(self, pcm):
+        probs = [("hi", 0.30), ("en", 0.25), ("de", 0.2), ("cy", 0.25)]
+        return probs[0][0], probs[0][1], probs
+
+
+async def test_short_low_confidence_match_is_still_decoded(whisper_cls):
+    # Decoding decides: Devanagari text makes it Hindi for the gate, as before the shortcut.
+    stt = _stt(whisper_cls, language=None, model=_UnsureHindiModel())
+    result = await stt.finalize_stream(
+        "s1", b"\x00\x01" * 8000, 16000, language=None, languages=("en", "hi"),
+        require_language=("hi", 0.8),
+    )
+    assert result.text == "haan ji" and stt._model.calls[0]["language"] == "hi"
+    assert result.language_confidence == pytest.approx(0.30 / 0.55)

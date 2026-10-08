@@ -309,8 +309,26 @@ async def test_revalidation_names_the_agent_a_provider_edit_would_break():
         "tts_config_by_language": json.dumps({"hi": hi_id}), "greeting_by_language": None,
         "tts_config_id": base_id, "stt_config_id": None,
     }
+    conn = FakeConn({base_id: base, hi_id: hi}, agents=[agent_row])
     with pytest.raises(ValueError, match=r"'Clinic bot'.*Hindi"):
-        await agents.revalidate_multilingual_agents(FakeConn({base_id: base, hi_id: hi}, agents=[agent_row]), TENANT)
+        await agents.revalidate_multilingual_agents(conn, TENANT, provider_id=hi_id)
+    # An edit to a row this agent doesn't use is never blocked by it.
+    await agents.revalidate_multilingual_agents(conn, TENANT, provider_id=str(uuid.uuid4()))
+
+
+async def test_revalidation_covers_agents_falling_back_to_the_tenant_default():
+    aura_id, aura = _tts("deepgram", name="New default voice")
+    agent_row = {
+        "name": "Default-voice bot", "language": "en", "supported_languages": ["en", "hi"],
+        "tts_config_by_language": None, "greeting_by_language": None,
+        "tts_config_id": None, "stt_config_id": None,
+    }
+    conn = FakeConn({aura_id: aura}, default_tts=aura_id, agents=[agent_row])
+    with pytest.raises(ValueError, match="'Default-voice bot'"):
+        await agents.revalidate_multilingual_agents(conn, TENANT, default_roles=("tts",))
+    with pytest.raises(ValueError, match="'Default-voice bot'"):
+        await agents.revalidate_multilingual_agents(conn, TENANT, provider_id=aura_id)  # edited the default row
+    await agents.revalidate_multilingual_agents(conn, TENANT, default_roles=())
 
 
 async def test_revalidation_passes_when_agents_still_work():
@@ -320,7 +338,7 @@ async def test_revalidation_passes_when_agents_still_work():
         "tts_config_by_language": None, "greeting_by_language": None,
         "tts_config_id": base_id, "stt_config_id": None,
     }
-    await agents.revalidate_multilingual_agents(FakeConn({base_id: base}, agents=[agent_row]), TENANT)
+    await agents.revalidate_multilingual_agents(FakeConn({base_id: base}, agents=[agent_row]), TENANT, provider_id=base_id)
 
 
 async def test_provider_edit_that_breaks_a_multilingual_agent_is_refused(test_tenant, scoped):
@@ -344,3 +362,11 @@ async def test_agent_save_rejects_malformed_language(test_tenant, scoped):
     created = await agents.create_agent(tenant_id=test_tenant["id"], slug="plain2", name="Plain")
     with pytest.raises(ValueError, match="not a language code"):
         await agents.update_agent(created["id"], tenant_slug=test_tenant["slug"], language="english please")
+
+
+
+async def test_language_is_stored_trimmed(test_tenant, scoped):
+    created = await agents.create_agent(tenant_id=test_tenant["id"], slug="trim", name="Trim", language=" en-US ")
+    assert created["language"] == "en-US"
+    updated = await agents.update_agent(created["id"], tenant_slug=test_tenant["slug"], language=" hi ")
+    assert updated["language"] == "hi"

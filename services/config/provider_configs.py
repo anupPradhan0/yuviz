@@ -261,7 +261,7 @@ async def update_provider_config(
         # than a live caller hearing Hindi read by an English-only voice.
         if old["role"] in ("stt", "tts") and {"engine", "model", "voice", "extra"} & set(fields):
             from .agents import revalidate_multilingual_agents  # agents imports this module
-            await revalidate_multilingual_agents(conn, old["tenant_id"])
+            await revalidate_multilingual_agents(conn, old["tenant_id"], provider_id=provider_id)
 
         # Only written columns, so a redacted api_key_ref doesn't show as changed on every update.
         await audit.write_audit(

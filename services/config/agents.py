@@ -386,18 +386,44 @@ def _row_tts_languages(row: Any) -> frozenset[str]:
     )
 
 
-async def revalidate_multilingual_agents(conn: Any, tenant_id: Any) -> None:
-    """Re-run the multilingual checks for every multilingual agent of the tenant, inside the
-    caller's transaction (after its write). Provider and tenant-default edits change what an
-    agent's voices and STT can do without the agent being saved, e.g. a Kokoro override's
-    voice from hf_alpha to af_heart. Raises ValueError naming the agent it would break."""
+async def revalidate_multilingual_agents(
+    conn: Any, tenant_id: Any, *, provider_id: Any = None, default_roles: tuple[str, ...] = (),
+) -> None:
+    """Re-run the multilingual checks, inside the caller's transaction (after its write), for
+    the multilingual agents that use what was just edited: the provider row `provider_id`
+    (as STT, TTS, a voice override, or the tenant default an agent falls back to), or the
+    tenant defaults in `default_roles` ("stt"/"tts") for agents without their own.
+
+    Provider and tenant-default edits change what an agent's voices and STT can do without
+    the agent being saved, e.g. a Kokoro override's voice from hf_alpha to af_heart. Agents
+    that don't use the edited row are left alone, so an unrelated edit is never blocked.
+    Raises ValueError naming the agent it would break."""
     rows = await conn.fetch(
         "SELECT name, language, supported_languages, tts_config_by_language, greeting_by_language, "
         "tts_config_id, stt_config_id FROM agents "
         "WHERE tenant_id = $1 AND deleted_at IS NULL AND cardinality(supported_languages) > 0",
         tenant_id,
     )
+    pid = str(provider_id) if provider_id is not None else None
+    defaults: dict[str, str | None] = {}
+    for role in ("stt", "tts"):
+        value = await conn.fetchval(f"SELECT default_{role}_config_id FROM tenants WHERE id = $1", tenant_id)
+        defaults[role] = str(value) if value is not None else None
+
+    def uses_edit(row: Any) -> bool:
+        own = {role: (str(row[f"{role}_config_id"]) if row[f"{role}_config_id"] is not None else None)
+               for role in ("stt", "tts")}
+        if any(own[role] is None for role in default_roles):
+            return True
+        if pid is None:
+            return False
+        effective = {role: own[role] or defaults[role] for role in ("stt", "tts")}
+        overrides = db.json_col(row["tts_config_by_language"]) or {}
+        return pid in effective.values() or pid in {str(v) for v in overrides.values()}
+
     for row in rows:
+        if not uses_edit(row):
+            continue
         merged = {f: row[f] for f in _LANGUAGE_FIELDS}
         for col in ("tts_config_by_language", "greeting_by_language"):
             merged[col] = db.json_col(merged[col])
@@ -454,6 +480,7 @@ async def create_agent(
             {"stt_config_id": stt_config_id, "llm_config_id": llm_config_id, "tts_config_id": tts_config_id},
         )
         _check_language_tag(language)
+        language = language.strip() if isinstance(language, str) else language
         langs = await _validate_languages(conn, tenant_id, {
             "stt_config_id": stt_config_id,
             "language": language, "supported_languages": supported_languages,
@@ -528,6 +555,9 @@ async def update_agent(
         set_fields = dict(fields)
         if "language" in fields:
             _check_language_tag(fields["language"])
+            if isinstance(fields["language"], str):
+                fields = {**fields, "language": fields["language"].strip()}
+                set_fields["language"] = fields["language"]
         if any(f in fields for f in _LANGUAGE_FIELDS):
             merged = {f: fields.get(f, old.get(f)) for f in _LANGUAGE_FIELDS}
             langs = await _validate_languages(conn, old["tenant_id"], merged)

@@ -156,7 +156,10 @@ async def update_tenant(
         # leave a multilingual agent unable to hear or speak one of its languages.
         if "default_stt_config_id" in fields or "default_tts_config_id" in fields:
             from .agents import revalidate_multilingual_agents  # agents imports this module's peers
-            await revalidate_multilingual_agents(conn, tenant_id)
+            await revalidate_multilingual_agents(
+                conn, tenant_id,
+                default_roles=tuple(r for r in ("stt", "tts") if f"default_{r}_config_id" in fields),
+            )
 
         await audit.write_audit(
             conn,

@@ -36,8 +36,8 @@ class FasterWhisperSTT:
                   With `languages=` (the agent's supported languages) and no fixed
                   language, detection picks among those only, counting registry aliases
                   (Whisper labels spoken Hindi as Urdu), then decodes once in that language.
-                  `require_language=(lang, min_conf)` skips the decode (empty text) unless
-                  detection lands on lang at min_conf or above.
+                  `require_language=(lang, min_conf)` skips the decode (empty text) when
+                  detection lands on another language; the caller applies min_conf after.
     """
 
     accepts_language = True
@@ -159,11 +159,10 @@ class FasterWhisperSTT:
         # English as they always did.
         if language is None and languages and self._model.model.is_multilingual:
             detected = self._detect_among(pcm, tuple(languages))
-            # Short utterances are only kept in the session's language at high confidence;
-            # skip the decode for the ones that would be dropped anyway (noise on the line).
-            if require_language is not None and (
-                detected[0] != require_language[0] or (detected[1] or 0.0) < require_language[1]
-            ):
+            # Short utterances are only kept in the session's language: skip the decode when
+            # detection lands on another one (noise on the line). A low-confidence match is
+            # still decoded, since the decoded text decides (Devanagari "हाँ" is Hindi).
+            if require_language is not None and detected[0] != require_language[0]:
                 return SttResult(text="", language=detected[0], language_confidence=detected[1])
 
         segments, info = self._model.transcribe(
