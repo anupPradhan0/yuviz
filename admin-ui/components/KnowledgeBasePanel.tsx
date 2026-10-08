@@ -2,13 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Check, FileText, Upload } from "lucide-react";
+import { Check, FileText, Upload, X } from "lucide-react";
 import { ApiError } from "@/lib/api";
 import {
   AgentKnowledgeBase,
   assignKnowledgeBase,
   createKnowledgeBase,
   deleteKnowledgeBase,
+  detachKnowledgeBase,
   getRetrievalPolicy,
   KbDocument,
   KnowledgeBase,
@@ -228,15 +229,36 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
                 </div>
                 {single?.error && <div style={{ color: "var(--red)", fontSize: ".68rem" }}>{single.error}</div>}
               </div>
-              <label className="toggle-switch" title={row.on ? "The agent uses this" : "The agent ignores this"}>
-                <input
-                  type="checkbox"
-                  checked={row.on}
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <label className="toggle-switch" title={row.on ? "The agent uses this" : "The agent ignores this"}>
+                  <input
+                    type="checkbox"
+                    checked={row.on}
+                    disabled={busyKb === row.id}
+                    onChange={(e) => handleToggle(row.id, e.target.checked)}
+                  />
+                  <span className="toggle-slider" />
+                </label>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  style={{ padding: "4px", color: "var(--text-3)", visibility: busyKb === row.id ? "hidden" : "visible" }}
+                  title="Remove from this agent"
                   disabled={busyKb === row.id}
-                  onChange={(e) => handleToggle(row.id, e.target.checked)}
-                />
-                <span className="toggle-slider" />
-              </label>
+                  onClick={async () => {
+                    setBusyKb(row.id);
+                    try {
+                      await detachKnowledgeBase(agentId, row.id);
+                      await refresh();
+                    } catch (e) {
+                      setError(e instanceof ApiError ? e.detail : String(e));
+                    } finally {
+                      setBusyKb(null);
+                    }
+                  }}
+                >
+                  <X size={16} />
+                </button>
+              </div>
             </div>
           );
         })

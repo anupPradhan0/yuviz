@@ -89,6 +89,7 @@ export interface KbDocument {
   version: number;
   usage_mode: UsageMode;
   chunk_count: number;
+  byte_size?: number;
   created_at: string;
   updated_at: string;
 }

@@ -318,7 +318,7 @@ export default function KnowledgeBasesPage() {
             <table className="tbl">
               <thead>
                 <tr>
-                  <th>Source</th><th>Type</th><th>Status</th><th>Indexed</th><th>Used by</th><th>Actions</th>
+                  <th>Source</th><th>Type</th><th>Size</th><th>Status</th><th>Uploaded</th><th>Indexed</th><th>Used by</th><th>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -331,7 +331,9 @@ export default function KnowledgeBasesPage() {
                       </div>
                     </td>
                     <td>—</td>
+                    <td>—</td>
                     <td><span className="badge gray">empty</span></td>
+                    <td>—</td>
                     <td className="kb-source-sub">No documents in it yet</td>
                     <td><span className="kb-source-sub">—</span></td>
                     <td>
@@ -356,6 +358,7 @@ export default function KnowledgeBasesPage() {
                       </div>
                     </td>
                     <td>{sourceType(s)}</td>
+                    <td className="mono">{s.byte_size ? `${(s.byte_size / 1024).toFixed(1)} KB` : "—"}</td>
                     <td>
                       <span className={`badge ${STATUS_BADGE[s.status] ?? "gray"}`}>{s.status}</span>
                       {/* #7: Show full error message for failed documents */}
@@ -365,6 +368,7 @@ export default function KnowledgeBasesPage() {
                         </div>
                       )}
                     </td>
+                    <td className="kb-source-sub">{timeAgo(s.created_at)}</td>
                     <td className="mono">
                       {s.status === "ready" ? `${(s.chunk_count ?? 0).toLocaleString()} chunks` : "—"}
                     </td>
