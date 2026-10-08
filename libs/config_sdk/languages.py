@@ -41,8 +41,10 @@ LANGUAGES: dict[str, Language] = {l.code: l for l in (
     Language("de", "German",     "Deutsch",   None, True),
     Language("pt", "Portuguese", "Português", "p", True),
     Language("it", "Italian",    "Italiano",  "i", True),
-    Language("ja", "Japanese",   "日本語",     "j", True),
-    Language("zh", "Chinese",    "中文",       "z", False),
+    # Kokoro ja/zh need misaki[ja]/misaki[zh] (pyopenjtalk, jieba, ...), which aren't installed:
+    # no Kokoro code until they are, so validation never accepts a voice that would be silent.
+    Language("ja", "Japanese",   "日本語",     None, True),
+    Language("zh", "Chinese",    "中文",       None, False),
 )}
 
 # Deepgram's code-switching mode; a valid provider_configs.language for Deepgram STT only.
@@ -121,8 +123,11 @@ def tts_languages(engine: str, model: str | None, voice: str | None = None) -> f
     if engine == "kokoro":
         # A Kokoro voice speaks its own language only: an English voice reading Hindi
         # phonemes comes out barely intelligible.
-        voice_lang = _KOKORO_VOICE_PREFIX_LANGUAGE.get((voice or "")[:1].lower())
-        return frozenset({voice_lang}) if voice_lang else _KOKORO_LANGUAGES
+        if not voice:
+            return _KOKORO_LANGUAGES
+        voice_lang = _KOKORO_VOICE_PREFIX_LANGUAGE.get(voice[:1].lower())
+        # A voice of a language we can't run (e.g. jf_alpha) speaks none of ours.
+        return frozenset({voice_lang}) if voice_lang else frozenset()
     return frozenset({"en"})
 
 
@@ -205,6 +210,15 @@ def same_tenant_tts_overrides(
                 "agent=%s: TTS override for %s (provider_config %s) rejected — "
                 "role=%s tenant=%s, expected a tts config of tenant %s",
                 agent.slug, lang, cfg.id, cfg.role, cfg.tenant_id, agent.tenant_id,
+            )
+            continue
+        # The Config Service checks this on every write, but a row edited before that check
+        # existed (or outside it) must not voice the language with the wrong speaker.
+        if lang not in tts_languages(cfg.engine, tts_model_of(cfg.engine, cfg.model, cfg.extra), cfg.voice):
+            log.error(
+                "agent=%s: TTS override for %s (provider_config %s, %s voice=%s) can't speak %s — "
+                "using the base voice; fix the agent's Language & Voice settings",
+                agent.slug, lang, cfg.id, cfg.engine, cfg.voice, language_name(lang),
             )
             continue
         out[lang] = cfg

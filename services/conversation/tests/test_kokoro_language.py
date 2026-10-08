@@ -33,9 +33,11 @@ def test_iso_to_kokoro_lang_code(kokoro):
     assert kokoro.kokoro_lang_code("en") == "a"
     assert kokoro.kokoro_lang_code("hi") == "h"
     assert kokoro.kokoro_lang_code("hi-IN") == "h"
-    expected = {"es": "e", "fr": "f", "it": "i", "pt": "p", "ja": "j", "zh": "z"}
+    expected = {"es": "e", "fr": "f", "it": "i", "pt": "p"}
     assert {k: kokoro.kokoro_lang_code(k) for k in expected} == expected
-    assert kokoro.kokoro_lang_code("de") is None
+    # ja/zh need G2P extras that aren't installed: no Kokoro pipeline for them.
+    for code in ("de", "ja", "zh"):
+        assert kokoro.kokoro_lang_code(code) is None
     assert kokoro.kokoro_lang_code(None) is None
 
 
@@ -63,3 +65,19 @@ async def test_prewarm_builds_pipelines_up_front(kokoro):
     tts = kokoro.KokoroTTS(lang_code="a")
     await tts.prewarm(["en", "hi", "es"])
     assert sorted(code for code, _ in _StubPipeline.built) == ["a", "e", "h"]
+
+
+async def test_failed_pipeline_build_falls_back_once_and_is_not_retried(kokoro, monkeypatch, caplog):
+    tts = kokoro.KokoroTTS(lang_code="a")
+    real = _StubPipeline.__init__
+
+    def failing(self, lang_code, model=True):
+        if lang_code == "h":
+            raise ModuleNotFoundError("No module named 'some_g2p_extra'")
+        real(self, lang_code, model)
+
+    monkeypatch.setattr(_StubPipeline, "__init__", failing)
+    first = await tts.synthesize("नमस्ते", 16000, language="hi")
+    second = await tts.synthesize("फिर से", 16000, language="hi")
+    assert first and second  # spoken with the row's pipeline, not silence
+    assert sum("can't build pipeline" in r.message for r in caplog.records) == 1

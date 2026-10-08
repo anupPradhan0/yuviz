@@ -58,6 +58,8 @@ class KokoroTTS:
         self._speed    = speed
         self._lock     = asyncio.Lock()  # KPipeline is not thread-safe for concurrent calls
         self._warned_languages: set[str] = set()
+        # lang_codes whose KPipeline failed to build (e.g. missing G2P extras): never retried.
+        self._failed_lang_codes: set[str] = set()
         log.info("Kokoro TTS ready")
 
     def _resolve_lang_code(self, language: Any) -> str:
@@ -72,13 +74,27 @@ class KokoroTTS:
         return code
 
     def _pipeline_sync(self, lang_code: str) -> Any:
-        """Get or build the KPipeline for lang_code. Call under self._lock (in the executor)."""
+        """Get or build the KPipeline for lang_code. Call under self._lock (in the executor).
+
+        A build failure is logged once and falls back to the row's own pipeline: speaking
+        with the wrong pronunciation beats silence on every sentence in that language."""
         pipeline = self._pipelines.get(lang_code)
-        if pipeline is None:
-            log.info("Kokoro: building pipeline lang_code=%s", lang_code)
-            base = self._pipelines[self._lang_code]
+        if pipeline is not None:
+            return pipeline
+        base = self._pipelines[self._lang_code]
+        if lang_code in self._failed_lang_codes:
+            return base
+        log.info("Kokoro: building pipeline lang_code=%s", lang_code)
+        try:
             pipeline = self._KPipeline(lang_code=lang_code, model=base.model)
-            self._pipelines[lang_code] = pipeline
+        except Exception:
+            self._failed_lang_codes.add(lang_code)
+            log.exception(
+                "Kokoro: can't build pipeline lang_code=%s — using lang_code=%s instead",
+                lang_code, self._lang_code,
+            )
+            return base
+        self._pipelines[lang_code] = pipeline
         return pipeline
 
     async def prewarm(self, languages: list[str]) -> None:
@@ -86,7 +102,7 @@ class KokoroTTS:
         in a new language doesn't pay the G2P load on the turn's critical path."""
         loop = asyncio.get_running_loop()
         for code in {self._resolve_lang_code(lang) for lang in languages}:
-            if code in self._pipelines:
+            if code in self._pipelines or code in self._failed_lang_codes:
                 continue
             async with self._lock:
                 await loop.run_in_executor(None, self._pipeline_sync, code)

@@ -54,11 +54,12 @@ function canSpeak(p: ProviderConfig, lang: string): boolean {
 
 const KOKORO_EXAMPLE_VOICES: Record<string, string> = {
   hi: "hf_alpha or hm_omega", en: "af_heart", es: "ef_dora", fr: "ff_siwis", it: "if_sara",
-  pt: "pf_dora", ja: "jf_alpha", zh: "zf_xiaobei",
+  pt: "pf_dora",
 };
 
 function kokoroExample(lang: string): string {
-  return KOKORO_EXAMPLE_VOICES[lang] ?? "one whose id starts with that language's letter";
+  // ja/zh have no Kokoro voice here: suggest another engine rather than a voice that can't load.
+  return KOKORO_EXAMPLE_VOICES[lang] ?? "none available for this language — use Cartesia or ElevenLabs";
 }
 
 export function isLanguageError(detail: string): boolean {

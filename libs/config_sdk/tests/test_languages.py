@@ -153,3 +153,22 @@ def test_kokoro_voice_speaks_only_its_own_language():
     assert tts_languages("kokoro", None, "bm_george") == frozenset({"en"})
     assert tts_languages("kokoro", None, "hf_alpha") == frozenset({"hi"})
     assert "hi" in tts_languages("kokoro", None, None)
+
+
+
+# ── Review fixes ─────────────────────────────────────────────────────────────
+
+def test_kokoro_has_no_ja_zh_and_unknown_voice_speaks_nothing():
+    assert "ja" not in tts_languages("kokoro", None) and "zh" not in tts_languages("kokoro", None)
+    assert tts_languages("kokoro", None, "jf_alpha") == frozenset()
+    assert tts_languages("kokoro", None, "zf_xiaobei") == frozenset()
+
+
+async def test_override_that_cannot_speak_its_language_is_dropped_at_runtime():
+    repo = _repo(
+        {"language": "en", "supported_languages": ["en", "hi"],
+         "tts_config_by_language": {"hi": "kokoro-en"}},
+        extra_providers={"kokoro-en": _provider_row("kokoro-en", "tts", "kokoro", tenant_id="t1", voice="af_heart")},
+    )
+    rc = await _runtime(repo)
+    assert rc.providers.tts_by_language == {}
