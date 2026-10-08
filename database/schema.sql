@@ -132,6 +132,22 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS workflow       JSONB;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS workflow_draft JSONB;
 
+-- Multilingual agents. NULL/empty supported_languages = single-language (agents.language
+-- alone sets the STT/TTS language). Set = language switching + per-turn "Reply in X";
+-- agents.language is then the default language. Override ids are validated same-tenant
+-- by the Config Service (an FK can't reach into JSONB).
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS supported_languages    TEXT[];
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS tts_config_by_language JSONB;  -- {"hi": "<provider_configs.id>"}
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS greeting_by_language   JSONB;  -- {"hi": "नमस्ते ..."}
+DO $$ BEGIN
+    ALTER TABLE agents ADD CONSTRAINT agents_tts_config_by_language_object
+        CHECK (tts_config_by_language IS NULL OR jsonb_typeof(tts_config_by_language) = 'object');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER TABLE agents ADD CONSTRAINT agents_greeting_by_language_object
+        CHECK (greeting_by_language IS NULL OR jsonb_typeof(greeting_by_language) = 'object');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- ── tool_provider_configs ─────────────────────────────────────────────────────
 -- api_key_ref is a reference only ('env:' | 'enc:' | 'k8s:'), never a real key.
 CREATE TABLE IF NOT EXISTS tool_provider_configs (
@@ -487,6 +503,9 @@ ALTER TABLE calls ADD COLUMN IF NOT EXISTS sentiment_reason TEXT;
 ALTER TABLE calls DROP CONSTRAINT IF EXISTS calls_sentiment_check;
 ALTER TABLE calls ADD CONSTRAINT calls_sentiment_check
     CHECK (sentiment IS NULL OR sentiment IN ('positive', 'neutral', 'negative', 'frustrated'));
+
+-- Languages the caller spoke, in order of first appearance (multilingual agents only).
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS detected_languages TEXT[];
 
 CREATE INDEX IF NOT EXISTS idx_calls_tenant   ON calls(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_calls_started  ON calls(started_at);
