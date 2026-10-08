@@ -387,3 +387,39 @@ async def test_guardrail_skip_is_logged_once_per_session(caplog):
     await _turn(h, "s1")
     skipped = [r for r in caplog.records if "guardrail and booking-claim checks skipped" in r.message]
     assert len(skipped) == 1
+
+
+# ── Post-call ────────────────────────────────────────────────────────────────
+
+def test_post_call_prompts_require_english():
+    from ..sentiment import _SYSTEM_PROMPT
+    from ..session_finalizer import _SUMMARY_PROMPT
+    for prompt in (_SYSTEM_PROMPT, _SUMMARY_PROMPT):
+        assert "English, whatever language the call was in" in prompt.replace("\n", " ")
+
+
+async def test_detected_languages_recorded_at_session_end():
+    from unittest.mock import MagicMock
+
+    rc = await _runtime({"language": "en", "supported_languages": ("en", "hi")})
+    stt = _RecordingSTT([SttResult(text="नमस्ते", language="hi", language_confidence=1.0)])
+    transcripts = MagicMock()
+    h = PipelineConversationHandler(rc, ProviderBundle(stt=stt, llm=_LLM(), tts=_RecordingTTS()),
+                                    transcripts=transcripts)
+    await _turn(h, "s1")
+    await h.on_session_end("s1", "hangup")
+    transcripts.record_detected_languages.assert_called_once_with("s1", ["hi"])
+
+
+async def test_single_language_agent_never_records_languages():
+    from unittest.mock import MagicMock
+
+    rc = await _runtime({})
+    transcripts = MagicMock()
+    h = PipelineConversationHandler(
+        rc, ProviderBundle(stt=_RecordingSTT([SttResult(text="hi")]), llm=_LLM(), tts=_RecordingTTS()),
+        transcripts=transcripts,
+    )
+    await _turn(h, "s1")
+    await h.on_session_end("s1", "hangup")
+    transcripts.record_detected_languages.assert_not_called()

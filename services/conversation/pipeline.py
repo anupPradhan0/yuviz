@@ -912,6 +912,8 @@ class PipelineConversationHandler:
         if self._transcripts is not None:
             for caller_text, ai_response, interrupted in pending_recovery_turns:
                 self._transcripts.record_turn(session_id, caller_text, 1.0, ai_response, interrupted)
+            if state is not None and state.language is not None and state.language.detected:
+                self._transcripts.record_detected_languages(session_id, state.language.detected)
             self._transcripts.end_call(session_id, reason, final_state=final_state)
         self._guardrail_counter.reset(session_id)
         self._booking_fabrication_counter.reset(session_id)
