@@ -16,17 +16,28 @@ OTHER_TENANT = "22222222-2222-2222-2222-222222222222"
 
 
 class FakeConn:
-    """Just enough of asyncpg for _validate_languages: provider rows by id + tenant default."""
+    """Just enough of asyncpg for _validate_languages: provider rows by id + tenant defaults
+    (+ agent rows for revalidate_multilingual_agents)."""
 
-    def __init__(self, rows: dict[str, dict], default_tts: str | None = None) -> None:
+    def __init__(self, rows: dict[str, dict], default_tts: str | None = None,
+                 default_stt: str | None = None, agents: list[dict] | None = None) -> None:
         self.rows = rows
         self.default_tts = default_tts
+        self.default_stt = default_stt
+        self.agents = agents or []
 
     async def fetchrow(self, _sql, config_id):
         return self.rows.get(str(config_id))
 
-    async def fetchval(self, _sql, _tenant_id):
-        return self.default_tts
+    async def fetchval(self, sql, _tenant_id):
+        return self.default_stt if "default_stt_config_id" in sql else self.default_tts
+
+    async def fetch(self, _sql, _tenant_id):
+        return self.agents
+
+
+def _stt(engine, model, *, name=None):
+    return _tts(engine, name=name, model=model, voice=None, role="stt")
 
 
 def _tts(engine, *, tenant=TENANT, name=None, model=None, voice="v", role="tts", extra=None):
@@ -231,3 +242,105 @@ async def test_kokoro_english_voice_rejected_for_hindi():
          "tts_config_by_language": {"hi": alpha_id}},
     )
     assert json.loads(out["tts_config_by_language"]) == {"hi": alpha_id}
+
+
+
+# ── Review fixes: STT that can't switch, language tags, provider/tenant edits ──
+
+async def test_english_only_whisper_rejected_for_multilingual_agent():
+    cartesia_id, cartesia = _tts("cartesia")
+    whisper_id, whisper = _stt("faster_whisper", "small.en", name="Whisper default")
+    with pytest.raises(ValueError, match=r"'Whisper default'.*English-only"):
+        await agents._validate_languages(
+            FakeConn({cartesia_id: cartesia, whisper_id: whisper}), TENANT,
+            {"language": "en", "supported_languages": ["en", "hi"],
+             "tts_config_id": cartesia_id, "stt_config_id": whisper_id},
+        )
+
+
+async def test_tenant_default_english_only_whisper_also_rejected():
+    cartesia_id, cartesia = _tts("cartesia")
+    whisper_id, whisper = _stt("faster_whisper", "small.en")
+    with pytest.raises(ValueError, match="English-only"):
+        await agents._validate_languages(
+            FakeConn({cartesia_id: cartesia, whisper_id: whisper}, default_stt=whisper_id), TENANT,
+            {"language": "en", "supported_languages": ["en", "hi"], "tts_config_id": cartesia_id},
+        )
+
+
+async def test_multilingual_whisper_and_nova3_accepted_old_deepgram_rejected():
+    cartesia_id, cartesia = _tts("cartesia")
+    ok_whisper_id, ok_whisper = _stt("faster_whisper", "small")
+    nova3_id, nova3 = _stt("deepgram", "nova-3")
+    base_id, base = _stt("deepgram", "base")
+    conn = FakeConn({cartesia_id: cartesia, ok_whisper_id: ok_whisper, nova3_id: nova3, base_id: base})
+    common = {"language": "en", "supported_languages": ["en", "hi"], "tts_config_id": cartesia_id}
+    await agents._validate_languages(conn, TENANT, {**common, "stt_config_id": ok_whisper_id})
+    await agents._validate_languages(conn, TENANT, {**common, "stt_config_id": nova3_id})
+    with pytest.raises(ValueError, match="nova-3 or nova-2"):
+        await agents._validate_languages(conn, TENANT, {**common, "stt_config_id": base_id})
+
+
+async def test_single_language_agent_keeps_any_stt():
+    whisper_id, whisper = _stt("faster_whisper", "small.en")
+    out = await agents._validate_languages(
+        FakeConn({whisper_id: whisper}), TENANT, {"language": "en-US", "stt_config_id": whisper_id},
+    )
+    assert out["supported_languages"] is None
+
+
+@pytest.mark.parametrize("value", ["en", "hi", "en-US", "nl-BE", "zh-Hant-TW", None])
+def test_language_tag_shape_accepted(value):
+    agents._check_language_tag(value)
+
+
+@pytest.mark.parametrize("value", ["", "english", "en US", "1234", "en-", 5])
+def test_language_tag_shape_rejected(value):
+    with pytest.raises(ValueError, match="not a language code"):
+        agents._check_language_tag(value)
+
+
+async def test_revalidation_names_the_agent_a_provider_edit_would_break():
+    # The Hindi override's voice was just edited to an English Kokoro voice.
+    base_id, base = _tts("cartesia")
+    hi_id, hi = _tts("kokoro", voice="af_heart", name="Hindi voice")
+    agent_row = {
+        "name": "Clinic bot", "language": "en", "supported_languages": ["en", "hi"],
+        "tts_config_by_language": json.dumps({"hi": hi_id}), "greeting_by_language": None,
+        "tts_config_id": base_id, "stt_config_id": None,
+    }
+    with pytest.raises(ValueError, match=r"'Clinic bot'.*Hindi"):
+        await agents.revalidate_multilingual_agents(FakeConn({base_id: base, hi_id: hi}, agents=[agent_row]), TENANT)
+
+
+async def test_revalidation_passes_when_agents_still_work():
+    base_id, base = _tts("cartesia")
+    agent_row = {
+        "name": "Clinic bot", "language": "en", "supported_languages": ["en", "hi"],
+        "tts_config_by_language": None, "greeting_by_language": None,
+        "tts_config_id": base_id, "stt_config_id": None,
+    }
+    await agents.revalidate_multilingual_agents(FakeConn({base_id: base}, agents=[agent_row]), TENANT)
+
+
+async def test_provider_edit_that_breaks_a_multilingual_agent_is_refused(test_tenant, scoped):
+    base = await _cartesia(test_tenant["id"])
+    hi_voice = await provider_configs.create_provider_config(
+        tenant_id=test_tenant["id"], name="Hindi voice", role="tts", engine="kokoro", voice="hf_alpha",
+        allow_pointer_schemes=False,
+    )
+    await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="ml-agent", name="ML", tts_config_id=str(base["id"]),
+        language="en", supported_languages=["en", "hi"],
+        tts_config_by_language={"hi": str(hi_voice["id"])},
+    )
+    with pytest.raises(ValueError, match="would break multilingual agent 'ML'"):
+        await provider_configs.update_provider_config(hi_voice["id"], allow_pointer_schemes=False, voice="af_heart")
+    still = await provider_configs.get_provider_config(hi_voice["id"])
+    assert still["voice"] == "hf_alpha"
+
+
+async def test_agent_save_rejects_malformed_language(test_tenant, scoped):
+    created = await agents.create_agent(tenant_id=test_tenant["id"], slug="plain2", name="Plain")
+    with pytest.raises(ValueError, match="not a language code"):
+        await agents.update_agent(created["id"], tenant_slug=test_tenant["slug"], language="english please")

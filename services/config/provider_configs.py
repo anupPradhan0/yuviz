@@ -256,6 +256,13 @@ async def update_provider_config(
         new = dict(new_row)
         new["extra"] = db.json_col(new["extra"])
 
+        # What an STT/TTS row can hear or speak depends on engine/model/voice/extra; re-check the
+        # multilingual agents using it, in this transaction, so the edit is refused (400) rather
+        # than a live caller hearing Hindi read by an English-only voice.
+        if old["role"] in ("stt", "tts") and {"engine", "model", "voice", "extra"} & set(fields):
+            from .agents import revalidate_multilingual_agents  # agents imports this module
+            await revalidate_multilingual_agents(conn, old["tenant_id"])
+
         # Only written columns, so a redacted api_key_ref doesn't show as changed on every update.
         await audit.write_audit(
             conn,

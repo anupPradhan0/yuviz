@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from typing import Any, Callable
 
 from libs.config_sdk.languages import (
+    DEEPGRAM_MULTI,
     LANGUAGES,
     agent_supported_languages,
+    deepgram_supports_multi,
     language_name,
     normalize_language,
     tts_languages,
@@ -237,9 +240,21 @@ async def _validate_provider_assignments(conn: Any, tenant_id: Any, fields: dict
 
 
 _LANGUAGE_FIELDS = (
-    "language", "supported_languages", "tts_config_by_language", "greeting_by_language", "tts_config_id",
+    "language", "supported_languages", "tts_config_by_language", "greeting_by_language",
+    "tts_config_id", "stt_config_id",
 )
 _MAX_GREETING_CHARS = 2000
+# BCP-47-ish: "en", "hi", "en-US", "zh-Hant-TW". Providers get a per-engine normalised form.
+_LANGUAGE_TAG_RE = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
+
+
+def _check_language_tag(value: Any) -> None:
+    """Shape check for agents.language on write. Not the registry: a single-language
+    agent may use any language its providers support (e.g. "nl-BE")."""
+    if value is None:
+        return
+    if not isinstance(value, str) or not _LANGUAGE_TAG_RE.match(value.strip()):
+        raise ValueError(f"language {value!r} is not a language code (e.g. 'en', 'hi', 'en-US')")
 
 
 async def _tts_row(conn: Any, config_id: Any) -> Any:
@@ -326,6 +341,27 @@ async def _validate_languages(conn: Any, tenant_id: Any, merged: dict[str, Any])
         return out
     out["language"] = default
 
+    # Switching needs an STT that can tell the languages apart: an English-only Whisper
+    # model can't detect at all, and Deepgram only code-switches on nova-2/3 'multi'.
+    if len(supported) > 1:
+        stt_id = merged.get("stt_config_id") or await conn.fetchval(
+            "SELECT default_stt_config_id FROM tenants WHERE id = $1", tenant_id,
+        )
+        stt = await _tts_row(conn, str(stt_id)) if stt_id else None
+        if stt is not None and stt["role"] == "stt":
+            name = f"{stt['name']!r} ({stt['engine']} {stt['model'] or 'default model'})"
+            if stt["engine"] == "faster_whisper" and (stt["model"] or "").endswith(".en"):
+                raise ValueError(
+                    f"the agent's speech recognition {name} is English-only and can't detect other "
+                    "languages — use a multilingual Whisper model (e.g. small)"
+                )
+            if stt["engine"] == "deepgram" and not deepgram_supports_multi(stt["model"], list(supported)):
+                raise ValueError(
+                    f"the agent's speech recognition {name} can't switch between "
+                    f"{', '.join(language_name(l) for l in supported)} — use nova-3 or nova-2 "
+                    f"('{DEEPGRAM_MULTI}' covers en, es, fr, de, hi, ru, pt, ja, it, nl)"
+                )
+
     # Every non-English language needs a voice that can speak it: a live caller must
     # never hear Hindi read by an English-only engine.
     base_id = merged.get("tts_config_id") or await conn.fetchval(
@@ -348,6 +384,29 @@ def _row_tts_languages(row: Any) -> frozenset[str]:
     return tts_languages(
         row["engine"], tts_model_of(row["engine"], row["model"], db.json_col(row["extra"]) or {}), row["voice"],
     )
+
+
+async def revalidate_multilingual_agents(conn: Any, tenant_id: Any) -> None:
+    """Re-run the multilingual checks for every multilingual agent of the tenant, inside the
+    caller's transaction (after its write). Provider and tenant-default edits change what an
+    agent's voices and STT can do without the agent being saved, e.g. a Kokoro override's
+    voice from hf_alpha to af_heart. Raises ValueError naming the agent it would break."""
+    rows = await conn.fetch(
+        "SELECT name, language, supported_languages, tts_config_by_language, greeting_by_language, "
+        "tts_config_id, stt_config_id FROM agents "
+        "WHERE tenant_id = $1 AND deleted_at IS NULL AND cardinality(supported_languages) > 0",
+        tenant_id,
+    )
+    for row in rows:
+        merged = {f: row[f] for f in _LANGUAGE_FIELDS}
+        for col in ("tts_config_by_language", "greeting_by_language"):
+            merged[col] = db.json_col(merged[col])
+        for col in ("tts_config_id", "stt_config_id"):
+            merged[col] = str(merged[col]) if merged[col] is not None else None
+        try:
+            await _validate_languages(conn, tenant_id, merged)
+        except ValueError as exc:
+            raise ValueError(f"this change would break multilingual agent {row['name']!r}: {exc}") from None
 
 
 async def create_agent(
@@ -394,7 +453,9 @@ async def create_agent(
             conn, tenant_id,
             {"stt_config_id": stt_config_id, "llm_config_id": llm_config_id, "tts_config_id": tts_config_id},
         )
+        _check_language_tag(language)
         langs = await _validate_languages(conn, tenant_id, {
+            "stt_config_id": stt_config_id,
             "language": language, "supported_languages": supported_languages,
             "tts_config_by_language": tts_config_by_language,
             "greeting_by_language": greeting_by_language, "tts_config_id": tts_config_id,
@@ -465,6 +526,8 @@ async def update_agent(
         await _validate_provider_assignments(conn, old["tenant_id"], fields)
 
         set_fields = dict(fields)
+        if "language" in fields:
+            _check_language_tag(fields["language"])
         if any(f in fields for f in _LANGUAGE_FIELDS):
             merged = {f: fields.get(f, old.get(f)) for f in _LANGUAGE_FIELDS}
             langs = await _validate_languages(conn, old["tenant_id"], merged)
