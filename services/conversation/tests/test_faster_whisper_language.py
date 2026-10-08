@@ -18,7 +18,8 @@ def whisper_cls(monkeypatch):
 
 
 class _StubModel:
-    def __init__(self, language="hi", probability=0.93):
+    def __init__(self, language="hi", probability=0.93, multilingual=True):
+        self.model = SimpleNamespace(is_multilingual=multilingual)  # the ctranslate2 model
         self.calls: list[dict] = []
         self._info = SimpleNamespace(language=language, language_probability=probability)
 
@@ -107,3 +108,46 @@ async def test_accented_english_is_confidently_english_among_candidates(whisper_
     result = await stt.transcribe(b"\x00\x01" * 8000, 16000, language=None, languages=("en", "hi"))
     assert result.language == "en"
     assert result.language_confidence == pytest.approx(0.48 / 0.58)  # 0.83: enough to switch back
+
+
+# ── Review fixes: English-only models, regional tags, short-blip early reject ──
+
+class _EnglishOnlyModel(_DetectingModel):
+    def __init__(self):
+        super().__init__(multilingual=False)
+
+    def detect_language(self, pcm):
+        raise RuntimeError("detect_language can only be called on multilingual models")
+
+
+async def test_english_only_model_skips_detection_instead_of_crashing(whisper_cls):
+    stt = _stt(whisper_cls, language=None, model_size="small.en", model=_EnglishOnlyModel())
+    result = await stt.finalize_stream("s1", b"\x00\x01" * 8000, 16000, language=None, languages=("en", "hi"))
+    assert result.text == "haan ji"
+    assert stt._model.calls[0]["language"] is None  # faster-whisper decodes English itself
+
+
+async def test_regional_tag_is_normalised_for_whisper(whisper_cls):
+    stt = _stt(whisper_cls, language="en-US")
+    await stt.transcribe(b"\x00\x01" * 8000, 16000)
+    await stt.transcribe(b"\x00\x01" * 8000, 16000, language="hi-IN")
+    assert [c["language"] for c in stt._model.calls] == ["en", "hi"]
+
+
+async def test_short_blip_in_other_language_skips_the_decode(whisper_cls):
+    stt = _stt(whisper_cls, language=None, model=_DetectingModel())  # detects hi (0.95 of en+hi)
+    result = await stt.finalize_stream(
+        "s1", b"\x00\x01" * 8000, 16000, language=None, languages=("en", "hi"),
+        require_language=("en", 0.8),
+    )
+    assert result.text == "" and result.language == "hi"
+    assert stt._model.calls == []  # no transcribe/decode at all
+
+
+async def test_short_utterance_in_session_language_is_decoded(whisper_cls):
+    stt = _stt(whisper_cls, language=None, model=_DetectingModel())
+    result = await stt.finalize_stream(
+        "s1", b"\x00\x01" * 8000, 16000, language=None, languages=("en", "hi"),
+        require_language=("hi", 0.8),
+    )
+    assert result.text == "haan ji" and stt._model.calls[0]["language"] == "hi"

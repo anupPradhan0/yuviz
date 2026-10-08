@@ -356,6 +356,8 @@ class PipelineConversationHandler:
         self._llm          = provider_bundle.llm
         self._tts          = provider_bundle.tts
         self._tts_by_language: dict[str, Any] = dict(getattr(provider_bundle, "tts_by_language", None) or {})
+        # The bundle owns the override-or-base rule; bundles predating it have no overrides.
+        self._tts_for = getattr(provider_bundle, "tts_for", None) or (lambda _language: self._tts)
         self._init_languages(runtime_config)
         self._sample_rate  = sample_rate
         self._max_history  = max_history
@@ -644,9 +646,17 @@ class PipelineConversationHandler:
 
         # ── 1. STT ─────────────────────────────────────────────────────────────
         stt_t0 = time.monotonic()
+        stt_kwargs = self._stt_kwargs
+        tracker = self._session(session_id).language
+        if is_short and tracker is not None and "languages" in stt_kwargs:
+            # Whisper detects first and skips the decode for a short blip the gate would drop.
+            stt_kwargs = {
+                **stt_kwargs,
+                "require_language": (tracker.current, lang_state.SHORT_MIN_CONFIDENCE),
+            }
         try:
             stt_result: SttResult = await self._stt.finalize_stream(
-                session_id, audio, self._sample_rate, **self._stt_kwargs,
+                session_id, audio, self._sample_rate, **stt_kwargs,
             )
         except Exception:
             log.exception("STT failed session=%s", session_id)
@@ -657,7 +667,6 @@ class PipelineConversationHandler:
             log.debug("STT empty or cancelled session=%s", session_id)
             return
 
-        tracker = self._session(session_id).language
         if tracker is not None:
             heard = utterance_language(stt_result, self._supported_languages)
             if is_short:
@@ -1367,7 +1376,7 @@ class PipelineConversationHandler:
                 log.info("TTS sentence written in %s during a %s session — voicing it in %s session=%s",
                          written_in, language, written_in, session_id)
                 language = written_in
-        tts = self._tts_by_language.get(language, self._tts) if language else self._tts
+        tts = self._tts_for(language)
         kwargs = {"language": language} if language and getattr(tts, "accepts_language", False) is True else {}
         try:
             async for chunk in tts.synthesize_stream(text, self._sample_rate, **kwargs):

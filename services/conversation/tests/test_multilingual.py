@@ -501,3 +501,49 @@ async def test_whisper_style_stt_gets_candidate_languages():
     stt = _CandidateSTT([SttResult(text="नमस्ते", language="hi", language_confidence=0.9)])
     await _turn(_handler(rc, stt, _LLM(), _RecordingTTS()), "s1")
     assert stt.languages == [(None, ("en", "hi"))]
+
+
+# ── Review fixes: short-blip early reject, single override rule ──────────────
+
+async def test_short_audio_asks_whisper_to_reject_before_decoding():
+    class _CandidateSTT(_RecordingSTT):
+        accepts_language_candidates = True
+
+        async def finalize_stream(self, session_id, audio, sample_rate, **kwargs):
+            self.languages.append(kwargs)
+            return self._results.pop(0)
+
+        async def feed_stream(self, session_id, chunk, sample_rate, **kwargs):
+            return None
+
+    provider = MockConfigProvider()
+    provider.add_tenant(slug="acme", name="Acme")
+    provider.add_provider_config(id="stt1", role="stt", engine="faster_whisper", model="small")
+    provider.add_provider_config(id="llm1", role="llm", engine="openai")
+    provider.add_provider_config(id="tts1", role="tts", engine="kokoro", voice="hf_alpha")
+    provider.add_agent("acme", slug="bot", name="Bot", stt_config_id="stt1", llm_config_id="llm1",
+                       tts_config_id="tts1", workflow=starter_graph("Hi", "Be brief."),
+                       language="hi", supported_languages=("hi", "en"))
+    rc = await provider.get_runtime_config("acme", "bot")
+    stt = _CandidateSTT([SttResult(text="", language="en", language_confidence=0.99),
+                         SttResult(text="haan", language="hi", language_confidence=0.9)])
+    h = _handler(rc, stt, _LLM(), _RecordingTTS())
+    assert await _turn(h, "s1", _SHORT) == []  # rejected inside STT: nothing heard
+    await _turn(h, "s1", _SPEECH)
+    assert stt.languages[0]["require_language"] == ("hi", lang_state.SHORT_MIN_CONFIDENCE)
+    assert "require_language" not in stt.languages[1]
+
+
+async def test_pipeline_uses_the_bundles_override_rule():
+    rc = await _runtime({"language": "hi", "supported_languages": ("hi", "en")})
+    seen: list = []
+
+    class _Bundle(ProviderBundle):
+        def tts_for(self, language):
+            seen.append(language)
+            return super().tts_for(language)
+
+    tts = _RecordingTTS()
+    h = PipelineConversationHandler(rc, _Bundle(stt=_RecordingSTT([]), llm=_LLM(), tts=tts))
+    await h.greeting("s1")
+    assert seen == ["hi"] and tts.calls
