@@ -18,6 +18,7 @@ void WarmTransferCoordinator::start(TransferCoordinatorContext ctx,
     customer_uuid_      = ctx.call_id;
     destination_        = ctx.destination;
     transfer_id_        = ctx.transfer_id;
+    freeswitch_host_    = ctx.freeswitch_host;
     caller_id_          = ctx.caller_id;
     waiting_experience_ = ctx.waiting_experience;
     agent_uuid_.clear();
@@ -27,14 +28,14 @@ void WarmTransferCoordinator::start(TransferCoordinatorContext ctx,
     // MOH while the agent leg rings; a failed hold just degrades to silence.
     if (waiting_experience_ != "announcement_silence") {
         std::string hold_error;
-        if (!esl_client_.hold(customer_uuid_, hold_error)) {
+        if (!esl_client_.hold(customer_uuid_, hold_error, freeswitch_host_)) {
             log_.warn("Warm transfer: hold failed uuid={} error={} transfer_id={} — "
                       "continuing without MOH", customer_uuid_, hold_error, transfer_id_);
         }
     }
 
     std::string error;
-    if (!esl_client_.originate_async(destination_, caller_id_, job_uuid_, error)) {
+    if (!esl_client_.originate_async(destination_, caller_id_, job_uuid_, error, freeswitch_host_)) {
         log_.warn("Warm transfer: originate not accepted destination={} error={} "
                  "transfer_id={}", destination_, error, transfer_id_);
         finish(false, destination_, error);
@@ -55,7 +56,7 @@ void WarmTransferCoordinator::on_job_resolved(bool success, std::string result) 
                  destination_, result, transfer_id_);
         // A held channel won't play the apology TTS, so always unhold.
         std::string unhold_error;
-        if (!esl_client_.unhold(customer_uuid_, unhold_error)) {
+        if (!esl_client_.unhold(customer_uuid_, unhold_error, freeswitch_host_)) {
             log_.warn("Warm transfer: unhold failed uuid={} error={} transfer_id={} — "
                       "caller may remain on hold", customer_uuid_, unhold_error, transfer_id_);
         }
@@ -68,7 +69,7 @@ void WarmTransferCoordinator::on_job_resolved(bool success, std::string result) 
              agent_uuid_, destination_, transfer_id_);
 
     std::string unhold_error;
-    if (!esl_client_.unhold(customer_uuid_, unhold_error)) {
+    if (!esl_client_.unhold(customer_uuid_, unhold_error, freeswitch_host_)) {
         log_.warn("Warm transfer: unhold failed uuid={} error={} transfer_id={} — "
                   "proceeding anyway", customer_uuid_, unhold_error, transfer_id_);
     }
@@ -78,17 +79,17 @@ void WarmTransferCoordinator::on_job_resolved(bool success, std::string result) 
     media_owner_ = MediaOwnership::BridgePending;
     if (callbacks_.on_media_handoff) callbacks_.on_media_handoff();
     std::string fork_error;
-    if (!esl_client_.stop_audio_fork(customer_uuid_, fork_error)) {
+    if (!esl_client_.stop_audio_fork(customer_uuid_, fork_error, freeswitch_host_)) {
         log_.warn("Warm transfer: stop_audio_fork failed uuid={} error={} transfer_id={} — "
                   "bridging anyway (AI may briefly receive post-bridge audio)",
                   customer_uuid_, fork_error, transfer_id_);
     }
 
     std::string bridge_error;
-    if (!esl_client_.bridge(customer_uuid_, agent_uuid_, bridge_error)) {
+    if (!esl_client_.bridge(customer_uuid_, agent_uuid_, bridge_error, freeswitch_host_)) {
         log_.warn("Warm transfer: bridge failed customer_uuid={} agent_uuid={} error={} "
                  "transfer_id={}", customer_uuid_, agent_uuid_, bridge_error, transfer_id_);
-        esl_client_.hangup(agent_uuid_, "bridge_failed");
+        esl_client_.hangup(agent_uuid_, "bridge_failed", freeswitch_host_);
         finish(false, destination_, "bridge_failed:" + bridge_error);
         return;
     }
@@ -105,10 +106,10 @@ void WarmTransferCoordinator::cancel() {
 
     // A late BACKGROUND_JOB resolves into nothing: finish() removes the watch.
     if (!agent_uuid_.empty()) {
-        esl_client_.hangup(agent_uuid_, "transfer_cancelled");
+        esl_client_.hangup(agent_uuid_, "transfer_cancelled", freeswitch_host_);
     }
     std::string unhold_error;
-    esl_client_.unhold(customer_uuid_, unhold_error);
+    esl_client_.unhold(customer_uuid_, unhold_error, freeswitch_host_);
 
     finish(false, destination_, "cancelled");
 }

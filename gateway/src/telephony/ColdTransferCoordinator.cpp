@@ -9,9 +9,10 @@ ColdTransferCoordinator::ColdTransferCoordinator(
 
 void ColdTransferCoordinator::start(TransferCoordinatorContext ctx,
                                     TransferCoordinatorCallbacks callbacks) {
-    state_           = CoordinatorState::Active;
-    active_call_id_  = ctx.call_id;
-    callbacks_       = std::move(callbacks);
+    state_            = CoordinatorState::Active;
+    active_call_id_   = ctx.call_id;
+    freeswitch_host_  = ctx.freeswitch_host;
+    callbacks_        = std::move(callbacks);
 
     // Watch before issuing the command: the outcome event arrives on another
     // thread and can beat transfer()'s own reply.
@@ -29,7 +30,7 @@ void ColdTransferCoordinator::start(TransferCoordinatorContext ctx,
 
     TransferRequest req{ctx.call_id, "cold", ctx.destination, ctx.reason, ctx.transfer_id};
     std::string error;
-    const bool accepted = esl_client_.transfer(req, error);
+    const bool accepted = esl_client_.transfer(req, error, freeswitch_host_);
     if (accepted) {
         // uuid_transfer may tear down mod_audio_fork's WebSocket before
         // CHANNEL_BRIDGE confirms the outcome.

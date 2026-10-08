@@ -334,7 +334,7 @@ void CallSession::wire_fsm_handlers() {
                      reason);
             return;
         }
-        esl_client_.hangup(ctx_.obs.call_id, reason);
+        esl_client_.hangup(ctx_.obs.call_id, reason, ctx_.freeswitch_host);
     };
 
     const CallFsmTimerConfig& timer_cfg = tc.timers;

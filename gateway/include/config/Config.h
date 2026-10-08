@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 
@@ -59,15 +60,30 @@ struct ConversationTransportConfig {
 // When disabled, agent hangup closes audio but the SIP leg lingers until the caller hangs up.
 struct EslConfig {
     bool        enabled{false};
-    std::string host{"127.0.0.1"};
-    uint16_t    port{8022};          // FREESWITCH_ESL_PORT
+    std::string host{"127.0.0.1"};     // default ESL host (used if node not found in nodes_map)
+    uint16_t    port{8022};            // default ESL port (FREESWITCH_ESL_PORT)
     std::string password;              // FREESWITCH_ESL_PASSWORD (or esl.password); required when enabled
     uint32_t    connect_timeout_ms{2000};
+
+    // Multi-node FreeSWITCH support: maps originating node ID (IP from local_ip_v4) to its ESL endpoint.
+    // If empty, all commands route to the default (host, port). For multi-node HA, populate this
+    // with entries like: {"10.0.1.1": ["10.0.1.1", 8022], "10.0.1.2": ["10.0.1.2", 8022]}.
+    // Configured via esl.nodes_map in gateway.yaml; loaded by Config::load().
+    std::map<std::string, std::pair<std::string, uint16_t>> nodes_map;
 
     // All dialed numbers go via sofia/external/sip:<dest>@<sip_proxy_host> because phones
     // register with Kamailio, not FreeSWITCH. Empty = transfers refused (sip_proxy_host_unset).
     std::string sip_proxy_host{};
     uint16_t    sip_proxy_port{5060};
+
+    // Resolve the ESL endpoint for a given originating FS node.
+    // Returns (host, port) for the node, or the default (host, port) if not in nodes_map.
+    [[nodiscard]] std::pair<std::string, uint16_t> resolve_node(
+        const std::string& node_id) const noexcept {
+        if (node_id.empty()) return {host, port};
+        const auto it = nodes_map.find(node_id);
+        return it != nodes_map.end() ? it->second : std::make_pair(host, port);
+    }
 };
 
 // Config-plane cache. Any Redis failure degrades to defaults; it never rejects a call.
@@ -137,12 +153,13 @@ struct PhoneRoute {
         class RedisClient& redis, const std::string& did) noexcept;
 };
 
-// DID/ANI/direction from mod_audio_fork's first WS text frame.
-// Missing or malformed input degrades to {"", "", "inbound"}; never throws.
+// DID/ANI/direction/freeswitch_host from mod_audio_fork's first WS text frame.
+// Missing or malformed input degrades gracefully; never throws.
 struct CallMetadata {
     std::string did;              // called number — feeds PhoneRoute::from_redis()
     std::string ani;              // calling number — feeds SessionContext::caller_did
     std::string direction{"inbound"};
+    std::string freeswitch_host;  // originating FS node (hostname/IP); routes ESL commands
 
     // raw is nullopt when no frame arrived in time.
     [[nodiscard]] static CallMetadata parse(

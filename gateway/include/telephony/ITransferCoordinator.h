@@ -28,6 +28,7 @@ struct TransferCoordinatorContext {
     std::string destination;
     std::string reason;
     std::string transfer_id;   // observability-only correlation id
+    std::string freeswitch_host;  // originating FS node (IP); routes ESL commands
     // Warm-only. caller_id is already resolved non-empty by CallSession;
     // waiting_experience is the raw config value.
     std::string caller_id;

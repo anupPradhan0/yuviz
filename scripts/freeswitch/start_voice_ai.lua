@@ -24,9 +24,14 @@ local function sip_token(value)
     return (tostring(value or ""):gsub("[^%w%+%-%._@]", ""))
 end
 
-local meta = string.format('{"did":"%s","ani":"%s","direction":"inbound"}',
+-- The originating FreeSWITCH node, used by the Gateway to route ESL commands
+-- (transfer, hangup) to the correct node in a multi-node deployment.
+local fs_host = session:getVariable("local_ip_v4") or ""
+
+local meta = string.format('{"did":"%s","ani":"%s","direction":"inbound","freeswitch_host":"%s"}',
     sip_token(session:getVariable("destination_number")),
-    sip_token(session:getVariable("caller_id_number")))
+    sip_token(session:getVariable("caller_id_number")),
+    sip_token(fs_host))
 
 local result = freeswitch.API():execute("uuid_audio_fork",
     uuid .. " start " .. gateway_ws .. "/voice/" .. uuid .. " mono 16000 " .. meta)

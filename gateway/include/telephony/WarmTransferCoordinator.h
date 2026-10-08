@@ -40,9 +40,10 @@ private:
     std::string      job_uuid_;
     std::string      agent_uuid_;      // known only after BACKGROUND_JOB succeeds
     std::string      destination_;
-    std::string       transfer_id_;
-    std::string       caller_id_;
-    std::string       waiting_experience_;
+    std::string      transfer_id_;
+    std::string      caller_id_;
+    std::string      waiting_experience_;
+    std::string      freeswitch_host_;  // originating FS node; routes ESL commands
     TransferCoordinatorCallbacks callbacks_;
 };
 
