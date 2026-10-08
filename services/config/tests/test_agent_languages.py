@@ -370,3 +370,30 @@ async def test_language_is_stored_trimmed(test_tenant, scoped):
     assert created["language"] == "en-US"
     updated = await agents.update_agent(created["id"], tenant_slug=test_tenant["slug"], language=" hi ")
     assert updated["language"] == "hi"
+
+
+
+async def test_revalidation_matches_ids_regardless_of_case():
+    base_id, base = _tts("cartesia")
+    hi_id, hi = _tts("kokoro", voice="af_heart")
+    agent_row = {
+        "name": "Clinic bot", "language": "en", "supported_languages": ["en", "hi"],
+        "tts_config_by_language": json.dumps({"hi": hi_id.upper()}), "greeting_by_language": None,
+        "tts_config_id": base_id, "stt_config_id": None,
+    }
+    conn = FakeConn({base_id: base, hi_id: hi, hi_id.upper(): hi}, agents=[agent_row])
+    with pytest.raises(ValueError, match="'Clinic bot'"):
+        await agents.revalidate_multilingual_agents(conn, TENANT, provider_id=hi_id.upper())
+    with pytest.raises(ValueError, match="'Clinic bot'"):
+        await agents.revalidate_multilingual_agents(conn, TENANT, provider_id=hi_id)
+
+
+async def test_override_ids_are_stored_lowercase():
+    base_id, base = _tts("cartesia")
+    hi_id, hi = _tts("cartesia")
+    out = await agents._validate_languages(
+        FakeConn({base_id: base, hi_id: hi, hi_id.upper(): hi}), TENANT,
+        {"language": "en", "supported_languages": ["en", "hi"], "tts_config_id": base_id,
+         "tts_config_by_language": {"hi": hi_id.upper()}},
+    )
+    assert json.loads(out["tts_config_by_language"]) == {"hi": hi_id}

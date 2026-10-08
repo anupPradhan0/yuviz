@@ -313,7 +313,8 @@ async def _validate_languages(conn: Any, tenant_id: Any, merged: dict[str, Any])
                 f"{language_name(lang)} ({lang}) can't be spoken by the voice override "
                 f"{row['name']!r} ({row['engine']}) — choose a voice that supports {language_name(lang)}"
             )
-        overrides[lang] = str(config_id)
+        # Canonical (lowercase) form, so id comparisons elsewhere can't miss on case.
+        overrides[lang] = str(uuid.UUID(str(config_id)))
 
     greetings_raw = merged.get("greeting_by_language") or {}
     if not isinstance(greetings_raw, dict):
@@ -404,22 +405,30 @@ async def revalidate_multilingual_agents(
         "WHERE tenant_id = $1 AND deleted_at IS NULL AND cardinality(supported_languages) > 0",
         tenant_id,
     )
-    pid = str(provider_id) if provider_id is not None else None
+    def canonical(value: Any) -> str | None:
+        """Lowercase UUID string, so a differently-cased id still matches."""
+        if value is None:
+            return None
+        try:
+            return str(uuid.UUID(str(value)))
+        except ValueError:
+            return str(value)
+
+    pid = canonical(provider_id)
     defaults: dict[str, str | None] = {}
     for role in ("stt", "tts"):
         value = await conn.fetchval(f"SELECT default_{role}_config_id FROM tenants WHERE id = $1", tenant_id)
-        defaults[role] = str(value) if value is not None else None
+        defaults[role] = canonical(value)
 
     def uses_edit(row: Any) -> bool:
-        own = {role: (str(row[f"{role}_config_id"]) if row[f"{role}_config_id"] is not None else None)
-               for role in ("stt", "tts")}
+        own = {role: canonical(row[f"{role}_config_id"]) for role in ("stt", "tts")}
         if any(own[role] is None for role in default_roles):
             return True
         if pid is None:
             return False
         effective = {role: own[role] or defaults[role] for role in ("stt", "tts")}
         overrides = db.json_col(row["tts_config_by_language"]) or {}
-        return pid in effective.values() or pid in {str(v) for v in overrides.values()}
+        return pid in effective.values() or pid in {canonical(v) for v in overrides.values()}
 
     for row in rows:
         if not uses_edit(row):
