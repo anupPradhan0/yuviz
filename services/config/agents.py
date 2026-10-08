@@ -16,6 +16,14 @@ import json
 import uuid
 from typing import Any, Callable
 
+from libs.config_sdk.languages import (
+    LANGUAGES,
+    agent_supported_languages,
+    language_name,
+    normalize_language,
+    tts_languages,
+    tts_model_of,
+)
 from libs.config_sdk.workflow import graphs_equivalent, starter_graph
 from libs.tenancy import platform_conn, tenant_conn
 
@@ -36,9 +44,11 @@ _UPDATABLE_FIELDS = {
     "status", "max_call_duration_s",
     # Which call flow (if any) answers ahead of this agent — see call_flows.py.
     "call_flow_id",
+    "supported_languages", "tts_config_by_language", "greeting_by_language",
 }
 
-_JSON_COLUMNS = ("workflow", "workflow_draft")
+_GRAPH_COLUMNS = ("workflow", "workflow_draft")
+_JSON_COLUMNS = (*_GRAPH_COLUMNS, "tts_config_by_language", "greeting_by_language")
 
 # Undo slot: the prompt before the last accepted fix, and the hash of the
 # prompt that fix wrote. Never leaves this module (audit rows, API payloads).
@@ -70,7 +80,7 @@ def _sha256_hex(text: str) -> str:
 
 def _audit_view(row: dict[str, Any]) -> dict[str, Any]:
     """Strip graph columns from ordinary agent audits (publish records them)."""
-    return {k: v for k, v in _strip_slot(row).items() if k not in _JSON_COLUMNS}
+    return {k: v for k, v in _strip_slot(row).items() if k not in _GRAPH_COLUMNS}
 
 
 def _public_agent(row: dict[str, Any]) -> dict[str, Any]:
@@ -226,6 +236,118 @@ async def _validate_provider_assignments(conn: Any, tenant_id: Any, fields: dict
         require_usable_tts_voice(field, config_id, row["engine"], row["voice"])
 
 
+_LANGUAGE_FIELDS = (
+    "language", "supported_languages", "tts_config_by_language", "greeting_by_language", "tts_config_id",
+)
+_MAX_GREETING_CHARS = 2000
+
+
+async def _tts_row(conn: Any, config_id: Any) -> Any:
+    return await conn.fetchrow(
+        "SELECT id, tenant_id, name, role, engine, model, voice, extra FROM provider_configs "
+        "WHERE id = $1 AND deleted_at IS NULL FOR SHARE", config_id,
+    )
+
+
+async def _validate_languages(conn: Any, tenant_id: Any, merged: dict[str, Any]) -> dict[str, Any]:
+    """Validate the multilingual fields as one unit and return their normalised column
+    values. `merged` is the agent's state after this write (old row overlaid with fields).
+
+    Override ids are always checked same-tenant. Language coverage is only checked
+    when supported_languages is set, so single-language agents save exactly as before.
+    Raises ValueError (-> 400) naming the language and provider on any problem."""
+    supported_raw = merged.get("supported_languages") or []
+    if not isinstance(supported_raw, (list, tuple)) or not all(isinstance(c, str) for c in supported_raw):
+        raise ValueError("supported_languages must be a list of language codes")
+    supported: tuple[str, ...] = ()
+    default = None
+    if supported_raw:
+        for code in [merged.get("language"), *supported_raw]:
+            if code is not None and normalize_language(code) not in LANGUAGES:
+                raise ValueError(
+                    f"language {code!r} is not supported — choose from {', '.join(sorted(LANGUAGES))}"
+                )
+        default = normalize_language(merged.get("language")) or normalize_language(supported_raw[0])
+        supported = agent_supported_languages(default, supported_raw)
+
+    overrides_raw = merged.get("tts_config_by_language") or {}
+    if not isinstance(overrides_raw, dict):
+        raise ValueError("tts_config_by_language must be an object of {language: tts_config_id}")
+    overrides: dict[str, str] = {}
+    for lang_raw, config_id in overrides_raw.items():
+        lang = normalize_language(lang_raw)
+        if lang not in LANGUAGES:
+            raise ValueError(f"tts_config_by_language has an unknown language {lang_raw!r}")
+        if supported and lang not in supported:
+            raise ValueError(f"tts_config_by_language has a voice for {lang_raw!r}, which is not in supported_languages")
+        if config_id in (None, ""):
+            continue
+        try:
+            uuid.UUID(str(config_id))
+        except ValueError:
+            raise ValueError(f"tts_config_by_language[{lang!r}]={config_id!r} is not a valid id") from None
+        row = await _tts_row(conn, str(config_id))
+        # Another tenant's id is indistinguishable from a missing one.
+        if row is None or str(row["tenant_id"]) != str(tenant_id):
+            raise ValueError(f"tts_config_by_language[{lang!r}] not found")
+        if row["role"] != "tts":
+            raise ValueError(f"tts_config_by_language[{lang!r}]={config_id!r} has role {row['role']!r}, expected 'tts'")
+        require_usable_tts_voice(f"tts_config_by_language[{lang!r}]", config_id, row["engine"], row["voice"])
+        if supported and lang not in _row_tts_languages(row):
+            raise ValueError(
+                f"{language_name(lang)} ({lang}) can't be spoken by the voice override "
+                f"{row['name']!r} ({row['engine']}) — choose a voice that supports {language_name(lang)}"
+            )
+        overrides[lang] = str(config_id)
+
+    greetings_raw = merged.get("greeting_by_language") or {}
+    if not isinstance(greetings_raw, dict):
+        raise ValueError("greeting_by_language must be an object of {language: greeting}")
+    greetings: dict[str, str] = {}
+    for lang_raw, text in greetings_raw.items():
+        lang = normalize_language(lang_raw)
+        if lang not in LANGUAGES:
+            raise ValueError(f"greeting_by_language has an unknown language {lang_raw!r}")
+        if supported and lang not in supported:
+            raise ValueError(f"greeting_by_language has a greeting for {lang_raw!r}, which is not in supported_languages")
+        if not isinstance(text, str):
+            raise ValueError(f"greeting_by_language[{lang!r}] must be text")
+        if len(text) > _MAX_GREETING_CHARS:
+            raise ValueError(f"greeting_by_language[{lang!r}] is longer than {_MAX_GREETING_CHARS} characters")
+        if text.strip():
+            greetings[lang] = text.strip()
+
+    out: dict[str, Any] = {
+        "supported_languages": list(supported) or None,
+        "tts_config_by_language": json.dumps(overrides) if overrides else None,
+        "greeting_by_language": json.dumps(greetings) if greetings else None,
+    }
+    if not supported:
+        return out
+    out["language"] = default
+
+    # Every non-English language needs a voice that can speak it: a live caller must
+    # never hear Hindi read by an English-only engine.
+    base_id = merged.get("tts_config_id") or await conn.fetchval(
+        "SELECT default_tts_config_id FROM tenants WHERE id = $1", tenant_id,
+    )
+    base = await _tts_row(conn, str(base_id)) if base_id else None
+    base_langs = _row_tts_languages(base) if base is not None else frozenset({"en"})
+    for lang in supported:
+        if lang == "en" or lang in overrides or lang in base_langs:
+            continue
+        provider = f"{base['name']!r} ({base['engine']})" if base is not None else "(none configured)"
+        raise ValueError(
+            f"{language_name(lang)} ({lang}) can't be spoken by the agent's TTS provider {provider} — "
+            f"choose a multilingual TTS provider or add a {language_name(lang)} voice override"
+        )
+    return out
+
+
+def _row_tts_languages(row: Any) -> frozenset[str]:
+    return tts_languages(row["engine"], tts_model_of(row["engine"], row["model"], db.json_col(row["extra"]) or {}))
+
+
 async def create_agent(
     *,
     tenant_id: Any,
@@ -238,6 +360,9 @@ async def create_agent(
     tts_config_id: Any | None = None,
     workflow: dict[str, Any] | None = None,
     language: str | None = None,
+    supported_languages: list[str] | None = None,
+    tts_config_by_language: dict[str, str] | None = None,
+    greeting_by_language: dict[str, str] | None = None,
     status: str = "active",
     template_id: str | None = None,
     template_version: int | None = None,
@@ -267,16 +392,25 @@ async def create_agent(
             conn, tenant_id,
             {"stt_config_id": stt_config_id, "llm_config_id": llm_config_id, "tts_config_id": tts_config_id},
         )
+        langs = await _validate_languages(conn, tenant_id, {
+            "language": language, "supported_languages": supported_languages,
+            "tts_config_by_language": tts_config_by_language,
+            "greeting_by_language": greeting_by_language, "tts_config_id": tts_config_id,
+        })
         row = await conn.fetchrow(
             "INSERT INTO agents "
             "(tenant_id, slug, name, greeting, system_prompt, "
             "stt_config_id, llm_config_id, tts_config_id, workflow, workflow_draft, "
-            "language, status, template_id, template_version) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $9::jsonb, $10, $11, $12, $13) "
+            "language, status, template_id, template_version, "
+            "supported_languages, tts_config_by_language, greeting_by_language) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $9::jsonb, $10, $11, $12, $13, "
+            "$14, $15::jsonb, $16::jsonb) "
             "RETURNING *",
             tenant_id, slug, name, greeting, system_prompt,
             stt_config_id, llm_config_id, tts_config_id, graph_json,
-            language, status, template_id, template_version,
+            langs.get("language", language), status, template_id, template_version,
+            langs["supported_languages"], langs["tts_config_by_language"],
+            langs["greeting_by_language"],
         )
         result = _row(row)
         await append_version(
@@ -329,6 +463,14 @@ async def update_agent(
         await _validate_provider_assignments(conn, old["tenant_id"], fields)
 
         set_fields = dict(fields)
+        if any(f in fields for f in _LANGUAGE_FIELDS):
+            merged = {f: fields.get(f, old.get(f)) for f in _LANGUAGE_FIELDS}
+            langs = await _validate_languages(conn, old["tenant_id"], merged)
+            # Only write the multilingual columns this request touched (plus the
+            # normalised default language), so a single-language save stays byte-identical.
+            for col, value in langs.items():
+                if col in fields or col == "language":
+                    set_fields[col] = value
         if "greeting" in set_fields:
             set_fields["greeting"] = _coerce_prompt(set_fields["greeting"])
         if "system_prompt" in set_fields:

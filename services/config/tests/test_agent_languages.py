@@ -1,0 +1,211 @@
+"""Multilingual agent fields: validation rules (fake connection) and tenant isolation
+of per-language voice overrides (real Postgres under RLS, like test_agents.py)."""
+
+from __future__ import annotations
+
+import json
+import uuid
+
+import pytest
+import pytest_asyncio
+
+from services.config import agents, provider_configs
+
+TENANT = "11111111-1111-1111-1111-111111111111"
+OTHER_TENANT = "22222222-2222-2222-2222-222222222222"
+
+
+class FakeConn:
+    """Just enough of asyncpg for _validate_languages: provider rows by id + tenant default."""
+
+    def __init__(self, rows: dict[str, dict], default_tts: str | None = None) -> None:
+        self.rows = rows
+        self.default_tts = default_tts
+
+    async def fetchrow(self, _sql, config_id):
+        return self.rows.get(str(config_id))
+
+    async def fetchval(self, _sql, _tenant_id):
+        return self.default_tts
+
+
+def _tts(engine, *, tenant=TENANT, name=None, model=None, voice="v", role="tts", extra=None):
+    rid = str(uuid.uuid4())
+    return rid, {
+        "id": rid, "tenant_id": tenant, "name": name or engine, "role": role,
+        "engine": engine, "model": model, "voice": voice, "extra": json.dumps(extra or {}),
+    }
+
+
+async def test_single_language_agent_is_not_language_checked():
+    aura_id, aura = _tts("deepgram")
+    out = await agents._validate_languages(
+        FakeConn({aura_id: aura}), TENANT, {"language": "hi", "tts_config_id": aura_id},
+    )
+    assert out == {"supported_languages": None, "tts_config_by_language": None, "greeting_by_language": None}
+
+
+async def test_multilingual_normalises_and_puts_default_first():
+    cartesia_id, cartesia = _tts("cartesia")
+    out = await agents._validate_languages(
+        FakeConn({cartesia_id: cartesia}), TENANT,
+        {"language": "hi-IN", "supported_languages": ["en", "HI"], "tts_config_id": cartesia_id,
+         "greeting_by_language": {"hi": " नमस्ते ", "en": ""}},
+    )
+    assert out["language"] == "hi"
+    assert out["supported_languages"] == ["hi", "en"]
+    assert json.loads(out["greeting_by_language"]) == {"hi": "नमस्ते"}
+
+
+async def test_english_only_base_tts_rejected_naming_language_and_provider():
+    aura_id, aura = _tts("deepgram", name="Aura Asteria")
+    with pytest.raises(ValueError) as exc:
+        await agents._validate_languages(
+            FakeConn({aura_id: aura}), TENANT,
+            {"language": "en", "supported_languages": ["en", "hi"], "tts_config_id": aura_id},
+        )
+    assert "Hindi (hi)" in str(exc.value) and "'Aura Asteria' (deepgram)" in str(exc.value)
+
+
+async def test_english_only_base_tts_accepted_with_override():
+    aura_id, aura = _tts("deepgram")
+    hi_id, hi = _tts("cartesia")
+    out = await agents._validate_languages(
+        FakeConn({aura_id: aura, hi_id: hi}), TENANT,
+        {"language": "en", "supported_languages": ["en", "hi"], "tts_config_id": aura_id,
+         "tts_config_by_language": {"hi": hi_id}},
+    )
+    assert json.loads(out["tts_config_by_language"]) == {"hi": hi_id}
+
+
+async def test_tenant_default_tts_is_the_base_when_agent_has_none():
+    aura_id, aura = _tts("deepgram", name="Default voice")
+    with pytest.raises(ValueError, match="'Default voice'"):
+        await agents._validate_languages(
+            FakeConn({aura_id: aura}, default_tts=aura_id), TENANT,
+            {"language": "en", "supported_languages": ["en", "hi"]},
+        )
+
+
+async def test_english_only_elevenlabs_model_rejected():
+    el_id, el = _tts("elevenlabs", extra={"model_id": "eleven_turbo_v2"})
+    with pytest.raises(ValueError, match="Hindi"):
+        await agents._validate_languages(
+            FakeConn({el_id: el}), TENANT,
+            {"language": "en", "supported_languages": ["en", "hi"], "tts_config_id": el_id},
+        )
+
+
+async def test_cross_tenant_override_rejected_as_not_found():
+    base_id, base = _tts("cartesia")
+    foreign_id, foreign = _tts("cartesia", tenant=OTHER_TENANT)
+    with pytest.raises(ValueError, match=r"tts_config_by_language\['hi'\] not found"):
+        await agents._validate_languages(
+            FakeConn({base_id: base, foreign_id: foreign}), TENANT,
+            {"language": "en", "supported_languages": ["en", "hi"], "tts_config_id": base_id,
+             "tts_config_by_language": {"hi": foreign_id}},
+        )
+
+
+async def test_cross_tenant_override_rejected_even_for_single_language_agent():
+    foreign_id, foreign = _tts("cartesia", tenant=OTHER_TENANT)
+    with pytest.raises(ValueError, match="not found"):
+        await agents._validate_languages(
+            FakeConn({foreign_id: foreign}), TENANT, {"tts_config_by_language": {"hi": foreign_id}},
+        )
+
+
+async def test_override_with_wrong_role_or_language_rejected():
+    base_id, base = _tts("cartesia")
+    llm_id, llm = _tts("openai", role="llm")
+    aura_id, aura = _tts("deepgram")
+    conn = FakeConn({base_id: base, llm_id: llm, aura_id: aura})
+    common = {"language": "en", "supported_languages": ["en", "hi"], "tts_config_id": base_id}
+    with pytest.raises(ValueError, match="expected 'tts'"):
+        await agents._validate_languages(conn, TENANT, {**common, "tts_config_by_language": {"hi": llm_id}})
+    with pytest.raises(ValueError, match="voice override"):
+        await agents._validate_languages(conn, TENANT, {**common, "tts_config_by_language": {"hi": aura_id}})
+    with pytest.raises(ValueError, match="not in supported_languages"):
+        await agents._validate_languages(conn, TENANT, {**common, "tts_config_by_language": {"es": base_id}})
+
+
+async def test_unknown_language_rejected():
+    with pytest.raises(ValueError, match="not supported"):
+        await agents._validate_languages(FakeConn({}), TENANT, {"supported_languages": ["en", "xx"]})
+
+
+# ── Real Postgres + RLS ──────────────────────────────────────────────────────
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def other_tenant_tts(pool):
+    """A TTS config owned by a second tenant, inserted outside the test tenant's RLS scope."""
+    slug = f"test-{uuid.uuid4().hex[:8]}"
+    tenant = await pool.fetchrow(
+        "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING id", f"Other {slug}", slug,
+    )
+    row = await pool.fetchrow(
+        "INSERT INTO provider_configs (tenant_id, name, role, engine, voice) "
+        "VALUES ($1, 'Foreign Hindi', 'tts', 'cartesia', 'v') RETURNING id",
+        tenant["id"],
+    )
+    yield str(row["id"])
+    await pool.execute("DELETE FROM provider_configs WHERE tenant_id = $1", tenant["id"])
+    await pool.execute("DELETE FROM tenants WHERE id = $1", tenant["id"])
+
+
+async def _cartesia(tenant_id, name="Cartesia"):
+    return await provider_configs.create_provider_config(
+        tenant_id=tenant_id, name=name, role="tts", engine="cartesia", voice="v",
+        allow_pointer_schemes=False,
+    )
+
+
+async def test_update_rejects_other_tenants_voice_override(test_tenant, scoped, other_tenant_tts):
+    base = await _cartesia(test_tenant["id"])
+    created = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="ml-agent", name="ML", tts_config_id=str(base["id"]),
+        language="en", supported_languages=["en", "hi"],
+    )
+    with pytest.raises(ValueError, match="not found"):
+        await agents.update_agent(
+            created["id"], tenant_slug=test_tenant["slug"],
+            tts_config_by_language={"hi": other_tenant_tts},
+        )
+    fetched = await agents.get_agent(test_tenant["slug"], "ml-agent")
+    assert fetched["tts_config_by_language"] is None
+
+
+async def test_create_and_update_round_trip_multilingual_fields(test_tenant, scoped):
+    base = await _cartesia(test_tenant["id"])
+    hi_voice = await _cartesia(test_tenant["id"], name="Hindi voice")
+    created = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="ml-agent", name="ML", tts_config_id=str(base["id"]),
+        language="hi", supported_languages=["en"],
+        tts_config_by_language={"hi": str(hi_voice["id"])},
+        greeting_by_language={"hi": "नमस्ते", "en": "Hello"},
+    )
+    assert created["supported_languages"] == ["hi", "en"]
+    assert created["tts_config_by_language"] == {"hi": str(hi_voice["id"])}
+    assert created["greeting_by_language"] == {"hi": "नमस्ते", "en": "Hello"}
+
+    updated = await agents.update_agent(created["id"], tenant_slug=test_tenant["slug"], supported_languages=[])
+    assert updated["supported_languages"] is None
+
+
+async def test_single_language_update_leaves_language_columns_untouched(test_tenant, scoped):
+    created = await agents.create_agent(tenant_id=test_tenant["id"], slug="plain", name="Plain")
+    updated = await agents.update_agent(created["id"], tenant_slug=test_tenant["slug"], language="en-US")
+    assert updated["language"] == "en-US"  # single-language: stored as given, as before
+    assert updated["supported_languages"] is None
+
+
+async def test_provider_used_as_voice_override_cannot_be_deleted(test_tenant, scoped):
+    base = await _cartesia(test_tenant["id"])
+    hi_voice = await _cartesia(test_tenant["id"], name="Hindi voice")
+    await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="ml-agent", name="ML", tts_config_id=str(base["id"]),
+        language="en", supported_languages=["en", "hi"],
+        tts_config_by_language={"hi": str(hi_voice["id"])},
+    )
+    with pytest.raises(provider_configs.ProviderConfigInUse):
+        await provider_configs.soft_delete_provider_config(hi_voice["id"])
