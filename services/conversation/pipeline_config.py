@@ -2,7 +2,7 @@
 PipelineConfig — provider selection and parameters for the STT→LLM→TTS pipeline.
 
 All fields have sensible defaults for a dev machine with Ollama running and the
-FasterWhisper "small.en" model cached.  Every field can be overridden at startup
+FasterWhisper "small" (multilingual) model cached.  Every field can be overridden at startup
 via environment variables — no source edits needed for different environments.
 
 Environment-variable overrides (all optional):
@@ -55,7 +55,7 @@ def _env_int(key: str, default: int) -> int:
 
 @dataclass
 class SttConfig:
-    model_size:   str        = "small.en"  # "tiny"|"base"|"small"|"medium"|"large-v3", or ".en" variant
+    model_size:   str        = "small"  # "tiny"|"base"|"small"|"medium"|"large-v3", or ".en" variant
     device:       str        = "cpu"     # "cpu"|"cuda"|"auto"
     compute_type: str        = "int8"    # "int8" (CPU), "float16" (GPU)
     language:     str | None = "en"      # None = auto-detect
