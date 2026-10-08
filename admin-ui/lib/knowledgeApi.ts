@@ -117,6 +117,9 @@ export const updateDocument = (documentId: string, body: DocumentUpdate) =>
 export const deleteDocument = (documentId: string) =>
   request<void>(`/documents/${documentId}`, { method: "DELETE" });
 
+export const retryDocument = (documentId: string) =>
+  request<KbDocument>(`/documents/${documentId}/retry`, { method: "POST" });
+
 // ── Reverse lookup: which agents use this KB ────────────────────────────
 
 export interface KbAgent {
