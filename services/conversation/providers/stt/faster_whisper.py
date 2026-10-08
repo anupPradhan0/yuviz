@@ -10,10 +10,15 @@ pip install faster-whisper
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
+from typing import Any
+
 import numpy as np
 
-from ..interfaces import SttResult
+from libs.config_sdk.languages import normalize_language
+
+from ..interfaces import INSTANCE_LANGUAGE, SttResult
 
 log = logging.getLogger(__name__)
 
@@ -25,8 +30,12 @@ class FasterWhisperSTT:
     model_size  — "tiny", "base", "small", "medium", "large-v3"
     device      — "cpu" | "cuda" | "auto"
     compute_type — "int8" (CPU) | "float16" (GPU) | "float32"
-    language    — ISO-639-1 code, e.g. "en".  None = auto-detect.
+    language    — ISO-639-1 code, e.g. "en".  None = auto-detect, reported back on
+                  SttResult.language / language_confidence (needs a non-".en" model).
+                  A per-call `language=` overrides it (accepts_language).
     """
+
+    accepts_language = True
 
     def __init__(
         self,
@@ -46,6 +55,7 @@ class FasterWhisperSTT:
         self._beam_size     = beam_size
         self._model         = None   # populated by load()
         self._lock          = asyncio.Lock()
+        self._warned_english_only = False
 
     async def load(self) -> None:
         """Load the model in a thread-pool executor; call after server.start()."""
@@ -64,25 +74,38 @@ class FasterWhisperSTT:
         )
         log.info("FasterWhisper ready")
 
-    async def transcribe(self, audio: bytes, sample_rate: int) -> SttResult:
+    async def transcribe(self, audio: bytes, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE) -> SttResult:
         if not audio or self._model is None:
             return SttResult(text="")
 
+        language = self._language if language is INSTANCE_LANGUAGE else language
+        if language is None and self._model_size.endswith(".en") and not self._warned_english_only:
+            self._warned_english_only = True
+            log.error(
+                "FasterWhisper model=%s is English-only and cannot detect other languages — "
+                "use a multilingual model (e.g. 'small') for multilingual agents", self._model_size,
+            )
         async with self._lock:
             loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(None, self._transcribe_sync, audio, sample_rate)
+            return await loop.run_in_executor(
+                None, functools.partial(self._transcribe_sync, audio, sample_rate, language),
+            )
 
-    async def feed_stream(self, session_id: str, chunk: bytes, sample_rate: int) -> None:
+    async def feed_stream(
+        self, session_id: str, chunk: bytes, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE,
+    ) -> None:
         # No incremental decode; finalize_stream() gets the full buffer.
         return
 
-    async def finalize_stream(self, session_id: str, audio: bytes, sample_rate: int) -> SttResult:
-        return await self.transcribe(audio, sample_rate)
+    async def finalize_stream(
+        self, session_id: str, audio: bytes, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE,
+    ) -> SttResult:
+        return await self.transcribe(audio, sample_rate, language=language)
 
     async def cancel_stream(self, session_id: str) -> None:
         return
 
-    def _transcribe_sync(self, audio: bytes, sample_rate: int) -> SttResult:
+    def _transcribe_sync(self, audio: bytes, sample_rate: int, language: str | None) -> SttResult:
         # Convert raw L16 PCM bytes → float32 numpy array in [-1, 1].
         pcm = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
 
@@ -93,7 +116,7 @@ class FasterWhisperSTT:
         segments, info = self._model.transcribe(
             pcm,
             beam_size=self._beam_size,
-            language=self._language,
+            language=language,
             vad_filter=False,   # Gateway EnergyVAD already gates speech; double-VAD
                                 # strips short utterances and non-speech test tones.
             condition_on_previous_text=False,  # prevents hallucination loops
@@ -113,8 +136,15 @@ class FasterWhisperSTT:
             kept.append(seg.text.strip())
 
         text = " ".join(kept).strip()
-        log.debug("FasterWhisper transcript=%r lang=%s", text, info.language)
-        return SttResult(text=text, confidence=1.0)
+        log.debug("FasterWhisper transcript=%r lang=%s p=%.2f", text, info.language, info.language_probability)
+        if language is not None:
+            # Forced language: nothing was detected.
+            return SttResult(text=text, confidence=1.0)
+        return SttResult(
+            text=text, confidence=1.0,
+            language=normalize_language(info.language),
+            language_confidence=float(info.language_probability),
+        )
 
     @staticmethod
     def _resample(pcm: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
