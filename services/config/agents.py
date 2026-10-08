@@ -345,7 +345,9 @@ async def _validate_languages(conn: Any, tenant_id: Any, merged: dict[str, Any])
 
 
 def _row_tts_languages(row: Any) -> frozenset[str]:
-    return tts_languages(row["engine"], tts_model_of(row["engine"], row["model"], db.json_col(row["extra"]) or {}))
+    return tts_languages(
+        row["engine"], tts_model_of(row["engine"], row["model"], db.json_col(row["extra"]) or {}), row["voice"],
+    )
 
 
 async def create_agent(

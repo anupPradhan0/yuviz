@@ -423,3 +423,63 @@ async def test_single_language_agent_never_records_languages():
     await _turn(h, "s1")
     await h.on_session_end("s1", "hangup")
     transcripts.record_detected_languages.assert_not_called()
+
+
+# ── Fixes from local testing: Urdu-labelled Hindi, script-mismatched replies ──
+
+from ..language import script_language  # noqa: E402
+
+
+def test_urdu_detection_counts_as_hindi():
+    r = SttResult(text="mujhe madad chahiye", language="ur", language_confidence=0.9)
+    assert utterance_language(r, ("en", "hi")) == U("hi", 0.9)
+    assert utterance_language(r, ("en", "es")).language == "ur"
+
+
+def test_script_language():
+    assert script_language("मुझे खेद है, लेकिन मैं मदद करूँगी।", ("en", "hi")) == "hi"
+    assert script_language("Your appointment is at 5.", ("en", "hi")) is None
+    assert script_language("Okay, नमस्ते and welcome to our clinic today", ("en", "hi")) is None
+    assert script_language("मुझे खेद है", ("en", "es")) is None
+    assert script_language("こんにちは、元気ですか", ("en", "ja", "zh")) == "ja"
+    assert script_language("你好，欢迎", ("en", "zh")) == "zh"
+
+
+async def test_devanagari_reply_in_english_session_uses_hindi_voice():
+    rc = await _runtime({"language": "en", "supported_languages": ("en", "hi")})
+    stt = _RecordingSTT([SttResult(text="I want to talk in Hindi.", language="en", language_confidence=1.0)])
+    base, hindi = _RecordingTTS("base"), _RecordingTTS("hi")
+
+    class _HindiLLM(_LLM):
+        async def generate(self, messages):
+            yield "ज़रूर, हम हिंदी में बात कर सकते हैं।"
+
+    h = _handler(rc, stt, _HindiLLM(), base, {"hi": hindi})
+    await _turn(h, "s1")
+    assert h._session_language("s1") == "en"
+    assert hindi.calls == [("ज़रूर, हम हिंदी में बात कर सकते हैं।", "hi")]
+
+
+async def test_whisper_style_stt_gets_candidate_languages():
+    class _CandidateSTT(_RecordingSTT):
+        accepts_language_candidates = True
+
+        async def finalize_stream(self, session_id, audio, sample_rate, *, language=INSTANCE_LANGUAGE, languages=None):
+            self.languages.append((language, languages))
+            return self._results.pop(0)
+
+        async def feed_stream(self, session_id, chunk, sample_rate, *, language=INSTANCE_LANGUAGE, languages=None):
+            return None
+
+    provider = MockConfigProvider()
+    provider.add_tenant(slug="acme", name="Acme")
+    provider.add_provider_config(id="stt1", role="stt", engine="faster_whisper", model="small")
+    provider.add_provider_config(id="llm1", role="llm", engine="openai")
+    provider.add_provider_config(id="tts1", role="tts", engine="kokoro", voice="af_sarah")
+    provider.add_agent("acme", slug="bot", name="Bot", stt_config_id="stt1", llm_config_id="llm1",
+                       tts_config_id="tts1", workflow=starter_graph("Hi", "Be brief."),
+                       language="en", supported_languages=("en", "hi"))
+    rc = await provider.get_runtime_config("acme", "bot")
+    stt = _CandidateSTT([SttResult(text="नमस्ते", language="hi", language_confidence=0.9)])
+    await _turn(_handler(rc, stt, _LLM(), _RecordingTTS()), "s1")
+    assert stt.languages == [(None, ("en", "hi"))]

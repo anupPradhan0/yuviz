@@ -33,7 +33,7 @@ from .fillers import FillerSelector
 from .i18n import t
 from .guardrails import GuardrailCounter, GuardrailDetector
 from . import language as lang_state
-from .language import LanguageTracker, reply_language_instruction, utterance_language
+from .language import LanguageTracker, reply_language_instruction, script_language, utterance_language
 from .metrics import IMetrics, NullMetrics
 from .provider_bundle import ProviderBundle
 from .tool_latency import ToolLatencyStore
@@ -502,6 +502,12 @@ class PipelineConversationHandler:
             and (self._multilingual or stt_language != providers.stt.language)
             else {}
         )
+        # Auto-detecting STT (Whisper): choose only among the agent's languages.
+        if (
+            self._multilingual and stt_language is None
+            and getattr(self._stt, "accepts_language_candidates", False) is True
+        ):
+            self._stt_kwargs["languages"] = self._supported_languages
         # Single-language: a fixed TTS language when agents.language overrides the row's.
         self._tts_fixed_language: str | None = (
             tts_language if (not self._multilingual and tts_language != providers.tts.language) else None
@@ -1345,6 +1351,14 @@ class PipelineConversationHandler:
         # Every text source reaches TTS here, so strip markdown once for all of them.
         text = strip_markdown_chars(text)
         language = self._session_language(session_id) or self._tts_fixed_language
+        if self._multilingual:
+            # The LLM sometimes answers in another supported language than the session's;
+            # voice the sentence in the language its script says it's in.
+            written_in = script_language(text, self._supported_languages)
+            if written_in and written_in != language:
+                log.info("TTS sentence written in %s during a %s session — voicing it in %s session=%s",
+                         written_in, language, written_in, session_id)
+                language = written_in
         tts = self._tts_by_language.get(language, self._tts) if language else self._tts
         kwargs = {"language": language} if language and getattr(tts, "accepts_language", False) is True else {}
         try:

@@ -62,3 +62,31 @@ async def test_english_only_model_logs_once_when_asked_to_detect(whisper_cls, ca
     await stt.transcribe(b"\x00\x01" * 8000, 16000)
     await stt.transcribe(b"\x00\x01" * 8000, 16000)
     assert sum("English-only" in r.message for r in caplog.records) == 1
+
+
+class _DetectingModel(_StubModel):
+    """Whisper hearing Hindi as Urdu: ur tops the probabilities, hi is close behind."""
+
+    def detect_language(self, pcm):
+        probs = [("ur", 0.55), ("hi", 0.35), ("en", 0.05), ("es", 0.05)]
+        return probs[0][0], probs[0][1], probs
+
+
+async def test_candidates_fold_urdu_into_hindi_and_decode_in_hindi(whisper_cls):
+    stt = _stt(whisper_cls, language=None, model=_DetectingModel())
+    result = await stt.finalize_stream("s1", b"\x00\x01" * 8000, 16000, language=None, languages=("en", "hi"))
+    assert stt._model.calls[0]["language"] == "hi"  # one decode, in Hindi (Devanagari), not Urdu
+    assert result.language == "hi"
+    assert result.language_confidence == pytest.approx(0.90)
+
+
+async def test_candidates_pick_best_supported_language(whisper_cls):
+    stt = _stt(whisper_cls, language=None, model=_DetectingModel())
+    result = await stt.transcribe(b"\x00\x01" * 8000, 16000, language=None, languages=("en", "es"))
+    assert result.language == "en" and result.language_confidence == pytest.approx(0.05)
+
+
+async def test_fixed_language_ignores_candidates(whisper_cls):
+    stt = _stt(whisper_cls, language="en", model=_DetectingModel())
+    result = await stt.transcribe(b"\x00\x01" * 8000, 16000, languages=("en", "hi"))
+    assert stt._model.calls[0]["language"] == "en" and result.language is None

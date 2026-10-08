@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from libs.config_sdk.languages import normalize_language
+from libs.config_sdk.languages import LANGUAGES, normalize_language
 
 from ..interfaces import INSTANCE_LANGUAGE, SttResult
 
@@ -33,9 +33,13 @@ class FasterWhisperSTT:
     language    — ISO-639-1 code, e.g. "en".  None = auto-detect, reported back on
                   SttResult.language / language_confidence (needs a non-".en" model).
                   A per-call `language=` overrides it (accepts_language).
+                  With `languages=` (the agent's supported languages) and no fixed
+                  language, detection picks among those only, counting registry aliases
+                  (Whisper labels spoken Hindi as Urdu), then decodes once in that language.
     """
 
     accepts_language = True
+    accepts_language_candidates = True
 
     def __init__(
         self,
@@ -74,7 +78,10 @@ class FasterWhisperSTT:
         )
         log.info("FasterWhisper ready")
 
-    async def transcribe(self, audio: bytes, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE) -> SttResult:
+    async def transcribe(
+        self, audio: bytes, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE,
+        languages: tuple[str, ...] | None = None,
+    ) -> SttResult:
         if not audio or self._model is None:
             return SttResult(text="")
 
@@ -88,24 +95,41 @@ class FasterWhisperSTT:
         async with self._lock:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
-                None, functools.partial(self._transcribe_sync, audio, sample_rate, language),
+                None, functools.partial(self._transcribe_sync, audio, sample_rate, language, languages),
             )
 
     async def feed_stream(
         self, session_id: str, chunk: bytes, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE,
+        languages: tuple[str, ...] | None = None,
     ) -> None:
         # No incremental decode; finalize_stream() gets the full buffer.
         return
 
     async def finalize_stream(
         self, session_id: str, audio: bytes, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE,
+        languages: tuple[str, ...] | None = None,
     ) -> SttResult:
-        return await self.transcribe(audio, sample_rate, language=language)
+        return await self.transcribe(audio, sample_rate, language=language, languages=languages)
 
     async def cancel_stream(self, session_id: str) -> None:
         return
 
-    def _transcribe_sync(self, audio: bytes, sample_rate: int, language: str | None) -> SttResult:
+    def _detect_among(self, pcm: np.ndarray, candidates: tuple[str, ...]) -> tuple[str, float]:
+        """Best candidate language and its probability, aliases folded in. One extra
+        encoder pass, no decode; the transcribe that follows decodes once."""
+        _top, _p, all_probs = self._model.detect_language(pcm)
+        probs = dict(all_probs)
+        def score(code: str) -> float:
+            entry = LANGUAGES.get(code)
+            aliases = entry.aliases if entry else ()
+            return probs.get(code, 0.0) + sum(probs.get(a, 0.0) for a in aliases if a not in candidates)
+        best = max(candidates, key=score)
+        return best, min(score(best), 1.0)
+
+    def _transcribe_sync(
+        self, audio: bytes, sample_rate: int, language: str | None,
+        languages: tuple[str, ...] | None = None,
+    ) -> SttResult:
         # Convert raw L16 PCM bytes → float32 numpy array in [-1, 1].
         pcm = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
 
@@ -113,10 +137,14 @@ class FasterWhisperSTT:
         if sample_rate != 16_000:
             pcm = self._resample(pcm, sample_rate, 16_000)
 
+        detected: tuple[str, float] | None = None
+        if language is None and languages:
+            detected = self._detect_among(pcm, tuple(languages))
+
         segments, info = self._model.transcribe(
             pcm,
             beam_size=self._beam_size,
-            language=language,
+            language=detected[0] if detected else language,
             vad_filter=False,   # Gateway EnergyVAD already gates speech; double-VAD
                                 # strips short utterances and non-speech test tones.
             condition_on_previous_text=False,  # prevents hallucination loops
@@ -137,6 +165,8 @@ class FasterWhisperSTT:
 
         text = " ".join(kept).strip()
         log.debug("FasterWhisper transcript=%r lang=%s p=%.2f", text, info.language, info.language_probability)
+        if detected is not None:
+            return SttResult(text=text, confidence=1.0, language=detected[0], language_confidence=detected[1])
         if language is not None:
             # Forced language: nothing was detected.
             return SttResult(text=text, confidence=1.0)

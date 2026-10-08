@@ -134,3 +134,22 @@ async def test_override_ignored_for_single_language_agent():
     rc = await _runtime(repo)
     assert rc.providers.tts_by_language == {}
     assert "provider:tts-hi" not in repo.calls
+
+
+# ── Aliases and voice-bound Kokoro ───────────────────────────────────────────
+
+from libs.config_sdk.languages import resolve_alias  # noqa: E402
+
+
+def test_urdu_resolves_to_hindi_only_when_urdu_unsupported():
+    assert resolve_alias("ur", ("en", "hi")) == "hi"
+    assert resolve_alias("ur", ("en", "es")) == "ur"
+    assert resolve_alias("hi", ("en", "hi")) == "hi"
+    assert resolve_alias(None, ("en", "hi")) is None
+
+
+def test_kokoro_voice_speaks_only_its_own_language():
+    assert tts_languages("kokoro", None, "af_sarah") == frozenset({"en"})
+    assert tts_languages("kokoro", None, "bm_george") == frozenset({"en"})
+    assert tts_languages("kokoro", None, "hf_alpha") == frozenset({"hi"})
+    assert "hi" in tts_languages("kokoro", None, None)

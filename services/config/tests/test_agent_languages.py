@@ -209,3 +209,25 @@ async def test_provider_used_as_voice_override_cannot_be_deleted(test_tenant, sc
     )
     with pytest.raises(provider_configs.ProviderConfigInUse):
         await provider_configs.soft_delete_provider_config(hi_voice["id"])
+
+
+async def test_kokoro_english_voice_rejected_for_hindi():
+    sarah_id, sarah = _tts("kokoro", name="Kokoro Sarah", voice="af_sarah")
+    with pytest.raises(ValueError, match=r"Hindi \(hi\).*'Kokoro Sarah' \(kokoro\)"):
+        await agents._validate_languages(
+            FakeConn({sarah_id: sarah}), TENANT,
+            {"language": "en", "supported_languages": ["en", "hi"], "tts_config_id": sarah_id},
+        )
+    with pytest.raises(ValueError, match="voice override"):
+        await agents._validate_languages(
+            FakeConn({sarah_id: sarah}), TENANT,
+            {"language": "en", "supported_languages": ["en", "hi"], "tts_config_id": sarah_id,
+             "tts_config_by_language": {"hi": sarah_id}},
+        )
+    alpha_id, alpha = _tts("kokoro", voice="hf_alpha")
+    out = await agents._validate_languages(
+        FakeConn({sarah_id: sarah, alpha_id: alpha}), TENANT,
+        {"language": "en", "supported_languages": ["en", "hi"], "tts_config_id": sarah_id,
+         "tts_config_by_language": {"hi": alpha_id}},
+    )
+    assert json.loads(out["tts_config_by_language"]) == {"hi": alpha_id}

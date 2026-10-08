@@ -13,7 +13,7 @@ import os
 import re
 from dataclasses import dataclass
 
-from libs.config_sdk.languages import LANGUAGES, language_name, normalize_language
+from libs.config_sdk.languages import LANGUAGES, language_name, normalize_language, resolve_alias
 
 from .providers.interfaces import SttResult
 
@@ -40,6 +40,14 @@ SHORT_MIN_S = _env_float("VOICEAI_LANG_SHORT_MIN_S", 0.45)
 SHORT_MIN_CONFIDENCE = _env_float("VOICEAI_LANG_SHORT_MIN_CONFIDENCE", 0.80)
 
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")
+# Scripts that identify one registry language on their own (Latin is shared, so absent).
+_SCRIPT_LANGUAGES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("hi", _DEVANAGARI),
+    ("ja", re.compile(r"[\u3040-\u30ff]")),           # kana: Japanese even when mixed with kanji
+    ("zh", re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")),
+)
+# A sentence is voiced in its script's language when that script is this share of its letters.
+_SCRIPT_SHARE = 0.5
 
 
 @dataclass(frozen=True)
@@ -52,7 +60,7 @@ def utterance_language(result: SttResult, supported: tuple[str, ...]) -> Utteran
     """The utterance's language after the Hinglish rule: when Hindi is supported, any
     Devanagari or >= HI_WORD_SHARE hi-tagged words makes it Hindi; otherwise the
     STT's own detection stands (so mixed hi/en below the share is English)."""
-    detected = normalize_language(result.language)
+    detected = resolve_alias(normalize_language(result.language), supported)
     if "hi" in supported:
         if _DEVANAGARI.search(result.text or ""):
             return UtteranceLanguage("hi", 1.0)
@@ -121,6 +129,19 @@ class LanguageTracker:
         self.current = lang
         self._candidate, self._streak = None, 0
         return True
+
+
+def script_language(text: str, supported: tuple[str, ...]) -> str | None:
+    """The supported language a sentence's script unambiguously belongs to, if any.
+    Guards TTS when the LLM answers in another language than the session's: Devanagari
+    read by an English voice is unintelligible."""
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return None
+    for lang, pattern in _SCRIPT_LANGUAGES:
+        if lang in supported and sum(1 for c in letters if pattern.match(c)) / len(letters) >= _SCRIPT_SHARE:
+            return lang
+    return None
 
 
 def reply_language_instruction(language: str) -> str:

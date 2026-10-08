@@ -25,12 +25,16 @@ class Language:
     deepgram_multi: bool          # covered by Deepgram nova-2/3 language=multi
     # Extra LLM guidance on how to write this language so TTS reads it well.
     script_hint:    str | None = None
+    # Detector codes that mean this language for us when they aren't supported themselves:
+    # Whisper often labels spoken Hindi as Urdu (the two are near-identical when spoken).
+    aliases:        tuple[str, ...] = ()
 
 
 LANGUAGES: dict[str, Language] = {l.code: l for l in (
     Language("en", "English",    "English",   "a", True),
     Language("hi", "Hindi",      "हिन्दी",     "h", True,
-             "Write Hindi words in Devanagari script and English words in Latin script."),
+             "Write Hindi words in Devanagari script and English words in Latin script.",
+             aliases=("ur",)),
     Language("es", "Spanish",    "Español",   "e", True),
     Language("fr", "French",     "Français",  "f", True),
     Language("de", "German",     "Deutsch",   None, True),
@@ -55,6 +59,18 @@ def normalize_language(code: str | None) -> str | None:
         return None
     m = _LANG_TAG_RE.match(code.strip())
     return m.group(1).lower() if m else None
+
+
+def resolve_alias(code: str | None, supported: tuple[str, ...] | list[str]) -> str | None:
+    """A detected code mapped onto the agent's languages: itself when supported, else the
+    supported language that lists it as an alias ('ur' -> 'hi' when only hi is supported)."""
+    if code is None or code in supported:
+        return code
+    for lang in supported:
+        entry = LANGUAGES.get(lang)
+        if entry is not None and code in entry.aliases:
+            return lang
+    return code
 
 
 def is_known_language(code: str | None) -> bool:
@@ -82,11 +98,18 @@ _ELEVENLABS_MULTILINGUAL = frozenset({"en", "hi", "es", "fr", "de", "pt", "it", 
 # ElevenLabs models that speak English only.
 _ELEVENLABS_ENGLISH_ONLY_MODELS = ("eleven_monolingual_v1", "eleven_turbo_v2", "eleven_flash_v2")
 _KOKORO_LANGUAGES = frozenset(code for code, l in LANGUAGES.items() if l.kokoro_code)
+# Kokoro voice ids start with their language's lang_code ('af_sarah' = a, 'hf_alpha' = h);
+# 'b' is British English. Each voice is trained on that one language.
+_KOKORO_VOICE_PREFIX_LANGUAGE = {
+    **{l.kokoro_code: code for code, l in LANGUAGES.items() if l.kokoro_code},
+    "b": "en",
+}
 
 
-def tts_languages(engine: str, model: str | None) -> frozenset[str]:
-    """Registry languages a TTS engine/model can speak. Unknown engines: English only,
-    so a new engine must be added here before a multilingual agent can use it."""
+def tts_languages(engine: str, model: str | None, voice: str | None = None) -> frozenset[str]:
+    """Registry languages a TTS engine/model (and, for Kokoro, voice) can speak. Unknown
+    engines: English only, so a new engine must be added here before a multilingual
+    agent can use it."""
     engine = (engine or "").lower()
     if engine == "cartesia":
         m = (model or "sonic-2").lower()
@@ -95,7 +118,10 @@ def tts_languages(engine: str, model: str | None) -> frozenset[str]:
         m = (model or "eleven_turbo_v2_5").lower()
         return frozenset({"en"}) if m in _ELEVENLABS_ENGLISH_ONLY_MODELS else _ELEVENLABS_MULTILINGUAL
     if engine == "kokoro":
-        return _KOKORO_LANGUAGES
+        # A Kokoro voice speaks its own language only: an English voice reading Hindi
+        # phonemes comes out barely intelligible.
+        voice_lang = _KOKORO_VOICE_PREFIX_LANGUAGE.get((voice or "")[:1].lower())
+        return frozenset({voice_lang}) if voice_lang else _KOKORO_LANGUAGES
     return frozenset({"en"})
 
 
