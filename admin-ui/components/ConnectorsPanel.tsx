@@ -248,7 +248,7 @@ export function ConnectorsPanel({ tenantId }: { tenantId: string }) {
       {error && <div className="error-banner">{error}</div>}
       {notice && <div className="info-banner">{notice}</div>}
 
-      <div className="card" style={{ marginBottom: 14 }}>
+      <div id="connect" className="card" style={{ marginBottom: 14, scrollMarginTop: 16 }}>
         <div className="card-hdr">
           <div className="card-title">Connected accounts</div>
         </div>

@@ -21,6 +21,8 @@ log = logging.getLogger(__name__)
 
 _TIMEOUT_S = 20.0
 _PROMPT_MAX_TOKENS = 3000
+# A rewrite echoes the whole prompt; ~3 chars/token covers PromptRewrite's 20k-char cap.
+_REWRITE_MAX_TOKENS = 8000
 _CHAT_MAX_TOKENS = 300
 _TRANSCRIPT_TURNS = 30
 _TRANSCRIPT_CHARS = 8000
@@ -107,6 +109,14 @@ class PromptStructureError(ValueError):
 
 class CustomerDataError(PromptStructureError):
     """A model proposal copied caller data into the prompt."""
+
+
+class TruncatedOutputError(PromptStructureError):
+    """The model hit max_tokens; `text` is the cut-off reply."""
+
+    def __init__(self, text: str):
+        super().__init__("model output was cut off at max_tokens")
+        self.text = text
 
 
 def _heading_indices(
@@ -274,6 +284,12 @@ def _parse_text(resp: httpx.Response, extract: Callable[[Any], Any]) -> str:
     return text
 
 
+def _check_truncated(text: str, truncated: bool) -> str:
+    if truncated:
+        raise TruncatedOutputError(text)
+    return text
+
+
 async def _call_openai(
     api_key: str, model: str, messages: _Messages, system: str | None, max_tokens: int,
 ) -> str:
@@ -294,7 +310,8 @@ async def _call_openai(
     if resp.status_code != 200:
         log.warning("OpenAI chat/completions returned %s", resp.status_code)
         raise ValueError(f"OpenAI returned {resp.status_code}")
-    return _parse_text(resp, lambda body: body["choices"][0]["message"]["content"])
+    text = _parse_text(resp, lambda body: body["choices"][0]["message"]["content"])
+    return _check_truncated(text, resp.json()["choices"][0].get("finish_reason") == "length")
 
 
 async def _call_anthropic(
@@ -317,7 +334,8 @@ async def _call_anthropic(
     if resp.status_code != 200:
         log.warning("Anthropic messages returned %s", resp.status_code)
         raise ValueError(f"Anthropic returned {resp.status_code}")
-    return _parse_text(resp, lambda body: body["content"][0]["text"])
+    text = _parse_text(resp, lambda body: body["content"][0]["text"])
+    return _check_truncated(text, resp.json().get("stop_reason") == "max_tokens")
 
 
 _CALLERS = {"openai": _call_openai, "anthropic": _call_anthropic}
@@ -413,6 +431,31 @@ async def revise_system_prompt(
     return revised
 
 
+_REWRITE_SYSTEM = (
+    "You edit the instructions of a customer-facing AI phone agent. Apply the requested change "
+    "and return the full updated instructions. Keep everything the change does not touch, "
+    "including headings and layout. Do not use double curly brackets. "
+    "Return only the instructions text — no preamble, no quotes."
+)
+
+
+async def rewrite_system_prompt(
+    tenant_id: Any, llm_config_id: Any, *, base_prompt: str, instruction: str,
+    secret_resolver: SecretResolver,
+) -> str:
+    """Free-form edit of hand-written instructions; unlike revise, no structure is enforced."""
+    text = (await _complete(
+        tenant_id, llm_config_id,
+        [{"role": "user", "content": f"Current instructions:\n{base_prompt}\n\nChange requested:\n{instruction}"}],
+        system=_REWRITE_SYSTEM,
+        max_tokens=min(_REWRITE_MAX_TOKENS, max(_PROMPT_MAX_TOKENS, len(base_prompt) // 3 + 500)),
+        secret_resolver=secret_resolver,
+    )).strip()
+    if not text or adds_template_braces(text, base_prompt):
+        raise PromptStructureError("unusable rewrite")
+    return text
+
+
 async def chat_test_reply(
     tenant_id: Any, llm_config_id: Any, *, system_prompt: str,
     history: list[tuple[str | None, str | None]], message: str, secret_resolver: SecretResolver,
@@ -431,7 +474,10 @@ async def chat_test_reply(
     if opening:
         system_prompt += "\n\nYou opened the conversation by saying: " + " ".join(opening)
     messages.append({"role": "user", "content": message})
-    return await _complete(
-        tenant_id, llm_config_id, messages, system=system_prompt,
-        max_tokens=_CHAT_MAX_TOKENS, secret_resolver=secret_resolver,
-    )
+    try:
+        return await _complete(
+            tenant_id, llm_config_id, messages, system=system_prompt,
+            max_tokens=_CHAT_MAX_TOKENS, secret_resolver=secret_resolver,
+        )
+    except TruncatedOutputError as exc:
+        return exc.text

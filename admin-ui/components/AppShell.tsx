@@ -2,9 +2,9 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, Moon, Sun } from "lucide-react";
-import { getCurrentUser, isConsoleRole, listTenants, Tenant, User } from "@/lib/api";
+import { getCurrentUser, isConsoleRole, listAllUsageTrend, listTenants, Tenant, User } from "@/lib/api";
 import { clearToken, getToken } from "@/lib/auth";
 import { clearAllAgentDrafts } from "@/lib/agentDraft";
 
@@ -15,6 +15,10 @@ export const ALL_TENANTS_SENTINEL = "__all__";
 
 function tenantInitial(name: string): string {
   return (name.trim()[0] || "?").toUpperCase();
+}
+
+function userInitials(email: string): string {
+  return email.slice(0, 2).toUpperCase();
 }
 
 const ICONS: Record<string, React.ReactNode> = {
@@ -54,7 +58,7 @@ const ICONS: Record<string, React.ReactNode> = {
       <path d="M2 14c0-3.314 2.686-5 6-5s6 1.686 6 5" />
     </svg>
   ),
-  "phone-numbers": (
+  telephony: (
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
       <path d="M3 2h3l1.5 4-2 1.5a10 10 0 004.5 4.5L11.5 10l4 1.5v3a2 2 0 01-2 2C7.5 16.5 -0.5 8.5 1 3a2 2 0 012-1z" />
     </svg>
@@ -90,13 +94,6 @@ const ICONS: Record<string, React.ReactNode> = {
       <path d="M4 10.5l1 3.5h2l-.8-3" />
     </svg>
   ),
-  telephony: (
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-      <rect x="1.5" y="9.5" width="13" height="5" rx="1" />
-      <path d="M4 12h.01M6.5 12h.01M9 12h.01" />
-      <path d="M8 8V5M8 5H4.5M8 5h3.5M4.5 5V2.5M11.5 5V2.5" />
-    </svg>
-  ),
   integrations: (
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
       <path d="M5.5 2v3M10.5 2v3M4 5h8v3a4 4 0 0 1-8 0zM8 12v2.5" />
@@ -120,44 +117,71 @@ const ICONS: Record<string, React.ReactNode> = {
       <path d="M9.5 2.5V6H13M5.5 8.5h5M5.5 11h3.5" />
     </svg>
   ),
+  clock: (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <circle cx="8" cy="8" r="6.5" />
+      <path d="M8 5v3.5l2 1.5" />
+    </svg>
+  ),
 };
 
-const OVERVIEW_ITEMS = [{ href: "/dashboard", label: "Dashboard", icon: "dashboard" }];
+type NavItem = { href: string; label: string; icon: string };
 
-const MANAGEMENT_ITEMS = [
+const OVERVIEW_ITEMS: NavItem[] = [{ href: "/dashboard", label: "Dashboard", icon: "dashboard" }];
+
+// Accounts and AI & Voice are superadmin-only here; admins reach AI & Voice under Settings.
+const BUILD_ITEMS: NavItem[] = [
   { href: "/tenants", label: "Accounts", icon: "accounts" },
-  { href: "/agents", label: "Agent Studio", icon: "agents" },
-  { href: "/workflows", label: "IVR Flows", icon: "workflows" },
-  { href: "/knowledge-bases", label: "Knowledge Base", icon: "knowledge-bases" },
+  { href: "/agents", label: "Agents", icon: "agents" },
+  { href: "/workflows", label: "Call Flows", icon: "workflows" },
+  { href: "/knowledge-bases", label: "Knowledge", icon: "knowledge-bases" },
   { href: "/ai-voice", label: "AI & Voice", icon: "ai-voice" },
-  // Provider configurations and every number on them, add to remove.
-  { href: "/telephony", label: "Telephony", icon: "telephony" },
-  // Connected CRM/calendar accounts and the presets built on them.
-  { href: "/integrations", label: "Integrations", icon: "integrations" },
+  { href: "/telephony", label: "Phone Numbers", icon: "telephony" },
+  { href: "/integrations", label: "Connected Apps", icon: "integrations" },
 ];
+const SUPERADMIN_ONLY = new Set(["/tenants", "/ai-voice", "/users", "/live-calls"]);
 
-// Superadmin's cross-account user view; admins manage their team under
-// Settings → Team members instead.
-const USERS_ITEM = { href: "/users", label: "Users", icon: "users" };
+// Superadmin's cross-account user view; admins manage their team under Settings → Team members.
+const USERS_ITEM: NavItem = { href: "/users", label: "Users", icon: "users" };
 
-const CALLING_ITEMS = [
+const CALLING_ITEMS: NavItem[] = [
   { href: "/calls", label: "Calls", icon: "calls" },
   { href: "/campaigns", label: "Campaigns", icon: "campaigns" },
   { href: "/live-calls", label: "Live Calls", icon: "live-calls" },
 ];
 
-const PLATFORM_ITEMS = [
-  { href: "/docs", label: "Guide", icon: "docs" },
+// Billing is superadmin/admin only. UI narrowing, not a security boundary.
+const PINNED_ITEMS: NavItem[] = [
+  { href: "/billing", label: "Billing", icon: "billing" },
+  { href: "/docs", label: "Help", icon: "docs" },
   { href: "/settings", label: "Settings", icon: "settings" },
 ];
 
-// superadmin/admin only. UI narrowing, not a security boundary (its endpoints allow any console role).
-const BILLING_ITEM = { href: "/billing", label: "Billing & usage", icon: "billing" };
+const ALL_ITEMS = [...OVERVIEW_ITEMS, ...BUILD_ITEMS, USERS_ITEM, ...CALLING_ITEMS, ...PINNED_ITEMS];
 
-const ALL_ITEMS = [...OVERVIEW_ITEMS, ...MANAGEMENT_ITEMS, USERS_ITEM, ...CALLING_ITEMS, BILLING_ITEM, ...PLATFORM_ITEMS];
+const PAGE_SUBTITLE: Record<string, string> = {
+  "/dashboard": "Overview of your calls and agents",
+  "/agents": "The AI that answers and makes your calls",
+  "/workflows": "Menus and routing before an agent picks up",
+  "/knowledge-bases": "Documents your agents can answer from",
+  "/telephony": "Numbers and carriers your calls come through",
+  "/integrations": "Calendars, CRMs and helpdesks",
+  "/calls": "Every call, with transcript and outcome",
+  "/campaigns": "Outbound calling lists",
+  "/billing": "Minutes used and cost",
+};
 
-// One agent's config page is /agents/{tenant}/{agent} — second crumb for it.
-const SETTINGS_CRUMBS = ["Agent Studio", "Configuration"];
+// Shown only on the list page itself, and never to viewers (read-only).
+const PAGE_CTA: Record<string, { label: string; href: string }> = {
+  "/agents": { label: "+ Create Agent", href: "/agents/new" },
+  "/workflows": { label: "+ New Flow", href: "/workflows/new" },
+  "/knowledge-bases": { label: "+ Add Document", href: "/knowledge-bases?add=1" },
+  "/telephony": { label: "+ Add Number", href: "/telephony?add=1" },
+  "/integrations": { label: "+ Connect App", href: "/integrations#connect" },
+  "/campaigns": { label: "+ New Campaign", href: "/campaigns/new" },
+};
+
+const monthKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -165,13 +189,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [theme, setTheme] = useState<"dark" | "light">("light");
   const [search, setSearch] = useState("");
   const [collapsed, setCollapsed] = useState(false);
-  // Off-canvas nav on narrow screens; independent of the desktop `collapsed` rail.
   const [navOpen, setNavOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [user, setUser] = useState<User | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [activeTenantId, setActiveTenantId] = useState<string | null>(null);
   const [tenantMenuOpen, setTenantMenuOpen] = useState(false);
+  const [monthMinutes, setMonthMinutes] = useState<number | null>(null);
+  const accountMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -182,9 +208,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     setNavOpen(false);
   }, [pathname]);
 
-  // Auth guard. /login and /invite skip it (invitees have no account); /no-access still needs a token.
-  // Non-console roles go to /no-access.
-  // authChecked stays false during a redirect so the page underneath never fetches.
+  useEffect(() => {
+    if (!accountMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (accountMenuRef.current && !accountMenuRef.current.contains(e.target as Node)) {
+        setAccountMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [accountMenuOpen]);
+
+  // Auth guard. /login and /invite skip it; authChecked stays false during a
+  // redirect so the page underneath never fetches.
   useEffect(() => {
     if (pathname === "/login" || pathname === "/invite") return;
     if (!getToken()) {
@@ -197,12 +233,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           router.push("/no-access");
           return;
         }
-        // Direct-URL guard matching the hidden nav items.
         if (u.role !== "superadmin" && (pathname.startsWith("/tenants") || pathname.startsWith("/live-calls"))) {
           router.push("/no-access");
           return;
         }
-        // Direct-URL guard matching the hidden nav item.
         if (u.role !== "superadmin" && u.role !== "admin" && pathname.startsWith("/billing")) {
           router.push("/no-access");
           return;
@@ -211,17 +245,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         setAuthChecked(true);
       })
       .catch(() => {
-        // api.ts's request() already redirects to /login on 401; nothing
-        // extra to do here.
         setAuthChecked(true);
       });
   }, [pathname, router]);
 
-  // Tenant switcher is only for platform-scoped superadmins; other roles are bound to one tenant.
-  // Resolves the stored selection against a tenant list (used on load and on change events).
   const resolveActiveTenantId = useCallback((ts: Tenant[]): string | null => {
     const stored = typeof window !== "undefined" ? window.localStorage.getItem(ACTIVE_TENANT_STORAGE_KEY) : null;
-    // Missing or stale selection defaults to "All tenants", never ts[0].
     const found = stored && stored !== ALL_TENANTS_SENTINEL ? ts.find((t) => t.slug === stored) ?? null : null;
     return found?.id ?? null;
   }, []);
@@ -231,15 +260,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     listTenants()
       .then((ts) => {
         setTenants(ts);
-        // Stores the tenant slug, not id: tenant-scoped routes take slugs.
         setActiveTenantId(resolveActiveTenantId(ts));
       })
-      .catch(() => {
-        // Non-fatal: the switcher simply doesn't render.
-      });
+      .catch(() => {});
   }, [user, resolveActiveTenantId]);
 
-  // Other pages' pickers (e.g. Live Calls) change the selection without selectTenant(), so listen too.
   useEffect(() => {
     if (user?.role !== "superadmin") return;
     const onSwitch = () => setActiveTenantId(resolveActiveTenantId(tenants));
@@ -249,28 +274,34 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const activeTenant = tenants.find((t) => t.id === activeTenantId) ?? null;
 
+  // Minutes pill: the switcher's selection for a superadmin, the user's own account otherwise.
+  useEffect(() => {
+    if (user?.role !== "superadmin" && user?.role !== "admin") return;
+    if (user.role === "superadmin" && tenants.length === 0) return;
+    const scope = user.role === "superadmin"
+      ? Promise.resolve(activeTenant ? [activeTenant] : tenants)
+      : listTenants();
+    const now = new Date();
+    scope
+      .then((ts) => listAllUsageTrend(ts, now.getDate() + 1))
+      .then((points) => {
+        const key = monthKey(now);
+        setMonthMinutes(points.filter((p) => p.date.startsWith(key)).reduce((sum, p) => sum + p.minutes, 0));
+      })
+      .catch(() => setMonthMinutes(null));
+  }, [user, tenants, activeTenant]);
+
   const selectTenant = (t: Tenant) => {
     setActiveTenantId(t.id);
     setTenantMenuOpen(false);
-    try {
-      window.localStorage.setItem(ACTIVE_TENANT_STORAGE_KEY, t.slug);
-    } catch {
-      // Private-mode/blocked storage: the selection just won't survive a
-      // reload, which is a strictly worse-but-safe fallback, not a crash.
-    }
-    // Tell open pages to re-query. Without this the switcher only took
-    // effect on the next full page load, which reads as it not working.
+    try { window.localStorage.setItem(ACTIVE_TENANT_STORAGE_KEY, t.slug); } catch { /* non-fatal */ }
     window.dispatchEvent(new CustomEvent("yuviz:active-tenant", { detail: t.slug }));
   };
 
   const selectAllTenants = () => {
     setActiveTenantId(null);
     setTenantMenuOpen(false);
-    try {
-      window.localStorage.setItem(ACTIVE_TENANT_STORAGE_KEY, ALL_TENANTS_SENTINEL);
-    } catch {
-      // Same non-fatal fallback as selectTenant above.
-    }
+    try { window.localStorage.setItem(ACTIVE_TENANT_STORAGE_KEY, ALL_TENANTS_SENTINEL); } catch { /* non-fatal */ }
     window.dispatchEvent(new CustomEvent("yuviz:active-tenant", { detail: ALL_TENANTS_SENTINEL }));
   };
 
@@ -286,30 +317,39 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const isSuperadmin = user?.role === "superadmin";
   const canManageUsers = isSuperadmin || user?.role === "admin";
   const matches = (label: string) => label.toLowerCase().includes(search.trim().toLowerCase());
-  const visibleOverview = OVERVIEW_ITEMS.filter((item) => matches(item.label));
-  // Accounts is superadmin-only (tenants.py enforces it server-side).
-  const visibleManagement = MANAGEMENT_ITEMS.filter((item) => matches(item.label) && (item.href !== "/tenants" || isSuperadmin));
-  const visibleUsers = isSuperadmin && matches(USERS_ITEM.label);
-  // Live Calls is superadmin-only (LIVE_CALLS_ROLES enforces it server-side).
-  const visibleCalling = CALLING_ITEMS.filter((item) => matches(item.label) && (item.href !== "/live-calls" || isSuperadmin));
-  const visibleBilling = canManageUsers && matches(BILLING_ITEM.label);
-  const visiblePlatform = PLATFORM_ITEMS.filter((item) => matches(item.label));
 
-  // Longest-prefix match, not first-match: /workflows/acme/reception must
-  // resolve to "Agents", not a shorter unrelated prefix.
+  // Server-side checks enforce these too (tenants.py, LIVE_CALLS_ROLES); this only hides the links.
+  const visible = (item: NavItem) =>
+    matches(item.label) &&
+    (isSuperadmin || !SUPERADMIN_ONLY.has(item.href)) &&
+    (item.href !== "/billing" || canManageUsers);
+  const visibleOverview = OVERVIEW_ITEMS.filter(visible);
+  const visibleBuild = [...BUILD_ITEMS, USERS_ITEM].filter(visible);
+  const visibleCalling = CALLING_ITEMS.filter(visible);
+  const visiblePinned = PINNED_ITEMS.filter(visible);
+  const noResults = [visibleOverview, visibleBuild, visibleCalling, visiblePinned].every((g) => g.length === 0);
+
+  // Longest-prefix match, not first-match: /agents/acme/bot resolves to Agents.
   const activeItem = [...ALL_ITEMS]
     .sort((a, b) => b.href.length - a.href.length)
     .find((item) => pathname.startsWith(item.href));
+
   const inAgentConfig = /^\/agents\/[^/]+\/[^/]+/.test(pathname);
-  const crumbs = inAgentConfig ? SETTINGS_CRUMBS : [activeItem?.label ?? "Yuviz.ai"];
+  const pageTitle = activeItem?.label ?? "Yuviz";
+  const pageSubtitle = inAgentConfig ? "Configuration" : PAGE_SUBTITLE[pathname];
+  const cta = user?.role !== "viewer" ? PAGE_CTA[pathname] : undefined;
+
+  const navLink = (item: NavItem) => (
+    <Link key={item.href} href={item.href} className={`nav-item${item.href === activeItem?.href ? " active" : ""}`}>
+      {ICONS[item.icon]}
+      <span className="nav-label">{item.label}</span>
+    </Link>
+  );
 
   return (
     <div className={`app-shell${navOpen ? " nav-open" : ""}`}>
-      <button
-        className="nav-scrim"
-        aria-label="Close menu"
-        onClick={() => setNavOpen(false)}
-      />
+      <button className="nav-scrim" aria-label="Close menu" onClick={() => setNavOpen(false)} />
+
       <aside className={`sidebar${collapsed ? " collapsed" : ""}`}>
         <div className="logo">
           <div className="logo-icon" aria-hidden="true">
@@ -317,9 +357,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <span className="logo-bar" />
             <span className="logo-bar" />
           </div>
-          <div className="logo-text">
-            Yuviz<span>.ai</span>
-          </div>
+          <div className="logo-text">Yuviz<span>.ai</span></div>
           <button
             className="sidebar-collapse-btn"
             onClick={() => setCollapsed((c) => !c)}
@@ -344,112 +382,27 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
 
         <nav className="nav">
-          {visibleOverview.length > 0 && (
+          {visibleOverview.map(navLink)}
+          {visibleBuild.length > 0 && (
             <>
-              <div className="nav-section">Overview</div>
-              {visibleOverview.map((item) => (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={`nav-item${item.href === activeItem?.href ? " active" : ""}`}
-                >
-                  {ICONS[item.icon]}
-                  <span className="nav-label">{item.label}</span>
-                </Link>
-              ))}
-            </>
-          )}
-          {(visibleManagement.length > 0 || visibleUsers) && (
-            <>
-              <div className="nav-section">Management</div>
-              {visibleManagement.map((item) => (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={`nav-item${item.href === activeItem?.href ? " active" : ""}`}
-                >
-                  {ICONS[item.icon]}
-                  <span className="nav-label">{item.label}</span>
-                </Link>
-              ))}
-              {visibleUsers && (
-                <Link
-                  href={USERS_ITEM.href}
-                  className={`nav-item${USERS_ITEM.href === activeItem?.href ? " active" : ""}`}
-                >
-                  {ICONS[USERS_ITEM.icon]}
-                  <span className="nav-label">{USERS_ITEM.label}</span>
-                </Link>
-              )}
+              <div className="nav-section">Build</div>
+              {visibleBuild.map(navLink)}
             </>
           )}
           {visibleCalling.length > 0 && (
             <>
-              <div className="nav-section">Calling</div>
-              {visibleCalling.map((item) => (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={`nav-item${item.href === activeItem?.href ? " active" : ""}`}
-                >
-                  {ICONS[item.icon]}
-                  <span className="nav-label">{item.label}</span>
-                </Link>
-              ))}
+              <div className="nav-section">Calls</div>
+              {visibleCalling.map(navLink)}
             </>
           )}
-          {(visiblePlatform.length > 0 || visibleBilling) && (
-            <>
-              <div className="nav-section">Platform</div>
-              {visibleBilling && (
-                <Link
-                  href={BILLING_ITEM.href}
-                  className={`nav-item${BILLING_ITEM.href === activeItem?.href ? " active" : ""}`}
-                >
-                  {ICONS[BILLING_ITEM.icon]}
-                  <span className="nav-label">{BILLING_ITEM.label}</span>
-                </Link>
-              )}
-              {visiblePlatform.map((item) => (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={`nav-item${item.href === activeItem?.href ? " active" : ""}`}
-                >
-                  {ICONS[item.icon]}
-                  <span className="nav-label">{item.label}</span>
-                </Link>
-              ))}
-            </>
-          )}
-          {visibleOverview.length === 0 && visibleManagement.length === 0 && !visibleUsers && visibleCalling.length === 0 && !visibleBilling && visiblePlatform.length === 0 && (
-            <div style={{ padding: "12px 10px", fontSize: ".76rem", color: "var(--text-3)" }}>No pages match &quot;{search}&quot;</div>
-          )}
+          {noResults && <div className="nav-empty">No pages match &quot;{search}&quot;</div>}
+          <div className="nav-spacer" />
+          {visiblePinned.length > 0 && <div className="nav-pinned">{visiblePinned.map(navLink)}</div>}
         </nav>
-
-        <div className="sidebar-user">
-          <div className="user-avatar">
-            {(user?.email || "?").slice(0, 2).toUpperCase()}
-          </div>
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div className="user-name">{user?.email ?? "…"}</div>
-            <div className="user-role">{user?.role ?? ""}</div>
-          </div>
-          <button
-            className="sidebar-collapse-btn"
-            onClick={handleLogout}
-            title="Sign out"
-            style={{ flexShrink: 0 }}
-          >
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" width="12" height="12">
-              <path d="M6 2H3a1 1 0 00-1 1v10a1 1 0 001 1h3M11 11l3-3-3-3M14 8H6" />
-            </svg>
-          </button>
-        </div>
       </aside>
 
       <div className="main">
-        <div className="topbar">
+        <header className="topbar">
           <button
             className="nav-toggle"
             aria-label="Menu"
@@ -460,8 +413,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <path d="M2 4h12M2 8h12M2 12h12" />
             </svg>
           </button>
-          {user?.role === "superadmin" ? (
-            tenants.length > 0 && (
+
+          {isSuperadmin && tenants.length > 0 && (
+            <>
               <div className="tenant-switch">
                 <button
                   className="tenant-switch-btn"
@@ -489,8 +443,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                       >
                         <span className="tenant-switch-mark">∀</span>
                         <span className="tenant-switch-row-name">
-                          All tenants
-                          <br />
+                          All tenants<br />
                           <span className="tenant-switch-row-meta">every account, unfiltered</span>
                         </span>
                         {activeTenantId === null && <Check size={14} className="tenant-switch-check" />}
@@ -503,8 +456,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                         >
                           <span className="tenant-switch-mark">{tenantInitial(t.name)}</span>
                           <span className="tenant-switch-row-name">
-                            {t.name}
-                            <br />
+                            {t.name}<br />
                             <span className="tenant-switch-row-meta">{t.slug}</span>
                           </span>
                           {t.id === activeTenantId && <Check size={14} className="tenant-switch-check" />}
@@ -514,28 +466,67 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   </>
                 )}
               </div>
-            )
-          ) : null}
-          {user?.role === "superadmin" && tenants.length > 0 && <div className="topbar-divider" />}
-          <span className="topbar-title">
-            <span style={{ color: "var(--text-3)" }}>Yuviz</span>
-            {crumbs.map((crumb) => (
-              <span key={crumb}>
-                <span style={{ color: "var(--text-3)", margin: "0 6px" }}>›</span>
-                {crumb}
-              </span>
-            ))}
-          </span>
-          <div className="topbar-actions">
-            <button
-              className="theme-toggle"
-              onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
-              title="Toggle theme"
-            >
-              {theme === "dark" ? <Moon size={15} /> : <Sun size={15} />}
-            </button>
+              <div className="topbar-divider" />
+            </>
+          )}
+
+          <div className="topbar-title">
+            <span className="topbar-page-name">{pageTitle}</span>
+            {pageSubtitle && <span className="topbar-page-sub">{pageSubtitle}</span>}
           </div>
-        </div>
+
+          <div className="topbar-actions">
+            {canManageUsers && monthMinutes !== null && (
+              <Link href="/billing" className="topbar-usage-pill" title="Open Billing">
+                {ICONS.clock}
+                <span>{Math.round(monthMinutes).toLocaleString("en-IN")} min this month</span>
+              </Link>
+            )}
+            {cta && (
+              <Link href={cta.href} className="topbar-cta">
+                {cta.label}
+              </Link>
+            )}
+            <div className="account-menu-wrap" ref={accountMenuRef}>
+              <button
+                className="account-trigger"
+                onClick={() => setAccountMenuOpen((o) => !o)}
+                aria-expanded={accountMenuOpen}
+                aria-label="Account menu"
+              >
+                <span className="account-avatar">{userInitials(user?.email ?? "?")}</span>
+                <ChevronDown size={12} className="account-caret" />
+              </button>
+
+              {accountMenuOpen && (
+                <div className="account-dropdown">
+                  <div className="account-dropdown-user">
+                    <span className="account-dropdown-email">{user?.email}</span>
+                    <span className="account-dropdown-role">{user?.role}</span>
+                  </div>
+                  <button
+                    className="account-dropdown-item"
+                    onClick={() => { setTheme((t) => (t === "dark" ? "light" : "dark")); }}
+                  >
+                    {theme === "dark" ? <Sun size={13} /> : <Moon size={13} />}
+                    <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+                    <span className="account-dropdown-switch" data-on={theme === "dark"} />
+                  </button>
+                  <button
+                    className="account-dropdown-item danger"
+                    onClick={handleLogout}
+                  >
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" width="13" height="13">
+                      <path d="M6 2H3a1 1 0 00-1 1v10a1 1 0 001 1h3M11 11l3-3-3-3M14 8H6" />
+                    </svg>
+                    <span>Log out</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </header>
+
         <div className="content">{children}</div>
       </div>
     </div>

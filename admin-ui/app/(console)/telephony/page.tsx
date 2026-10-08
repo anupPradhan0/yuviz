@@ -369,6 +369,26 @@ export default function TelephonyPage() {
   }, [numbers, numberSearch]);
 
   const selectedConfig = selectedKey ? configs.find((c) => c.key === `${selectedKey.kind}:${selectedKey.id}`) ?? null : null;
+  const wantsAdd = searchParams.get("add") === "1";
+
+  // "+ Add Number" from the top bar: open the first connection's add-number dialog, or connect a carrier first.
+  useEffect(() => {
+    if (!wantsAdd || loading) return;
+    if (selectedKey) {
+      router.replace(`/telephony?config=${encodeURIComponent(`${selectedKey.kind}:${selectedKey.id}`)}`);
+      return;
+    }
+    const target = configs.find(
+      (c) => isSuperadmin || !(c.kind === "telephony_config" && c.provider === NATIVE),
+    );
+    if (target) {
+      router.replace(`/telephony?config=${encodeURIComponent(target.key)}&add=1`);
+    } else {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setAddOpen(true);
+      router.replace("/telephony");
+    }
+  }, [wantsAdd, loading, selectedKey, configs, isSuperadmin, router]);
 
   const accountLine = isAllTenants
     ? `SIP trunks, DID numbers and routing across ${allTenants.length} account${allTenants.length === 1 ? "" : "s"}.`
@@ -384,6 +404,7 @@ export default function TelephonyPage() {
         tenant={allTenants.find((t) => t.id === selectedConfig.tenantId) ?? null}
         agents={agentsByTenant[selectedConfig.tenantId]?.agents ?? []}
         isSuperadmin={isSuperadmin}
+        openAddNumber={wantsAdd}
         syncNotice={syncNotice}
         onSyncNotice={setSyncNotice}
         onBack={() => { setSyncNotice(null); router.push("/telephony"); }}
@@ -408,7 +429,7 @@ export default function TelephonyPage() {
 
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
         <div>
-          <h1 style={{ fontSize: "1.5rem", fontWeight: 600, letterSpacing: "-.025em", margin: 0, color: "var(--text)" }}>Telephony</h1>
+          <h1 style={{ fontSize: "1.5rem", fontWeight: 600, letterSpacing: "-.025em", margin: 0, color: "var(--text)" }}>Phone Numbers</h1>
           <div className="form-hint" style={{ marginTop: 4 }}>{accountLine}</div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -860,9 +881,10 @@ function webhookUrlFor(config: ConfigRow): string | null {
 }
 
 function ConfigDetail({
-  config, numbers, tenant, agents, isSuperadmin, syncNotice, onSyncNotice, onBack, onChanged,
+  config, numbers, tenant, agents, isSuperadmin, openAddNumber, syncNotice, onSyncNotice, onBack, onChanged,
 }: {
   config: ConfigRow; numbers: NumberRow[]; tenant: Tenant | null; agents: Agent[]; isSuperadmin: boolean;
+  openAddNumber: boolean;
   syncNotice: SyncNotice | null; onSyncNotice: (n: SyncNotice | null) => void;
   onBack: () => void; onChanged: () => void;
 }) {
@@ -895,7 +917,7 @@ function ConfigDetail({
   };
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
-  const [addOpen, setAddOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(openAddNumber);
   const [purchased, setPurchased] = useState<PurchasedNumber[]>([]);
   const [editTarget, setEditTarget] = useState<NumberRow | null>(null);
 

@@ -9,7 +9,7 @@ import { OAUTH_CONTEXT_KEY, OAuthContext } from "@/components/ConnectorsPanel";
 // Whatever went wrong, the page says the same thing: the provider's error text
 // and the server's reason are never shown (the server answers every failure
 // identically too).
-const FAILURE_MESSAGE = "We could not complete the connection. Go back to Integrations and try again.";
+const FAILURE_MESSAGE = "We could not complete the connection. Go back to Connected Apps and try again.";
 
 // The provider sends the browser here with a single-use code in the URL. The
 // URL is stripped before anything else runs so the code is never in history,
@@ -48,7 +48,7 @@ export default function OAuthCallbackPage() {
           <div className="card-body">
             <div className="error-banner">{FAILURE_MESSAGE}</div>
             <Link href="/integrations" className="btn btn-ghost btn-sm">
-              Back to Integrations
+              Back to Connected Apps
             </Link>
           </div>
         ) : (

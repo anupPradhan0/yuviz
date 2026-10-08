@@ -1,14 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Check, ChevronDown, ChevronRight } from "lucide-react";
-import { ApiError, listProviders, ProviderConfig } from "@/lib/api";
+import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import { Check, FileText, Upload } from "lucide-react";
+import { ApiError } from "@/lib/api";
 import {
   AgentKnowledgeBase,
   assignKnowledgeBase,
   createKnowledgeBase,
-  deleteDocument,
-  detachKnowledgeBase,
+  deleteKnowledgeBase,
   getRetrievalPolicy,
   KbDocument,
   KnowledgeBase,
@@ -17,10 +17,9 @@ import {
   listKnowledgeBases,
   setKnowledgeBaseEnabled,
   setRetrievalPolicy,
-  updateDocument,
   uploadDocument,
 } from "@/lib/knowledgeApi";
-import { Modal } from "@/components/Modal";
+import { ACCEPTED_DOC_ACCEPT, rejectionReasonFor } from "@/components/AddSourceModal";
 
 interface PolicyForm {
   top_k: number;
@@ -30,165 +29,129 @@ interface PolicyForm {
 }
 
 const DEFAULT_POLICY: PolicyForm = { top_k: 5, minimum_score: 0, max_tokens: 1000, include_citations: true };
+const POLL_MS = 4000;
 
-// Without agentId: authoring (create/upload/delete). With agentId: attach-only plus the
-// retrieval-policy card.
-export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; agentId?: string }) {
-  const [allKbs, setAllKbs] = useState<KnowledgeBase[]>([]);
-  const [kbsError, setKbsError] = useState<string | null>(null);
+const STATUS_LABEL: Record<KbDocument["status"], { text: string; cls: string }> = {
+  ready: { text: "Ready", cls: "green" },
+  pending: { text: "Getting ready…", cls: "amber" },
+  processing: { text: "Getting ready…", cls: "amber" },
+  failed: { text: "Couldn't read this file", cls: "red" },
+};
+
+function slugFor(fileName: string): string {
+  const base = fileName.replace(/\.[^.]+$/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return `${base || "doc"}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+// Agent-scoped picker: every document in the account with an on/off switch for this agent.
+export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; agentId: string }) {
+  const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [assignments, setAssignments] = useState<AgentKnowledgeBase[]>([]);
-  const [assignmentsError, setAssignmentsError] = useState<string | null>(null);
-  const [providersError, setProvidersError] = useState<string | null>(null);
   const [docsByKb, setDocsByKb] = useState<Record<string, KbDocument[]>>({});
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [embeddingProviders, setEmbeddingProviders] = useState<ProviderConfig[]>([]);
+  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [busyKb, setBusyKb] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   const [policyForm, setPolicyForm] = useState<PolicyForm>(DEFAULT_POLICY);
   const [policySaving, setPolicySaving] = useState(false);
   const [policySaved, setPolicySaved] = useState(false);
 
-  const [createOpen, setCreateOpen] = useState(false);
-  const [createForm, setCreateForm] = useState({ slug: "", name: "", description: "", embedding_config_id: "" });
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
-
-  const [uploadKbId, setUploadKbId] = useState<string | null>(null);
-  const [uploadTitle, setUploadTitle] = useState("");
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-
-  // Each source is caught independently so one 403 doesn't blank the others.
   const refresh = async () => {
-    setLoading(true);
-    let kbs: KnowledgeBase[] = [];
-    let assigns: AgentKnowledgeBase[] = [];
-    await Promise.allSettled([
-      listKnowledgeBases(tenantId)
-        .then((ks) => {
-          kbs = ks;
-          setAllKbs(ks);
-        })
-        .then(() => setKbsError(null))
-        .catch((e) => setKbsError(e instanceof ApiError ? e.detail : String(e))),
-      agentId
-        ? listAgentKnowledgeBases(agentId)
-            .then((a) => {
-              assigns = a;
-              setAssignments(a);
-            })
-            .then(() => setAssignmentsError(null))
-            .catch((e) => setAssignmentsError(e instanceof ApiError ? e.detail : String(e)))
-        : Promise.resolve(),
-      listProviders(tenantId, { role: "embedding" })
-        .then(setEmbeddingProviders)
-        .then(() => setProvidersError(null))
-        .catch((e) => setProvidersError(e instanceof ApiError ? e.detail : String(e))),
-    ]);
+    const [kbRes, assignRes] = await Promise.allSettled([listKnowledgeBases(tenantId), listAgentKnowledgeBases(agentId)]);
+    const nextKbs = kbRes.status === "fulfilled" ? kbRes.value : [];
+    const nextAssigns = assignRes.status === "fulfilled" ? assignRes.value : [];
+    const failed = [kbRes, assignRes].find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
+    setError(failed ? (failed.reason instanceof ApiError ? failed.reason.detail : String(failed.reason)) : null);
 
-    // Authoring lists documents per tenant KB; attach lists documents per
-    // the agent's assigned KBs only.
-    const kbIdsForDocs = agentId ? assigns.map((a) => a.kb_id) : kbs.map((kb) => kb.id);
-    const docEntries = await Promise.all(kbIdsForDocs.map(async (id) => [id, await listDocuments(id)] as const));
-    setDocsByKb(Object.fromEntries(docEntries));
+    const ids = [...new Set([...nextKbs.map((kb) => kb.id), ...nextAssigns.map((a) => a.kb_id)])];
+    const docResults = await Promise.allSettled(ids.map((id) => listDocuments(id)));
+    setKbs(nextKbs);
+    setAssignments(nextAssigns);
+    setDocsByKb(Object.fromEntries(ids.map((id, i) => [id, docResults[i].status === "fulfilled" ? (docResults[i] as PromiseFulfilledResult<KbDocument[]>).value : []])));
     setLoading(false);
   };
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     refresh();
-    if (agentId) {
-      getRetrievalPolicy(agentId)
-        .then((p) =>
-          setPolicyForm({
-            top_k: p.top_k ?? DEFAULT_POLICY.top_k,
-            minimum_score: p.minimum_score ?? DEFAULT_POLICY.minimum_score,
-            max_tokens: p.max_tokens ?? DEFAULT_POLICY.max_tokens,
-            include_citations: p.include_citations ?? DEFAULT_POLICY.include_citations,
-          }),
-        )
-        .catch((e) => setAssignmentsError(e instanceof ApiError ? e.detail : String(e)));
-    }
+    getRetrievalPolicy(agentId)
+      .then((p) =>
+        setPolicyForm({
+          top_k: p.top_k ?? DEFAULT_POLICY.top_k,
+          minimum_score: p.minimum_score ?? DEFAULT_POLICY.minimum_score,
+          max_tokens: p.max_tokens ?? DEFAULT_POLICY.max_tokens,
+          include_citations: p.include_citations ?? DEFAULT_POLICY.include_citations,
+        }),
+      )
+      .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId, agentId]);
 
-  const assignedKbIds = new Set(assignments.map((a) => a.kb_id));
-  const unassignedKbs = allKbs.filter((kb) => !assignedKbIds.has(kb.id));
-  // Retrieval is on exactly when at least one attached KB is enabled.
-  const ragEnabled = assignments.some((a) => a.enabled);
-
-  const withErrorHandling = async (fn: () => Promise<unknown>, onError: (msg: string) => void) => {
-    try {
-      await fn();
-      await refresh();
-    } catch (e) {
-      onError(e instanceof ApiError ? e.detail : String(e));
-    }
-  };
-
-  const handleAttach = (kbId: string) => {
-    if (!agentId) return;
-    return withErrorHandling(() => assignKnowledgeBase(agentId, kbId), setAssignmentsError);
-  };
-  const handleToggleEnabled = (kbId: string, enabled: boolean) => {
-    if (!agentId) return;
-    return withErrorHandling(() => setKnowledgeBaseEnabled(agentId, kbId, enabled), setAssignmentsError);
-  };
-  const handleDetach = (kbId: string) => {
-    if (!agentId) return;
-    if (!confirm("Detach this knowledge base from the agent? Documents themselves are not deleted.")) return;
-    withErrorHandling(() => detachKnowledgeBase(agentId, kbId), setAssignmentsError);
-  };
-  const handleUsageModeToggle = (doc: KbDocument) =>
-    withErrorHandling(
-      () => updateDocument(doc.id, { usage_mode: doc.usage_mode === "auto" ? "prompt" : "auto" }),
-      setKbsError,
-    );
-  const handleDeleteDoc = (doc: KbDocument) => {
-    if (!confirm(`Delete document "${doc.title}"?`)) return;
-    withErrorHandling(() => deleteDocument(doc.id), setKbsError);
-  };
-
-  const handleCreateKb = async () => {
-    setCreating(true);
-    setCreateError(null);
-    try {
-      await createKnowledgeBase(tenantId, {
-        slug: createForm.slug,
-        name: createForm.name,
-        description: createForm.description,
-        embedding_config_id: createForm.embedding_config_id || undefined,
+  // One request per KB adds up fast (upload makes a KB per file), so the poll only re-reads unfinished ones.
+  const processingKbIds = Object.entries(docsByKb)
+    .filter(([, docs]) => docs.some((d) => d.status === "pending" || d.status === "processing"))
+    .map(([id]) => id);
+  useEffect(() => {
+    if (processingKbIds.length === 0) return;
+    const t = setTimeout(async () => {
+      const results = await Promise.allSettled(processingKbIds.map((id) => listDocuments(id)));
+      setDocsByKb((prev) => {
+        const next = { ...prev };
+        results.forEach((r, i) => {
+          if (r.status === "fulfilled") next[processingKbIds[i]] = r.value;
+        });
+        return next;
       });
-      setCreateOpen(false);
-      setCreateForm({ slug: "", name: "", description: "", embedding_config_id: "" });
+    }, POLL_MS);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docsByKb]);
+
+  const assignmentByKb = new Map(assignments.map((a) => [a.kb_id, a]));
+
+  const handleToggle = async (kbId: string, on: boolean) => {
+    setBusyKb(kbId);
+    try {
+      if (assignmentByKb.has(kbId)) await setKnowledgeBaseEnabled(agentId, kbId, on);
+      else if (on) await assignKnowledgeBase(agentId, kbId);
       await refresh();
     } catch (e) {
-      setCreateError(e instanceof ApiError ? e.detail : String(e));
+      setError(e instanceof ApiError ? e.detail : String(e));
     } finally {
-      setCreating(false);
+      setBusyKb(null);
     }
   };
 
-  const handleUpload = async () => {
-    if (!uploadKbId || !uploadFile) return;
+  const handleUpload = async (file: File | null) => {
+    if (!file) return;
+    const reason = rejectionReasonFor(file);
+    if (reason) {
+      setError(reason);
+      return;
+    }
     setUploading(true);
-    setUploadError(null);
+    setError(null);
+    // The new knowledge base is rolled back if the upload fails, so no empty one is left behind.
+    let createdKbId: string | null = null;
     try {
-      await uploadDocument(uploadKbId, uploadFile, uploadTitle || uploadFile.name);
-      setUploadKbId(null);
-      setUploadTitle("");
-      setUploadFile(null);
+      const kb = await createKnowledgeBase(tenantId, { slug: slugFor(file.name), name: file.name.replace(/\.[^.]+$/, "") });
+      createdKbId = kb.id;
+      await uploadDocument(kb.id, file, file.name);
+      createdKbId = null;
+      await assignKnowledgeBase(agentId, kb.id);
       await refresh();
     } catch (e) {
-      setUploadError(e instanceof ApiError ? e.detail : String(e));
+      setError(e instanceof ApiError ? e.detail : String(e));
+      if (createdKbId) await deleteKnowledgeBase(createdKbId).catch(() => {});
     } finally {
       setUploading(false);
+      if (fileInput.current) fileInput.current.value = "";
     }
   };
 
   const handleSavePolicy = async () => {
-    if (!agentId) return;
     setPolicySaving(true);
     setPolicySaved(false);
     try {
@@ -196,365 +159,165 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
       setPolicySaved(true);
       setTimeout(() => setPolicySaved(false), 2000);
     } catch (e) {
-      setAssignmentsError(e instanceof ApiError ? e.detail : String(e));
+      setError(e instanceof ApiError ? e.detail : String(e));
     } finally {
       setPolicySaving(false);
     }
   };
 
-  const statusBadge = (status: KbDocument["status"]) => {
-    const cls = status === "ready" ? "green" : status === "failed" ? "red" : status === "processing" ? "amber" : "gray";
-    return <span className={`badge ${cls}`}>{status}</span>;
-  };
-
   if (loading) return <div className="empty-state">Loading…</div>;
 
-  // Authoring: every tenant KB. Attach: only the agent's assigned KBs.
-  const rows = agentId
-    ? assignments.map((a) => ({ id: a.kb_id, name: a.kb_name, enabled: a.enabled as boolean | null }))
-    : allKbs.map((kb) => ({ id: kb.id, name: kb.name, enabled: null as boolean | null }));
+  const kbNames = new Map<string, string>([
+    ...kbs.map((kb) => [kb.id, kb.name] as [string, string]),
+    ...assignments.map((a) => [a.kb_id, a.kb_name] as [string, string]),
+  ]);
+  // Empty, unused knowledge bases are leftovers from failed uploads; nothing to pick there.
+  const rows = [...kbNames.entries()]
+    .map(([id, name]) => ({ id, name, docs: docsByKb[id] || [], on: !!assignmentByKb.get(id)?.enabled }))
+    .filter((r) => r.docs.length > 0 || assignmentByKb.has(r.id))
+    .sort((a, b) => Number(b.on) - Number(a.on) || a.name.localeCompare(b.name));
+  const usedCount = rows.filter((r) => r.on).length;
 
   return (
-    <div className="cols">
-      <div className="col-main">
-        {kbsError && <div className="error-banner">{kbsError}</div>}
-        {agentId && assignmentsError && <div className="error-banner">{assignmentsError}</div>}
-        {providersError && <div className="error-banner">{providersError}</div>}
-
-        <div className="card">
-          <div className="card-hdr">
-            <div className="card-title">{agentId ? "Knowledge this agent can use" : "Knowledge Bases"}</div>
-            <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-              {agentId && unassignedKbs.length > 0 && (
-                <select
-                  className="form-select"
-                  style={{ width: 200 }}
-                  defaultValue=""
-                  onChange={(e) => {
-                    if (e.target.value) handleAttach(e.target.value);
-                    e.target.value = "";
-                  }}
-                >
-                  <option value="">+ Add a knowledge base…</option>
-                  {unassignedKbs.map((kb) => (
-                    <option key={kb.id} value={kb.id}>
-                      {kb.name}
-                    </option>
-                  ))}
-                </select>
-              )}
-              {!agentId && (
-                <button className="btn btn-primary btn-sm" onClick={() => setCreateOpen(true)}>
-                  + New Knowledge Base
-                </button>
-              )}
-            </div>
+    <div className="card">
+      <div className="card-hdr">
+        <div>
+          <div className="card-title">Documents</div>
+          <div className="card-sub" style={{ marginLeft: 0 }}>
+            {rows.length === 0
+              ? "Upload a file and the agent will answer callers from it."
+              : `Switch on what the agent should answer from. Using ${usedCount} of ${rows.length}.`}
           </div>
-
-          {rows.length === 0 ? (
-            <div className="empty-state">
-              {agentId
-                ? unassignedKbs.length > 0
-                  ? "No knowledge added yet. Add a knowledge base above so the agent can answer from your documents."
-                  : "No knowledge added yet. Create a knowledge base in Knowledge Base, then add it here."
-                : "No knowledge bases yet."}
-            </div>
-          ) : (
-            rows.map((row) => {
-              const docs = docsByKb[row.id] || [];
-              const isExpanded = !!expanded[row.id];
-              return (
-                <div key={row.id}>
-                  <div className="kb-row">
-                    <button
-                      className="btn btn-ghost btn-sm btn-icon"
-                      aria-label={isExpanded ? "Collapse" : "Expand"}
-                      onClick={() => setExpanded({ ...expanded, [row.id]: !isExpanded })}
-                    >
-                      {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                    </button>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 500 }}>{row.name}</div>
-                      <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>
-                        {docs.length} document{docs.length === 1 ? "" : "s"}
-                      </div>
-                    </div>
-                    {agentId && (
-                      <label
-                        className="toggle-switch"
-                        title={row.enabled ? "On: used when it's relevant" : "Off: not used"}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={!!row.enabled}
-                          onChange={(e) => handleToggleEnabled(row.id, e.target.checked)}
-                        />
-                        <span className="toggle-slider" />
-                      </label>
-                    )}
-                    {!agentId && (
-                      <button
-                        className="btn btn-ghost btn-sm"
-                        onClick={() => {
-                          setUploadKbId(row.id);
-                          setUploadTitle("");
-                          setUploadFile(null);
-                          setUploadError(null);
-                        }}
-                      >
-                        + Document
-                      </button>
-                    )}
-                    {agentId && (
-                      <button className="btn btn-danger btn-sm" onClick={() => handleDetach(row.id)}>
-                        Remove
-                      </button>
-                    )}
-                  </div>
-                  {isExpanded &&
-                    (docs.length === 0 ? (
-                      <div className="kb-doc-row" style={{ color: "var(--text-3)" }}>
-                        No documents yet.
-                      </div>
-                    ) : (
-                      docs.map((doc) => (
-                        <div key={doc.id} className="kb-doc-row">
-                          <div style={{ flex: 1 }}>
-                            <span className="mono">{doc.title}</span>
-                            {doc.error && <div style={{ color: "var(--red)", fontSize: ".68rem" }}>{doc.error}</div>}
-                          </div>
-                          {statusBadge(doc.status)}
-                          {agentId ? (
-                            doc.usage_mode === "prompt" && (
-                              <span className="badge gray" title="The agent reads this on every call">
-                                always used
-                              </span>
-                            )
-                          ) : (
-                            <label
-                              style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text-3)" }}
-                              title="Always inject this document's full content into the LLM prompt every turn, regardless of query relevance"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={doc.usage_mode === "prompt"}
-                                onChange={() => handleUsageModeToggle(doc)}
-                                disabled={doc.status !== "ready"}
-                              />
-                              Always include in prompt
-                            </label>
-                          )}
-                          {!agentId && (
-                            <button className="btn btn-danger btn-sm" onClick={() => handleDeleteDoc(doc)}>
-                              Delete
-                            </button>
-                          )}
-                        </div>
-                      ))
-                    ))}
-                </div>
-              );
-            })
-          )}
         </div>
+        <button
+          className="btn btn-primary btn-sm"
+          style={{ marginLeft: "auto" }}
+          disabled={uploading}
+          onClick={() => fileInput.current?.click()}
+        >
+          <Upload size={13} /> {uploading ? "Uploading…" : "Upload document"}
+        </button>
+        <input
+          ref={fileInput}
+          type="file"
+          accept={ACCEPTED_DOC_ACCEPT}
+          hidden
+          onChange={(e) => handleUpload(e.target.files?.[0] || null)}
+        />
       </div>
 
-      {agentId && (
-        <div className="col-side">
-          <div className="card">
-            <div className="card-hdr">
-              <div className="card-title">Lookup settings</div>
-              {ragEnabled && <div className="card-sub">how the agent searches your documents</div>}
-            </div>
-            <div className="card-body">
-              {!ragEnabled ? (
-                <div style={{ fontSize: ".76rem", color: "var(--text-3)", lineHeight: 1.5 }}>
-                  Turn on at least one knowledge base to adjust how the agent searches it.
-                </div>
-              ) : (
-                <>
-                  <div className="form-group">
-                    <label className="form-label">
-                      Snippets to read <span className="hint">matching passages checked per question</span>
-                    </label>
-                    <input
-                      className="form-input"
-                      type="number"
-                      min={1}
-                      max={50}
-                      value={policyForm.top_k}
-                      onChange={(e) => setPolicyForm({ ...policyForm, top_k: Number(e.target.value) })}
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">
-                      Max text to read <span className="hint">characters per question</span>
-                    </label>
-                    <input
-                      className="form-input"
-                      type="number"
-                      min={100}
-                      step={100}
-                      value={policyForm.max_tokens}
-                      onChange={(e) => setPolicyForm({ ...policyForm, max_tokens: Number(e.target.value) })}
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">
-                      How close a match must be <span className="hint">stricter means fewer but more relevant snippets</span>
-                    </label>
-                    <input
-                      className="form-range"
-                      style={{ width: "100%" }}
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      value={policyForm.minimum_score}
-                      onChange={(e) => setPolicyForm({ ...policyForm, minimum_score: Number(e.target.value) })}
-                    />
-                    <div className="form-range-row" style={{ justifyContent: "space-between" }}>
-                      <span className="form-range-label">Stricter</span>
-                      <span className="form-range-label">Looser</span>
-                    </div>
-                  </div>
-                  <div className="form-group" style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <label className="toggle-switch">
-                      <input
-                        type="checkbox"
-                        checked={policyForm.include_citations}
-                        onChange={(e) => setPolicyForm({ ...policyForm, include_citations: e.target.checked })}
-                      />
-                      <span className="toggle-slider" />
-                    </label>
-                    <span className="form-label" style={{ margin: 0 }}>
-                      Mention where answers come from
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
-                    {policySaved && <span className="saved-note">Saved <Check size={13} /></span>}
-                    <button className="btn btn-primary btn-sm" onClick={handleSavePolicy} disabled={policySaving}>
-                      {policySaving ? "Saving…" : "Save"}
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
+      {error && <div className="error-banner">{error}</div>}
+
+      {rows.length === 0 ? (
+        <div className="empty-state">
+          No documents yet. Upload a price list, FAQ or policy as a .txt or .md file.
         </div>
+      ) : (
+        rows.map((row) => {
+          const single = row.docs.length === 1 ? row.docs[0] : null;
+          const status = single ? STATUS_LABEL[single.status] : null;
+          return (
+            <div key={row.id} className="kb-row">
+              <FileText size={16} style={{ color: "var(--text-3)", flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 500, overflowWrap: "anywhere" }}>{single ? single.title : row.name}</div>
+                <div style={{ fontSize: ".7rem", color: "var(--text-3)", display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+                  {status && <span className={`badge ${status.cls}`}>{status.text}</span>}
+                  {single?.usage_mode === "prompt" && <span>Read on every call</span>}
+                  {!single && `${row.docs.length} files: ${row.docs.map((d) => d.title).join(", ") || "none yet"}`}
+                </div>
+                {single?.error && <div style={{ color: "var(--red)", fontSize: ".68rem" }}>{single.error}</div>}
+              </div>
+              <label className="toggle-switch" title={row.on ? "The agent uses this" : "The agent ignores this"}>
+                <input
+                  type="checkbox"
+                  checked={row.on}
+                  disabled={busyKb === row.id}
+                  onChange={(e) => handleToggle(row.id, e.target.checked)}
+                />
+                <span className="toggle-slider" />
+              </label>
+            </div>
+          );
+        })
       )}
 
-      {!agentId && (
-        <Modal
-          open={createOpen}
-          title="New Knowledge Base"
-          onClose={() => setCreateOpen(false)}
-          footer={
-            <>
-              <button className="btn btn-ghost btn-sm" onClick={() => setCreateOpen(false)}>
-                Cancel
-              </button>
-              <button
-                className="btn btn-primary btn-sm"
-                onClick={handleCreateKb}
-                disabled={creating || !createForm.slug || !createForm.name}
-              >
-                {creating ? "Creating…" : "Create"}
-              </button>
-            </>
-          }
-        >
-          {createError && <div className="error-banner">{createError}</div>}
-          <div className="form-group">
-            <label className="form-label">
-              Name <span className="required">*</span>
-            </label>
-            <input
-              className="form-input"
-              value={createForm.name}
-              onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })}
-              placeholder="Reception FAQ"
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">
-              Slug <span className="required">*</span>
-            </label>
-            <input
-              className="form-input"
-              style={{ fontFamily: "var(--mono)" }}
-              value={createForm.slug}
-              onChange={(e) => setCreateForm({ ...createForm, slug: e.target.value })}
-              placeholder="reception-faq"
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Description</label>
-            <textarea
-              className="form-textarea"
-              value={createForm.description}
-              onChange={(e) => setCreateForm({ ...createForm, description: e.target.value })}
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">
-              Search model <span className="hint">needed for anything longer than a short paragraph</span>
-            </label>
-            <select
-              className="form-select"
-              value={createForm.embedding_config_id}
-              onChange={(e) => setCreateForm({ ...createForm, embedding_config_id: e.target.value })}
-            >
-              <option value="">None (short documents only)</option>
-              {embeddingProviders.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        </Modal>
-      )}
-
-      {!agentId && (
-        <Modal
-          open={!!uploadKbId}
-          title="Upload Document"
-          onClose={() => setUploadKbId(null)}
-          footer={
-            <>
-              <button className="btn btn-ghost btn-sm" onClick={() => setUploadKbId(null)}>
-                Cancel
-              </button>
-              <button className="btn btn-primary btn-sm" onClick={handleUpload} disabled={uploading || !uploadFile}>
-                {uploading ? "Uploading…" : "Upload"}
-              </button>
-            </>
-          }
-        >
-          {uploadError && <div className="error-banner">{uploadError}</div>}
-          <div className="form-group">
-            <label className="form-label">Title</label>
-            <input
-              className="form-input"
-              value={uploadTitle}
-              onChange={(e) => setUploadTitle(e.target.value)}
-              placeholder="defaults to filename"
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">
-              File <span className="hint">.txt or .md only, for now</span>
-            </label>
-            <input
-              className="form-input"
-              type="file"
-              accept=".txt,.md,text/plain,text/markdown"
-              onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
-            />
-          </div>
-        </Modal>
-      )}
+      <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {usedCount > 0 && (
+          <details>
+            <summary style={{ cursor: "pointer", fontSize: ".78rem", color: "var(--text-2)" }}>Search settings</summary>
+            <div style={{ marginTop: 12 }}>
+              <div className="form-group">
+                <label className="form-label">
+                  Snippets to read <span className="hint">matching passages checked per question</span>
+                </label>
+                <input
+                  className="form-input"
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={policyForm.top_k}
+                  onChange={(e) => setPolicyForm({ ...policyForm, top_k: Number(e.target.value) })}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">
+                  Max text to read <span className="hint">per question</span>
+                </label>
+                <input
+                  className="form-input"
+                  type="number"
+                  min={100}
+                  step={100}
+                  value={policyForm.max_tokens}
+                  onChange={(e) => setPolicyForm({ ...policyForm, max_tokens: Number(e.target.value) })}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">
+                  How close a match must be <span className="hint">stricter means fewer but more relevant snippets</span>
+                </label>
+                <input
+                  className="form-range"
+                  style={{ width: "100%" }}
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={policyForm.minimum_score}
+                  onChange={(e) => setPolicyForm({ ...policyForm, minimum_score: Number(e.target.value) })}
+                />
+                <div className="form-range-row" style={{ justifyContent: "space-between" }}>
+                  <span className="form-range-label">Looser</span>
+                  <span className="form-range-label">Stricter</span>
+                </div>
+              </div>
+              <div className="form-group" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={policyForm.include_citations}
+                    onChange={(e) => setPolicyForm({ ...policyForm, include_citations: e.target.checked })}
+                  />
+                  <span className="toggle-slider" />
+                </label>
+                <span className="form-label" style={{ margin: 0 }}>
+                  Mention where answers come from
+                </span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                {policySaved && <span className="saved-note">Saved <Check size={13} /></span>}
+                <button className="btn btn-ghost btn-sm" onClick={handleSavePolicy} disabled={policySaving}>
+                  {policySaving ? "Saving…" : "Save"}
+                </button>
+              </div>
+            </div>
+          </details>
+        )}
+        <Link href="/knowledge-bases" style={{ fontSize: ".76rem", color: "var(--cyan)" }}>
+          Manage all documents →
+        </Link>
+      </div>
     </div>
   );
 }

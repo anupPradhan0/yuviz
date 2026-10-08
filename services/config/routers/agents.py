@@ -18,13 +18,14 @@ from .. import workflows as workflows_service
 from ..auth import CurrentUser
 from ..deps import bind_path_tenant, get_current_user, get_or_404, require_path_tenant_access, require_role
 from ..schemas import (
-    AgentCreate, AgentFromTemplate, AgentUpdate, PromptAccept, PromptRevise, SystemPromptGenerate,
-    TestChatTurn, TestSessionCreate, WorkflowDraft, WorkflowPublish,
+    AgentCreate, AgentFromTemplate, AgentUpdate, PromptAccept, PromptRevise, PromptRewrite,
+    SystemPromptGenerate, TestChatTurn, TestSessionCreate, WorkflowDraft, WorkflowPublish,
 )
 from ..secret_resolver import CompositeSecretResolver
 from ..system_prompt import (
     CustomerDataError, PromptStructureError, adds_template_braces, check_prompt_structure,
     enforce_prompt_structure, find_customer_data, generate_system_prompt, revise_system_prompt,
+    rewrite_system_prompt,
 )
 
 _secret_resolver = CompositeSecretResolver()
@@ -162,6 +163,7 @@ async def create_agent(
             supported_languages=body.supported_languages,
             tts_config_by_language=body.tts_config_by_language,
             greeting_by_language=body.greeting_by_language,
+            status=body.status,
             tenant_slug=tenant_slug,
             user_id=current_user.id,
             user_email=current_user.email,
@@ -302,6 +304,35 @@ async def revise_prompt(
         "after": after,
         "base_prompt_sha256": agents_service._sha256_hex(agent["system_prompt"]),
     }
+
+
+@router.post("/{agent_id}/prompt/rewrite")
+async def rewrite_prompt(
+    request: Request,
+    tenant_slug: str,
+    agent_id: str,
+    body: PromptRewrite,
+    current_user: CurrentUser = Depends(require_role("superadmin", "admin")),
+):
+    """Editor's "Ask AI" box. Never persists; the editor saves the result like a hand edit."""
+    tenant = await _resolve_tenant(tenant_slug, current_user)
+    agent = await _load_agent(tenant, agent_id)
+    request.app.state.agent_assist_throttle.check_revise(str(tenant["id"]))
+    llm_config_id = agent["llm_config_id"] or tenant["default_llm_config_id"]
+    if not llm_config_id:
+        raise HTTPException(status_code=400, detail="no_ai_model")
+    try:
+        after = await rewrite_system_prompt(
+            tenant["id"], llm_config_id, base_prompt=body.prompt, instruction=body.instruction,
+            secret_resolver=_secret_resolver,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except PromptStructureError:
+        raise HTTPException(status_code=422, detail="unusable_output")
+    except ValueError:
+        raise HTTPException(status_code=502, detail="ai_unavailable")
+    return {"after": after}
 
 
 @router.post("/{agent_id}/prompt/accept")

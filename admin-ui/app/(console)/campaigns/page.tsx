@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   addDncNumber,
@@ -159,9 +158,6 @@ export default function CampaignsPage() {
             Outbound dialing with per-campaign pacing, retry ladders and DNC scrubbing.
           </div>
         </div>
-        <Link href="/campaigns/new" className="btn btn-primary">
-          New campaign
-        </Link>
       </div>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, gap: 10, flexWrap: "wrap" }}>

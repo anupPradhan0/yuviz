@@ -8,12 +8,9 @@ export interface EngineOption {
   label: string;
 }
 
-// TTS engines the Voice card has a browsing picker for; others fall back to the engine chooser.
-export type BrowsableTtsEngine = "macos" | "kokoro" | "elevenlabs";
-export const BROWSABLE_TTS_ENGINES: readonly BrowsableTtsEngine[] = ["macos", "kokoro", "elevenlabs"];
-export function asBrowsableTtsEngine(engine: string | undefined): BrowsableTtsEngine | null {
-  return BROWSABLE_TTS_ENGINES.includes(engine as BrowsableTtsEngine) ? (engine as BrowsableTtsEngine) : null;
-}
+// The voice engine bundled with the conversation service (VOICEAI_TTS_ENGINE in docker-compose).
+export const BUILTIN_TTS_ENGINE = "kokoro";
+export const BUILTIN_TTS_VOICE = "af_sarah";
 
 // Local engines take no credential, so the UI hides the API Key field for them.
 export const LOCAL_ENGINES: ReadonlySet<string> = new Set([

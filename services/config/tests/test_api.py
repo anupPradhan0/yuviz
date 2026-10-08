@@ -500,6 +500,15 @@ class TestAgentEndpoints:
         )
         assert resp.status_code == 404
 
+    async def test_create_agent_status_defaults_to_active_and_can_start_paused(self, client, test_tenant):
+        url = f"/tenants/{test_tenant['slug']}/agents"
+        live = await client.post(url, json={"slug": "live-agent", "name": "Live"})
+        paused = await client.post(url, json={"slug": "paused-copy", "name": "Copy", "status": "inactive"})
+        assert live.json()["status"] == "active"
+        assert paused.status_code == 201 and paused.json()["status"] == "inactive"
+        bogus = await client.post(url, json={"slug": "bogus", "name": "Bogus", "status": "suspended"})
+        assert bogus.status_code == 422
+
     async def test_update_agent_transfer_config(self, client, test_tenant):
         create = await client.post(
             f"/tenants/{test_tenant['slug']}/agents",
