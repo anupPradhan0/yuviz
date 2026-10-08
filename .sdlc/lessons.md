@@ -366,3 +366,22 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
     *Earned: `gcal_find_booking` matched `q=<caller-stated phone>`, so any caller could cancel any
     patient's appointment. The fix bound it to `caller_did`, which on campaign calls is the shared
     outbound DID, so every callee shared one "ANI".*
+
+45. [implementer][critic] Every value handed to a third-party engine or API must be in the form that
+    engine accepts, normalised at the adapter that calls it — not where the value was stored. A
+    field the UI fills from one source ("en-US" from a voice pick, legacy free text, "en_US") reaches
+    every provider; each adapter normalises or drops what its engine rejects, and the field is
+    shape-checked on write *and* tolerated-or-ignored on read for rows saved before the check.
+    *Earned: multilingual-agents. Honouring `agents.language` sent "en-US" to faster-whisper (raises
+    on every turn — dead air for ordinary single-language agents), ElevenLabs and Cartesia; review
+    rounds then found `en_US` and legacy "English" reaching Deepgram's stream URL, and
+    `language_code` sent to ElevenLabs models that don't support it.*
+
+46. [architect][critic] A capability table (registry, catalogue, UI hint) is a promise the runtime
+    must keep: before advertising "engine X speaks language Y", prove the runtime path for Y on X
+    actually works in this environment (dependency installed, parameter accepted, voice of that
+    language), and make the failure path fall back with one loud log instead of going silent.
+    *Earned: multilingual-agents advertised Kokoro ja/zh (misaki extras not installed: ImportError
+    and silence on every sentence), English Kokoro voices as Hindi-capable, and `language_code` on
+    multilingual_v2. Each passed unit tests and validation, and only a reviewer reading the
+    third-party code/docs found the gap.*
