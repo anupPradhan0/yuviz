@@ -19,8 +19,9 @@ import { CodeInput } from "@/components/CodeInput";
 import { Modal } from "@/components/Modal";
 import { setToken } from "@/lib/auth";
 import { TeamMembers } from "@/components/TeamMembers";
+import { AiVoicePanel } from "@/components/AiVoicePanel";
 
-type SettingsSection = "profile" | "sessions" | "security" | "team" | "audit-log";
+type SettingsSection = "profile" | "sessions" | "security" | "team" | "ai-voice" | "audit-log";
 
 // Personal settings first, then the account's own; each tab gated to the
 // roles whose API calls it makes (team: invites.py, audit log: audit_log.py).
@@ -37,6 +38,7 @@ const SECTION_GROUPS: { label: string; sections: { id: SettingsSection; label: s
     label: "Organization",
     sections: [
       { id: "team", label: "Team members", roles: ["superadmin", "admin"] },
+      { id: "ai-voice", label: "AI & Voice" },
       { id: "audit-log", label: "Audit Log", roles: ["superadmin"] },
     ],
   },
@@ -76,8 +78,8 @@ const ROLE_BLURB: Record<UserRole, string> = {
     AppShell and services/config/deps.py — it is a description of the real
     permissions, so it must be edited whenever those move. */
 const ROLE_ACCESS: Record<UserRole, string[]> = {
-  superadmin: ["Every account on the platform", "Agents, IVR flows, knowledge and voice", "Telephony, users and billing", "Live Calls monitoring", "Full audit trail"],
-  admin: ["This account only", "Agents, IVR flows, knowledge and voice", "Telephony, users and billing", "Full audit trail"],
+  superadmin: ["Every account on the platform", "Agents, IVR flows, knowledge and voice", "Phone Numbers, users and billing", "Live Calls monitoring", "Full audit trail"],
+  admin: ["This account only", "Agents, IVR flows, knowledge and voice", "Phone Numbers, users and billing", "Full audit trail"],
   supervisor: ["No console access yet", "Live Calls is superadmin-only"],
   agent: ["Handles calls", "No console access at all"],
   viewer: ["This account, read-only", "May not invite users or change configuration"],
@@ -813,6 +815,7 @@ export default function SettingsPage() {
           {section === "sessions" && <SessionsPanel />}
           {section === "security" && <SecurityPanel />}
           {section === "team" && <TeamMembers embedded />}
+          {section === "ai-voice" && <AiVoicePanel />}
           {section === "audit-log" && <AuditLogPanel />}
         </>
       )}

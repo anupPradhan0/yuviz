@@ -273,6 +273,7 @@ export interface AgentCreate {
   stt_config_id?: string | null;
   llm_config_id?: string | null;
   tts_config_id?: string | null;
+  status?: "active" | "inactive";
 }
 
 export interface AgentUpdate {
@@ -393,6 +394,11 @@ export const acceptPrompt = (
   });
 export const undoPrompt = (tenantSlug: string, agentId: string) =>
   request<Agent>(`/tenants/${tenantSlug}/agents/${agentId}/prompt/undo`, { method: "POST" });
+export const rewritePrompt = (tenantSlug: string, agentId: string, body: { prompt: string; instruction: string }) =>
+  request<{ after: string }>(`/tenants/${tenantSlug}/agents/${agentId}/prompt/rewrite`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 export interface SystemPromptGenerateRequest {
   name: string;
@@ -641,9 +647,10 @@ export interface TranscriptEntry {
 
 export const listCalls = (
   tenantSlug: string,
-  opts?: { limit?: number; offset?: number; direction?: CallDirection } & CallTimeRange,
+  opts?: { limit?: number; offset?: number; direction?: CallDirection; agentId?: string } & CallTimeRange,
 ) => {
   const params = new URLSearchParams();
+  if (opts?.agentId) params.set("agent_id", opts.agentId);
   if (opts?.limit) params.set("limit", String(opts.limit));
   if (opts?.offset) params.set("offset", String(opts.offset));
   if (opts?.direction) params.set("direction", opts.direction);
@@ -858,6 +865,8 @@ const DISPOSITION_LABELS: Record<string, string> = {
   session_destroyed: "Session destroyed",
   transport_error: "Transport error",
   reconciled_inactive: "Reconciled (node went silent)",
+  reconciled_stale: "Reconciled (call went stale)",
+  reconciled_dead_node: "Reconciled (node stopped)",
   TRANSFER_SUCCESS: "Transferred to human",
   TRANSFER_FAILED: "Transfer failed",
   TRANSFER_TIMEOUT: "Transfer timed out",
@@ -892,6 +901,8 @@ export interface UsageTrendPoint {
   date: string;
   calls: number;
   minutes: number;
+  ended: number;
+  escalated: number;
 }
 
 export const getUsageTrend = (tenantSlug: string, days: number = 30) =>
@@ -907,6 +918,8 @@ export const listAllUsageTrend = async (tenants: Tenant[], days: number = 30): P
         date: p.date,
         calls: (existing?.calls || 0) + p.calls,
         minutes: Math.round(((existing?.minutes || 0) + p.minutes) * 100) / 100,
+        ended: (existing?.ended || 0) + p.ended,
+        escalated: (existing?.escalated || 0) + p.escalated,
       });
     }
   }
@@ -918,6 +931,8 @@ export interface TodaysActivityPoint {
   inbound: number;
   outbound: number;
   web: number;
+  ended: number;
+  escalated: number;
 }
 
 export const getTodaysActivity = (tenantSlug: string) =>
@@ -934,6 +949,8 @@ export const listAllTodaysActivity = async (tenants: Tenant[]): Promise<TodaysAc
         inbound: (existing?.inbound || 0) + p.inbound,
         outbound: (existing?.outbound || 0) + p.outbound,
         web: (existing?.web || 0) + p.web,
+        ended: (existing?.ended || 0) + p.ended,
+        escalated: (existing?.escalated || 0) + p.escalated,
       });
     }
   }

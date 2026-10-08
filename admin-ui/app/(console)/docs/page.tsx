@@ -673,7 +673,7 @@ export default function DocsPage() {
                 are live — everything else can be built and tested without it.
               </P>
 
-              <H3>Telephony</H3>
+              <H3>Phone Numbers</H3>
               <P>
                 How calls physically reach the platform: your carrier or SIP trunk
                 details. Usually set up once, by whoever manages your telephony, and
