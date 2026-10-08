@@ -349,3 +349,41 @@ async def test_farewell_message_override_still_wins():
     assert rc.conversation.farewell_message == "Bye from Acme."
     h = _handler(rc, _RecordingSTT([]), _LLM(), _RecordingTTS())
     assert h._farewell_message == "Bye from Acme."
+
+
+# ── Booking-claim check per language ─────────────────────────────────────────
+
+from ..pipeline import _claims_booking_without_tool_call  # noqa: E402
+
+
+@pytest.mark.parametrize("text", [
+    "आपका अपॉइंटमेंट बुक हो गया है।",
+    "Aapka appointment book ho gaya hai.",
+    "आपका appointment confirm कर दिया है।",
+    "Your appointment is confirmed.",
+])
+def test_booking_claim_detected_in_hindi_session(text):
+    assert _claims_booking_without_tool_call(text, "hi")
+
+
+def test_booking_claim_hindi_precision():
+    assert not _claims_booking_without_tool_call("क्या मैं आपका अपॉइंटमेंट बुक कर दूँ?", "hi")
+
+
+def test_booking_claim_skipped_for_unknown_language():
+    assert not _claims_booking_without_tool_call("Your appointment is confirmed.", "fr")
+    assert _claims_booking_without_tool_call("Your appointment is confirmed.")
+
+
+async def test_guardrail_skip_is_logged_once_per_session(caplog):
+    caplog.set_level("INFO")
+    rc = await _runtime({"language": "en", "supported_languages": ("en", "es")})
+    stt = _RecordingSTT([
+        SttResult(text="hola buenos días", language="es", language_confidence=1.0),
+        SttResult(text="esto es inútil", language="es", language_confidence=1.0),
+    ])
+    h = _handler(rc, stt, _LLM(), _RecordingTTS())
+    await _turn(h, "s1")
+    await _turn(h, "s1")
+    skipped = [r for r in caplog.records if "guardrail and booking-claim checks skipped" in r.message]
+    assert len(skipped) == 1

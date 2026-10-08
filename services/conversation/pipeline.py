@@ -81,6 +81,7 @@ class _SessionState:
     confirmed_booking_slot:          str | None = None
     # Multilingual agents only; None = single-language (fixed language).
     language:                        "LanguageTracker | None" = None
+    unchecked_languages_logged:      set = field(default_factory=set)
 
 
 # Split after ! or ?, and after . unless it follows a title abbreviation or middle initial.
@@ -170,11 +171,38 @@ _BOOKING_CLAIM_RE = re.compile(
 _BOOKING_SUBJECT_RE = re.compile(
     r"\b(appointment|demo|booking|meeting|slot)\b", re.IGNORECASE,
 )
+# Hindi replies mix scripts ("आपका appointment बुक हो गया"), so claim and subject are
+# each matched across English, Devanagari and romanised Hindi.
+_HI_LETTER = r"[\w\u0900-\u097F]"
+_HI_BOOKING_CLAIM_RE = re.compile(
+    rf"(?<!{_HI_LETTER})(?:"
+    r"(?:बुक|कन्फ़र्म|कन्फर्म|शेड्यूल|पक्का|तय) (?:हो (?:गया|गई|गयी|चुका|चुकी)|कर (?:दिया|दी))"
+    r"|(?:book|confirm|schedule|pakka|tay) (?:ho (?:gaya|gayi|chuka|chuki)|kar (?:diya|di))"
+    r"|(?:book|confirm|schedule) (?:हो (?:गया|गई|गयी|चुका|चुकी)|कर (?:दिया|दी))"
+    rf")(?!{_HI_LETTER})",
+    re.IGNORECASE,
+)
+_HI_BOOKING_SUBJECT_RE = re.compile(
+    rf"(?<!{_HI_LETTER})(?:अपॉइंटमेंट|अपॉइन्टमेंट|बुकिंग|मीटिंग|डेमो|स्लॉट)(?!{_HI_LETTER})",
+)
+_BOOKING_CLAIM_PATTERNS: dict[str, list[tuple[re.Pattern[str], re.Pattern[str]]]] = {
+    "en": [(_BOOKING_CLAIM_RE, _BOOKING_SUBJECT_RE)],
+    "hi": [
+        (_BOOKING_CLAIM_RE, _BOOKING_SUBJECT_RE),
+        (_HI_BOOKING_CLAIM_RE, _BOOKING_SUBJECT_RE),
+        (_HI_BOOKING_CLAIM_RE, _HI_BOOKING_SUBJECT_RE),
+        (_BOOKING_CLAIM_RE, _HI_BOOKING_SUBJECT_RE),
+    ],
+}
 
 
-def _claims_booking_without_tool_call(assistant_text: str) -> bool:
-    """Heuristic backstop for a fabricated booking claim (claim word + subject word)."""
-    return bool(_BOOKING_CLAIM_RE.search(assistant_text) and _BOOKING_SUBJECT_RE.search(assistant_text))
+def _claims_booking_without_tool_call(assistant_text: str, language: str | None = None) -> bool:
+    """Heuristic backstop for a fabricated booking claim (claim word + subject word).
+    A language without patterns is never flagged (no false correction or escalation)."""
+    return any(
+        claim.search(assistant_text) and subject.search(assistant_text)
+        for claim, subject in _BOOKING_CLAIM_PATTERNS.get(language or "en", [])
+    )
 
 
 def _build_end_call_instruction(condition: str | None, scripted: bool = False) -> str:
@@ -516,6 +544,20 @@ class PipelineConversationHandler:
             return self._workflow.render(localized).strip() or None
         return self._workflow.greeting()
 
+    def _log_unchecked_language(self, session_id: str, language: str | None) -> None:
+        """Guardrails and the booking-claim check have no lexicon for this language:
+        they're skipped (fail safe). Logged once per session, per language."""
+        if GuardrailDetector.supports(language):
+            return
+        state = self._session(session_id)
+        if language in state.unchecked_languages_logged:
+            return
+        state.unchecked_languages_logged.add(language)
+        log.info(
+            "guardrail and booking-claim checks skipped: no lexicon for language=%s session=%s",
+            language, session_id,
+        )
+
     def _session_language(self, session_id: str) -> str | None:
         """The language this session speaks now; None for single-language agents."""
         tracker = self._session(session_id).language
@@ -626,7 +668,11 @@ class PipelineConversationHandler:
         yield HandlerResponse(stt_text=stt_result.text, stt_confidence=stt_result.confidence)
 
         # A breach only stores a pending transfer; the agent still answers this turn first.
-        violation = GuardrailDetector.check(stt_result.text)
+        check_language = self._session_language(session_id) or (
+            self._strings_language if self._agent_language else None
+        )
+        self._log_unchecked_language(session_id, check_language)
+        violation = GuardrailDetector.check(stt_result.text, check_language)
         if violation is not None:
             log.info(
                 "Guardrail violation category=%s matched=%r session=%s",
@@ -741,7 +787,7 @@ class PipelineConversationHandler:
             self._has_action_tool
             and not recap_of_real_booking
             and not tool_calls_made
-            and _claims_booking_without_tool_call(assistant_text)
+            and _claims_booking_without_tool_call(assistant_text, check_language)
         )
 
         if full_response and not cancel_event.is_set():
