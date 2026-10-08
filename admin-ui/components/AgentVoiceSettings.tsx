@@ -3,12 +3,13 @@
 // Language, voice, speech recognition and AI model for one agent — shared by the
 // creation wizard and the agent page so both read the same.
 
-import { Dispatch, SetStateAction, useState } from "react";
+import { Dispatch, SetStateAction, useEffect, useState } from "react";
 import Link from "next/link";
 import { AlertCircle } from "lucide-react";
-import { AgentUpdate, ApiError, ProviderConfig, updateProvider } from "@/lib/api";
+import { AgentUpdate, ApiError, ProviderConfig, listProviders, updateProvider } from "@/lib/api";
 import {
   LANGUAGES, OTHER, SUPPORTED_LANGUAGES, BrowsableTtsEngine, asBrowsableTtsEngine, baseLanguage, languageLabel,
+  ttsLanguages,
 } from "@/lib/engineCatalog";
 import { LocalVoicePicker } from "@/components/LocalVoicePicker";
 import { ElevenLabsVoicePicker } from "@/components/ElevenLabsVoicePicker";
@@ -46,6 +47,20 @@ export function multilingualPayload(
 
 // The Config Service's 400s for language/voice coverage all name the language field or say
 // it can't be spoken; those belong next to the languages section, not just in the banner.
+// The server skips English (every engine reads it); every other language needs a voice that speaks it.
+function canSpeak(p: ProviderConfig, lang: string): boolean {
+  return lang === "en" || ttsLanguages(p).includes(lang);
+}
+
+const KOKORO_EXAMPLE_VOICES: Record<string, string> = {
+  hi: "hf_alpha or hm_omega", en: "af_heart", es: "ef_dora", fr: "ff_siwis", it: "if_sara",
+  pt: "pf_dora", ja: "jf_alpha", zh: "zf_xiaobei",
+};
+
+function kokoroExample(lang: string): string {
+  return KOKORO_EXAMPLE_VOICES[lang] ?? "one whose id starts with that language's letter";
+}
+
 export function isLanguageError(detail: string): boolean {
   return /language|can't be spoken/i.test(detail);
 }
@@ -87,6 +102,20 @@ export function AgentVoiceSettings({
   // null = follow the engine of the assigned voice, so browsing never swaps providers on its own.
   const [chosenEngine, setChosenEngine] = useState<BrowsableTtsEngine | null>(null);
   const [speedDraft, setSpeedDraft] = useState<number | null>(null);
+
+  // Voices are often created on the AI & Voice page mid-setup: re-read the list when this
+  // panel opens and whenever the browser tab regains focus, so new ones show up here.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      listProviders(tenantId)
+        .then((provs) => { if (!cancelled) setProviders(provs); })
+        .catch(() => {});  // keep the list we have; the page's own load reports real failures
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => { cancelled = true; window.removeEventListener("focus", refresh); };
+  }, [tenantId, setProviders]);
 
   const byRole = (role: Role) => providers.filter((p) => p.role === role);
   const selectedTts = providers.find((p) => p.id === ttsId) ?? null;
@@ -269,13 +298,34 @@ export function AgentVoiceSettings({
                         value={ttsByLanguage[lang] ?? ""}
                         onChange={(e) => setLanguageEntry(ttsByLanguage, onTtsByLanguage, lang, e.target.value)}
                       >
-                        <option value="">Use agent voice</option>
-                        {byRole("tts").map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.name}{p.environment !== "prod" ? ` (${p.environment})` : ""}
-                          </option>
-                        ))}
+                        <option value="">
+                          Use agent voice{selectedTts && !canSpeak(selectedTts, lang) ? ` — can't speak ${languageLabel(lang)}` : ""}
+                        </option>
+                        {byRole("tts").map((p) => {
+                          const ok = canSpeak(p, lang);
+                          return (
+                            // Disabled rather than hidden, so a saved-but-wrong pick still shows as selected.
+                            <option key={p.id} value={p.id} disabled={!ok && ttsByLanguage[lang] !== p.id}>
+                              {p.name}{p.environment !== "prod" ? ` (${p.environment})` : ""}
+                              {ok ? "" : ` — can't speak ${languageLabel(lang)}`}
+                            </option>
+                          );
+                        })}
                       </select>
+                      {(() => {
+                        const voice = providers.find((p) => p.id === ttsByLanguage[lang]) ?? selectedTts;
+                        if (!voice || canSpeak(voice, lang)) return null;
+                        return (
+                          <div className="voice-missing">
+                            <AlertCircle size={13} />
+                            <span>
+                              {voice.name} can&apos;t speak {languageLabel(lang)}.{" "}
+                              <Link href="/ai-voice">Add a {languageLabel(lang)} voice in AI &amp; Voice</Link>
+                              {voice.engine === "kokoro" ? ` (for Kokoro, e.g. ${kokoroExample(lang)})` : ""}, then pick it here.
+                            </span>
+                          </div>
+                        );
+                      })()}
                     </div>
                     <div className="form-group">
                       <label className="form-label">Greeting</label>

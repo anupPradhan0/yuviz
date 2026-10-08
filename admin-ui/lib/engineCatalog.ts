@@ -165,6 +165,33 @@ export function baseLanguage(code: string | null | undefined): string | null {
   return m ? m[1].toLowerCase() : null;
 }
 
+// Mirrors libs/config_sdk/languages.py tts_languages(): which SUPPORTED_LANGUAGES a TTS
+// provider can speak. The server enforces this on save; the UI uses it to steer the pick.
+const MULTILINGUAL_TTS = ["en", "hi", "es", "fr", "de", "pt", "it", "ja", "zh"];
+const ELEVENLABS_ENGLISH_ONLY_MODELS = ["eleven_monolingual_v1", "eleven_turbo_v2", "eleven_flash_v2"];
+// Kokoro voice ids start with their language's lang_code; each voice speaks only that language.
+const KOKORO_VOICE_PREFIX: Record<string, string> = {
+  a: "en", b: "en", h: "hi", e: "es", f: "fr", p: "pt", i: "it", j: "ja", z: "zh",
+};
+
+export function ttsLanguages(p: { engine: string; model: string | null; voice: string | null; extra?: Record<string, unknown> | null }): string[] {
+  const extra = p.extra ?? {};
+  if (p.engine === "cartesia") {
+    const model = String(extra.model ?? p.model ?? "sonic-2").toLowerCase();
+    return model.startsWith("sonic-english") ? ["en"] : MULTILINGUAL_TTS;
+  }
+  if (p.engine === "elevenlabs") {
+    const model = String(extra.model_id ?? p.model ?? "eleven_turbo_v2_5").toLowerCase();
+    return ELEVENLABS_ENGLISH_ONLY_MODELS.includes(model) ? ["en"] : MULTILINGUAL_TTS;
+  }
+  if (p.engine === "kokoro") {
+    const lang = KOKORO_VOICE_PREFIX[(p.voice ?? "").charAt(0).toLowerCase()];
+    // No (or unknown) voice: every language Kokoro has a pipeline for.
+    return lang ? [lang] : ["en", "hi", "es", "fr", "pt", "it", "ja", "zh"];
+  }
+  return ["en"];
+}
+
 export function languageLabel(code: string): string {
   const l = SUPPORTED_LANGUAGES.find((x) => x.value === code);
   return l ? (l.native !== l.label ? `${l.label} (${l.native})` : l.label) : code;
