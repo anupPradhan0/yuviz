@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from libs.config_sdk.languages import (
     DEEPGRAM_MULTI,
     agent_supported_languages,
@@ -172,3 +174,17 @@ async def test_override_that_cannot_speak_its_language_is_dropped_at_runtime():
     )
     rc = await _runtime(repo)
     assert rc.providers.tts_by_language == {}
+
+
+
+@pytest.mark.parametrize("bad", ["English", "en us", "1234"])
+async def test_free_text_agent_language_is_ignored_at_runtime(bad):
+    rc = await _runtime(_repo({"language": bad}, stt=_provider_row(
+        "stt1", "stt", "deepgram", tenant_id="t1", model="nova-3", language="en-IN")))
+    assert rc.media.stt_language == "en-IN"   # the row's own, not "English"
+    assert rc.media.tts_language is None
+
+
+async def test_legacy_underscore_tag_still_reaches_providers():
+    rc = await _runtime(_repo({"language": "en_IN"}))
+    assert rc.media.stt_language == "en_IN"   # Deepgram canonicalises it to en-IN

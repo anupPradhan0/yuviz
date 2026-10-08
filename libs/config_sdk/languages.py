@@ -164,14 +164,27 @@ def agent_supported_languages(agent_language: str | None, supported: Any) -> tup
     return tuple(out)
 
 
+# Shape of a language tag ("en", "hi-IN", legacy "en_US"); anything else isn't sent to providers.
+_LANGUAGE_TAG_RE = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$")
+
+
 def resolve_languages(agent: "Agent", stt: "ProviderConfig", tts: "ProviderConfig") -> ResolvedLanguages:
     """Effective per-role languages. Single-language agents: agent.language > the row's own
     language, per role (TTS never inherits the STT row's language). Multilingual agents:
     STT listens for every supported language (Deepgram multi / Whisper auto-detect)."""
-    supported = agent_supported_languages(agent.language, agent.supported_languages)
-    tts_language = agent.language or tts.language
+    agent_language = agent.language
+    if agent_language and not _LANGUAGE_TAG_RE.match(agent_language.strip()):
+        # Free text saved before the Config Service checked it (e.g. "English"): providers
+        # would reject it (Deepgram refuses the stream), so use the rows' own languages.
+        log.warning(
+            "agent=%s: language %r is not a language code — ignoring it; fix it in the agent's settings",
+            agent.slug, agent_language,
+        )
+        agent_language = None
+    supported = agent_supported_languages(agent_language, agent.supported_languages)
+    tts_language = agent_language or tts.language
     if not supported:
-        return ResolvedLanguages(agent.language or stt.language, tts_language, None, ())
+        return ResolvedLanguages(agent_language or stt.language, tts_language, None, ())
 
     default = supported[0]
     if len(supported) == 1:

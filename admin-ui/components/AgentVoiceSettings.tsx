@@ -8,7 +8,8 @@ import Link from "next/link";
 import { AlertCircle, Check } from "lucide-react";
 import { AgentUpdate, ApiError, ProviderConfig, createProvider, listProviders, updateProvider } from "@/lib/api";
 import {
-  BUILTIN_TTS_ENGINE, LANGUAGES, OTHER, SUPPORTED_LANGUAGES, baseLanguage, deepgramSupportsMulti, languageLabel, ttsLanguages,
+  BUILTIN_TTS_ENGINE, DEEPGRAM_MULTI_LANGUAGES, LANGUAGES, OTHER, SUPPORTED_LANGUAGES, baseLanguage,
+  deepgramSupportsMulti, languageLabel, ttsLanguages,
 } from "@/lib/engineCatalog";
 import { LocalVoicePicker } from "@/components/LocalVoicePicker";
 import { ElevenLabsVoicePicker } from "@/components/ElevenLabsVoicePicker";
@@ -166,7 +167,10 @@ export function AgentVoiceSettings({
     : selectedStt.engine === "faster_whisper" && selectedStt.model?.endsWith(".en")
       ? `${selectedStt.model} only understands English. Use a multilingual model (e.g. small) so callers can be heard in every language.`
       : selectedStt.engine === "deepgram" && selectedStt.model && !deepgramSupportsMulti(selectedStt.model, languages)
-        ? `${selectedStt.model} can't switch between ${languages.map(languageLabel).join(", ")} mid-call; it will listen in the default language only. Use nova-2 or nova-3, which cover en, hi, es, fr, de, pt, it and ja.`
+        ? (/^nova-[23]/i.test(selectedStt.model)
+          // Already the right model: the gap is a language Deepgram's multi mode doesn't cover.
+          ? `${selectedStt.model} can't recognise ${languages.filter((l) => !DEEPGRAM_MULTI_LANGUAGES.includes(l)).map(languageLabel).join(", ")} while switching languages. Remove it, or use a Whisper speech recognition provider.`
+          : `${selectedStt.model} can't switch between ${languages.map(languageLabel).join(", ")} mid-call; it will listen in the default language only. Use nova-2 or nova-3, which cover en, hi, es, fr, de, pt, it and ja.`)
         : null;
   const connectedVoices = byRole("tts").filter((p) => p.engine !== BUILTIN_TTS_ENGINE);
   const voiceMode = chosenMode ?? (selectedTts && selectedTts.engine !== BUILTIN_TTS_ENGINE ? "own" : "builtin");

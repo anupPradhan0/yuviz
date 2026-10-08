@@ -410,3 +410,15 @@ async def test_override_ids_are_stored_lowercase():
          "tts_config_by_language": {"hi": hi_id.upper()}},
     )
     assert json.loads(out["tts_config_by_language"]) == {"hi": hi_id}
+
+
+async def test_create_rejects_other_tenants_voice_override(test_tenant, scoped, other_tenant_tts):
+    # The wizard now sends the language fields in the create request itself.
+    base = await _cartesia(test_tenant["id"])
+    with pytest.raises(ValueError, match="not found"):
+        await agents.create_agent(
+            tenant_id=test_tenant["id"], slug="ml-create", name="ML", tts_config_id=str(base["id"]),
+            language="en", supported_languages=["en", "hi"],
+            tts_config_by_language={"hi": other_tenant_tts},
+        )
+    assert await agents.get_agent(test_tenant["slug"], "ml-create") is None

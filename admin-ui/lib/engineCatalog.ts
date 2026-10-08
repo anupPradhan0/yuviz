@@ -174,7 +174,7 @@ const KOKORO_VOICE_PREFIX: Record<string, string> = {
 
 // Mirrors deepgram_supports_multi() in libs/config_sdk/languages.py: Deepgram code-switches
 // only on nova-2/nova-3, and only across the languages it covers in multi mode.
-const DEEPGRAM_MULTI_LANGUAGES = ["en", "hi", "es", "fr", "de", "pt", "it", "ja"];
+export const DEEPGRAM_MULTI_LANGUAGES = ["en", "hi", "es", "fr", "de", "pt", "it", "ja"];
 
 export function deepgramSupportsMulti(model: string, languages: string[]): boolean {
   const m = model.toLowerCase();

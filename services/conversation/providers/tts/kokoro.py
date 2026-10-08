@@ -72,6 +72,18 @@ class KokoroTTS:
     def _resolve_lang_code(self, language: Any) -> str:
         if language is INSTANCE_LANGUAGE or language is None:
             return self._lang_code
+        # A Kokoro voice speaks only its own language: a request for another one (e.g. an
+        # agent set to en-IN on a Hindi voice) keeps the row's pipeline, as before languages
+        # reached Kokoro. Multilingual agents get a matching voice per language (validated).
+        voice_language = _row_language(self._voice[:1].lower()) if self._voice else None
+        if voice_language is not None and normalize_language(language) != voice_language:
+            if language not in self._warned_languages:
+                self._warned_languages.add(language)
+                log.warning(
+                    "Kokoro voice %s can't speak language=%r — using lang_code=%s",
+                    self._voice, language, self._lang_code,
+                )
+            return self._lang_code
         if normalize_language(language) == _row_language(self._lang_code):
             return self._lang_code  # same language as the row: keep its own accent (e.g. British 'b')
         code = kokoro_lang_code(language)

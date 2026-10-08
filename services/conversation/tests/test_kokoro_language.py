@@ -42,7 +42,7 @@ def test_iso_to_kokoro_lang_code(kokoro):
 
 
 async def test_pipelines_are_lazy_cached_and_share_the_model(kokoro):
-    tts = kokoro.KokoroTTS(voice="af_sarah", lang_code="a")
+    tts = kokoro.KokoroTTS(voice="hf_alpha", lang_code="a")
     assert [code for code, _ in _StubPipeline.built] == ["a"]
     base_model = tts._pipelines["a"].model
 
@@ -62,13 +62,13 @@ async def test_unknown_language_falls_back_to_row_pipeline(kokoro):
 
 
 async def test_prewarm_builds_pipelines_up_front(kokoro):
-    tts = kokoro.KokoroTTS(lang_code="a")
+    tts = kokoro.KokoroTTS(voice="custom", lang_code="a")  # no language prefix
     await tts.prewarm(["en", "hi", "es"])
     assert sorted(code for code, _ in _StubPipeline.built) == ["a", "e", "h"]
 
 
 async def test_failed_pipeline_build_falls_back_once_and_is_not_retried(kokoro, monkeypatch, caplog):
-    tts = kokoro.KokoroTTS(lang_code="a")
+    tts = kokoro.KokoroTTS(voice="hf_alpha", lang_code="a")
     real = _StubPipeline.__init__
 
     def failing(self, lang_code, model=True):
@@ -89,3 +89,14 @@ async def test_same_language_as_row_keeps_the_rows_own_accent(kokoro, language):
     assert tts._resolve_lang_code(language) == "b"
     await tts.synthesize("hello", 16000, language=language)
     assert [code for code, _ in _StubPipeline.built] == ["b"]
+
+
+async def test_voice_never_switches_to_another_languages_pipeline(kokoro):
+    # A single-language agent set to en-IN on a Hindi voice keeps the row's pipeline, as before
+    # agents.language reached Kokoro; an English voice never builds a Hindi pipeline.
+    hindi = kokoro.KokoroTTS(voice="hf_alpha", lang_code="h")
+    await hindi.synthesize("hello", 16000, language="en-IN")
+    english = kokoro.KokoroTTS(voice="af_heart", lang_code="a")
+    await english.prewarm(["en", "hi"])
+    await english.synthesize("नमस्ते", 16000, language="hi")
+    assert [code for code, _ in _StubPipeline.built] == ["h", "a"]

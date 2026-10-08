@@ -2,7 +2,7 @@
 
 // One-screen agent editor: sections on the left, test call on the right, every change auto-saved.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
@@ -118,6 +118,11 @@ export default function AgentDetailPage() {
   const [deleteChecking, setDeleteChecking] = useState(false);
 
   const snapshot = JSON.stringify({ form, languageChoice, customLanguage });
+  // The latest edits, read when a save's reply lands (the save closure only has the sent ones).
+  const latestSnapshot = useRef(snapshot);
+  useEffect(() => {
+    latestSnapshot.current = snapshot;
+  }, [snapshot]);
   const dirty = baseline !== "" && snapshot !== baseline;
   const language = toLanguage(languageChoice, customLanguage);
 
@@ -218,16 +223,28 @@ export default function AgentDetailPage() {
     try {
       const updated = await updateAgent(tenantSlug, agent.id, changes as AgentUpdate);
       setAgent(updated);
-      // The server normalises the language fields (e.g. picks a default when none was set), so
-      // show what it stored; other fields keep any edits typed while the save was in flight.
-      const { languageChoice: choice, customLanguage: custom, ...stored } = languageState(updated);
-      setLanguageChoice(choice);
-      setCustomLanguage(custom);
-      setForm((prev) => ({ ...prev, ...stored }));
       const sentState = JSON.parse(sent);
-      setBaseline(JSON.stringify({
-        form: { ...sentState.form, ...stored }, languageChoice: choice, customLanguage: custom,
-      }));
+      if ("language" in changes || "supported_languages" in changes) {
+        // The server normalises the language fields (e.g. picks a default when none was set):
+        // the baseline becomes what it stored, and the page shows it for every field the user
+        // hasn't edited since sending. An edit made during the save stays, dirty, and autosaves.
+        const { languageChoice: choice, customLanguage: custom, ...stored } = languageState(updated);
+        const latest = JSON.parse(latestSnapshot.current);
+        const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+        if (latest.languageChoice === sentState.languageChoice && latest.customLanguage === sentState.customLanguage) {
+          setLanguageChoice(choice);
+          setCustomLanguage(custom);
+        }
+        const keep = (Object.keys(stored) as (keyof typeof stored)[]).filter(
+          (k) => same(latest.form[k], sentState.form[k]),
+        );
+        setForm((prev) => ({ ...prev, ...Object.fromEntries(keep.map((k) => [k, stored[k]])) }));
+        setBaseline(JSON.stringify({
+          form: { ...sentState.form, ...stored }, languageChoice: choice, customLanguage: custom,
+        }));
+      } else {
+        setBaseline(sent);
+      }
       setRejected(null);
     } catch (e) {
       const detail = e instanceof ApiError ? e.detail : String(e);
