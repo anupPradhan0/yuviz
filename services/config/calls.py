@@ -5,6 +5,7 @@ Uncached: append-heavy data queried many ways would need per-filter invalidation
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Any
 
@@ -44,11 +45,15 @@ async def list_calls(
     direction: str | None = None,
     started_after: datetime | None = None,
     started_before: datetime | None = None,
+    agent_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """tenant_slug, not tenant_id: calls.tenant_id is a TEXT slug, not a UUID FK."""
     pool = await db.get_pool()
     where = ["c.tenant_id = $1"]
     params: list[Any] = [tenant_slug]
+    if agent_id is not None:
+        params.append(agent_id)
+        where.append(f"c.agent_id = ${len(params)}")
     if direction is not None:
         params.append(direction)
         where.append(f"c.direction = ${len(params)}")
@@ -246,7 +251,7 @@ async def get_disposition_mix(tenant_slug: str, *, hours: int = 24 * 30) -> list
 
 
 async def get_usage_trend(tenant_slug: str, *, days: int = 30) -> list[dict[str, Any]]:
-    """Calls + minutes per calendar day, for the Usage Trends chart."""
+    """Calls, minutes and containment inputs (ended/escalated) per calendar day."""
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         rows = await conn.fetch(
@@ -254,7 +259,9 @@ async def get_usage_trend(tenant_slug: str, *, days: int = 30) -> list[dict[str,
             SELECT
                 date_trunc('day', started_at)::date AS date,
                 COUNT(*) AS calls,
-                ROUND(COALESCE(SUM(duration_ms), 0) / 60000.0, 2) AS minutes
+                ROUND(COALESCE(SUM(duration_ms), 0) / 60000.0, 2) AS minutes,
+                COUNT(*) FILTER (WHERE ended_at IS NOT NULL) AS ended,
+                COUNT(*) FILTER (WHERE close_reason LIKE 'TRANSFER%') AS escalated
             FROM calls
             WHERE tenant_id = $1 AND started_at >= NOW() - ($2 * INTERVAL '1 day')
             GROUP BY date_trunc('day', started_at)
@@ -274,14 +281,16 @@ async def get_todays_activity(tenant_slug: str) -> list[dict[str, Any]]:
             SELECT
                 EXTRACT(HOUR FROM started_at)::int AS hour,
                 COUNT(*) FILTER (WHERE direction = 'inbound') AS inbound,
-                COUNT(*) FILTER (WHERE direction = 'outbound') AS outbound
+                COUNT(*) FILTER (WHERE direction = 'outbound') AS outbound,
+                COUNT(*) FILTER (WHERE ended_at IS NOT NULL) AS ended,
+                COUNT(*) FILTER (WHERE close_reason LIKE 'TRANSFER%') AS escalated
             FROM calls
             WHERE tenant_id = $1 AND started_at >= date_trunc('day', NOW())
             GROUP BY hour ORDER BY hour
             """,
             tenant_slug,
         )
-    return [{"hour": r["hour"], "inbound": r["inbound"], "outbound": r["outbound"], "web": 0} for r in rows]
+    return [{**dict(r), "web": 0} for r in rows]
 
 
 async def get_latency_stats(tenant_slug: str, *, hours: int = 24) -> list[dict[str, Any]]:

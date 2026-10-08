@@ -462,7 +462,7 @@ function Canvas({ flow, tenantSlug }: { flow: CallFlow; tenantSlug: string }) {
             {!selected && !selectedEdge && (
               <div className="wf-inspector-empty">
                 <div className="wf-inspector-empty-title">Pick a step</div>
-                Click a step or a branch to edit it, or drag one in from the Add step bar above.
+                Click a step or a branch to edit it, or add one from the Add step bar above.
               </div>
             )}
 

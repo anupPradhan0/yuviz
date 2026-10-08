@@ -384,11 +384,11 @@ test("Advanced opens the existing wizard with its six titles", async ({ page }) 
   await page.getByRole("button", { name: easyCopy.advancedLink }).click();
   await expect(page.locator(".tabs .tab")).toHaveCount(6);
   expect(await page.locator(".tabs .tab").allInnerTexts()).toEqual([
-    "1. Identity",
+    "1. About",
     "2. Language & Voice",
-    "3. Limits",
-    "4. Advanced",
-    "5. Knowledge & Tools",
+    "3. Call length",
+    "4. Transfers & rules",
+    "5. Knowledge",
     "6. Review",
   ]);
 });
@@ -982,11 +982,11 @@ test("the Advanced wizard turns the on-switch on when an action is ticked", asyn
   await page.getByRole("button", { name: easyCopy.advancedLink }).click();
   await page.getByPlaceholder("Booking Bot").fill(uniqueName("Wizard"));
   await page.locator("select.form-select").first().selectOption(tenantA);
-  await page.getByRole("button", { name: "5. Knowledge & Tools" }).click();
+  await page.getByRole("button", { name: "5. Knowledge" }).click();
   await page.getByLabel("check_available_slots").check();
   await page.getByRole("button", { name: "6. Review" }).click();
   const created = createdAgentId(page, `/tenants/${tenantA}/agents`);
-  await page.getByRole("button", { name: "Create Agent" }).click();
+  await page.getByRole("button", { name: "Create agent" }).click();
   const agentId = await created;
   await expect
     .poll(() => stub.calls)

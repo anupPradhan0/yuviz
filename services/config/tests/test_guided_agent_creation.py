@@ -44,6 +44,7 @@ NEW_ROUTES = {
     ("POST", "/tenants/{tenant_slug}/agents/{agent_id}/prompt/revise"),
     ("POST", "/tenants/{tenant_slug}/agents/{agent_id}/prompt/accept"),
     ("POST", "/tenants/{tenant_slug}/agents/{agent_id}/prompt/undo"),
+    ("POST", "/tenants/{tenant_slug}/agents/{agent_id}/prompt/rewrite"),
     ("GET", "/agent-templates"),
 }
 SLOT_KEYS = ("prompt_undo_previous", "prompt_undo_accepted_sha256")
@@ -372,6 +373,7 @@ class TestIsolation:
                               "proposed_prompt": _extend(prompt, "One more."),
                               "base_prompt_sha256": _sha(prompt)},
             "prompt/undo": None,
+            "prompt/rewrite": {"prompt": prompt, "instruction": "be polite"},
         }
         outcomes = {}
         for suffix, body in bodies.items():
@@ -807,6 +809,32 @@ class TestRevise:
         assert statuses == [404] * 20 + [429]
         limited = await _revise(client, test_tenant, agent["id"], "no-such-session")
         assert limited.headers["Retry-After"].isdigit()
+
+
+class TestRewrite:
+    async def test_returns_the_rewrite_of_the_sent_prompt_and_persists_nothing(
+        self, pool, client, test_tenant, configs, model,
+    ):
+        agent = await _create_agent(client, test_tenant, configs)
+        row_before = await _agent_row(pool, agent["id"])
+        model.reply = "  Be polite. Speak Hindi too.  "
+
+        resp = await client.post(
+            _url(test_tenant, f"/{agent['id']}/prompt/rewrite"),
+            json={"prompt": "Be polite.", "instruction": "also speak Hindi"},
+        )
+        assert (resp.status_code, resp.json()) == (200, {"after": "Be polite. Speak Hindi too."})
+        assert "Be polite." in model.calls[-1][0][0]["content"]
+        assert await _agent_row(pool, agent["id"]) == row_before
+
+    async def test_template_braces_in_the_output_are_unusable(self, client, test_tenant, configs, model):
+        agent = await _create_agent(client, test_tenant, configs)
+        model.reply = "Use {{ x }}."
+        resp = await client.post(
+            _url(test_tenant, f"/{agent['id']}/prompt/rewrite"),
+            json={"prompt": "Be polite.", "instruction": "change"},
+        )
+        assert (resp.status_code, resp.json()) == (422, {"detail": "unusable_output"})
 
 
 # ── 3. freshness (finding 1) ─────────────────────────────────────────────

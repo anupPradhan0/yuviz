@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -35,12 +36,13 @@ async def list_calls(
     direction: str | None = Query(default=None, pattern="^(inbound|outbound)$"),
     started_after: datetime | None = Query(default=None),
     started_before: datetime | None = Query(default=None),
+    agent_id: uuid.UUID | None = Query(default=None),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     await get_or_404(tenants_service.get_tenant(tenant_slug), f"tenant {tenant_slug!r} not found")
     return await calls_service.list_calls(
         tenant_slug, limit=limit, offset=offset, direction=direction,
-        started_after=started_after, started_before=started_before,
+        started_after=started_after, started_before=started_before, agent_id=agent_id,
     )
 
 

@@ -12,7 +12,7 @@ export default function IntegrationsPage() {
 
       <div style={{ marginBottom: 18 }}>
         <h1 style={{ fontSize: "1.5rem", fontWeight: 600, letterSpacing: "-.025em", margin: 0, color: "var(--text)" }}>
-          Integrations
+          Connected Apps
         </h1>
         <div className="form-hint" style={{ marginTop: 4 }}>
           {tenant ? `Connected accounts and ready-made tools for ${tenant.name}.` : "Connected accounts and ready-made tools."}

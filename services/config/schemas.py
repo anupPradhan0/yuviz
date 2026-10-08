@@ -83,6 +83,7 @@ class AgentCreate(BaseModel):
     stt_config_id:  str | None = None
     llm_config_id:  str | None = None
     tts_config_id:  str | None = None
+    status:         Literal["active", "inactive"] = "active"
     workflow: dict | None = None  # None/{} → starter_graph; validated like publish
 
     @field_validator("workflow")
@@ -130,6 +131,11 @@ class PromptRevise(BaseModel):
     session_id:    str
     problem:       str = Field(min_length=1, max_length=1000)
     llm_config_id: str | None = None
+
+
+class PromptRewrite(BaseModel):
+    prompt:      str = Field(min_length=1, max_length=20_000)
+    instruction: str = Field(min_length=1, max_length=500)
 
 
 class PromptAccept(BaseModel):

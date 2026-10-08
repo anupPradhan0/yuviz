@@ -24,17 +24,18 @@ import { AgentVoiceSettings } from "@/components/AgentVoiceSettings";
 import { OTHER } from "@/lib/engineCatalog";
 import { buildSystemPrompt } from "@/lib/systemPromptBuilder";
 import { templateByKey } from "@/lib/agentTemplates";
-import { EasyAgentFlow } from "@/components/EasyAgentFlow";
+import { normalizeDialTarget } from "@/lib/dialTargets";
+import { QuickCreateAgent } from "@/components/QuickCreateAgent";
 import { AgentDraft, clearAgentDraft, draftSavedLabel, loadAgentDraft, saveAgentDraft } from "@/lib/agentDraft";
 
 type Step = "identity" | "voice" | "limits" | "advanced" | "knowledge" | "review";
 
 const STEPS: { key: Step; label: string }[] = [
-  { key: "identity", label: "Identity" },
+  { key: "identity", label: "About" },
   { key: "voice", label: "Language & Voice" },
-  { key: "limits", label: "Limits" },
-  { key: "advanced", label: "Advanced" },
-  { key: "knowledge", label: "Knowledge & Tools" },
+  { key: "limits", label: "Call length" },
+  { key: "advanced", label: "Transfers & rules" },
+  { key: "knowledge", label: "Knowledge" },
   { key: "review", label: "Review" },
 ];
 
@@ -51,9 +52,7 @@ export default function NewAgentPage() {
   // ?template= is read once as initial state only, so it never overwrites typed input.
   const template = templateByKey(searchParams.get("template"));
 
-  // Easy is the default; a quick-start link (?template=) carries advanced-wizard
-  // fields, so it opens the wizard it was written for.
-  const [mode, setMode] = useState<"easy" | "advanced">(template ? "advanced" : "easy");
+  const [mode, setMode] = useState<"quick" | "advanced">(searchParams.get("mode") === "advanced" ? "advanced" : "quick");
   const [step, setStep] = useState<Step>("identity");
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
@@ -155,7 +154,7 @@ export default function NewAgentPage() {
   const hasContent = name.trim() !== "" || purpose.trim() !== "" || persona.trim() !== "";
 
   useEffect(() => {
-    if (!draftReady || skipAutosave.current) return;
+    if (!draftReady || skipAutosave.current || mode !== "advanced") return;
     if (!hasContent) {
       clearAgentDraft();
       return;
@@ -174,7 +173,7 @@ export default function NewAgentPage() {
     }, 400);
     return () => clearTimeout(timer);
   }, [
-    draftReady, hasContent, step, name, tenantSlug, purpose, persona, tone, languageChoice, customLanguage,
+    draftReady, mode, hasContent, step, name, tenantSlug, purpose, persona, tone, languageChoice, customLanguage,
     sttId, llmId, ttsId, maxCallDuration, goodbyeGraceMs, escalationThreshold, transferType,
     transferDestination, transferCondition, transferAnnouncement, complianceInstructions, fallbackResponse,
     selectedKbIds, selectedApiIds, greeting, systemPrompt, promptEdited,
@@ -183,7 +182,7 @@ export default function NewAgentPage() {
   const startOver = () => {
     skipAutosave.current = true;
     clearAgentDraft();
-    window.location.replace("/agents/new");
+    window.location.replace("/agents/new?mode=advanced");
   };
 
   useEffect(() => {
@@ -323,7 +322,7 @@ export default function NewAgentPage() {
           max_call_duration_s: maxCallDuration === "" ? null : maxCallDuration,
           goodbye_grace_ms: goodbyeGraceMs === "" ? undefined : goodbyeGraceMs,
           transfer_type: transferType,
-          transfer_destination: transferType === "none" ? null : transferDestination.trim() || null,
+          transfer_destination: transferType === "none" ? null : normalizeDialTarget(transferDestination),
           transfer_prompt: transferType === "none" ? null : transferCondition.trim() || null,
           transfer_announcement: transferType === "none" ? null : transferAnnouncement.trim() || null,
           escalation_threshold: escalationThreshold === "" ? null : escalationThreshold,
@@ -347,7 +346,9 @@ export default function NewAgentPage() {
     }
   };
 
-  if (mode === "easy") return <EasyAgentFlow onAdvanced={() => setMode("advanced")} />;
+  if (mode === "quick") {
+    return <QuickCreateAgent initialTemplate={searchParams.get("template")} onStepByStep={() => setMode("advanced")} />;
+  }
 
   return (
     <>
@@ -390,13 +391,12 @@ export default function NewAgentPage() {
       {step === "identity" && (
         <div className="card">
           <div className="card-hdr">
-            <div className="card-title">Identity</div>
+            <div className="card-title">About your agent</div>
           </div>
           <div className="card-body">
             <div className="form-group">
               <label className="form-label">Name <span className="required">*</span></label>
               <input className="form-input" autoFocus value={name} placeholder="Booking Bot" onChange={(e) => setName(e.target.value)} />
-              {name.trim() !== "" && <div className="form-hint">Address: <span className="mono">{slugify(name) || "—"}</span></div>}
             </div>
             <div className="form-group">
               <label className="form-label">Account <span className="required">*</span></label>
@@ -407,7 +407,7 @@ export default function NewAgentPage() {
               </select>
             </div>
             <div className="form-group">
-              <label className="form-label">Purpose <span className="hint">one line — what is this agent for?</span></label>
+              <label className="form-label">What does it do? <span className="hint">one line</span></label>
               <input
                 className="form-input"
                 value={purpose}
@@ -416,7 +416,7 @@ export default function NewAgentPage() {
               />
             </div>
             <div className="form-group">
-              <label className="form-label">Identity <span className="hint">who the agent is — read out loud to the reviewer, so write it as a persona</span></label>
+              <label className="form-label">Who is it? <span className="hint">describe the agent as a person</span></label>
               <textarea
                 className="form-textarea"
                 style={{ minHeight: 70 }}
@@ -457,40 +457,40 @@ export default function NewAgentPage() {
       {step === "limits" && (
         <div className="card">
           <div className="card-hdr">
-            <div className="card-title">Limits</div>
-            <div className="card-sub">hard caps this agent runs under on every call</div>
+            <div className="card-title">Call length</div>
+            <div className="card-sub">how long calls can last and how they end</div>
           </div>
           <div className="card-body">
             <div className="form-row">
               <div className="form-group">
-                <label className="form-label">Max Call Duration <span className="hint">seconds — hard cutoff. Blank = unlimited.</span></label>
+                <label className="form-label">Longest call <span className="hint">in seconds. Leave blank for no limit.</span></label>
                 <input
                   className="form-input"
-                  style={{ fontFamily: "var(--mono)" }}
                   type="number"
                   min={30}
                   max={7200}
-                  placeholder="unlimited"
+                  placeholder="No limit"
                   value={maxCallDuration}
                   onChange={(e) => setMaxCallDuration(e.target.value === "" ? "" : Number(e.target.value))}
                 />
               </div>
               <div className="form-group">
-                <label className="form-label">Goodbye Grace <span className="hint">ms — pause before hanging up after the farewell</span></label>
+                <label className="form-label">Pause before hanging up <span className="hint">in seconds, after saying goodbye</span></label>
                 <input
                   className="form-input"
-                  style={{ fontFamily: "var(--mono)" }}
                   type="number"
-                  value={goodbyeGraceMs}
-                  onChange={(e) => setGoodbyeGraceMs(e.target.value === "" ? "" : Number(e.target.value))}
+                  min={0}
+                  step={0.5}
+                  value={goodbyeGraceMs === "" ? "" : goodbyeGraceMs / 1000}
+                  onChange={(e) => setGoodbyeGraceMs(e.target.value === "" ? "" : Math.round(Number(e.target.value) * 1000))}
                 />
               </div>
             </div>
             <div className="form-group" style={{ marginBottom: 0 }}>
-              <label className="form-label">Escalate after <span className="hint">consecutive guardrail triggers before transferring — requires a transfer rule set in Advanced</span></label>
+              <label className="form-label">Hand off to a person after <span className="hint">this many problems in a row. Needs a transfer set up in the next step.</span></label>
               <input
                 className="form-input"
-                style={{ fontFamily: "var(--mono)", width: 80 }}
+                style={{ width: 80 }}
                 type="number"
                 min={1}
                 value={escalationThreshold}
@@ -504,33 +504,32 @@ export default function NewAgentPage() {
       {step === "advanced" && (
         <div className="card">
           <div className="card-hdr">
-            <div className="card-title">Advanced</div>
-            <div className="card-sub">transfer rules, compliance and fallback wording — all folded into the generated system prompt</div>
+            <div className="card-title">Transfers &amp; rules</div>
+            <div className="card-sub">when to pass callers to a person, and rules the agent must follow</div>
           </div>
           <div className="card-body">
             <div className="form-row">
               <div className="form-group">
-                <label className="form-label">Transfer Type</label>
+                <label className="form-label">Transfer to a person</label>
                 <select className="form-select" value={transferType || "none"} onChange={(e) => setTransferType(e.target.value as AgentUpdate["transfer_type"])}>
-                  <option value="none">Never Escalate</option>
-                  <option value="cold">Cold Transfer</option>
-                  <option value="warm">Warm Transfer</option>
+                  <option value="none">Don&apos;t transfer</option>
+                  <option value="cold">Connect directly</option>
+                  <option value="warm">Introduce first</option>
                 </select>
               </div>
               <div className="form-group">
-                <label className="form-label">Transfer Destination <span className="hint">phone number or SIP URI</span></label>
+                <label className="form-label">Transfer to <span className="hint">phone number with country code</span></label>
                 <input
                   className="form-input"
-                  style={{ fontFamily: "var(--mono)", fontSize: ".75rem" }}
                   value={transferDestination}
                   onChange={(e) => setTransferDestination(e.target.value)}
-                  placeholder="+18005550100 or sip:agent@example.com"
+                  placeholder="+1 800 555 0100"
                   disabled={transferType === "none"}
                 />
               </div>
             </div>
             <div className="form-group">
-              <label className="form-label">Transfer Condition <span className="hint">an &quot;If the caller…&quot; clause — also drives the generated system prompt</span></label>
+              <label className="form-label">When should it transfer?</label>
               <textarea
                 className="form-textarea"
                 style={{ minHeight: 48 }}
@@ -541,7 +540,7 @@ export default function NewAgentPage() {
               />
             </div>
             <div className="form-group">
-              <label className="form-label">Transfer Announcement <span className="hint">exact words spoken before transferring — blank = AI chooses the wording</span></label>
+              <label className="form-label">What it says before transferring <span className="hint">leave blank to let the agent choose</span></label>
               <textarea
                 className="form-textarea"
                 style={{ minHeight: 48 }}
@@ -552,7 +551,7 @@ export default function NewAgentPage() {
               />
             </div>
             <div className="form-group">
-              <label className="form-label">Fallback Response <span className="hint">said when the agent genuinely doesn&apos;t know the answer</span></label>
+              <label className="form-label">When it doesn&apos;t know the answer <span className="hint">what the agent says</span></label>
               <textarea
                 className="form-textarea"
                 style={{ minHeight: 48 }}
@@ -562,7 +561,7 @@ export default function NewAgentPage() {
               />
             </div>
             <div className="form-group" style={{ marginBottom: 0 }}>
-              <label className="form-label">Compliance Instructions <span className="hint">brand/regulatory rules the agent must always follow</span></label>
+              <label className="form-label">Rules it must always follow</label>
               <textarea
                 className="form-textarea"
                 style={{ minHeight: 48 }}
@@ -578,12 +577,12 @@ export default function NewAgentPage() {
       {step === "knowledge" && (
         <div className="card">
           <div className="card-hdr">
-            <div className="card-title">Knowledge & Tools</div>
-            <div className="card-sub">shared across every agent in this account — upload documents or add APIs from the Knowledge Base tab</div>
+            <div className="card-title">Knowledge</div>
+            <div className="card-sub">documents and connections this agent can use to answer</div>
           </div>
           <div className="card-body">
             <div className="form-group">
-              <label className="form-label">Knowledge Bases</label>
+              <label className="form-label">Knowledge</label>
               {kbs.length === 0 ? (
                 <div className="form-hint">
                   No knowledge bases yet in this account.{" "}
@@ -602,12 +601,12 @@ export default function NewAgentPage() {
               )}
             </div>
             <div className="form-group" style={{ marginBottom: 0 }}>
-              <label className="form-label">Custom APIs</label>
+              <label className="form-label">Connections to your systems</label>
               {customApis.length === 0 ? (
                 <div className="form-hint">
-                  No custom APIs yet in this account.{" "}
+                  No connections yet in this account.{" "}
                   <a href="/knowledge-bases?tab=apis" target="_blank" rel="noopener noreferrer" style={{ color: "var(--cyan)" }}>
-                    Add an API ↗
+                    Add a connection ↗
                   </a>{" "}
                   It opens in a new tab and shows up here when you come back.
                 </div>
@@ -628,17 +627,17 @@ export default function NewAgentPage() {
         <div className="card">
           <div className="card-hdr">
             <div className="card-title">Review</div>
-            <div className="card-sub">system prompt generated from your answers — edit freely before creating</div>
+            <div className="card-sub">instructions written from your answers — change anything before creating</div>
           </div>
           <div className="card-body">
             {createError && <div className="error-banner">{createError}</div>}
             <div className="form-group">
-              <label className="form-label">Greeting <span className="hint">first thing the agent says</span></label>
+              <label className="form-label">Opening line <span className="hint">first thing the agent says</span></label>
               <input className="form-input" value={greeting} onChange={(e) => setGreeting(e.target.value)} />
             </div>
             <div className="form-group" style={{ marginBottom: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <label className="form-label" style={{ marginBottom: 0 }}>System Prompt</label>
+                <label className="form-label" style={{ marginBottom: 0 }}>How the agent should behave</label>
                 <button
                   type="button"
                   className="btn btn-ghost btn-sm"
@@ -646,12 +645,12 @@ export default function NewAgentPage() {
                   disabled={!llmId || generatingPrompt}
                   onClick={handleGenerateWithAi}
                 >
-                  {generatingPrompt ? "Generating…" : <><Sparkles size={13} /> Generate with AI</>}
+                  {generatingPrompt ? "Writing…" : <><Sparkles size={13} /> Write with AI</>}
                 </button>
               </div>
               {!llmId && (
                 <div className="voice-missing" style={{ marginBottom: 6 }}>
-                  To write the prompt with AI, choose an AI model first.{" "}
+                  To write this with AI, choose an AI model first.{" "}
                   <a href="#" onClick={(e) => { e.preventDefault(); setStep("voice"); }}>Choose an AI model</a>
                 </div>
               )}
@@ -668,9 +667,9 @@ export default function NewAgentPage() {
               />
               {promptEdited && (
                 <div className="form-hint">
-                  Edited — no longer auto-updates from earlier steps.{" "}
+                  You edited this, so it no longer updates from earlier steps.{" "}
                   <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPromptEdited(false)}>
-                    Reset to the plain template
+                    Start over from your answers
                   </button>
                 </div>
               )}
@@ -691,7 +690,7 @@ export default function NewAgentPage() {
           </button>
         ) : (
           <button className="btn btn-primary btn-sm" onClick={handleCreate} disabled={creating || !canLeaveIdentity}>
-            {creating ? "Creating…" : "Create Agent"}
+            {creating ? "Creating…" : "Create agent"}
           </button>
         )}
       </div>

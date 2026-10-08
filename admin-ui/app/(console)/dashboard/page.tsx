@@ -1,31 +1,34 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Activity, Rocket } from "lucide-react";
 import {
   AgentWithTenant,
   ApiError,
+  CallWithTenant,
+  CampaignProgress,
+  CampaignWithTenant,
   DashboardStats,
   DispositionSlice,
-  dispositionLabel,
-  LatencyStatWithTenant,
+  getCampaignProgress,
   listAllAgents,
+  listAllCalls,
+  listAllCampaigns,
   listAllDashboardStats,
   listAllDispositionMix,
-  listAllLatencyStats,
+  listAllPhoneNumbers,
   listAllTodaysActivity,
   listAllUsageTrend,
-  TodaysActivityPoint,
-  UsageTrendPoint,
+  PhoneNumberWithTenant,
 } from "@/lib/api";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 
 const RANGE_OPTIONS = [
-  { label: "7 Days", hours: 24 * 7, days: 7 },
-  { label: "30 Days", hours: 24 * 30, days: 30 },
-  { label: "90 Days", hours: 24 * 90, days: 90 },
+  { label: "Today", hours: 24, days: 0, prev: "previous 24h", period: "in the last 24 hours" },
+  { label: "7 days", hours: 24 * 7, days: 7, prev: "previous 7 days", period: "in the last 7 days" },
+  { label: "30 days", hours: 24 * 30, days: 30, prev: "previous 30 days", period: "in the last 30 days" },
 ];
+type Range = (typeof RANGE_OPTIONS)[number];
 
 // Fixed locale avoids SSR/client hydration mismatch; operators read Indian grouping (1,36,650).
 const fmtInt = (n: number) => n.toLocaleString("en-IN");
@@ -35,395 +38,391 @@ function fmtDuration(ms: number | null): string {
   const total = Math.round(ms / 1000);
   const m = Math.floor(total / 60);
   const s = total % 60;
-  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  return m > 0 ? `${m}m ${String(s).padStart(2, "0")}s` : `${s}s`;
 }
 
-// AHT bar ceiling; the tile displays this target.
-const AHT_TARGET_MS = 120_000;
+function maskNumber(n: string | null): string {
+  if (!n) return "Unknown";
+  return n.length <= 6 ? n : `${n.slice(0, Math.min(6, n.length - 4))}••• ${n.slice(-4)}`;
+}
 
-type Tone = "good" | "bad" | "flat";
+type Tone = "g" | "a" | "r" | "n";
+interface Outcome { label: string; short: string; tone: Tone }
 
 const TONE_COLOR: Record<Tone, string> = {
-  good: "var(--green)",
-  bad: "var(--red)",
-  flat: "var(--text-3)",
+  g: "var(--green)", a: "var(--amber)", r: "var(--red)", n: "var(--text-3)",
 };
 
-/** One headline tile: label, big value, a fill bar, and a delta + context line.
-    The value carries the same accent colour as its bar — the StatCard this
-    replaced coloured its number per metric, and keeping that means a tile
-    still reads at a glance without tracing the thin bar underneath. */
-function Kpi({
-  label, value, fillPct, fillColor, delta, deltaTone, footnote, live,
-}: {
-  label: string;
-  value: string;
-  fillPct: number | null;
-  fillColor: string;
-  delta: string | null;
-  deltaTone: Tone;
-  footnote: string;
-  live?: boolean;
-}) {
-  return (
-    <div className="card" style={{ padding: "14px 16px", flex: "1 1 200px", minWidth: 180 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-        <span style={{ fontSize: ".72rem", fontWeight: 600, color: "var(--text-2)" }}>{label}</span>
-        {live && (
-          <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4, fontSize: ".64rem", color: "var(--green)" }}>
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--green)", display: "inline-block" }} />
-            LIVE
-          </span>
-        )}
-      </div>
-      <div style={{
-        fontSize: "1.75rem", fontWeight: 600, letterSpacing: "-.025em",
-        color: fillColor, fontVariantNumeric: "tabular-nums", lineHeight: 1.1,
-      }}>
-        {value}
-      </div>
-      <div style={{ height: 3, borderRadius: 2, background: "var(--surf-3)", margin: "12px 0 8px" }}>
-        {/* A null fill means the ratio has no denominator yet (no calls in
-            the window). An empty track is honest there; a full or zeroed
-            bar would both read as a real measurement. */}
-        {fillPct !== null && (
-          <div style={{
-            width: `${Math.min(100, Math.max(0, fillPct))}%`, height: "100%",
-            borderRadius: 2, background: fillColor,
-          }} />
-        )}
-      </div>
-      <div style={{ display: "flex", gap: 6, alignItems: "baseline", fontSize: ".7rem" }}>
-        {delta && <span style={{ color: TONE_COLOR[deltaTone], fontWeight: 600 }}>{delta}</span>}
-        <span style={{ color: "var(--text-3)" }}>{footnote}</span>
-      </div>
-    </div>
-  );
-}
-
-/** Stacked hourly volume. Plain divs rather than SVG — every bar is a
-    simple proportion of the tallest hour, and the stack only ever has two
-    segments (see get_todays_activity: 'web' is hardcoded 0, not a real
-    channel on this platform, so stacking it would draw a permanent
-    zero-height lie into the legend). */
-function StackedBars({ points }: { points: TodaysActivityPoint[] }) {
-  const max = Math.max(1, ...points.map((p) => p.inbound + p.outbound));
-  return (
-    <div>
-      <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 190 }}>
-        {points.map((p) => {
-          const total = p.inbound + p.outbound;
-          return (
-            <div
-              key={p.hour}
-              style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "flex-end", height: "100%" }}
-              title={`${String(p.hour).padStart(2, "0")}:00 — ${p.outbound} outbound, ${p.inbound} inbound`}
-            >
-              <div style={{
-                height: `${(total / max) * 100}%`, display: "flex", flexDirection: "column",
-                justifyContent: "flex-end", borderRadius: "4px 4px 0 0", overflow: "hidden", minHeight: total > 0 ? 2 : 0,
-              }}>
-                {/* inbound=cyan / outbound=amber is the convention the Calls
-                    page already sets (app/calls/page.tsx's direction badge).
-                    Do not re-pick these per screen — the same colour has to
-                    mean the same direction everywhere in the console. */}
-                <div style={{ flex: p.inbound, background: "var(--text-2)" }} />
-                <div style={{ flex: p.outbound, background: "var(--amber)" }} />
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-        {points.map((p) => (
-          <span key={p.hour} style={{ flex: 1, textAlign: "center", fontSize: ".65rem", color: "var(--text-3)" }}>
-            {String(p.hour).padStart(2, "0")}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// Disposition colour by meaning, not rank; uses globals.css .badge tones.
-type BadgeTone = "green" | "amber" | "red" | "gray" | "cyan";
-
-const BADGE_VAR: Record<BadgeTone, string> = {
-  green: "var(--green)",
-  amber: "var(--amber)",
-  red: "var(--red)",
-  gray: "var(--text-3)",
-  cyan: "var(--text-2)",
-};
-
-function dispositionTone(closeReason: string): BadgeTone {
-  if (closeReason.startsWith("TRANSFER")) {
-    return closeReason === "TRANSFER_SUCCESS" ? "amber" : "red";
+// close_reason is a system code; group it into the few outcomes a business user cares about.
+function outcomeOf(reason: string | null): Outcome {
+  switch (reason) {
+    case "caller_hangup":
+    case "stream_ended":
+    case "session_destroyed":
+      return { label: "Ended normally", short: "Done", tone: "g" };
+    case "TRANSFER_SUCCESS":
+      return { label: "Sent to a person", short: "To person", tone: "a" };
+    case "TRANSFER_FAILED":
+    case "TRANSFER_TIMEOUT":
+      return { label: "Transfer failed", short: "Transfer failed", tone: "r" };
+    case "transport_error":
+    case "close_timeout":
+    case "reconciled_inactive":
+    case "reconciled_stale":
+    case "reconciled_dead_node":
+      return { label: "Call dropped", short: "Dropped", tone: "r" };
+    default:
+      return { label: "Not recorded", short: "—", tone: "n" };
   }
-  if (closeReason === "caller_hangup") return "green";
-  if (closeReason === "transport_error" || closeReason === "close_timeout") return "red";
-  if (closeReason === "reconciled_inactive" || closeReason === "unknown") return "gray";
-  return "cyan";
 }
 
-// Bands calibrated to this stack's sequential STT+LLM+TTS turn, not industry 500-600ms benchmarks.
-function latencyBand(ms: number | null): { label: string; badge: string } {
-  if (ms == null) return { label: "—", badge: "gray" };
-  if (ms < 1500) return { label: "Good", badge: "green" };
-  if (ms < 3500) return { label: "Slow", badge: "amber" };
-  return { label: "Very slow", badge: "red" };
-}
+interface ChartPoint { label: string; calls: number; aiPct: number | null }
 
-function formatMs(ms: number | null): string {
-  if (ms == null) return "—";
-  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
-}
+const toChartPoint = (label: string, calls: number, ended: number, escalated: number): ChartPoint => ({
+  label,
+  calls,
+  aiPct: ended === 0 ? null : ((ended - escalated) / ended) * 100,
+});
 
-// Dependency-free multi-series line chart. Each series is normalized to its own max (units differ).
-function LineChart({
-  series, xLabels, height = 160,
-}: {
-  series: { name: string; color: string; values: number[] }[];
-  xLabels: string[];
-  height?: number;
-}) {
-  const width = 100; // percentage-based viewBox, scales via SVG width=100%
-  const n = xLabels.length;
-  if (n === 0) return <div className="empty-state">No data in this window yet.</div>;
-
-  const points = (values: number[]) => {
-    const max = Math.max(1, ...values);
-    return values.map((v, i) => {
-      const x = n === 1 ? width / 2 : (i / (n - 1)) * width;
-      const y = height - (v / max) * (height - 20) - 10;
-      return { x, y };
-    });
-  };
-
-  const xTickIdx = n <= 6 ? xLabels.map((_, i) => i) : [0, Math.floor((n - 1) / 2), n - 1];
-
+function TrendChart({ points }: { points: ChartPoint[] }) {
+  if (points.length === 0) return <div className="d-empty">No calls in this period yet.</div>;
+  const w = 400;
+  const h = 110;
+  const max = Math.max(1, ...points.map((p) => p.calls));
+  const xAt = (i: number) => (points.length === 1 ? w / 2 : (i / (points.length - 1)) * w);
+  const yAt = (frac: number) => h - 6 - frac * (h - 16);
+  const xy = points.map((p, i) => [xAt(i), yAt(p.calls / max)]);
+  const line = xy.map(([x, y]) => `${x},${y}`).join(" ");
+  const aiXy = points.flatMap((p, i) => (p.aiPct == null ? [] : [[xAt(i), yAt(p.aiPct / 100), i]]));
+  const ticks = points.length <= 6 ? points.map((_, i) => i) : [0, Math.floor((points.length - 1) / 2), points.length - 1];
   return (
-    <div>
-      <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} preserveAspectRatio="none" style={{ overflow: "visible" }}>
-        {[0.25, 0.5, 0.75].map((f) => (
-          <line key={f} x1={0} x2={width} y1={height * f} y2={height * f} stroke="var(--border)" strokeWidth={0.3} />
+    <>
+      <div className="d-chart">
+        <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img" aria-label="Calls over time">
+          <path d={`M0 ${h * 0.25}H${w}M0 ${h * 0.5}H${w}M0 ${h * 0.75}H${w}`} stroke="var(--border)" strokeWidth="1" />
+          <path d={`M${xy[0][0]} ${h} L${line.replaceAll(" ", " L")} L${xy[xy.length - 1][0]} ${h}Z`} fill="var(--cyan-dim)" />
+          <polyline points={line} fill="none" stroke="var(--cyan)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+          {aiXy.length > 1 && (
+            <polyline
+              points={aiXy.map(([x, y]) => `${x},${y}`).join(" ")}
+              fill="none"
+              stroke="var(--green)"
+              strokeWidth="2"
+              strokeDasharray="4 3"
+              vectorEffect="non-scaling-stroke"
+            />
+          )}
+        </svg>
+        {/* HTML dots: SVG circles would stretch under the non-uniform viewBox scaling. */}
+        {xy.map(([x, y], i) => (
+          <span
+            key={i}
+            className="d-dot"
+            style={{ left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%` }}
+            title={`${points[i].label}: ${points[i].calls} call${points[i].calls === 1 ? "" : "s"}`}
+          />
         ))}
-        {series.map((s) => {
-          const pts = points(s.values);
-          const path = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
-          return (
-            <g key={s.name}>
-              <path d={path} fill="none" stroke={s.color} strokeWidth={0.6} vectorEffect="non-scaling-stroke" />
-              {pts.map((p, i) => (
-                <circle key={i} cx={p.x} cy={p.y} r={0.8} fill={s.color} />
-              ))}
-            </g>
-          );
-        })}
-      </svg>
-      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
-        {xTickIdx.map((i) => (
-          <span key={i} style={{ fontSize: ".65rem", color: "var(--text-3)" }}>
-            {xLabels[i]}
-          </span>
+        {aiXy.map(([x, y, i]) => (
+          <span
+            key={`ai-${i}`}
+            className="d-dot ai"
+            style={{ left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%` }}
+            title={`${points[i].label}: ${Math.round(points[i].aiPct!)}% handled by AI`}
+          />
         ))}
       </div>
-      <div style={{ display: "flex", gap: 16, marginTop: 10 }}>
-        {series.map((s) => (
-          <div key={s.name} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: ".72rem", color: "var(--text-2)" }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: s.color, display: "inline-block" }} />
-            {s.name}
-          </div>
-        ))}
+      <div className="d-legend">
+        <span><i style={{ background: "var(--cyan)" }} />Calls</span>
+        <span><i style={{ background: "var(--green)" }} />Handled by AI (%)</span>
       </div>
-    </div>
+      <div className="d-ticks">
+        {ticks.map((i) => <span key={i}>{points[i].label}</span>)}
+      </div>
+    </>
+  );
+}
+
+const REFRESH_MS = 30_000;
+
+function LiveStatus({ updatedAt }: { updatedAt: number | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  if (updatedAt === null) return null;
+  const ago = Math.max(0, Math.floor((now - updatedAt) / 1000));
+  return (
+    <span className="d-live" title="This page updates itself every 30 seconds">
+      <i />Live updates on · Updated {ago < 60 ? `${ago}s` : `${Math.floor(ago / 60)}m`} ago
+    </span>
   );
 }
 
 export default function DashboardPage() {
   const { tenant, allTenants, isAllTenants, loading: tenantLoading } = useActiveTenant();
-  // Header switcher selection: one tenant, or all under "All tenants".
   const targetTenants = useMemo(
     () => (isAllTenants ? allTenants : tenant ? [tenant] : []),
     [tenant, allTenants, isAllTenants],
   );
-  const [agents, setAgents] = useState<AgentWithTenant[]>([]);
+
+  const [range, setRange] = useState<Range>(RANGE_OPTIONS[1]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const [range, setRange] = useState(RANGE_OPTIONS[1]); // 30 days default
   const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [statsLoading, setStatsLoading] = useState(true);
-
-  const [trend, setTrend] = useState<UsageTrendPoint[]>([]);
-  const [trendLoading, setTrendLoading] = useState(true);
-
-  const [activity, setActivity] = useState<TodaysActivityPoint[]>([]);
-  const [activityLoading, setActivityLoading] = useState(true);
-
-  const [latencyStats, setLatencyStats] = useState<LatencyStatWithTenant[]>([]);
-  const [latencyLoading, setLatencyLoading] = useState(true);
-  const [latencyHours, setLatencyHours] = useState(24);
-
+  const [trend, setTrend] = useState<ChartPoint[]>([]);
   const [dispositions, setDispositions] = useState<DispositionSlice[]>([]);
-  const [dispositionsLoading, setDispositionsLoading] = useState(true);
+  const [calls, setCalls] = useState<CallWithTenant[]>([]);
+  const [callsTruncated, setCallsTruncated] = useState(false);
+
+  const [agents, setAgents] = useState<AgentWithTenant[]>([]);
+  const [numbers, setNumbers] = useState<PhoneNumberWithTenant[]>([]);
+  const [campaigns, setCampaigns] = useState<CampaignWithTenant[]>([]);
+  const [progress, setProgress] = useState<Record<string, CampaignProgress>>({});
+
+  // Bumping `tick` reloads everything in the background, without the "Loading…" placeholders.
+  const [tick, setTick] = useState(0);
+  const lastTick = useRef(0);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+
+  // A hidden tab waits and refreshes as soon as it is shown again.
+  useEffect(() => {
+    if (updatedAt === null) return;
+    let onVisible: (() => void) | null = null;
+    const timer = setTimeout(() => {
+      if (!document.hidden) return setTick((t) => t + 1);
+      onVisible = () => {
+        if (document.hidden) return;
+        document.removeEventListener("visibilitychange", onVisible!);
+        setTick((t) => t + 1);
+      };
+      document.addEventListener("visibilitychange", onVisible);
+    }, REFRESH_MS);
+    return () => {
+      clearTimeout(timer);
+      if (onVisible) document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [updatedAt]);
 
   useEffect(() => {
     if (tenantLoading || targetTenants.length === 0) return;
-    listAllAgents(targetTenants).then(setAgents).catch(() => {});
-  }, [targetTenants, tenantLoading]);
+    let cancelled = false;
+    const since = new Date(Date.now() - range.hours * 3_600_000).toISOString();
+    const background = tick !== lastTick.current;
+    lastTick.current = tick;
+    if (!background) setLoading(true);
+    Promise.allSettled([
+      listAllDashboardStats(targetTenants, range.hours),
+      range.days
+        ? listAllUsageTrend(targetTenants, range.days).then((pts) =>
+            pts.map((p) => toChartPoint(
+              new Date(p.date).toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
+              p.calls, p.ended, p.escalated,
+            )),
+          )
+        : listAllTodaysActivity(targetTenants).then((pts) => {
+            if (pts.length === 0) return [];
+            // API omits zero-call hours; fill gaps between the first and last active hour.
+            const byHour = new Map(pts.map((p) => [p.hour, p]));
+            const hours = pts.map((p) => p.hour);
+            const dense: ChartPoint[] = [];
+            for (let hr = Math.min(...hours); hr <= Math.max(...hours); hr++) {
+              const p = byHour.get(hr);
+              dense.push(toChartPoint(
+                `${String(hr).padStart(2, "0")}:00`,
+                p ? p.inbound + p.outbound : 0, p?.ended ?? 0, p?.escalated ?? 0,
+              ));
+            }
+            return dense;
+          }),
+      listAllDispositionMix(targetTenants, range.hours),
+      listAllCalls(targetTenants, { startedAfter: since }),
+    ]).then(([s, t, d, c]) => {
+      if (cancelled) return;
+      if (s.status === "fulfilled") setStats(s.value);
+      if (t.status === "fulfilled") setTrend(t.value);
+      if (d.status === "fulfilled") setDispositions(d.value);
+      if (c.status === "fulfilled") {
+        setCalls(c.value.calls);
+        setCallsTruncated(c.value.truncated);
+      }
+      const failed = [s, t, d, c].find((r): r is PromiseRejectedResult => r.status === "rejected");
+      setError(failed ? (failed.reason instanceof ApiError ? failed.reason.detail : String(failed.reason)) : null);
+      setLoading(false);
+      setUpdatedAt(Date.now());
+    });
+    return () => { cancelled = true; };
+  }, [targetTenants, tenantLoading, range, tick]);
 
   useEffect(() => {
     if (tenantLoading || targetTenants.length === 0) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setStatsLoading(true);
-    listAllDashboardStats(targetTenants, range.hours)
-      .then(setStats)
-      .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)))
-      .finally(() => setStatsLoading(false));
-  }, [targetTenants, tenantLoading, range]);
+    let cancelled = false;
+    listAllAgents(targetTenants).then((a) => !cancelled && setAgents(a)).catch(() => {});
+    listAllPhoneNumbers(targetTenants).then((n) => !cancelled && setNumbers(n)).catch(() => {});
+    // Campaigns run in a separate service; if it's down the card just stays empty.
+    listAllCampaigns(targetTenants)
+      .then(async (cs) => {
+        if (cancelled) return;
+        setCampaigns(cs);
+        const active = cs.filter((c) => c.status === "running" || c.status === "paused").slice(0, 3);
+        const results = await Promise.allSettled(active.map((c) => getCampaignProgress(c.id)));
+        if (cancelled) return;
+        const next: Record<string, CampaignProgress> = {};
+        results.forEach((r, i) => { if (r.status === "fulfilled") next[active[i].id] = r.value; });
+        setProgress(next);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [targetTenants, tenantLoading, tick]);
 
-  useEffect(() => {
-    if (tenantLoading || targetTenants.length === 0) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setTrendLoading(true);
-    listAllUsageTrend(targetTenants, range.days)
-      .then(setTrend)
-      .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)))
-      .finally(() => setTrendLoading(false));
-  }, [targetTenants, tenantLoading, range]);
-
-  useEffect(() => {
-    if (tenantLoading || targetTenants.length === 0) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setActivityLoading(true);
-    listAllTodaysActivity(targetTenants)
-      .then(setActivity)
-      .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)))
-      .finally(() => setActivityLoading(false));
-  }, [targetTenants, tenantLoading]);
-
-  useEffect(() => {
-    if (tenantLoading || targetTenants.length === 0) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setDispositionsLoading(true);
-    listAllDispositionMix(targetTenants, range.hours)
-      .then(setDispositions)
-      .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)))
-      .finally(() => setDispositionsLoading(false));
-  }, [targetTenants, tenantLoading, range]);
-
-  useEffect(() => {
-    if (tenantLoading || targetTenants.length === 0) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setLatencyLoading(true);
-    listAllLatencyStats(targetTenants, latencyHours)
-      .then(setLatencyStats)
-      .catch((e) => setError(e instanceof ApiError ? e.detail : String(e)))
-      .finally(() => setLatencyLoading(false));
-  }, [targetTenants, tenantLoading, latencyHours]);
-
-  const activeAgents = agents.filter((a) => a.status === "active").length;
-
-  // Derived from raw counts so a zero denominator renders "—" rather than NaN%/Infinity.
   const kpi = useMemo(() => {
-    const pctChange = (cur: number, prev: number): number | null =>
-      prev === 0 ? null : ((cur - prev) / prev) * 100;
-    const ratePct = (num: number, den: number): number | null =>
-      den === 0 ? null : (num / den) * 100;
-    const mean = (sum: number, n: number): number | null => (n === 0 ? null : sum / n);
-
     if (!stats) return null;
-
-    const containment = ratePct(stats.ended_count - stats.escalated_count, stats.ended_count);
-    const prevContainment = ratePct(
-      stats.prev_ended_count - stats.prev_escalated_count, stats.prev_ended_count,
-    );
-    const aht = mean(stats.aht_duration_ms, stats.aht_sample_count);
-    const prevAht = mean(stats.prev_aht_duration_ms, stats.prev_aht_sample_count);
-
+    const pctChange = (cur: number, prev: number) => (prev === 0 ? null : ((cur - prev) / prev) * 100);
+    const ratio = (num: number, den: number) => (den === 0 ? null : num / den);
+    const contained = ratio(stats.ended_count - stats.escalated_count, stats.ended_count);
+    const prevContained = ratio(stats.prev_ended_count - stats.prev_escalated_count, stats.prev_ended_count);
+    const aht = ratio(stats.aht_duration_ms, stats.aht_sample_count);
+    const prevAht = ratio(stats.prev_aht_duration_ms, stats.prev_aht_sample_count);
     return {
-      containment,
-      // Percentage POINTS, not a percent-of-a-percent — 80% to 83% is
-      // "+3.0pt", never "+3.75%".
-      containmentDeltaPt: containment !== null && prevContainment !== null
-        ? containment - prevContainment : null,
+      callsDeltaPct: pctChange(stats.total_calls, stats.prev_total_calls),
+      aiPct: contained === null ? null : contained * 100,
+      // Percentage points, not percent-of-a-percent.
+      aiDeltaPt: contained !== null && prevContained !== null ? (contained - prevContained) * 100 : null,
       aht,
       ahtDeltaSec: aht !== null && prevAht !== null ? (aht - prevAht) / 1000 : null,
-      callsDeltaPct: pctChange(stats.total_calls, stats.prev_total_calls),
-      handoffDeltaPct: pctChange(stats.handoff_count, stats.prev_handoff_count),
-      // Dial attempts that never became a call row aren't recorded; this is ended / started.
-      handledPct: ratePct(stats.ended_count, stats.total_calls),
-      handoffPct: ratePct(stats.handoff_count, stats.ended_count),
+      failedTransfers: stats.escalated_count - stats.handoff_count,
     };
   }, [stats]);
 
-  const signed = (n: number, unit: string, digits = 1) =>
-    `${n >= 0 ? "+" : "−"}${Math.abs(n).toFixed(digits)}${unit}`;
-
-  const dispositionTotal = dispositions.reduce((sum, d) => sum + d.count, 0);
-
-  const trendSeries = useMemo(
-    () => [
-      { name: "Calls", color: "var(--text-2)", values: trend.map((p) => p.calls) },
-      { name: "Minutes", color: "var(--indigo)", values: trend.map((p) => p.minutes) },
-    ],
-    [trend],
-  );
-  const trendLabels = trend.map((p) => new Date(p.date).toLocaleDateString(undefined, { month: "short", day: "numeric" }));
-
-  const todayLabel = new Date().toLocaleDateString("en-IN", {
-    weekday: "long", day: "numeric", month: "short",
-  });
-
-  // API omits zero-call hours; fill gaps with 0, but only between the first and last active hour.
-  const hourly = useMemo(() => {
-    if (activity.length === 0) return [];
-    const byHour = new Map(activity.map((p) => [p.hour, p]));
-    const hours = activity.map((p) => p.hour);
-    const dense: TodaysActivityPoint[] = [];
-    for (let h = Math.min(...hours); h <= Math.max(...hours); h++) {
-      dense.push(byHour.get(h) ?? { hour: h, inbound: 0, outbound: 0, web: 0 });
+  const outcomes = useMemo(() => {
+    const byLabel = new Map<string, { outcome: Outcome; count: number }>();
+    for (const d of dispositions) {
+      const outcome = outcomeOf(d.close_reason);
+      const entry = byLabel.get(outcome.label) ?? { outcome, count: 0 };
+      entry.count += d.count;
+      byLabel.set(outcome.label, entry);
     }
-    return dense;
-  }, [activity]);
+    const total = dispositions.reduce((sum, d) => sum + d.count, 0);
+    return { rows: [...byLabel.values()].sort((a, b) => b.count - a.count), total };
+  }, [dispositions]);
+
+  const mood = useMemo(() => {
+    const scored = calls.filter((c) => c.sentiment);
+    const count = (pred: (s: string) => boolean) => scored.filter((c) => pred(c.sentiment!)).length;
+    const n = scored.length;
+    const pct = (v: number) => (n === 0 ? 0 : Math.round((v / n) * 100));
+    return {
+      n,
+      happy: pct(count((s) => s === "positive")),
+      neutral: pct(count((s) => s === "neutral")),
+      unhappy: pct(count((s) => s === "negative" || s === "frustrated")),
+    };
+  }, [calls]);
+
+  const agentRows = useMemo(() => {
+    const numbered = new Set(numbers.map((n) => n.agent_id).filter(Boolean));
+    // Outbound-only agents dial out through a campaign and need no number of their own.
+    const dialing = new Set(campaigns.map((c) => c.agent_id));
+    const perAgent = new Map<string, { calls: number; ended: number; toPerson: number }>();
+    for (const c of calls) {
+      if (!c.agent_id) continue;
+      const row = perAgent.get(c.agent_id) ?? { calls: 0, ended: 0, toPerson: 0 };
+      row.calls += 1;
+      if (c.ended_at) row.ended += 1;
+      if (c.close_reason?.startsWith("TRANSFER")) row.toPerson += 1;
+      perAgent.set(c.agent_id, row);
+    }
+    return agents
+      .map((a) => {
+        const s = perAgent.get(a.id) ?? { calls: 0, ended: 0, toPerson: 0 };
+        const noNumber = a.status === "active" && !numbered.has(a.id) && !dialing.has(a.id);
+        return {
+          agent: a,
+          calls: s.calls,
+          aiPct: s.ended === 0 ? null : Math.round(((s.ended - s.toPerson) / s.ended) * 100),
+          status: a.status !== "active"
+            ? { label: "Paused", tone: "n" as Tone }
+            : noNumber ? { label: "No number", tone: "a" as Tone } : { label: "Live", tone: "g" as Tone },
+          noNumber,
+        };
+      })
+      .sort((a, b) => b.calls - a.calls);
+  }, [agents, numbers, campaigns, calls]);
+
+  const attention = useMemo(() => {
+    const items: { tone: Tone; text: string; action: string; href: string }[] = [];
+    if (kpi && kpi.failedTransfers > 0) {
+      items.push({
+        tone: "r",
+        text: `${fmtInt(kpi.failedTransfers)} transfer${kpi.failedTransfers === 1 ? "" : "s"} to a person failed`,
+        action: "Review",
+        href: "/calls",
+      });
+    }
+    const dropped = outcomes.rows.find((r) => r.outcome.label === "Call dropped")?.count ?? 0;
+    if (dropped > 0) {
+      items.push({ tone: "r", text: `${fmtInt(dropped)} call${dropped === 1 ? "" : "s"} dropped`, action: "Review", href: "/calls" });
+    }
+    const unnumbered = agentRows.filter((r) => r.noNumber);
+    if (unnumbered.length === 1) {
+      items.push({ tone: "a", text: `"${unnumbered[0].agent.name}" has no number`, action: "Add", href: "/telephony" });
+    } else if (unnumbered.length > 1) {
+      items.push({ tone: "a", text: `${unnumbered.length} agents have no number`, action: "Add", href: "/telephony" });
+    }
+    const paused = campaigns.filter((c) => c.status === "paused");
+    if (paused.length > 0) {
+      items.push({
+        tone: "a",
+        text: paused.length === 1 ? `"${paused[0].name}" is paused` : `${paused.length} campaigns are paused`,
+        action: "Open",
+        href: paused.length === 1 ? `/campaigns/${paused[0].id}` : "/campaigns",
+      });
+    }
+    const finished = campaigns
+      .filter((c) => c.status === "completed")
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
+    if (finished) {
+      items.push({ tone: "g", text: `"${finished.name}" finished`, action: "Results", href: `/campaigns/${finished.id}` });
+    }
+    return items;
+  }, [kpi, outcomes, agentRows, campaigns]);
+
+  const runningCampaigns = campaigns.filter((c) => progress[c.id]);
+
+  const greeting = useMemo(() => {
+    const h = new Date().getHours();
+    return h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
+  }, []);
+  const who = isAllTenants ? "" : tenant ? `, ${tenant.name}` : "";
+  const sampleNote = callsTruncated ? " · based on the most recent calls" : "";
 
   return (
-    <>
+    <div className="dash">
       {error && <div className="error-banner">{error}</div>}
 
-      <div style={{
-        display: "flex", alignItems: "flex-start", justifyContent: "space-between",
-        gap: 16, flexWrap: "wrap", marginBottom: 18,
-      }}>
+      <div className="d-head">
         <div>
-          <h1 style={{ fontSize: "1.55rem", fontWeight: 600, letterSpacing: "-.025em", margin: 0, color: "var(--text)" }}>
-            Today across {isAllTenants
-              ? `${targetTenants.length} account${targetTenants.length === 1 ? "" : "s"}`
-              : tenant?.name ?? "your accounts"}
-          </h1>
-          {/* The date is computed from the viewer's clock, which need not
-              match the prerender host's — suppressed rather than deferred to
-              an effect so the line does not pop in after paint. */}
-          <div suppressHydrationWarning style={{ fontSize: ".8rem", color: "var(--text-2)", marginTop: 4 }}>
-            {todayLabel} · last {range.label.toLowerCase()} ·{" "}
-            {statsLoading ? "…" : `${fmtInt(stats?.live_calls ?? 0)} live now`} ·{" "}
-            {fmtInt(activeAgents)} active agent{activeAgents === 1 ? "" : "s"}
-          </div>
+          <b>{greeting}{who}</b>
+          <small>
+            {loading || !stats
+              ? "Loading…"
+              : `Your agents took ${fmtInt(stats.total_calls)} call${stats.total_calls === 1 ? "" : "s"} ${range.period}`}
+            {stats && (
+              <>
+                {" · "}<span className="live-dot" />{fmtInt(stats.live_calls)} live now
+              </>
+            )}
+          </small>
         </div>
-        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap-reverse", justifyContent: "flex-end" }}>
-          <div style={{ display: "flex", gap: 8 }}>
-            <Link href="/calls" className="btn btn-ghost">
-              <Activity size={14} />Open live monitor
-            </Link>
-            <Link href="/campaigns" className="btn btn-ghost">
-              <Rocket size={14} />New campaign
-            </Link>
-          </div>
-          <div style={{ display: "flex", gap: 4, borderLeft: "1px solid var(--border)", paddingLeft: 12 }}>
+        <div className="d-head-right">
+          <LiveStatus updatedAt={updatedAt} />
+          <div className="d-seg" role="group" aria-label="Time range">
             {RANGE_OPTIONS.map((o) => (
               <button
                 key={o.label}
-                className={`btn btn-sm ${range.label === o.label ? "btn-primary" : "btn-ghost"}`}
+                type="button"
+                className={range.label === o.label ? "on" : ""}
+                aria-pressed={range.label === o.label}
                 onClick={() => setRange(o)}
               >
                 {o.label}
@@ -433,194 +432,202 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 16 }}>
-        <Kpi
-          label="Calls handled"
-          value={statsLoading || !stats ? "—" : fmtInt(stats.ended_count)}
-          fillPct={kpi?.handledPct ?? null}
-          fillColor="var(--cyan)"
-          delta={kpi?.callsDeltaPct != null ? signed(kpi.callsDeltaPct, "%") : null}
-          deltaTone={(kpi?.callsDeltaPct ?? 0) >= 0 ? "good" : "bad"}
-          footnote={stats ? `of ${fmtInt(stats.total_calls)} started` : "no calls yet"}
-          live={(stats?.live_calls ?? 0) > 0}
-        />
-        <Kpi
-          label="Containment"
-          value={kpi?.containment == null ? "—" : `${Math.round(kpi.containment)}%`}
-          fillPct={kpi?.containment ?? null}
-          fillColor="var(--green)"
-          delta={kpi?.containmentDeltaPt != null ? signed(kpi.containmentDeltaPt, "pt") : null}
-          deltaTone={(kpi?.containmentDeltaPt ?? 0) >= 0 ? "good" : "bad"}
-          footnote="resolved without a human"
-        />
-        <Kpi
-          label="Avg handle time"
-          value={fmtDuration(kpi?.aht ?? null)}
-          fillPct={kpi?.aht != null ? (kpi.aht / AHT_TARGET_MS) * 100 : null}
-          fillColor={kpi?.aht != null && kpi.aht > AHT_TARGET_MS ? "var(--red)" : "var(--amber)"}
-          // Faster is better, so a negative delta is the good one — the only
-          // tile where the sign/tone mapping inverts.
-          delta={kpi?.ahtDeltaSec != null ? signed(kpi.ahtDeltaSec, "s", 0) : null}
-          deltaTone={(kpi?.ahtDeltaSec ?? 0) <= 0 ? "good" : "bad"}
-          footnote={stats && stats.aht_sample_count < stats.ended_count
-            ? `${fmtInt(stats.aht_sample_count)} of ${fmtInt(stats.ended_count)} calls report duration`
-            : "target under 2m"}
-        />
-        <Kpi
-          label="Human handoffs"
-          value={statsLoading || !stats ? "—" : fmtInt(stats.handoff_count)}
-          fillPct={kpi?.handoffPct ?? null}
-          // Amber like TRANSFER_SUCCESS: a handoff is an escalation, not a failure.
-          fillColor="var(--amber)"
-          delta={kpi?.handoffDeltaPct != null ? signed(kpi.handoffDeltaPct, "%") : null}
-          deltaTone={(kpi?.handoffDeltaPct ?? 0) <= 0 ? "good" : "bad"}
-          footnote={stats && stats.escalated_count > stats.handoff_count
-            ? `${fmtInt(stats.escalated_count - stats.handoff_count)} transfer${stats.escalated_count - stats.handoff_count === 1 ? "" : "s"} failed`
-            : "reached a human agent"}
-        />
-      </div>
-
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div className="card-hdr">
-          <div className="card-title">Usage Trends</div>
-          <div className="card-sub">Last {range.days} days</div>
+      <div className="d-row r4">
+        <div className="d-card">
+          <div className="kpi-l">Calls</div>
+          <div className="kpi-v">{stats ? fmtInt(stats.total_calls) : "—"}</div>
+          <div className={`kpi-d ${(kpi?.callsDeltaPct ?? 0) >= 0 ? "up" : "down"}`}>
+            {kpi?.callsDeltaPct != null
+              ? `${kpi.callsDeltaPct >= 0 ? "▲" : "▼"} ${Math.abs(kpi.callsDeltaPct).toFixed(0)}% vs ${range.prev}`
+              : <span className="muted">No earlier data to compare</span>}
+          </div>
         </div>
-        <div style={{ padding: 16 }}>
-          {trendLoading ? <div className="empty-state">Loading…</div> : <LineChart series={trendSeries} xLabels={trendLabels} />}
+        <div className="d-card">
+          <div className="kpi-l">Handled by AI</div>
+          <div className="kpi-v">{kpi?.aiPct == null ? "—" : `${Math.round(kpi.aiPct)}%`}</div>
+          <div className={`kpi-d ${(kpi?.aiDeltaPt ?? 0) >= 0 ? "up" : "down"}`}>
+            {kpi?.aiDeltaPt != null
+              ? `${kpi.aiDeltaPt >= 0 ? "▲" : "▼"} ${Math.abs(kpi.aiDeltaPt).toFixed(1)} pts`
+              : <span className="muted">Calls finished without a transfer</span>}
+          </div>
+        </div>
+        <div className="d-card">
+          <div className="kpi-l">Avg call length</div>
+          <div className="kpi-v">{fmtDuration(kpi?.aht ?? null)}</div>
+          <div className={`kpi-d ${(kpi?.ahtDeltaSec ?? 0) <= 0 ? "up" : "down"}`}>
+            {kpi?.ahtDeltaSec != null && Math.round(kpi.ahtDeltaSec) !== 0
+              ? `${kpi.ahtDeltaSec < 0 ? "▼" : "▲"} ${Math.abs(Math.round(kpi.ahtDeltaSec))}s ${kpi.ahtDeltaSec < 0 ? "faster" : "slower"}`
+              : <span className="muted">No change</span>}
+          </div>
+        </div>
+        <div className="d-card">
+          <div className="kpi-l">Sent to a person</div>
+          <div className="kpi-v">{stats ? fmtInt(stats.handoff_count) : "—"}</div>
+          <div className={`kpi-d ${kpi && kpi.failedTransfers > 0 ? "down" : "muted"}`}>
+            {kpi && kpi.failedTransfers > 0
+              ? `${fmtInt(kpi.failedTransfers)} transfer${kpi.failedTransfers === 1 ? "" : "s"} failed`
+              : "Every transfer connected"}
+          </div>
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
-        <div className="card" style={{ flex: "2 1 420px" }}>
-          <div className="card-hdr">
-            <div className="card-title">Call volume by hour</div>
-            <div className="card-sub">Today</div>
-            <div style={{ marginLeft: "auto", display: "flex", gap: 14 }}>
-              {[
-                { name: "Inbound", color: "var(--text-2)" },
-                { name: "Outbound", color: "var(--amber)" },
-              ].map((s) => (
-                <span key={s.name} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: ".72rem", color: "var(--text-2)" }}>
-                  <span style={{ width: 8, height: 8, borderRadius: 2, background: s.color, display: "inline-block" }} />
-                  {s.name}
-                </span>
-              ))}
-            </div>
-          </div>
-          <div style={{ padding: 16 }}>
-            {activityLoading ? (
-              <div className="empty-state">Loading…</div>
-            ) : activity.length === 0 ? (
-              <div className="empty-state">No calls yet today.</div>
-            ) : (
-              <StackedBars points={hourly} />
-            )}
-          </div>
+      <div className="d-row r21">
+        <div className="d-card">
+          <div className="d-title">Calls over time</div>
+          {loading ? <div className="d-empty">Loading…</div> : <TrendChart points={trend} />}
+        </div>
+        <div className="d-card">
+          <div className="d-title">Needs your attention</div>
+          {attention.length === 0 ? (
+            <div className="d-empty">Nothing needs you right now.</div>
+          ) : (
+            attention.map((item) => (
+              <div className="att" key={item.text}>
+                <span className="dot" style={{ background: TONE_COLOR[item.tone] }} />
+                <span>{item.text}</span>
+                <Link href={item.href} className="act">{item.action}</Link>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      <div className="d-row r3">
+        <div className="d-card">
+          <div className="d-title">How calls ended</div>
+          {outcomes.total === 0 ? (
+            <div className="d-empty">{loading ? "Loading…" : "No calls ended in this period."}</div>
+          ) : (
+            outcomes.rows.map(({ outcome, count }) => {
+              const pct = (count / outcomes.total) * 100;
+              return (
+                <div className="bar-row" key={outcome.label}>
+                  <div className="lbl">
+                    <span>{outcome.label}</span>
+                    <b>{pct < 1 ? "<1%" : `${Math.round(pct)}%`}</b>
+                  </div>
+                  <div className="bar"><i style={{ width: `${Math.max(pct, 1)}%`, background: TONE_COLOR[outcome.tone] }} /></div>
+                </div>
+              );
+            })
+          )}
         </div>
 
-        <div className="card" style={{ flex: "1 1 300px" }}>
-          <div className="card-hdr">
-            <div className="card-title">Disposition mix</div>
-            <div className="card-sub">
-              {dispositionsLoading ? "Loading…" : `${fmtInt(dispositionTotal)} ended call${dispositionTotal === 1 ? "" : "s"}`}
-            </div>
+        <div className="d-card">
+          <div className="d-title">Caller mood</div>
+          {mood.n === 0 ? (
+            <div className="d-empty">{loading ? "Loading…" : "No scored calls in this period yet."}</div>
+          ) : (
+            <>
+              <div className="mood">
+                <i style={{ width: `${mood.happy}%`, background: "var(--green)" }} />
+                <i style={{ width: `${mood.neutral}%`, background: "var(--surf-3)" }} />
+                <i style={{ width: `${mood.unhappy}%`, background: "var(--red)" }} />
+              </div>
+              <div className="mood-keys">
+                <div><b className="up">{mood.happy}%</b><span>Happy</span></div>
+                <div><b>{mood.neutral}%</b><span>Neutral</span></div>
+                <div><b className="down">{mood.unhappy}%</b><span>Unhappy</span></div>
+              </div>
+              <div className="d-foot">From {fmtInt(mood.n)} scored call{mood.n === 1 ? "" : "s"}{sampleNote}</div>
+            </>
+          )}
+        </div>
+
+        <div className="d-card">
+          <div className="d-title">
+            Running campaigns
+            <Link href="/campaigns" className="link">View all</Link>
           </div>
-          <div style={{ padding: 16 }}>
-            {dispositionsLoading ? (
-              <div className="empty-state">Loading…</div>
-            ) : dispositions.length === 0 ? (
-              <div className="empty-state">No calls have ended in this window yet.</div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                {dispositions.map((d) => {
-                  const pct = (d.count / dispositionTotal) * 100;
-                  const tone = dispositionTone(d.close_reason);
+          {runningCampaigns.length === 0 ? (
+            <div className="d-empty">
+              No campaigns running. <Link href="/campaigns/new" className="act">Start one</Link>
+            </div>
+          ) : (
+            runningCampaigns.map((c) => {
+              const p = progress[c.id];
+              const done = p.total - p.pending - p.calling;
+              return (
+                <Link href={`/campaigns/${c.id}`} className="bar-row" key={c.id}>
+                  <div className="lbl">
+                    <span>{c.name}</span>
+                    <span className="muted">{c.status === "paused" ? "Paused" : `${fmtInt(done)} / ${fmtInt(p.total)}`}</span>
+                  </div>
+                  <div className="bar">
+                    <i style={{
+                      width: `${p.total === 0 ? 0 : (done / p.total) * 100}%`,
+                      background: c.status === "paused" ? "var(--text-3)" : "var(--cyan)",
+                    }} />
+                  </div>
+                </Link>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      <div className="d-row r11">
+        <div className="d-card">
+          <div className="d-title">
+            Your agents
+            <Link href="/agents" className="link">View all</Link>
+          </div>
+          {agentRows.length === 0 ? (
+            <div className="d-empty">No agents yet. <Link href="/agents/new" className="act">Create one</Link></div>
+          ) : (
+            <table className="d-tbl">
+              <thead>
+                <tr><th>Agent</th><th>Calls</th><th>Handled by AI</th><th>Status</th></tr>
+              </thead>
+              <tbody>
+                {agentRows.slice(0, 5).map((r) => (
+                  <tr key={r.agent.id}>
+                    <td>
+                      <Link href={`/agents/${r.agent.tenantSlug}/${r.agent.slug}`}>{r.agent.name}</Link>
+                    </td>
+                    <td>{fmtInt(r.calls)}</td>
+                    <td>{r.aiPct == null ? "—" : `${r.aiPct}%`}</td>
+                    <td><span className={`st ${r.status.tone}`}>{r.status.label}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <div className="d-card">
+          <div className="d-title">
+            Recent calls
+            <Link href="/calls" className="link">All calls</Link>
+          </div>
+          {calls.length === 0 ? (
+            <div className="d-empty">{loading ? "Loading…" : "No calls in this period yet."}</div>
+          ) : (
+            <table className="d-tbl">
+              <thead>
+                <tr><th>Caller</th><th>Agent</th><th>Length</th><th>Result</th></tr>
+              </thead>
+              <tbody>
+                {calls.slice(0, 5).map((c) => {
+                  const outcome = c.ended_at ? outcomeOf(c.close_reason) : { short: "Live", tone: "g" as Tone };
                   return (
-                    <div key={d.close_reason}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                        <span className={`badge ${tone}`}>{dispositionLabel(d.close_reason)}</span>
-                        <span style={{ fontSize: ".8rem", color: "var(--text-2)", fontVariantNumeric: "tabular-nums" }}>
-                          {/* Sub-1% slices round to "<1%" rather than "0%",
-                              which would contradict the row existing at all. */}
-                          {pct < 1 ? "<1%" : `${Math.round(pct)}%`}
-                        </span>
-                      </div>
-                      <div style={{ height: 4, borderRadius: 2, background: "var(--surf-3)" }}>
-                        <div style={{
-                          width: `${Math.max(pct, 1)}%`, height: "100%", borderRadius: 2,
-                          background: BADGE_VAR[tone],
-                        }} />
-                      </div>
-                    </div>
+                    <tr key={c.session_id}>
+                      <td>
+                        <Link href={`/calls/${c.session_id}`}>
+                          {maskNumber(c.direction === "outbound" ? c.called_number : c.caller_number)}
+                        </Link>
+                      </td>
+                      <td>{c.agent_name ?? "—"}</td>
+                      <td>{fmtDuration(c.duration_ms)}</td>
+                      <td><span className={`st ${outcome.tone}`}>{outcome.short}</span></td>
+                    </tr>
                   );
                 })}
-              </div>
-            )}
-          </div>
+              </tbody>
+            </table>
+          )}
         </div>
       </div>
-
-      <div className="card">
-        <div className="card-hdr">
-          <div className="card-title">Voice Latency</div>
-          <div className="card-sub">
-            {latencyLoading ? "Loading…" : `${latencyStats.length} agent/engine combination${latencyStats.length === 1 ? "" : "s"}`}
-          </div>
-          <select
-            className="form-select"
-            style={{ marginLeft: 12, width: 150, padding: "3px 8px", fontSize: ".72rem" }}
-            value={latencyHours}
-            onChange={(e) => setLatencyHours(Number(e.target.value))}
-          >
-            <option value={24}>Last 24 hours</option>
-            <option value={24 * 7}>Last 7 days</option>
-            <option value={24 * 30}>Last 30 days</option>
-          </select>
-        </div>
-        {latencyLoading ? (
-          <div className="empty-state">Loading…</div>
-        ) : latencyStats.length === 0 ? (
-          <div className="empty-state">No turns with recorded latency in this window yet.</div>
-        ) : (
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th>Account</th>
-                <th>Agent</th>
-                <th>LLM Engine</th>
-                <th>Turns</th>
-                <th>p50 STT</th>
-                <th>p50 LLM</th>
-                <th>p50 TTS</th>
-                <th>p50 Voice-to-Voice</th>
-                <th>p95 Voice-to-Voice</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {latencyStats.map((s, i) => {
-                const band = latencyBand(s.p50_voice_to_voice_ms);
-                return (
-                  <tr key={`${s.agent_id}-${s.llm_engine}-${i}`}>
-                    <td>{s.tenantName}</td>
-                    <td>{s.agent_name || "—"}</td>
-                    <td className="mono">{s.llm_engine || "—"}</td>
-                    <td>{s.sample_count}</td>
-                    <td className="mono">{formatMs(s.p50_stt_ms)}</td>
-                    <td className="mono">{formatMs(s.p50_llm_ms)}</td>
-                    <td className="mono">{formatMs(s.p50_tts_ms)}</td>
-                    <td className="mono" style={{ fontWeight: 600 }}>{formatMs(s.p50_voice_to_voice_ms)}</td>
-                    <td className="mono">{formatMs(s.p95_voice_to_voice_ms)}</td>
-                    <td>
-                      <span className={`badge ${band.badge}`}>{band.label}</span>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </>
+    </div>
   );
 }

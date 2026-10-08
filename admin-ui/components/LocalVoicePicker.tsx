@@ -6,8 +6,8 @@ import { ApiError, ProviderConfig, createProvider } from "@/lib/api";
 import { VOICES_BY_ENGINE, VoiceGender } from "@/lib/engineCatalog";
 
 const ENGINE_LABELS: Record<string, string> = {
-  macos: "macOS say",
-  kokoro: "Kokoro",
+  macos: "Basic voice",
+  kokoro: "Built-in voice",
 };
 
 const GENDER_BADGE: Record<VoiceGender, React.ReactNode> = {

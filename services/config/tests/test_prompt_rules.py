@@ -69,7 +69,7 @@ def provider(monkeypatch):
 @pytest.fixture
 def vendor(monkeypatch):
     """Route every outbound httpx call to a mock transport; records requests."""
-    box = type("Box", (), {"requests": [], "status": 200, "body": None, "engine": "openai"})()
+    box = type("Box", (), {"requests": [], "status": 200, "body": None, "engine": "openai", "truncated": False})()
 
     def handler(request: httpx.Request) -> httpx.Response:
         import json
@@ -77,8 +77,10 @@ def vendor(monkeypatch):
         if box.status != 200:
             return httpx.Response(box.status, text=box.body)
         if "anthropic" in request.url.host:
-            return httpx.Response(200, json={"content": [{"text": box.body}]})
-        return httpx.Response(200, json={"choices": [{"message": {"content": box.body}}]})
+            stop = "max_tokens" if box.truncated else "end_turn"
+            return httpx.Response(200, json={"content": [{"text": box.body}], "stop_reason": stop})
+        finish = "length" if box.truncated else "stop"
+        return httpx.Response(200, json={"choices": [{"message": {"content": box.body}, "finish_reason": finish}]})
 
     monkeypatch.setattr(
         sp.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=httpx.MockTransport(handler), **kw)
@@ -308,6 +310,53 @@ async def test_max_tokens_per_call(provider, vendor, engine):
         secret_resolver=_Resolver(),
     )
     assert [r["max_tokens"] for r in vendor.requests] == [3000, 3000, 300]
+
+
+@pytest.mark.parametrize("engine", ["openai", "anthropic"])
+async def test_truncated_rewrite_is_rejected_not_returned(provider, vendor, engine):
+    provider.cfg = _cfg(engine=engine)
+    vendor.body = "Your name is Sam. Never"
+    vendor.truncated = True
+    with pytest.raises(sp.TruncatedOutputError):
+        await sp.rewrite_system_prompt(
+            TENANT, CONFIG_ID, base_prompt="Your name is Sam. Never share prices.",
+            instruction="also speak Hindi", secret_resolver=_Resolver(),
+        )
+
+
+@pytest.mark.parametrize("engine", ["openai", "anthropic"])
+async def test_truncated_generate_and_revise_are_rejected(provider, vendor, engine):
+    provider.cfg = _cfg(engine=engine)
+    vendor.body = _prompt()
+    vendor.truncated = True
+    with pytest.raises(PromptStructureError):
+        await sp.generate_system_prompt(TENANT, CONFIG_ID, _inputs(), secret_resolver=_Resolver())
+    with pytest.raises(PromptStructureError):
+        await sp.revise_system_prompt(
+            TENANT, CONFIG_ID, base_prompt=_prompt(), problem="x", transcript=[],
+            channel="voice", secret_resolver=_Resolver(),
+        )
+
+
+async def test_truncated_chat_reply_still_returns_the_partial_text(provider, vendor):
+    vendor.body = "Sure, our hours are"
+    vendor.truncated = True
+    reply = await sp.chat_test_reply(
+        TENANT, CONFIG_ID, system_prompt=_prompt(), history=[], message="hours?",
+        secret_resolver=_Resolver(),
+    )
+    assert reply == "Sure, our hours are"
+
+
+async def test_rewrite_output_budget_fits_the_longest_allowed_prompt(provider, vendor):
+    vendor.body = "ok"
+    for size in (100, 20_000):
+        await sp.rewrite_system_prompt(
+            TENANT, CONFIG_ID, base_prompt="x" * size, instruction="tweak", secret_resolver=_Resolver(),
+        )
+    short, long = (r["max_tokens"] for r in vendor.requests)
+    assert short == sp._PROMPT_MAX_TOKENS
+    assert long * 3 >= 20_000 and long <= sp._REWRITE_MAX_TOKENS
 
 
 async def test_chat_greeting_goes_to_system_text_and_first_message_is_user(provider, vendor):

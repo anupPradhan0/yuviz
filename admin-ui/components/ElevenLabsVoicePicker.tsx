@@ -4,8 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, Circle } from "lucide-react";
 import { ApiError, ElevenLabsVoice, ProviderConfig, createProvider, listElevenLabsVoices, updateProvider } from "@/lib/api";
 import { ELEVENLABS_LANGUAGES } from "@/lib/engineCatalog";
-import { SecretRefInput } from "./SecretRefInput";
-
 // Module-level so it survives unmounts; cleared on reload or Refresh.
 const voicesCache = new Map<string, ElevenLabsVoice[]>();
 
@@ -37,7 +35,7 @@ export function ElevenLabsVoicePicker({
   // isn't this agent's voice and must not be shown as selected. Defaults to true.
   isCurrentAssignment?: boolean;
 }) {
-  const [apiKeyRef, setApiKeyRef] = useState("");
+  const [apiKey, setApiKey] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
 
@@ -112,7 +110,7 @@ export function ElevenLabsVoicePicker({
     setConnectError(null);
     try {
       const created = await createProvider(tenantId, {
-        name: "ElevenLabs", role: "tts", engine: "elevenlabs", api_key_ref: apiKeyRef,
+        name: "ElevenLabs", role: "tts", engine: "elevenlabs", api_key: apiKey.trim(),
       });
       onProviderCreated(created);
     } catch (e) {
@@ -127,23 +125,23 @@ export function ElevenLabsVoicePicker({
       <div>
         {connectError && <div className="error-banner">{connectError}</div>}
         <div className="form-group" style={{ marginBottom: 0 }}>
-          <label className="form-label">
-            ElevenLabs API Key Reference <span className="hint">e.g. env:ELEVENLABS_API_KEY — never a raw key, see Secret Manager</span>
-          </label>
+          <label className="form-label">Your ElevenLabs API key</label>
           <div style={{ display: "flex", gap: 8 }}>
-            <div style={{ flex: 1 }}>
-              <SecretRefInput
-                value={apiKeyRef}
-                onChange={setApiKeyRef}
-                placeholder="env:ELEVENLABS_API_KEY"
-                disabled={disabled}
-              />
-            </div>
+            <input
+              className="form-input"
+              style={{ flex: 1 }}
+              type="password"
+              autoComplete="off"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="Paste your API key"
+              disabled={disabled}
+            />
             <button
               type="button"
               className="btn btn-primary btn-sm"
               onClick={handleConnect}
-              disabled={connecting || !apiKeyRef.trim() || disabled}
+              disabled={connecting || !apiKey.trim() || disabled}
             >
               {connecting ? "Connecting…" : "Connect"}
             </button>
@@ -245,7 +243,7 @@ export function ElevenLabsVoicePicker({
       {languageError && <div className="error-banner">{languageError}</div>}
       <div className="form-group" style={{ marginBottom: 12 }}>
         <label className="form-label">
-          Synthesis Language <span className="hint">what language the voice actually speaks on calls — not just which voices are shown below</span>
+          Language the voice speaks <span className="hint">on calls, not just which voices are listed below</span>
         </label>
         <select
           className="form-select"
@@ -253,7 +251,7 @@ export function ElevenLabsVoicePicker({
           disabled={savingLanguage || disabled}
           onChange={(e) => handleSynthesisLanguageChange(e.target.value)}
         >
-          <option value="">Auto-detect from text (default)</option>
+              <option value="">Automatic (default)</option>
           {ELEVENLABS_LANGUAGES.map((l) => (
             <option key={l.value} value={l.value}>
               {l.label}
@@ -264,7 +262,7 @@ export function ElevenLabsVoicePicker({
       {languages.length > 1 && (
         <div style={{ marginBottom: 12 }}>
           <div className="form-label" style={{ marginBottom: 6 }}>
-            Filter voices below by native language/accent
+            Show voices by accent
           </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           <button
@@ -317,7 +315,7 @@ export function ElevenLabsVoicePicker({
         })}
       </div>
       <div style={{ fontSize: ".7rem", color: "var(--text-3)", marginTop: 10 }}>
-        Voices come from this ElevenLabs account directly, and are cached after the first load — add or remove voices at elevenlabs.io, then click Refresh above to see the change here.
+        These are the voices in your ElevenLabs account. Added a new one there? Click Refresh.
       </div>
     </div>
   );
