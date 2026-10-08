@@ -100,7 +100,6 @@ _CARTESIA_MULTILINGUAL = frozenset({"en", "hi", "es", "fr", "de", "pt", "it", "j
 _ELEVENLABS_MULTILINGUAL = frozenset({"en", "hi", "es", "fr", "de", "pt", "it", "ja", "zh"})
 # ElevenLabs models that speak English only.
 _ELEVENLABS_ENGLISH_ONLY_MODELS = ("eleven_monolingual_v1", "eleven_turbo_v2", "eleven_flash_v2")
-_KOKORO_LANGUAGES = frozenset(code for code, l in LANGUAGES.items() if l.kokoro_code)
 # The voice a Kokoro row without one speaks with (the provider factory uses this too), so the
 # capability check and the runtime agree about a voiceless row.
 KOKORO_DEFAULT_VOICE = "af_sarah"
