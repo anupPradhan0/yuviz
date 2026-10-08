@@ -154,9 +154,14 @@ keep working unchanged.
 
 - **LLM instruction, per turn:** `_refresh_node_prompt(history, session_id)` appends this line when the
   agent is multilingual:
-  > Reply in Hindi (हिन्दी). If the caller mixes languages, mirror their mix naturally. Write Hindi
-  > words in Devanagari and English words in Latin script. Keep the [[…]] tokens, numbers and tool
-  > arguments exactly as specified.
+  > The caller is speaking Hindi now. Reply only in Hindi (हिन्दी), even if earlier turns of the
+  > call were in another language; if the caller mixes Hindi and English in their sentences, you
+  > may mix the same way. Always write Hindi words in Devanagari script … Keep any [[…]] tokens,
+  > numbers and tool arguments exactly as specified.
+
+  It is anchored to the caller's *latest* language. An earlier "mirror the caller's mix" wording
+  let llama3.2 keep answering in Hindi after the caller switched back to English (1/6 correct;
+  6/6 with this wording, measured against the real agent prompt).
 
   It isn't baked into `base_suffix`, so it changes when the session language does.
 - **Sentence splitter:** add the alternative `(?<=[।॥。！？])\s*`. No whitespace is needed after it,

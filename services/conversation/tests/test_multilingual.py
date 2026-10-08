@@ -121,8 +121,13 @@ def test_hinglish_rule_only_when_hindi_supported():
 
 def test_reply_instruction_names_language_and_script():
     line = reply_language_instruction("hi")
-    assert "Reply in Hindi (हिन्दी)" in line and "Devanagari" in line and "mirror" in line
-    assert "Reply in English." in reply_language_instruction("en")
+    assert "Reply only in Hindi (हिन्दी)" in line and "Devanagari" in line
+    assert "mix the same way" in line
+    en = reply_language_instruction("en")
+    assert "The caller is speaking English now. Reply only in English" in en
+    # Anchored to the latest turn, so a mixed call can't pull the reply back to Hindi.
+    assert "even if earlier turns of the call were in another language" in en
+    assert "mix" not in en
 
 
 # ── Sentence splitter ────────────────────────────────────────────────────────
@@ -247,7 +252,7 @@ async def test_single_language_agent_without_language_calls_providers_as_before(
 
     assert set(stt.languages) == {INSTANCE_LANGUAGE}
     assert all(lang is INSTANCE_LANGUAGE for _, lang in tts.calls)
-    assert "Reply in" not in llm.system_prompts[0]
+    assert "The caller is speaking" not in llm.system_prompts[0]
 
 
 async def test_single_language_non_english_agent_gets_no_prompt_injection():
@@ -255,7 +260,7 @@ async def test_single_language_non_english_agent_gets_no_prompt_injection():
     llm = _LLM()
     h = _handler(rc, _RecordingSTT([SttResult(text="नमस्ते")]), llm, _RecordingTTS())
     await _turn(h, "s1")
-    assert "Reply in" not in llm.system_prompts[0]
+    assert "The caller is speaking" not in llm.system_prompts[0]
 
 
 async def test_multilingual_switches_voice_prompt_and_stt_mode():
@@ -272,14 +277,14 @@ async def test_multilingual_switches_voice_prompt_and_stt_mode():
     h = _handler(rc, stt, llm, base, {"hi": hindi})
 
     await _turn(h, "s1")
-    assert "Reply in English." in llm.system_prompts[-1]
+    assert "Reply only in English" in llm.system_prompts[-1]
     assert base.calls and not hindi.calls
 
     await _turn(h, "s1")  # one Hindi utterance after English was established: no switch yet
-    assert "Reply in English." in llm.system_prompts[-1]
+    assert "Reply only in English" in llm.system_prompts[-1]
 
     await _turn(h, "s1")  # sustained: switch
-    assert "Reply in Hindi" in llm.system_prompts[-1]
+    assert "Reply only in Hindi" in llm.system_prompts[-1]
     assert hindi.calls and all(lang == "hi" for _, lang in hindi.calls)
     assert set(stt.languages) == {"multi"}
 

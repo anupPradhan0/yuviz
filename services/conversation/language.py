@@ -145,11 +145,21 @@ def script_language(text: str, supported: tuple[str, ...]) -> str | None:
 
 
 def reply_language_instruction(language: str) -> str:
-    """Per-turn system-prompt line for multilingual agents (never single-language ones)."""
+    """Per-turn system-prompt line for multilingual agents (never single-language ones).
+
+    Anchored to the caller's latest language: a generic "mirror the caller's mix" let small
+    models (llama3.2) keep answering in Hindi after the caller switched back to English,
+    because the call as a whole was mixed."""
     lang = LANGUAGES.get(language)
     name = f"{lang.name} ({lang.native_name})" if lang and lang.native_name != lang.name else language_name(language)
+    plain = lang.name if lang else language
+    mix = (
+        f"; if the caller mixes {plain} and English in their sentences, you may mix the same way"
+        if language != "en" else ""
+    )
     hint = f" {lang.script_hint}" if lang and lang.script_hint else ""
     return (
-        f"\n\nReply in {name}. If the caller mixes languages, mirror their mix naturally.{hint} "
+        f"\n\nThe caller is speaking {plain} now. Reply only in {name}, even if earlier turns "
+        f"of the call were in another language{mix}.{hint} "
         "Keep any [[...]] tokens, numbers and tool arguments exactly as specified."
     )

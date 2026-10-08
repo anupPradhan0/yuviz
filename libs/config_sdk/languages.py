@@ -33,7 +33,8 @@ class Language:
 LANGUAGES: dict[str, Language] = {l.code: l for l in (
     Language("en", "English",    "English",   "a", True),
     Language("hi", "Hindi",      "हिन्दी",     "h", True,
-             "Write Hindi words in Devanagari script and English words in Latin script.",
+             "Always write Hindi words in Devanagari script (देवनागरी), even when the caller's "
+             "words reach you in Latin letters; write English words in Latin script.",
              aliases=("ur",)),
     Language("es", "Spanish",    "Español",   "e", True),
     Language("fr", "French",     "Français",  "f", True),
