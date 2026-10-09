@@ -177,7 +177,7 @@ const PAGE_CTA: Record<string, { label: string; href: string }> = {
   "/phone-menus": { label: "+ New menu", href: "/phone-menus/new" },
   "/knowledge-bases": { label: "+ Add Document", href: "/knowledge-bases?add=1" },
   "/telephony": { label: "+ Add Number", href: "/telephony?add=1" },
-  "/integrations": { label: "+ Connect App", href: "/integrations#connect" },
+  "/integrations": { label: "+ Connect App", href: "/integrations?add=1" },
   "/campaigns": { label: "+ New Campaign", href: "/campaigns/new" },
 };
 
