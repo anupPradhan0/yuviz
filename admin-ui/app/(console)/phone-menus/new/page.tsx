@@ -111,7 +111,7 @@ export default function NewCallFlowPage() {
           ? { clone_from_id: cloneFromId }
           : { graph: scaffoldGraph(picks, direction) }),
       });
-      router.push(`/workflows/flows/${flow.id}`);
+      router.push(`/phone-menus/${flow.id}`);
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : String(e));
       setCreating(false);
@@ -121,7 +121,7 @@ export default function NewCallFlowPage() {
   return (
     <>
       <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
-        <button className="btn btn-ghost btn-sm" onClick={() => router.push("/workflows")}>
+        <button className="btn btn-ghost btn-sm" onClick={() => router.push("/phone-menus")}>
           <ArrowLeft size={13} /> Cancel
         </button>
       </div>

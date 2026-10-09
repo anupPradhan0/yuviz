@@ -63,7 +63,7 @@ export default function CallFlowsPage() {
     return [...matched].sort((a, b) => a.name.localeCompare(b.name));
   }, [flows, search]);
 
-  const open = (f: FlowRow) => router.push(`/workflows/flows/${f.id}`);
+  const open = (f: FlowRow) => router.push(`/phone-menus/${f.id}`);
 
   const remove = async (f: FlowRow) => {
     const msg =

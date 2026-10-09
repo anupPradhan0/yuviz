@@ -1,6 +1,6 @@
 "use client";
 
-// Agent Studio. Opening an agent goes to its config tabs; the call-flow canvas lives under /workflows.
+// Agent Studio. Opening an agent goes to its config tabs; its conversation-steps canvas lives under /workflows.
 // Cards show only stored values — no invented metrics like containment rate.
 
 import { useEffect, useMemo, useState } from "react";

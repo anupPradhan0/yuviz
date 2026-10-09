@@ -133,7 +133,7 @@ const OVERVIEW_ITEMS: NavItem[] = [{ href: "/dashboard", label: "Dashboard", ico
 const BUILD_ITEMS: NavItem[] = [
   { href: "/tenants", label: "Accounts", icon: "accounts" },
   { href: "/agents", label: "Agents", icon: "agents" },
-  { href: "/workflows", label: "Phone menus", icon: "workflows" },
+  { href: "/phone-menus", label: "Phone menus", icon: "workflows" },
   { href: "/knowledge-bases", label: "Knowledge", icon: "knowledge-bases" },
   { href: "/ai-voice", label: "AI & Voice", icon: "ai-voice" },
   { href: "/telephony", label: "Phone Numbers", icon: "telephony" },
@@ -162,7 +162,7 @@ const ALL_ITEMS = [...OVERVIEW_ITEMS, ...BUILD_ITEMS, USERS_ITEM, ...CALLING_ITE
 const PAGE_SUBTITLE: Record<string, string> = {
   "/dashboard": "Overview of your calls and agents",
   "/agents": "The AI that answers and makes your calls",
-  "/workflows": "Menus and routing before an agent picks up",
+  "/phone-menus": "Menus and routing before an agent picks up",
   "/knowledge-bases": "Documents your agents can answer from",
   "/telephony": "Numbers and carriers your calls come through",
   "/integrations": "Calendars, CRMs and helpdesks",
@@ -174,7 +174,7 @@ const PAGE_SUBTITLE: Record<string, string> = {
 // Shown only on the list page itself, and never to viewers (read-only).
 const PAGE_CTA: Record<string, { label: string; href: string }> = {
   "/agents": { label: "+ Create Agent", href: "/agents/new" },
-  "/workflows": { label: "+ New menu", href: "/workflows/new" },
+  "/phone-menus": { label: "+ New menu", href: "/phone-menus/new" },
   "/knowledge-bases": { label: "+ Add Document", href: "/knowledge-bases?add=1" },
   "/telephony": { label: "+ Add Number", href: "/telephony?add=1" },
   "/integrations": { label: "+ Connect App", href: "/integrations#connect" },
@@ -332,11 +332,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const noResults = [visibleOverview, visibleBuild, visibleCalling, visiblePinned].every((g) => g.length === 0);
 
   // Longest-prefix match, not first-match: /agents/acme/bot resolves to Agents.
+  // An agent's conversation steps live at /workflows/{tenant}/{agent}, so they belong to Agents too.
+  const navPath = pathname.startsWith("/workflows/") ? "/agents" : pathname;
   const activeItem = [...ALL_ITEMS]
     .sort((a, b) => b.href.length - a.href.length)
-    .find((item) => pathname.startsWith(item.href));
+    .find((item) => navPath.startsWith(item.href));
 
-  const inAgentConfig = /^\/agents\/[^/]+\/[^/]+/.test(pathname);
+  const inAgentConfig = /^\/(agents|workflows)\/[^/]+\/[^/]+/.test(pathname);
   const pageTitle = activeItem?.label ?? "Yuviz";
   const pageSubtitle = inAgentConfig ? "Configuration" : PAGE_SUBTITLE[pathname];
   const cta = user?.role !== "viewer" ? PAGE_CTA[pathname] : undefined;
