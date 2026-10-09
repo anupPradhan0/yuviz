@@ -227,6 +227,13 @@ _CRM_SCOPES = {
     "zoho": frozenset({"ZohoCRM.modules.contacts.READ"}),
 }
 
+# Scopes the account-level Connect (no preset) asks for on top of the identity
+# scopes. HubSpot has no identity scope and refuses an install URL that omits a
+# scope the app requires, so a bare Connect asks for the CRM lookup's scopes.
+CONNECT_SCOPES: dict[str, frozenset[str]] = {
+    "hubspot": _CRM_SCOPES["hubspot"],
+}
+
 
 def _crm_lookup_step(
     provider: str, *, method: str, endpoint_url: str, params: tuple[PresetParam, ...],

@@ -229,11 +229,12 @@ async def start_authorization(*, tenant_id: str, user_id: str, provider: str, pr
     if provider not in configured_providers() or PROVIDERS[provider].auth_kind != "oauth2":
         raise ValueError("oauth_provider_unavailable")
     spec = PROVIDERS[provider]
-    preset_scopes = frozenset()
-    if preset_key is not None:
-        from . import presets  # function-local: presets imports this module
+    from . import presets  # function-local: presets imports this module
 
-        # Scopes come only from the preset definitions, never from tenant input.
+    # Scopes come only from the preset definitions, never from tenant input.
+    if preset_key is None:
+        preset_scopes = presets.CONNECT_SCOPES.get(provider, frozenset())
+    else:
         preset = presets.PRESETS.get(preset_key)
         if preset is None or preset.provider != provider:
             raise ValueError("unknown_preset")

@@ -28,7 +28,7 @@ from starlette.background import BackgroundTasks
 from libs.config_sdk.secrets import SecretTenantMismatch, decrypt_tenant_secret, encrypt_tenant_secret
 from libs.tenancy import set_target_tenant
 from services.toolexec.__main__ import configure_logging
-from services.toolexec import auth_schemes, custom_apis, oauth
+from services.toolexec import auth_schemes, custom_apis, oauth, presets
 
 REDIRECT = "https://console.test/integrations/callback"
 
@@ -483,6 +483,7 @@ async def test_a_hubspot_flow_has_no_pkce_and_completes_without_a_verifier(pool,
     url = await oauth.start_authorization(tenant_id=made["a"], user_id=users["a"], provider="hubspot", preset_key=None)
     query = parse_qs(urlsplit(url).query)
     assert "code_challenge" not in query and "code_challenge_method" not in query
+    assert query["scope"] == ["crm.objects.contacts.read oauth"]  # never empty: HubSpot rejects the install
 
     row = await pool.fetchrow("SELECT code_verifier_ref FROM oauth_authorization_states WHERE tenant_id = $1", uuid.UUID(made["a"]))
     assert row["code_verifier_ref"].startswith("enc:t1.")  # a sealed filler, the column stays NOT NULL
@@ -494,6 +495,15 @@ async def test_a_hubspot_flow_has_no_pkce_and_completes_without_a_verifier(pool,
     assert connection["provider"] == "hubspot"
     assert "code_verifier" not in fake.form(fake.requests[0])
     assert await _api_base(pool, made["a"], "hubspot") is None
+
+
+def test_every_oauth_provider_asks_for_a_scope_without_a_preset():
+    # The account-level Connect sends preset_key=None; an empty scope fails the consent.
+    empty = [
+        k for k, p in oauth.PROVIDERS.items()
+        if p.auth_kind == "oauth2" and not (p.identity_scopes | presets.CONNECT_SCOPES.get(k, frozenset()))
+    ]
+    assert empty == []
 
 
 async def _hubspot_state(tenants, *, tenant_key="a", user_key="a") -> str:
