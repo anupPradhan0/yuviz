@@ -308,7 +308,7 @@ function Canvas({ flow, tenantSlug }: { flow: CallFlow; tenantSlug: string }) {
     setDeleting(true);
     try {
       await deleteCallFlow(flow.id);
-      router.push("/workflows");
+      router.push("/phone-menus");
     } catch (e) {
       setBanner(e instanceof ApiError ? e.detail : String(e));
       setDeleting(false);
@@ -354,7 +354,7 @@ function Canvas({ flow, tenantSlug }: { flow: CallFlow; tenantSlug: string }) {
   return (
     <div className="wf-root">
       <div className="cf-header">
-        <button className="btn btn-ghost btn-sm" onClick={() => router.push("/workflows")}>
+        <button className="btn btn-ghost btn-sm" onClick={() => router.push("/phone-menus")}>
           <ArrowLeft size={13} /> Phone menus
         </button>
         <div className="cf-header-title">
