@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import logging
 
-from services.conversation.__main__ import _await_stopped, _log_task_failure
+from services.conversation.__main__ import _await_stopped, _log_task_failure, _spawn, serve
 from services.conversation.pipeline_config import SttConfig
 
 
@@ -59,3 +61,23 @@ async def test_shutdown_join_survives_a_failed_load():
     cancelled = asyncio.create_task(asyncio.sleep(60))
     cancelled.cancel()
     await _await_stopped(cancelled)
+
+
+async def test_spawn_logs_a_failing_task_by_name(caplog):
+    async def load():
+        raise RuntimeError("model not cached")
+
+    task = _spawn(load(), "startup load")
+    await asyncio.wait({task})
+    await asyncio.sleep(0)
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1 and "startup load" in errors[0].getMessage()
+
+
+def test_serve_starts_its_background_tasks_only_through_spawn():
+    calls = [n for n in ast.walk(ast.parse(inspect.getsource(serve).lstrip()))
+             if isinstance(n, ast.Call) and isinstance(n.func, (ast.Name, ast.Attribute))]
+    bare = [n.lineno for n in calls if getattr(n.func, "attr", None) == "create_task"]
+    assert bare == [], f"serve() calls create_task directly (line offsets {bare}); use _spawn"
+    spawned = [n.args[1].value for n in calls if getattr(n.func, "id", None) == "_spawn"]
+    assert sorted(spawned) == ["heartbeat", "startup load"]

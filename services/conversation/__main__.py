@@ -15,7 +15,9 @@ import logging
 import signal
 import socket
 import sys
+from collections.abc import Coroutine
 from datetime import datetime, timezone
+from typing import Any
 
 import grpc.aio
 import redis.asyncio as aioredis
@@ -186,6 +188,13 @@ def _log_task_failure(task: asyncio.Task) -> None:
     """Done-callback for background tasks: a failed startup load or heartbeat is never silent."""
     if not task.cancelled() and task.exception() is not None:
         logging.getLogger(__name__).error("Background task %r failed", task.get_name(), exc_info=task.exception())
+
+
+def _spawn(coro: Coroutine[Any, Any, None], name: str) -> asyncio.Task:
+    """create_task for serve()'s background work, with failures logged."""
+    task = asyncio.create_task(coro, name=name)
+    task.add_done_callback(_log_task_failure)
+    return task
 
 
 async def _await_stopped(task: asyncio.Task) -> None:
@@ -451,8 +460,7 @@ async def serve(port: int, args: argparse.Namespace) -> None:
         health_servicer.set(SERVICE_NAME, health_pb2.HealthCheckResponse.SERVING)
         log.info("ConversationService SERVING")
 
-    load_task = asyncio.create_task(_load_and_promote(), name="startup load")
-    load_task.add_done_callback(_log_task_failure)
+    load_task = _spawn(_load_and_promote(), "startup load")
 
     # Node is considered dead after 3 missed heartbeats (45s).
     HEARTBEAT_INTERVAL_S = 15
@@ -466,8 +474,7 @@ async def serve(port: int, args: argparse.Namespace) -> None:
             await transcripts.reconcile_inactive_calls(inactive_after_seconds=INACTIVE_CALL_TIMEOUT_S)
             await asyncio.sleep(HEARTBEAT_INTERVAL_S)
 
-    heartbeat_task = asyncio.create_task(_heartbeat_loop(), name="heartbeat")
-    heartbeat_task.add_done_callback(_log_task_failure)
+    heartbeat_task = _spawn(_heartbeat_loop(), "heartbeat")
 
     loop = asyncio.get_running_loop()
     stop = loop.create_future()
