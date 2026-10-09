@@ -34,7 +34,8 @@ interface KbRow extends KnowledgeBase {
 interface SourceRow extends KbDocument {
   kbName: string;
   tenantName: string;
-  agents: KbAgent[];
+  // null when the agent lookup failed: unknown, not "unused".
+  agents: KbAgent[] | null;
 }
 
 type Tab = "sources" | "apis";
@@ -132,7 +133,7 @@ export default function KnowledgeBasesPage() {
         const kb = nextKbs[i];
         const agents = agentResults[i].status === "fulfilled"
           ? (agentResults[i] as PromiseFulfilledResult<KbAgent[]>).value
-          : [];
+          : null;
         nextSources.push(
           ...result.value.map((d) => ({ ...d, kbName: kb.name, tenantName: kb.tenantName, agents })),
         );
@@ -377,7 +378,9 @@ export default function KnowledgeBasesPage() {
                       {s.status === "ready" ? `${(s.chunk_count ?? 0).toLocaleString()} chunks` : "—"}
                     </td>
                     <td>
-                      {s.agents.length === 0
+                      {s.agents === null
+                        ? <span className="kb-source-sub">Couldn&apos;t check</span>
+                        : s.agents.length === 0
                         ? <span className="kb-source-sub">Not used yet</span>
                         : s.agents.length === 1
                           ? s.agents[0].agent_name
@@ -479,7 +482,12 @@ export default function KnowledgeBasesPage() {
       >
         {deleteTarget && (
           <div style={{ fontSize: ".82rem", color: "var(--text-2)", lineHeight: 1.6 }}>
-            {deleteTarget.agents.length === 0 ? (
+            {deleteTarget.agents === null ? (
+              <p style={{ margin: 0 }}>
+                Couldn&apos;t check which agents use this document. Any agent using it will lose
+                it permanently.
+              </p>
+            ) : deleteTarget.agents.length === 0 ? (
               <p style={{ margin: 0 }}>
                 This document is not currently used by any agents. Deleting it will remove it
                 from the knowledge base permanently.
