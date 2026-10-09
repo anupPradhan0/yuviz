@@ -493,8 +493,43 @@ async def test_a_hubspot_flow_has_no_pkce_and_completes_without_a_verifier(pool,
         tenant_id=made["a"], user_id=users["a"], user_email=None, state=_state_of(url), code="c", accounts_server=None,
     )
     assert connection["provider"] == "hubspot"
+    assert str(fake.requests[0].url) == "https://api.hubspot.com/oauth/v3/token"  # v1 is deprecated
     assert "code_verifier" not in fake.form(fake.requests[0])
     assert await _api_base(pool, made["a"], "hubspot") is None
+
+
+@pytest.mark.asyncio
+async def test_the_app_required_scopes_from_env_join_every_hubspot_install_url(pool, tenants, fake, crm_env, monkeypatch):
+    # HubSpot errors on its consent page when a scope the app requires is missing.
+    monkeypatch.setenv("TOOLEXEC_OAUTH_HUBSPOT_REQUIRED_SCOPES", "crm.objects.companies.read  crm.objects.contacts.write")
+    made, users = tenants
+    set_target_tenant(made["a"])
+    url = await oauth.start_authorization(tenant_id=made["a"], user_id=users["a"], provider="hubspot", preset_key=None)
+    assert parse_qs(urlsplit(url).query)["scope"] == [
+        "crm.objects.companies.read crm.objects.contacts.read crm.objects.contacts.write oauth"
+    ]
+    # Not stored: an operator who later drops a scope is not pinned to it by the tenant's row.
+    stored = await pool.fetchval("SELECT scopes FROM oauth_authorization_states WHERE tenant_id = $1", uuid.UUID(made["a"]))
+    assert sorted(stored) == ["crm.objects.contacts.read", "oauth"]
+
+    monkeypatch.setenv("TOOLEXEC_OAUTH_HUBSPOT_REQUIRED_SCOPES", "")
+    url = await oauth.start_authorization(tenant_id=made["a"], user_id=users["a"], provider="hubspot", preset_key=None)
+    assert parse_qs(urlsplit(url).query)["scope"] == ["crm.objects.contacts.read oauth"]
+
+
+@pytest.mark.asyncio
+async def test_a_dead_hubspot_refresh_token_flips_the_status_and_requires_reconnect(pool, tenants, fake, crm_env):
+    # HubSpot answers invalid_request + BAD_REFRESH_TOKEN, not RFC 6749's invalid_grant.
+    made, users = tenants
+    connection = await _connect_crm(made["a"], users["a"], fake, "hubspot")
+    await _expire_access_token(pool, connection["id"])
+    fake.token = lambda request: httpx.Response(400, json={"status": "BAD_REFRESH_TOKEN", "error": "invalid_request"})
+
+    with pytest.raises(auth_schemes.ReconnectRequired):
+        await oauth.access_token_for(made["a"], str(connection["id"]))
+    assert str(fake.requests[-1].url) == "https://api.hubspot.com/oauth/v3/token"
+    row = await pool.fetchrow("SELECT status, refresh_token_ref FROM oauth_connections WHERE id = $1", connection["id"])
+    assert row["status"] == "reconnect_needed" and row["refresh_token_ref"] is None
 
 
 def test_every_oauth_provider_asks_for_a_scope_without_a_preset():

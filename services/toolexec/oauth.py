@@ -141,7 +141,7 @@ PROVIDERS: dict[str, OAuthProvider] = {
         key="hubspot",
         label="HubSpot",
         authorize_url="https://app.hubspot.com/oauth/authorize",
-        token_url="https://api.hubapi.com/oauth/v1/token",
+        token_url="https://api.hubspot.com/oauth/v3/token",  # v1 is deprecated; same form-body params
         revoke_url="https://api.hubapi.com/oauth/v1/refresh-tokens/{token}",
         identity_scopes=frozenset(),
         api_hosts=frozenset({"api.hubapi.com"}),
@@ -156,6 +156,14 @@ def _client_id(provider: OAuthProvider) -> str | None:
 
 def _client_secret_ref(provider: OAuthProvider) -> str | None:
     return os.environ.get(f"TOOLEXEC_OAUTH_{provider.key.upper()}_CLIENT_SECRET_REF")
+
+
+def _app_required_scopes(provider: OAuthProvider) -> frozenset[str]:
+    """Scopes the operator ticked as required on the provider's app console.
+    HubSpot refuses an install URL that omits any of them, and only the
+    operator knows that list, so it is deployment config (space-separated),
+    never tenant input."""
+    return frozenset(os.environ.get(f"TOOLEXEC_OAUTH_{provider.key.upper()}_REQUIRED_SCOPES", "").split())
 
 
 def _api_key_enabled(provider: OAuthProvider) -> bool:
@@ -252,6 +260,8 @@ async def start_authorization(*, tenant_id: str, user_id: str, provider: str, pr
             "SELECT scopes FROM oauth_connections WHERE tenant_id = $1 AND provider = $2 AND deleted_at IS NULL",
             tenant_id, provider,
         )
+        # The app's required scopes are not stored: they stay env-owned, so an
+        # operator who drops one is not pinned to it by tenants' saved scopes.
         scopes = sorted(spec.identity_scopes | preset_scopes | set(existing or ()))
         await conn.execute(
             "INSERT INTO oauth_authorization_states "
@@ -269,7 +279,7 @@ async def start_authorization(*, tenant_id: str, user_id: str, provider: str, pr
         "response_type": "code",
         "client_id": _client_id(spec),
         "redirect_uri": os.environ[_REDIRECT_URI_ENV],
-        "scope": spec.scope_separator.join(scopes),
+        "scope": spec.scope_separator.join(sorted(set(scopes) | _app_required_scopes(spec))),
         "state": state,
         **pkce,
         **dict(spec.extra_authorize_params),
@@ -510,7 +520,7 @@ async def _refresh(tenant_id: str, row: Any, spec: OAuthProvider) -> str:
         raise ValueError("credential_unavailable") from None
 
     pool = await db.get_pool()
-    if resp.status_code == 400 and _error_code(resp) == "invalid_grant":
+    if resp.status_code == 400 and _refresh_token_dead(resp):
         async with tenant_conn(pool) as conn:
             flipped = await conn.execute(
                 "UPDATE oauth_connections SET status = 'reconnect_needed', access_token_ref = NULL, "
@@ -549,11 +559,14 @@ async def _refresh(tenant_id: str, row: Any, spec: OAuthProvider) -> str:
     return access_token
 
 
-def _error_code(resp: httpx.Response) -> str | None:
+def _refresh_token_dead(resp: httpx.Response) -> bool:
+    """RFC 6749 says invalid_grant; HubSpot answers a revoked or unknown
+    refresh token with invalid_request and its own BAD_REFRESH_TOKEN status."""
     try:
-        return resp.json().get("error")
+        body = resp.json()
     except ValueError:
-        return None
+        return False
+    return body.get("error") == "invalid_grant" or body.get("status") == "BAD_REFRESH_TOKEN"
 
 
 async def disconnect(

@@ -276,6 +276,8 @@ export TOOLEXEC_OAUTH_SALESFORCE_CLIENT_ID="..."
 export TOOLEXEC_OAUTH_SALESFORCE_CLIENT_SECRET_REF="env:TOOLEXEC_OAUTH_SALESFORCE_SECRET"
 export TOOLEXEC_OAUTH_HUBSPOT_CLIENT_ID="..."
 export TOOLEXEC_OAUTH_HUBSPOT_CLIENT_SECRET_REF="env:TOOLEXEC_OAUTH_HUBSPOT_SECRET"
+# Optional: any scope ticked as required on the HubSpot app beyond the two below.
+export TOOLEXEC_OAUTH_HUBSPOT_REQUIRED_SCOPES=""
 # Zoho CRM uses the Zoho app registered above: no new variables. The CRM
 # preset asks the tenant for one extra scope, ZohoCRM.modules.contacts.READ.
 ```
@@ -291,8 +293,11 @@ export TOOLEXEC_OAUTH_HUBSPOT_CLIENT_SECRET_REF="env:TOOLEXEC_OAUTH_HUBSPOT_SECR
   only to Salesforce hosts.
 - **HubSpot.** developers.hubspot.com, create a *public app* (not a private
   app), add the redirect URI above, and select the scopes `oauth` and
-  `crm.objects.contacts.read`. HubSpot does not support PKCE and the service
-  does not send it. A tenant installs through the *Connect* button, which sends
+  `crm.objects.contacts.read`. HubSpot treats every scope ticked on the app as
+  required and shows an error on its consent page if the install URL omits
+  one, so tick only those two, or list the extras, space-separated, in
+  `TOOLEXEC_OAUTH_HUBSPOT_REQUIRED_SCOPES`. HubSpot does not support PKCE and
+  the service does not send it. A tenant installs through the *Connect* button, which sends
   them to the install URL on `app.hubspot.com`; there is no URL to hand out
   yourself.
 - **Zoho CRM.** Reuses the Zoho server-based application and its multi-DC
