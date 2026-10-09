@@ -213,8 +213,8 @@ void Application::wire_websocket_handlers() {
                 try {
                     const CallMetadata md = CallMetadata::parse(meta_json);
                     logger_->info(
-                        "Metadata frame resolved sid={} did={} ani={} direction={}",
-                        sid, md.did, md.ani, md.direction);
+                        "Metadata frame resolved sid={} did={} ani={} direction={} fs_host={}",
+                        sid, md.did, md.ani, md.direction, md.freeswitch_host);
 
                     const auto route = PhoneRoute::from_redis(*redis_client_, md.did);
                     logger_->info(
@@ -231,6 +231,7 @@ void Application::wire_websocket_handlers() {
                     ctx.called_did     = md.did;
                     ctx.caller_did     = md.ani;
                     ctx.direction      = md.direction;
+                    ctx.freeswitch_host = md.freeswitch_host;
                     ctx.tenant = std::make_shared<TenantConfig>(TenantConfig::from_redis(
                         *redis_client_, ctx.obs.tenant_id, *config_data_, logger_.get()));
 

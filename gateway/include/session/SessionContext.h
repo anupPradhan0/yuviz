@@ -16,6 +16,7 @@ struct SessionContext {
     std::string                            called_did;
     std::string                            direction{"inbound"};
     std::string                            script_id;   // conversation script / persona for this tenant
+    std::string                            freeswitch_host;  // originating FS node for ESL affinity
 };
 
 } // namespace voiceai

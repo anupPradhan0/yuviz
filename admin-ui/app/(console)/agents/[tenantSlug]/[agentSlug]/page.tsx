@@ -394,6 +394,7 @@ export default function AgentDetailPage() {
   if (!agent) return null;
 
   const isActive = (form.status || "active") === "active";
+  const isDraft = !isActive && !agent.activated_at;
   const transferType = form.transfer_type || "none";
   const graceMs = form.goodbye_grace_ms ?? 0;
   const graceOptions = GRACE_OPTIONS_MS.includes(graceMs) ? GRACE_OPTIONS_MS : [...GRACE_OPTIONS_MS, graceMs].sort((a, b) => a - b);
@@ -442,16 +443,36 @@ export default function AgentDetailPage() {
           placeholder="Agent name"
           onChange={(e) => setForm({ ...form, name: e.target.value })}
         />
-        <button
-          type="button"
-          role="switch"
-          aria-checked={isActive}
-          className={`ed2-live${isActive ? " on" : ""}`}
-          title={isActive ? "Click to pause this agent" : "Click to let this agent take calls"}
-          onClick={() => setForm({ ...form, status: isActive ? "inactive" : "active" })}
-        >
-          <i /> {isActive ? "Taking calls" : "Paused"}
-        </button>
+        {isDraft ? (
+          <>
+            <span
+              className="ed2-live"
+              style={{ cursor: "default", opacity: 0.75 }}
+              title="This agent hasn't gone live yet. Configure it, then go live."
+            >
+              <i /> Draft
+            </span>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              title="Make this agent available to take calls"
+              onClick={() => setForm({ ...form, status: "active" })}
+            >
+              Go live
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            role="switch"
+            aria-checked={isActive}
+            className={`ed2-live${isActive ? " on" : ""}`}
+            title={isActive ? "Click to pause this agent" : "Click to let this agent take calls"}
+            onClick={() => setForm({ ...form, status: isActive ? "inactive" : "active" })}
+          >
+            <i /> {isActive ? "Taking calls" : "Paused"}
+          </button>
+        )}
         <span className="ed2-dir">{inCampaign ? "My agent calls people" : "People call my agent"}</span>
         <div className="ed2-top-right">
           <div className="ed2-save" aria-live="polite">{saveStatus}</div>
@@ -515,7 +536,12 @@ export default function AgentDetailPage() {
           )}
           {justCreated && (
             <div className="ed2-ready ok">
-              <Check size={14} /> Your agent is ready. Try it with a test call, then fine-tune anything here.
+              <Check size={14} />{" "}
+              {isDraft ? (
+                <>Agent created as a draft. Review the settings, then press <strong>Go live</strong> when ready.</>
+              ) : (
+                "Your agent is ready. Try it with a test call, then fine-tune anything here."
+              )}
             </div>
           )}
           {blocker && (
@@ -856,22 +882,24 @@ export default function AgentDetailPage() {
                 : null
             }
           />
-          <div className="card ed2-calls">
-            <div className="ed2-calls-hdr">
-              <b>This agent&apos;s recent calls</b>
-              <Link href="/calls">All calls</Link>
+          {!isDraft && (
+            <div className="card ed2-calls">
+              <div className="ed2-calls-hdr">
+                <b>This agent&apos;s recent calls</b>
+                <Link href="/calls">All calls</Link>
+              </div>
+              {recentCalls.length === 0 ? (
+                <div className="ed-test-empty">No calls yet.</div>
+              ) : (
+                recentCalls.map((c) => (
+                  <Link key={c.session_id} href={`/calls/${c.session_id}`} className="ed2-call">
+                    <span>{formatCallTime(c.started_at)}</span>
+                    <span>{c.ended_at ? formatLength(c.duration_ms) : "Live"}</span>
+                  </Link>
+                ))
+              )}
             </div>
-            {recentCalls.length === 0 ? (
-              <div className="ed-test-empty">No calls yet.</div>
-            ) : (
-              recentCalls.map((c) => (
-                <Link key={c.session_id} href={`/calls/${c.session_id}`} className="ed2-call">
-                  <span>{formatCallTime(c.started_at)}</span>
-                  <span>{c.ended_at ? formatLength(c.duration_ms) : "Live"}</span>
-                </Link>
-              ))
-            )}
-          </div>
+          )}
         </aside>
       </div>
 

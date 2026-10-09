@@ -331,6 +331,7 @@ export default function NewAgentPage() {
           // Sent here so a language 400 rejects the create instead of leaving a half-set-up agent.
           language,
           ...multilingualPayload(language, supportedLanguages, ttsByLanguage, greetingByLanguage),
+          status: "inactive",
         });
         createdAgent.current = agent;
       }
@@ -362,7 +363,7 @@ export default function NewAgentPage() {
 
       skipAutosave.current = true;
       clearAgentDraft();
-      router.push(`/agents/${tenantSlug}/${agent.slug}?test=1`);
+      router.push(`/agents/${tenantSlug}/${agent.slug}?new=1`);
     } catch (e) {
       const detail = e instanceof ApiError ? e.detail : String(e);
       setCreateError(detail);

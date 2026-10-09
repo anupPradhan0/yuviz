@@ -260,6 +260,8 @@ export interface Agent {
   // Set only on agents created from a shipped Easy job; null for Advanced.
   template_id: string | null;
   template_version: number | null;
+  // First time the agent went active; null = still a draft.
+  activated_at: string | null;
   // True while the stored prompt still equals the one the last accepted fix
   // wrote, so "Undo last change" can be offered. Computed server-side.
   can_undo: boolean;

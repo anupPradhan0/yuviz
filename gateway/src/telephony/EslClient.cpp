@@ -166,16 +166,26 @@ void EslClient::disconnect_locked() {
     read_buf_.clear();
 }
 
-bool EslClient::ensure_connected_locked() {
-    if (fd_ >= 0) return true;
+bool EslClient::ensure_connected_locked(const std::string& target_node) {
+    // Resolve the target endpoint from the node ID (or use default if empty/not found).
+    const auto [target_host, target_port] = cfg_.resolve_node(target_node);
+
+    // If the target changed, disconnect and reconnect.
+    if (fd_ >= 0 && current_target_host_ != target_host) {
+        logger_.info("EslClient: target node changed from {} to {}, reconnecting",
+                     current_target_host_, target_host);
+        disconnect_locked();
+    }
+
+    if (fd_ >= 0) return true;  // Already connected to the right target.
 
     addrinfo hints{};
     hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* res = nullptr;
-    const std::string port_str = std::to_string(cfg_.port);
-    if (::getaddrinfo(cfg_.host.c_str(), port_str.c_str(), &hints, &res) != 0 || !res) {
-        logger_.warn("EslClient: getaddrinfo failed host={} port={}", cfg_.host, cfg_.port);
+    const std::string port_str = std::to_string(target_port);
+    if (::getaddrinfo(target_host.c_str(), port_str.c_str(), &hints, &res) != 0 || !res) {
+        logger_.warn("EslClient: getaddrinfo failed host={} port={}", target_host, target_port);
         return false;
     }
 
@@ -194,7 +204,7 @@ bool EslClient::ensure_connected_locked() {
 
     if (rc < 0 && errno != EINPROGRESS) {
         logger_.warn("EslClient: connect() failed host={} port={} errno={}",
-                     cfg_.host, cfg_.port, errno);
+                     target_host, target_port, errno);
         ::close(fd);
         return false;
     }
@@ -205,7 +215,7 @@ bool EslClient::ensure_connected_locked() {
         socklen_t len = sizeof(soerr);
         if (pr <= 0 || ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &len) != 0 || soerr != 0) {
             logger_.warn("EslClient: connect timed out/failed host={} port={}",
-                         cfg_.host, cfg_.port);
+                         target_host, target_port);
             ::close(fd);
             return false;
         }
@@ -218,7 +228,7 @@ bool EslClient::ensure_connected_locked() {
     std::string carry, headers;
     if (!read_until_blank_line(fd, carry, headers, timeout) ||
         headers.find("auth/request") == std::string::npos) {
-        logger_.warn("EslClient: did not receive auth/request from {}:{}", cfg_.host, cfg_.port);
+        logger_.warn("EslClient: did not receive auth/request from {}:{}", target_host, target_port);
         ::close(fd);
         return false;
     }
@@ -234,18 +244,21 @@ bool EslClient::ensure_connected_locked() {
     if (!read_until_blank_line(fd, carry, auth_reply, timeout) ||
         auth_reply.find("+OK") == std::string::npos) {
         logger_.warn("EslClient: auth rejected by {}:{} (check FREESWITCH_ESL_PASSWORD in .env)",
-                     cfg_.host, cfg_.port);
+                     target_host, target_port);
         ::close(fd);
         return false;
     }
 
     fd_ = fd;
     read_buf_ = std::move(carry);   // any bytes read past the auth reply (normally none)
-    logger_.info("EslClient: connected and authenticated host={} port={}", cfg_.host, cfg_.port);
+    current_target_host_ = target_host;
+    current_target_port_ = target_port;
+    logger_.info("EslClient: connected and authenticated host={} port={}", target_host, target_port);
     return true;
 }
 
-bool EslClient::send_command_locked(const std::string& command, std::string& reply_out) {
+bool EslClient::send_command_locked(const std::string& command, std::string& reply_out,
+                                   const std::string& target_node) {
     // Backstop for every command: a line break ends an ESL command, so one
     // inside it would run whatever follows as a second command.
     if (command.find_first_of(std::string("\r\n\0", 3)) != std::string::npos) {
@@ -253,7 +266,7 @@ bool EslClient::send_command_locked(const std::string& command, std::string& rep
                       command.size());
         return false;
     }
-    if (!ensure_connected_locked()) return false;
+    if (!ensure_connected_locked(target_node)) return false;
 
     const std::string full = command + "\n\n";
     if (::send(fd_, full.data(), full.size(), 0) < 0) {
@@ -286,7 +299,8 @@ bool EslClient::send_command_locked(const std::string& command, std::string& rep
     return true;
 }
 
-void EslClient::hangup(const std::string& uuid, const std::string& reason) {
+void EslClient::hangup(const std::string& uuid, const std::string& reason,
+                       const std::string& target_node) {
     if (!cfg_.enabled) {
         logger_.info("EslClient: disabled (esl.enabled=false) — not hanging up SIP leg "
                      "uuid={} reason={}; WebSocket/audio already closed", uuid, reason);
@@ -306,7 +320,7 @@ void EslClient::hangup(const std::string& uuid, const std::string& reason) {
 
     std::lock_guard lock{mutex_};
     std::string reply;
-    if (!send_command_locked("api uuid_kill " + uuid, reply)) {
+    if (!send_command_locked("api uuid_kill " + uuid, reply, target_node)) {
         logger_.warn("EslClient: hangup failed uuid={} reason={} "
                      "(ESL unreachable or unauthenticated — call remains connected)",
                      uuid, reason);
@@ -320,7 +334,8 @@ void EslClient::hangup(const std::string& uuid, const std::string& reason) {
     }
 }
 
-bool EslClient::transfer(const TransferRequest& req, std::string& error_out) {
+bool EslClient::transfer(const TransferRequest& req, std::string& error_out,
+                        const std::string& target_node) {
     const std::string& uuid        = req.call_id;
     const std::string& destination = req.destination;
     const std::string& reason      = req.reason;
@@ -375,7 +390,7 @@ bool EslClient::transfer(const TransferRequest& req, std::string& error_out) {
 
     std::lock_guard lock{mutex_};
     std::string reply;
-    if (!send_command_locked(command, reply)) {
+    if (!send_command_locked(command, reply, target_node)) {
         error_out = "esl_unreachable";
         logger_.warn("EslClient: transfer failed uuid={} destination={} reason={} "
                      "(ESL unreachable or unauthenticated — call remains connected)",
@@ -423,7 +438,8 @@ std::string EslClient::dial_string_for(const std::string& destination) const {
 
 bool EslClient::originate_async(const std::string& destination,
                                 const std::string& caller_id_number,
-                                std::string& out_job_uuid, std::string& error_out) {
+                                std::string& out_job_uuid, std::string& error_out,
+                                const std::string& target_node) {
     if (!cfg_.enabled) {
         error_out = "esl_disabled";
         logger_.info("EslClient: disabled (esl.enabled=false) — not originating "
@@ -466,7 +482,7 @@ bool EslClient::originate_async(const std::string& destination,
 
     std::lock_guard lock{mutex_};
     std::string reply;
-    if (!send_command_locked(command, reply)) {
+    if (!send_command_locked(command, reply, target_node)) {
         error_out = "esl_unreachable";
         logger_.warn("EslClient: originate failed destination={} "
                      "(ESL unreachable or unauthenticated)", destination);
@@ -485,7 +501,7 @@ bool EslClient::originate_async(const std::string& destination,
 }
 
 bool EslClient::bridge(const std::string& uuid_a, const std::string& uuid_b,
-                       std::string& error_out) {
+                       std::string& error_out, const std::string& target_node) {
     if (!cfg_.enabled) {
         error_out = "esl_disabled";
         return false;
@@ -504,7 +520,7 @@ bool EslClient::bridge(const std::string& uuid_a, const std::string& uuid_b,
 
     std::lock_guard lock{mutex_};
     std::string reply;
-    if (!send_command_locked("api uuid_bridge " + uuid_a + " " + uuid_b, reply)) {
+    if (!send_command_locked("api uuid_bridge " + uuid_a + " " + uuid_b, reply, target_node)) {
         error_out = "esl_unreachable";
         logger_.warn("EslClient: bridge failed uuid_a={} uuid_b={} "
                      "(ESL unreachable or unauthenticated)", uuid_a, uuid_b);
@@ -520,7 +536,8 @@ bool EslClient::bridge(const std::string& uuid_a, const std::string& uuid_b,
     return false;
 }
 
-bool EslClient::stop_audio_fork(const std::string& uuid, std::string& error_out) {
+bool EslClient::stop_audio_fork(const std::string& uuid, std::string& error_out,
+                               const std::string& target_node) {
     if (!cfg_.enabled) {
         error_out = "esl_disabled";
         return false;
@@ -536,7 +553,7 @@ bool EslClient::stop_audio_fork(const std::string& uuid, std::string& error_out)
 
     std::lock_guard lock{mutex_};
     std::string reply;
-    if (!send_command_locked("api uuid_audio_fork " + uuid + " stop", reply)) {
+    if (!send_command_locked("api uuid_audio_fork " + uuid + " stop", reply, target_node)) {
         error_out = "esl_unreachable";
         logger_.warn("EslClient: stop_audio_fork failed uuid={} "
                      "(ESL unreachable or unauthenticated)", uuid);
@@ -551,7 +568,8 @@ bool EslClient::stop_audio_fork(const std::string& uuid, std::string& error_out)
     return false;
 }
 
-bool EslClient::hold(const std::string& uuid, std::string& error_out) {
+bool EslClient::hold(const std::string& uuid, std::string& error_out,
+                    const std::string& target_node) {
     if (!cfg_.enabled) {
         error_out = "esl_disabled";
         return false;
@@ -567,7 +585,7 @@ bool EslClient::hold(const std::string& uuid, std::string& error_out) {
 
     std::lock_guard lock{mutex_};
     std::string reply;
-    if (!send_command_locked("api uuid_hold " + uuid, reply)) {
+    if (!send_command_locked("api uuid_hold " + uuid, reply, target_node)) {
         error_out = "esl_unreachable";
         return false;
     }
@@ -577,7 +595,8 @@ bool EslClient::hold(const std::string& uuid, std::string& error_out) {
     return false;
 }
 
-bool EslClient::unhold(const std::string& uuid, std::string& error_out) {
+bool EslClient::unhold(const std::string& uuid, std::string& error_out,
+                      const std::string& target_node) {
     if (!cfg_.enabled) {
         error_out = "esl_disabled";
         return false;
@@ -593,7 +612,7 @@ bool EslClient::unhold(const std::string& uuid, std::string& error_out) {
 
     std::lock_guard lock{mutex_};
     std::string reply;
-    if (!send_command_locked("api uuid_hold off " + uuid, reply)) {
+    if (!send_command_locked("api uuid_hold off " + uuid, reply, target_node)) {
         error_out = "esl_unreachable";
         return false;
     }

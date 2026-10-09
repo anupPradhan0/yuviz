@@ -29,6 +29,7 @@ private:
     // Atomic: read cross-thread by ~CallSession().
     std::atomic<CoordinatorState> state_{CoordinatorState::Idle};
     std::string                   active_call_id_;
+    std::string                   freeswitch_host_;  // originating FS node
     TransferCoordinatorCallbacks  callbacks_;
 };
 
