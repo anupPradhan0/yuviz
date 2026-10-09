@@ -89,17 +89,25 @@ export interface KbDocument {
   version: number;
   usage_mode: UsageMode;
   chunk_count: number;
-  byte_size?: number;
+  // null for documents uploaded before sizes were recorded.
+  byte_size: number | null;
   created_at: string;
   updated_at: string;
 }
 
 export const listDocuments = (kbId: string) => request<KbDocument[]>(`/knowledge-bases/${kbId}/documents`);
 
-export const uploadDocument = (kbId: string, file: File, title: string) => {
+export const uploadDocument = (
+  kbId: string,
+  file: File,
+  title: string,
+  opts?: { language?: string | null; tags?: Record<string, unknown> },
+) => {
   const form = new FormData();
   form.append("file", file);
   form.append("title", title);
+  if (opts?.language) form.append("language", opts.language);
+  if (opts?.tags) form.append("tags", JSON.stringify(opts.tags));
   return request<KbDocument & { ingestion_job_id: string }>(`/knowledge-bases/${kbId}/documents`, {
     method: "POST",
     body: form,

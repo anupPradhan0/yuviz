@@ -18,6 +18,7 @@ import {
   listKbAgents,
   listKnowledgeBases,
   retryDocument,
+  updateDocument,
   uploadDocument,
 } from "@/lib/knowledgeApi";
 import { CustomApi, listCustomApis } from "@/lib/toolexecApi";
@@ -84,10 +85,8 @@ export default function KnowledgeBasesPage() {
   const router = useRouter();
   const [tab, setTab] = useState<Tab>(searchParams.get("tab") === "apis" ? "apis" : "sources");
 
-  // #1 — Delete with agent impact modal
   const [deleteTarget, setDeleteTarget] = useState<SourceRow | null>(null);
 
-  // #7 — Retry / Replace state
   const [retryingSource, setRetryingSource] = useState<string | null>(null);
   const [replacingSource, setReplacingSource] = useState<string | null>(null);
   const replaceInputRef = useRef<HTMLInputElement>(null);
@@ -188,7 +187,6 @@ export default function KnowledgeBasesPage() {
     }
   };
 
-  // #1: Confirm delete via modal, then execute.
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     const id = deleteTarget.id;
@@ -204,7 +202,6 @@ export default function KnowledgeBasesPage() {
     }
   };
 
-  // #7: Retry failed ingestion — no new upload needed.
   const handleRetry = async (source: SourceRow) => {
     setRetryingSource(source.id);
     try {
@@ -217,7 +214,6 @@ export default function KnowledgeBasesPage() {
     }
   };
 
-  // #7: Replace — upload a new file into the same KB slot and delete the old doc.
   const handleReplaceClick = (source: SourceRow) => {
     pendingReplaceId.current = source.id;
     replaceInputRef.current?.click();
@@ -231,17 +227,26 @@ export default function KnowledgeBasesPage() {
     const source = sources.find((s) => s.id === docId);
     if (!source) return;
     setReplacingSource(docId);
+    const message = (e: unknown) => (e instanceof ApiError ? e.detail : String(e));
+    let failure: string | null = null;
     try {
-      // Upload the new file into the same KB, then delete the old doc.
-      await uploadDocument(source.kb_id, file, file.name);
-      await deleteDocument(docId);
-      await refresh();
+      const fresh = await uploadDocument(source.kb_id, file, source.title, {
+        language: source.language,
+        tags: source.tags,
+      });
+      if (source.usage_mode !== "auto") await updateDocument(fresh.id, { usage_mode: source.usage_mode });
+      try {
+        await deleteDocument(docId);
+      } catch (e) {
+        failure = `New file uploaded, but the old copy of "${source.title}" could not be removed: ${message(e)}`;
+      }
     } catch (e) {
-      setTenantErrors((errs) => [...errs, e instanceof ApiError ? e.detail : String(e)]);
-    } finally {
-      setReplacingSource(null);
-      pendingReplaceId.current = null;
+      failure = message(e);
     }
+    await refresh();
+    if (failure) setTenantErrors((errs) => [...errs, failure!]);
+    setReplacingSource(null);
+    pendingReplaceId.current = null;
   };
 
   if (pageError) {
@@ -358,10 +363,9 @@ export default function KnowledgeBasesPage() {
                       </div>
                     </td>
                     <td>{sourceType(s)}</td>
-                    <td className="mono">{s.byte_size ? `${(s.byte_size / 1024).toFixed(1)} KB` : "—"}</td>
+                    <td className="mono">{s.byte_size != null ? `${(s.byte_size / 1024).toFixed(1)} KB` : "—"}</td>
                     <td>
                       <span className={`badge ${STATUS_BADGE[s.status] ?? "gray"}`}>{s.status}</span>
-                      {/* #7: Show full error message for failed documents */}
                       {s.status === "failed" && s.error && (
                         <div className="kb-source-sub" style={{ marginTop: 4, maxWidth: 260 }} title={s.error}>
                           {s.error}
@@ -382,7 +386,6 @@ export default function KnowledgeBasesPage() {
                     <td>
                       {canManage && (
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          {/* #7: Retry and Replace buttons for failed documents */}
                           {s.status === "failed" && (
                             <>
                               <button
@@ -405,7 +408,6 @@ export default function KnowledgeBasesPage() {
                               </button>
                             </>
                           )}
-                          {/* #1: Open impact modal instead of window.confirm */}
                           <button
                             className="btn btn-danger btn-sm"
                             disabled={removingSource === s.id}
@@ -424,7 +426,6 @@ export default function KnowledgeBasesPage() {
         </div>
       )}
 
-      {/* Hidden file input for Replace */}
       <input
         ref={replaceInputRef}
         type="file"
@@ -465,7 +466,6 @@ export default function KnowledgeBasesPage() {
         />
       )}
 
-      {/* #1 — Delete impact modal */}
       <Modal
         open={!!deleteTarget}
         title={`Delete "${deleteTarget?.title}"?`}

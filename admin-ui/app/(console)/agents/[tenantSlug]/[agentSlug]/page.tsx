@@ -330,8 +330,7 @@ export default function AgentDetailPage() {
   if (!agent) return null;
 
   const isActive = (form.status || "active") === "active";
-  // An agent that was never active and has no calls is effectively a draft.
-  const isDraft = !isActive && agent.status === "inactive" && recentCalls.length === 0;
+  const isDraft = !isActive && !agent.activated_at;
   const transferType = form.transfer_type || "none";
   const graceMs = form.goodbye_grace_ms ?? 0;
   const graceOptions = GRACE_OPTIONS_MS.includes(graceMs) ? GRACE_OPTIONS_MS : [...GRACE_OPTIONS_MS, graceMs].sort((a, b) => a - b);
@@ -381,12 +380,11 @@ export default function AgentDetailPage() {
           onChange={(e) => setForm({ ...form, name: e.target.value })}
         />
         {isDraft ? (
-          /* #12a: Draft mode — new/never-live agents show a "Draft" pill + "Go live" CTA */
           <>
             <span
               className="ed2-live"
               style={{ cursor: "default", opacity: 0.75 }}
-              title="This agent hasn't taken any calls yet. Configure it, then go live."
+              title="This agent hasn't gone live yet. Configure it, then go live."
             >
               <i /> Draft
             </span>
@@ -474,7 +472,12 @@ export default function AgentDetailPage() {
           )}
           {justCreated && (
             <div className="ed2-ready ok">
-              <Check size={14} /> Agent created as a draft. Review the settings, then press <strong>Go live</strong> when ready.
+              <Check size={14} />{" "}
+              {isDraft ? (
+                <>Agent created as a draft. Review the settings, then press <strong>Go live</strong> when ready.</>
+              ) : (
+                "Your agent is ready. Try it with a test call, then fine-tune anything here."
+              )}
             </div>
           )}
           {blocker && (
@@ -807,7 +810,6 @@ export default function AgentDetailPage() {
                 : null
             }
           />
-          {/* #12b: Only show recent calls once the agent has actually gone live */}
           {!isDraft && (
             <div className="card ed2-calls">
               <div className="ed2-calls-hdr">

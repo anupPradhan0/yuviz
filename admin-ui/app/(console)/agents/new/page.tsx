@@ -315,7 +315,6 @@ export default function NewAgentPage() {
           stt_config_id: known(sttId),
           llm_config_id: known(llmId),
           tts_config_id: known(ttsId),
-          // #12a: New agents start as inactive (draft) — user presses "Go live" when ready.
           status: "inactive",
         });
 
@@ -341,7 +340,6 @@ export default function NewAgentPage() {
 
       skipAutosave.current = true;
       clearAgentDraft();
-      // Navigate with ?new=1 so the agent detail page shows a "Draft" welcome banner.
       router.push(`/agents/${tenantSlug}/${agent.slug}?new=1`);
     } catch (e) {
       setCreateError(e instanceof ApiError ? e.detail : String(e));
