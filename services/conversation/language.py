@@ -39,6 +39,12 @@ HI_WORD_SHARE = _env_float("VOICEAI_LANG_HI_WORD_SHARE", 0.30)
 # and the 1.0 s floor, kept only at SHORT_MIN_CONFIDENCE in the session's language.
 SHORT_MIN_S = _env_float("VOICEAI_LANG_SHORT_MIN_S", 0.45)
 SHORT_MIN_CONFIDENCE = _env_float("VOICEAI_LANG_SHORT_MIN_CONFIDENCE", 0.80)
+# Short utterances also need the STT engine's own transcript confidence (Deepgram) at this
+# level: the language checks measure language, not whether it was speech.
+SHORT_MIN_SPEECH_CONFIDENCE = _env_float("VOICEAI_STT_SHORT_MIN_SPEECH_CONFIDENCE", 0.80)
+# Language bar for the pre-decode check in a Hindi session: 0 lets Whisper decode so Devanagari
+# text can decide. Only the language bar; the speech-signal checks still apply.
+SHORT_MIN_CONFIDENCE_HI = _env_float("VOICEAI_LANG_SHORT_MIN_CONFIDENCE_HI", 0.0)
 
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")
 # Scripts that identify one registry language on their own (Latin is shared, so absent).

@@ -25,8 +25,12 @@ class FakeConn:
         self.default_tts = default_tts
         self.default_stt = default_stt
         self.agents = agents or []
+        self.default_reads: list[str] = []
 
-    async def fetchrow(self, _sql, config_id, tenant_id):
+    async def fetchrow(self, sql, config_id, tenant_id=None):
+        if "FROM tenants" in sql:
+            self.default_reads.append(sql)
+            return {"default_stt_config_id": self.default_stt, "default_tts_config_id": self.default_tts}
         row = self.rows.get(str(config_id))
         return row if row is not None and str(row["tenant_id"]) == str(tenant_id) else None
 
@@ -97,6 +101,16 @@ async def test_tenant_default_tts_is_the_base_when_agent_has_none():
             FakeConn({aura_id: aura}, default_tts=aura_id), TENANT,
             {"language": "en", "supported_languages": ["en", "hi"]},
         )
+
+
+async def test_both_tenant_defaults_come_from_one_locked_read():
+    cartesia_id, cartesia = _tts("cartesia")
+    whisper_id, whisper = _stt("faster_whisper", "small")
+    conn = FakeConn({cartesia_id: cartesia, whisper_id: whisper}, default_tts=cartesia_id, default_stt=whisper_id)
+    await agents._validate_languages(conn, TENANT, {"language": "en", "supported_languages": ["en", "hi"]}, lock_defaults=True)
+    assert len(conn.default_reads) == 1
+    assert "FOR SHARE" in conn.default_reads[0]
+    assert "default_stt_config_id" in conn.default_reads[0] and "default_tts_config_id" in conn.default_reads[0]
 
 
 async def test_english_only_elevenlabs_model_rejected():
@@ -433,3 +447,23 @@ async def test_voiceless_kokoro_base_is_rejected_for_hindi():
             FakeConn({kokoro_id: kokoro}), TENANT,
             {"language": "en", "supported_languages": ["en", "hi"], "tts_config_id": kokoro_id},
         )
+
+
+async def test_agent_save_reads_tenant_defaults_for_share():
+    conn = FakeConn({})
+    await agents._validate_languages(
+        conn, TENANT, {"language": "en", "supported_languages": ["en"]}, lock_defaults=True,
+    )
+    assert len(conn.default_reads) == 1 and "FOR SHARE" in conn.default_reads[0]
+
+
+async def test_revalidation_reads_tenant_defaults_without_a_lock():
+    # Taking the tenant lock after the provider lock would invert update_tenant's order.
+    cartesia_id, cartesia = _tts("cartesia")
+    conn = FakeConn({cartesia_id: cartesia}, default_tts=cartesia_id, agents=[{
+        "name": "Bot", "language": "en", "supported_languages": ["en", "hi"],
+        "tts_config_by_language": None, "greeting_by_language": None,
+        "tts_config_id": None, "stt_config_id": None,
+    }])
+    await agents.revalidate_multilingual_agents(conn, TENANT, default_roles=("tts",))
+    assert len(conn.default_reads) == 1 and "FOR SHARE" not in conn.default_reads[0]

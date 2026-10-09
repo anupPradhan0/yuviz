@@ -265,7 +265,9 @@ async def _tts_row(conn: Any, config_id: Any, tenant_id: Any) -> Any:
     )
 
 
-async def _validate_languages(conn: Any, tenant_id: Any, merged: dict[str, Any]) -> dict[str, Any]:
+async def _validate_languages(
+    conn: Any, tenant_id: Any, merged: dict[str, Any], *, lock_defaults: bool = False,
+) -> dict[str, Any]:
     """Validate the multilingual fields as one unit and return their normalised column
     values. `merged` is the agent's state after this write (old row overlaid with fields).
 
@@ -342,12 +344,20 @@ async def _validate_languages(conn: Any, tenant_id: Any, merged: dict[str, Any])
         return out
     out["language"] = default
 
+    # One read of both tenant defaults for the two checks below. Agent saves take FOR SHARE so a
+    # concurrent update_tenant can't swap a default under them; revalidation reads unlocked
+    # because its callers already serialize with update_tenant on the provider row, and
+    # locking the tenant after the provider would invert update_tenant's provider -> tenant order.
+    defaults = await conn.fetchrow(
+        "SELECT default_stt_config_id, default_tts_config_id FROM tenants WHERE id = $1"
+        + (" FOR SHARE" if lock_defaults else ""),
+        tenant_id,
+    )
+
     # Switching needs an STT that can tell the languages apart: an English-only Whisper
     # model can't detect at all, and Deepgram only code-switches on nova-2/3 'multi'.
     if len(supported) > 1:
-        stt_id = merged.get("stt_config_id") or await conn.fetchval(
-            "SELECT default_stt_config_id FROM tenants WHERE id = $1", tenant_id,
-        )
+        stt_id = merged.get("stt_config_id") or defaults["default_stt_config_id"]
         stt = await _tts_row(conn, str(stt_id), tenant_id) if stt_id else None
         if stt is not None and stt["role"] == "stt":
             name = f"{stt['name']!r} ({stt['engine']} {stt['model'] or 'default model'})"
@@ -365,9 +375,7 @@ async def _validate_languages(conn: Any, tenant_id: Any, merged: dict[str, Any])
 
     # Every non-English language needs a voice that can speak it: a live caller must
     # never hear Hindi read by an English-only engine.
-    base_id = merged.get("tts_config_id") or await conn.fetchval(
-        "SELECT default_tts_config_id FROM tenants WHERE id = $1", tenant_id,
-    )
+    base_id = merged.get("tts_config_id") or defaults["default_tts_config_id"]
     base = await _tts_row(conn, str(base_id), tenant_id) if base_id else None
     base_langs = _row_tts_languages(base) if base is not None else frozenset({"en"})
     for lang in supported:
@@ -495,7 +503,7 @@ async def create_agent(
             "language": language, "supported_languages": supported_languages,
             "tts_config_by_language": tts_config_by_language,
             "greeting_by_language": greeting_by_language, "tts_config_id": tts_config_id,
-        })
+        }, lock_defaults=True)
         row = await conn.fetchrow(
             "INSERT INTO agents "
             "(tenant_id, slug, name, greeting, system_prompt, "
@@ -569,7 +577,7 @@ async def update_agent(
                 set_fields["language"] = fields["language"]
         if any(f in fields for f in _LANGUAGE_FIELDS):
             merged = {f: fields.get(f, old.get(f)) for f in _LANGUAGE_FIELDS}
-            langs = await _validate_languages(conn, old["tenant_id"], merged)
+            langs = await _validate_languages(conn, old["tenant_id"], merged, lock_defaults=True)
             # Only write the multilingual columns this request touched (plus the
             # normalised default language), so a single-language save stays byte-identical.
             for col, value in langs.items():

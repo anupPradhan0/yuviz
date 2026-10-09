@@ -153,6 +153,26 @@ async def test_short_utterance_in_session_language_is_decoded(whisper_cls):
     assert result.text == "haan ji" and stt._model.calls[0]["language"] == "hi"
 
 
+class _NoSpeechModel(_DetectingModel):
+    """A cough Whisper decodes to text but flags as probably-not-speech, with a fair logprob."""
+
+    def transcribe(self, pcm, **kwargs):
+        self.calls.append(kwargs)
+        seg = SimpleNamespace(text=" ji ", no_speech_prob=0.7, avg_logprob=-0.3)
+        return [seg], self._info
+
+
+async def test_no_speech_prob_alone_drops_a_short_segment_but_not_a_full_one(whisper_cls):
+    stt = _stt(whisper_cls, language=None, model=_NoSpeechModel())
+    short = await stt.finalize_stream(
+        "s1", b"\x00\x01" * 8000, 16000, language=None, languages=("en", "hi"),
+        require_language=("hi", 0.0),
+    )
+    assert short.text == ""
+    full = await stt.finalize_stream("s1", b"\x00\x01" * 8000, 16000, language=None, languages=("en", "hi"))
+    assert full.text == "ji"  # full-length path still needs the low logprob too
+
+
 class _UnsureHindiModel(_StubModel):
     """A short Hindi "haan": Hindi tops the agent's languages, but not confidently."""
 

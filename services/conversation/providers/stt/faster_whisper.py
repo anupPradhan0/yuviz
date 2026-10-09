@@ -182,7 +182,9 @@ class FasterWhisperSTT:
         # line noise otherwise decode as polite filler ("Thank you very much.").
         kept: list[str] = []
         for seg in segments:
-            if seg.no_speech_prob > 0.6 and seg.avg_logprob < -0.8:
+            # A short utterance (require_language set) has little else to show it is speech, so
+            # no_speech_prob alone drops it.
+            if seg.no_speech_prob > 0.6 and (require_language is not None or seg.avg_logprob < -0.8):
                 log.debug(
                     "FasterWhisper dropped segment %r no_speech_prob=%.2f avg_logprob=%.2f",
                     seg.text.strip(), seg.no_speech_prob, seg.avg_logprob,

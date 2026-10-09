@@ -319,6 +319,40 @@ async def test_multilingual_short_utterance_gate():
     assert h._session_language("s1") == "hi"
 
 
+async def test_short_utterance_needs_stt_confidence_as_well_as_language():
+    # Deepgram multi reports language_confidence 1.0 for any one-word transcript; a low
+    # transcript confidence marks line noise that merely looks like the session language.
+    rc = await _runtime({"language": "hi", "supported_languages": ("hi", "en")})
+    stt = _RecordingSTT([
+        SttResult(text="हाँ", confidence=0.3, language="hi", language_confidence=1.0),
+        SttResult(text="हाँ", confidence=0.95, language="hi", language_confidence=1.0),
+    ])
+    h = _handler(rc, stt, _LLM(), _RecordingTTS())
+    assert not any(r.stt_text for r in await _turn(h, "s1", _SHORT))
+    assert any(r.stt_text == "हाँ" for r in await _turn(h, "s1", _SHORT))
+
+
+async def test_short_speech_bar_has_its_own_setting(monkeypatch):
+    monkeypatch.setattr(lang_state, "SHORT_MIN_SPEECH_CONFIDENCE", 0.2)
+    monkeypatch.setattr(lang_state, "SHORT_MIN_CONFIDENCE", 0.99)  # the language bar must not apply to it
+    rc = await _runtime({"language": "hi", "supported_languages": ("hi", "en")})
+    stt = _RecordingSTT([SttResult(text="हाँ", confidence=0.3, language="hi", language_confidence=1.0)])
+    h = _handler(rc, stt, _LLM(), _RecordingTTS())
+    assert any(r.stt_text == "हाँ" for r in await _turn(h, "s1", _SHORT))
+
+
+def test_short_bar_defaults_without_env():
+    import os, subprocess, sys
+    env = {k: v for k, v in os.environ.items() if not k.startswith("VOICEAI_")}
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "from services.conversation import language as l;"
+         "print(l.SHORT_MIN_CONFIDENCE_HI, l.SHORT_MIN_SPEECH_CONFIDENCE)"],
+        env=env, capture_output=True, text=True, check=True, cwd=os.getcwd(),
+    ).stdout.split()
+    assert out == ["0.0", "0.8"]
+
+
 async def test_single_language_keeps_one_second_gate():
     rc = await _runtime({})
     stt = _RecordingSTT([SttResult(text="haan", language="hi", language_confidence=0.99)])
@@ -533,6 +567,32 @@ async def test_short_audio_asks_whisper_to_reject_before_decoding():
     # Hindi session: any matching blip is decoded (Devanagari text decides), so the bar is 0.
     assert stt.languages[0]["require_language"] == ("hi", 0.0)
     assert "require_language" not in stt.languages[1]
+
+
+async def test_hindi_short_audio_uses_the_hindi_bar_setting(monkeypatch):
+    class _CandidateSTT(_RecordingSTT):
+        accepts_language_candidates = True
+
+        async def finalize_stream(self, session_id, audio, sample_rate, **kwargs):
+            self.languages.append(kwargs)
+            return self._results.pop(0)
+
+        async def feed_stream(self, session_id, chunk, sample_rate, **kwargs):
+            return None
+
+    monkeypatch.setattr(lang_state, "SHORT_MIN_CONFIDENCE_HI", 0.9)
+    provider = MockConfigProvider()
+    provider.add_tenant(slug="acme", name="Acme")
+    provider.add_provider_config(id="stt1", role="stt", engine="faster_whisper", model="small")
+    provider.add_provider_config(id="llm1", role="llm", engine="openai")
+    provider.add_provider_config(id="tts1", role="tts", engine="kokoro", voice="hf_alpha")
+    provider.add_agent("acme", slug="bot", name="Bot", stt_config_id="stt1", llm_config_id="llm1",
+                       tts_config_id="tts1", workflow=starter_graph("Hi", "Be brief."),
+                       language="hi", supported_languages=("hi", "en"))
+    rc = await provider.get_runtime_config("acme", "bot")
+    stt = _CandidateSTT([SttResult(text="", language="hi", language_confidence=0.5)])
+    await _turn(_handler(rc, stt, _LLM(), _RecordingTTS()), "s1", _SHORT)
+    assert stt.languages[0]["require_language"] == ("hi", 0.9)
 
 
 async def test_pipeline_uses_the_bundles_override_rule():

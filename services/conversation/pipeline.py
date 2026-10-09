@@ -650,9 +650,12 @@ class PipelineConversationHandler:
         tracker = self._session(session_id).language
         if is_short and tracker is not None and "languages" in stt_kwargs:
             # Whisper detects first and skips the decode for a short blip the gate would drop.
-            # Hindi keeps decoding low-confidence matches: Devanagari text makes it Hindi for the
-            # gate (utterance_language), so a short "हाँ" isn't lost to Whisper's English prior.
-            min_confidence = 0.0 if tracker.current == "hi" else lang_state.SHORT_MIN_CONFIDENCE
+            # Hindi uses its own (lower) bar: Devanagari text makes it Hindi for the gate
+            # (utterance_language), so a short "हाँ" isn't lost to Whisper's English prior.
+            min_confidence = (
+                lang_state.SHORT_MIN_CONFIDENCE_HI if tracker.current == "hi"
+                else lang_state.SHORT_MIN_CONFIDENCE
+            )
             stt_kwargs = {**stt_kwargs, "require_language": (tracker.current, min_confidence)}
         try:
             stt_result: SttResult = await self._stt.finalize_stream(
@@ -670,10 +673,13 @@ class PipelineConversationHandler:
         if tracker is not None:
             heard = utterance_language(stt_result, self._supported_languages)
             if is_short:
-                if not tracker.accept_short(heard):
+                # The language check measures language, not speech: also require the engine's
+                # own transcript confidence (Deepgram; Whisper reports 1.0 and gates on no_speech_prob).
+                if stt_result.confidence < lang_state.SHORT_MIN_SPEECH_CONFIDENCE or not tracker.accept_short(heard):
                     log.debug(
-                        "Skipping short utterance %r lang=%s conf=%s (session language %s) session=%s",
-                        stt_result.text, heard.language, heard.confidence, tracker.current, session_id,
+                        "Skipping short utterance %r lang=%s conf=%s stt_conf=%.2f (session language %s) session=%s",
+                        stt_result.text, heard.language, heard.confidence, stt_result.confidence,
+                        tracker.current, session_id,
                     )
                     return
             else:
