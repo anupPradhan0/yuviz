@@ -195,7 +195,7 @@ export default function AgentsPage() {
                             <Pencil size={13} /> Edit agent
                           </button>
                           <button role="menuitem" onClick={() => router.push(`/workflows/${a.tenantSlug}/${a.slug}`)}>
-                            <Workflow size={13} /> Call flow
+                            <Workflow size={13} /> Conversation steps
                           </button>
                         </div>
                       </>

@@ -133,7 +133,7 @@ const OVERVIEW_ITEMS: NavItem[] = [{ href: "/dashboard", label: "Dashboard", ico
 const BUILD_ITEMS: NavItem[] = [
   { href: "/tenants", label: "Accounts", icon: "accounts" },
   { href: "/agents", label: "Agents", icon: "agents" },
-  { href: "/workflows", label: "Call Flows", icon: "workflows" },
+  { href: "/workflows", label: "Phone menus", icon: "workflows" },
   { href: "/knowledge-bases", label: "Knowledge", icon: "knowledge-bases" },
   { href: "/ai-voice", label: "AI & Voice", icon: "ai-voice" },
   { href: "/telephony", label: "Phone Numbers", icon: "telephony" },
@@ -174,7 +174,7 @@ const PAGE_SUBTITLE: Record<string, string> = {
 // Shown only on the list page itself, and never to viewers (read-only).
 const PAGE_CTA: Record<string, { label: string; href: string }> = {
   "/agents": { label: "+ Create Agent", href: "/agents/new" },
-  "/workflows": { label: "+ New Flow", href: "/workflows/new" },
+  "/workflows": { label: "+ New menu", href: "/workflows/new" },
   "/knowledge-bases": { label: "+ Add Document", href: "/knowledge-bases?add=1" },
   "/telephony": { label: "+ Add Number", href: "/telephony?add=1" },
   "/integrations": { label: "+ Connect App", href: "/integrations#connect" },
