@@ -132,6 +132,30 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS workflow       JSONB;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS workflow_draft JSONB;
 
+-- First time the agent went active; NULL = draft. Rows predating the column count as activated.
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema() AND table_name = 'agents'
+                      AND column_name = 'activated_at') THEN
+        ALTER TABLE agents ADD COLUMN activated_at TIMESTAMPTZ;
+        UPDATE agents SET activated_at = created_at;
+    END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION agents_stamp_activated_at() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.status = 'active' AND NEW.activated_at IS NULL THEN
+        NEW.activated_at := now();
+    END IF;
+    RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS agents_stamp_activated_at ON agents;
+CREATE TRIGGER agents_stamp_activated_at
+    BEFORE INSERT OR UPDATE OF status ON agents
+    FOR EACH ROW EXECUTE FUNCTION agents_stamp_activated_at();
+
 -- ── tool_provider_configs ─────────────────────────────────────────────────────
 -- api_key_ref is a reference only ('env:' | 'enc:' | 'k8s:'), never a real key.
 CREATE TABLE IF NOT EXISTS tool_provider_configs (

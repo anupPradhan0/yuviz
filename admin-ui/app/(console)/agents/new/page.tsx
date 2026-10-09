@@ -315,6 +315,7 @@ export default function NewAgentPage() {
           stt_config_id: known(sttId),
           llm_config_id: known(llmId),
           tts_config_id: known(ttsId),
+          status: "inactive",
         });
 
         await updateAgent(tenantSlug, fresh.id, {
@@ -339,7 +340,7 @@ export default function NewAgentPage() {
 
       skipAutosave.current = true;
       clearAgentDraft();
-      router.push(`/agents/${tenantSlug}/${agent.slug}?test=1`);
+      router.push(`/agents/${tenantSlug}/${agent.slug}?new=1`);
     } catch (e) {
       setCreateError(e instanceof ApiError ? e.detail : String(e));
       setCreating(false);
