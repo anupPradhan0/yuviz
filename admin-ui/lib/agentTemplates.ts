@@ -83,12 +83,19 @@ export const templateByKey = (key: string | null): AgentTemplate | null =>
 
 const FALLBACK_ICONS: LucideIcon[] = [Bot, Sparkles, MessageCircle, PhoneCall, Smile, Star, Zap];
 
-// Agents don't record their template, so match on its greeting or name; otherwise a stable pick by id.
-export function agentIcon(agent: { id: string; name: string; greeting: string | null }): LucideIcon {
+// Agents don't record their template, so match on its greeting or name.
+export function agentTemplate(agent: { name: string; greeting: string | null }): AgentTemplate | null {
   const name = agent.name.trim().toLowerCase();
-  const tpl = AGENT_TEMPLATES.find(
-    (t) => t.greeting === agent.greeting?.trim() || (name.length > 3 && t.label.toLowerCase().startsWith(name)),
+  return (
+    AGENT_TEMPLATES.find(
+      (t) => t.greeting === agent.greeting?.trim() || (name.length > 3 && t.label.toLowerCase().startsWith(name)),
+    ) ?? null
   );
+}
+
+// Template icon when one matches; otherwise a stable pick by id.
+export function agentIcon(agent: { id: string; name: string; greeting: string | null }): LucideIcon {
+  const tpl = agentTemplate(agent);
   if (tpl) return tpl.icon;
   let hash = 0;
   for (const ch of agent.id) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
