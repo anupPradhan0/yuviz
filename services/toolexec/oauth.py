@@ -337,7 +337,8 @@ async def complete_authorization(
                 headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
             )
             info.raise_for_status()
-            account_label, provider_sub = info.json().get("Email"), info.json().get("ZUID")
+            zuid = info.json().get("ZUID")  # Zoho returns ZUID as a number; the column is text
+            account_label, provider_sub = info.json().get("Email"), None if zuid is None else str(zuid)
         access_ref = encrypt_tenant_secret(tenant_id, access_token)
         refresh_ref = encrypt_tenant_secret(tenant_id, refresh_token)
         access_expires_at = _expires_at(body)

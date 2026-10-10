@@ -228,10 +228,15 @@ _CRM_SCOPES = {
 }
 
 # Scopes the account-level Connect (no preset) asks for on top of the identity
-# scopes. HubSpot has no identity scope and refuses an install URL that omits a
-# scope the app requires, so a bare Connect asks for the CRM lookup's scopes.
+# scopes, so a bare Connect yields a connection the CRM preset can use as-is.
+# HubSpot has no identity scope and refuses an install URL that omits a required
+# one. Salesforce returns no refresh_token unless the refresh_token scope is
+# asked for. Zoho gets its refresh token from access_type=offline (already in
+# its extra_authorize_params); the scope here is the CRM data scope it needs.
 CONNECT_SCOPES: dict[str, frozenset[str]] = {
     "hubspot": _CRM_SCOPES["hubspot"],
+    "salesforce": _CRM_SCOPES["salesforce"],
+    "zoho": _CRM_SCOPES["zoho"],
 }
 
 

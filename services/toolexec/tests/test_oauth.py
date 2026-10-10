@@ -477,6 +477,20 @@ async def test_a_zoho_data_centre_move_replaces_the_origin(pool, tenants, fake, 
 
 
 @pytest.mark.asyncio
+async def test_a_zoho_numeric_zuid_is_stored_as_text(pool, tenants, fake, crm_env):
+    # Zoho's userinfo returns ZUID as a number; the provider_sub column is text.
+    made, users = tenants
+    connection = await _connect_crm(
+        made["a"], users["a"], fake, "zoho", accounts_server="https://accounts.zoho.com",
+        api_domain="https://www.zohoapis.com", Email="owner@zoho.test", ZUID=60091508656,
+    )
+    row = await pool.fetchrow(
+        "SELECT account_label, provider_sub FROM oauth_connections WHERE id = $1", connection["id"],
+    )
+    assert row["account_label"] == "owner@zoho.test" and row["provider_sub"] == "60091508656"
+
+
+@pytest.mark.asyncio
 async def test_a_hubspot_flow_has_no_pkce_and_completes_without_a_verifier(pool, tenants, fake, crm_env):
     made, users = tenants
     set_target_tenant(made["a"])
@@ -539,6 +553,25 @@ def test_every_oauth_provider_asks_for_a_scope_without_a_preset():
         if p.auth_kind == "oauth2" and not (p.identity_scopes | presets.CONNECT_SCOPES.get(k, frozenset()))
     ]
     assert empty == []
+
+
+def test_every_crm_bare_connect_carries_its_required_scope():
+    # Without its non-identity scope a bare Connect either gets no refresh_token
+    # (Salesforce) or is refused by the provider (HubSpot), so each CRM's required
+    # scope must ride the account-level Connect.
+    for provider, required_scope in (
+        ("salesforce", "refresh_token"), ("hubspot", "oauth"), ("zoho", "ZohoCRM.modules.contacts.READ"),
+    ):
+        bare = oauth.PROVIDERS[provider].identity_scopes | presets.CONNECT_SCOPES.get(provider, frozenset())
+        assert required_scope in bare, provider
+
+
+@pytest.mark.asyncio
+async def test_a_salesforce_bare_connect_requests_api_and_refresh(pool, tenants, fake, crm_env):
+    made, users = tenants
+    set_target_tenant(made["a"])
+    url = await oauth.start_authorization(tenant_id=made["a"], user_id=users["a"], provider="salesforce", preset_key=None)
+    assert set(parse_qs(urlsplit(url).query)["scope"][0].split()) == {"openid", "api", "refresh_token"}
 
 
 async def _hubspot_state(tenants, *, tenant_key="a", user_key="a") -> str:
