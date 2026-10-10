@@ -200,13 +200,14 @@ export default function DashboardPage() {
             // API omits zero-call days; draw every day of the range so today is always the last point.
             const byDate = new Map(pts.map((p) => [p.date.slice(0, 10), p]));
             const dense: ChartPoint[] = [];
+            const userTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
             for (let i = range.days - 1; i >= 0; i--) {
               const d = new Date();
               d.setDate(d.getDate() - i);
               const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
               const p = byDate.get(key);
               dense.push(toChartPoint(
-                d.toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
+                d.toLocaleDateString("en-IN", { day: "numeric", month: "short", timeZone: userTz }),
                 p?.calls ?? 0, p?.ended ?? 0, p?.escalated ?? 0,
               ));
             }
