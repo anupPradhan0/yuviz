@@ -158,6 +158,9 @@ async def get_dashboard_stats(tenant_slug: str, *, hours: int = 24 * 30) -> dict
                   AND (turn_count = 0 OR close_reason = 'TRANSFER_FAILED')
             ) AS failed_count,
             COUNT(*) FILTER (
+                WHERE started_at >= NOW() - ($2 * INTERVAL '1 hour') AND direction = 'inbound'
+            ) AS inbound_count,
+            COUNT(*) FILTER (
                 WHERE started_at >= NOW() - ($2 * INTERVAL '1 hour') AND direction = 'outbound'
             ) AS outbound_count,
 
@@ -259,6 +262,8 @@ async def get_usage_trend(tenant_slug: str, *, days: int = 30) -> list[dict[str,
             SELECT
                 date_trunc('day', started_at)::date AS date,
                 COUNT(*) AS calls,
+                COUNT(*) FILTER (WHERE direction = 'inbound') AS inbound,
+                COUNT(*) FILTER (WHERE direction = 'outbound') AS outbound,
                 ROUND(COALESCE(SUM(duration_ms), 0) / 60000.0, 2) AS minutes,
                 COUNT(*) FILTER (WHERE ended_at IS NOT NULL) AS ended,
                 COUNT(*) FILTER (WHERE close_reason LIKE 'TRANSFER%') AS escalated
@@ -273,7 +278,7 @@ async def get_usage_trend(tenant_slug: str, *, days: int = 30) -> list[dict[str,
 
 
 async def get_todays_activity(tenant_slug: str) -> list[dict[str, Any]]:
-    """Today's calls by hour and direction; 'web' is always 0 (not a persisted channel)."""
+    """Today's calls by hour and direction; 'web' is browser test sessions (direction 'test')."""
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         rows = await conn.fetch(
@@ -282,6 +287,7 @@ async def get_todays_activity(tenant_slug: str) -> list[dict[str, Any]]:
                 EXTRACT(HOUR FROM started_at)::int AS hour,
                 COUNT(*) FILTER (WHERE direction = 'inbound') AS inbound,
                 COUNT(*) FILTER (WHERE direction = 'outbound') AS outbound,
+                COUNT(*) FILTER (WHERE direction = 'test') AS web,
                 COUNT(*) FILTER (WHERE ended_at IS NOT NULL) AS ended,
                 COUNT(*) FILTER (WHERE close_reason LIKE 'TRANSFER%') AS escalated
             FROM calls
@@ -290,7 +296,7 @@ async def get_todays_activity(tenant_slug: str) -> list[dict[str, Any]]:
             """,
             tenant_slug,
         )
-    return [{**dict(r), "web": 0} for r in rows]
+    return [dict(r) for r in rows]
 
 
 async def get_latency_stats(tenant_slug: str, *, hours: int = 24) -> list[dict[str, Any]]:

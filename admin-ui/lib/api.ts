@@ -821,6 +821,7 @@ export interface DashboardStats {
   live_calls: number;
   success_count: number;
   failed_count: number;
+  inbound_count: number;
   outbound_count: number;
   // Raw numerators/denominators, not rates, so they can be summed across tenants.
   ended_count: number;
@@ -838,7 +839,7 @@ export interface DashboardStats {
 
 const EMPTY_DASHBOARD_STATS: DashboardStats = {
   total_calls: 0, total_minutes: 0, live_calls: 0, success_count: 0, failed_count: 0,
-  outbound_count: 0, ended_count: 0, aht_sample_count: 0, aht_duration_ms: 0,
+  inbound_count: 0, outbound_count: 0, ended_count: 0, aht_sample_count: 0, aht_duration_ms: 0,
   handoff_count: 0, escalated_count: 0, prev_total_calls: 0, prev_ended_count: 0,
   prev_aht_sample_count: 0, prev_aht_duration_ms: 0, prev_handoff_count: 0,
   prev_escalated_count: 0,
@@ -856,6 +857,7 @@ export const listAllDashboardStats = async (tenants: Tenant[], hours: number = 2
       live_calls: acc.live_calls + s.live_calls,
       success_count: acc.success_count + s.success_count,
       failed_count: acc.failed_count + s.failed_count,
+      inbound_count: acc.inbound_count + s.inbound_count,
       outbound_count: acc.outbound_count + s.outbound_count,
       ended_count: acc.ended_count + s.ended_count,
       aht_sample_count: acc.aht_sample_count + s.aht_sample_count,
@@ -916,6 +918,8 @@ export const listAllDispositionMix = async (
 export interface UsageTrendPoint {
   date: string;
   calls: number;
+  inbound: number;
+  outbound: number;
   minutes: number;
   ended: number;
   escalated: number;
@@ -933,6 +937,8 @@ export const listAllUsageTrend = async (tenants: Tenant[], days: number = 30): P
       byDate.set(p.date, {
         date: p.date,
         calls: (existing?.calls || 0) + p.calls,
+        inbound: (existing?.inbound || 0) + p.inbound,
+        outbound: (existing?.outbound || 0) + p.outbound,
         minutes: Math.round(((existing?.minutes || 0) + p.minutes) * 100) / 100,
         ended: (existing?.ended || 0) + p.ended,
         escalated: (existing?.escalated || 0) + p.escalated,

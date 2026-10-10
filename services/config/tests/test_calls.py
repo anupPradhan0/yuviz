@@ -246,6 +246,7 @@ async def test_get_dashboard_stats_counts_and_sums_minutes(test_tenant, scoped, 
     assert stats["live_calls"] == 1
     assert stats["success_count"] == 1
     assert stats["failed_count"] == 1
+    assert stats["inbound_count"] == 2
     assert stats["outbound_count"] == 1
 
     for sid in (ok_id, failed_id, live_id):
@@ -276,7 +277,7 @@ async def test_get_usage_trend_groups_by_day(test_tenant, scoped, pool):
     )
     await pool.execute(
         "INSERT INTO calls (session_id, tenant_id, direction, duration_ms, started_at, ended_at) "
-        "VALUES ($1, $2, 'inbound', 120000, NOW() - INTERVAL '1 day', NOW() - INTERVAL '1 day')",
+        "VALUES ($1, $2, 'outbound', 120000, NOW() - INTERVAL '1 day', NOW() - INTERVAL '1 day')",
         yesterday_id, test_tenant["slug"],
     )
 
@@ -284,6 +285,7 @@ async def test_get_usage_trend_groups_by_day(test_tenant, scoped, pool):
     assert len(trend) == 2
     assert sum(row["calls"] for row in trend) == 2
     assert sum(row["minutes"] for row in trend) == 3.0
+    assert [(row["inbound"], row["outbound"]) for row in trend] == [(0, 1), (1, 0)]
 
     for sid in (today_id, yesterday_id):
         await pool.execute("DELETE FROM calls WHERE session_id = $1", sid)
@@ -308,7 +310,7 @@ async def test_trend_and_activity_report_containment_inputs(test_tenant, scoped,
 
 
 async def test_get_todays_activity_buckets_by_hour_and_direction(test_tenant, scoped, pool):
-    inbound_id, outbound_id = (f"test-call-{uuid.uuid4().hex[:8]}" for _ in range(2))
+    inbound_id, outbound_id, test_id = (f"test-call-{uuid.uuid4().hex[:8]}" for _ in range(3))
     await pool.execute(
         "INSERT INTO calls (session_id, tenant_id, direction, started_at) VALUES ($1, $2, 'inbound', NOW())",
         inbound_id, test_tenant["slug"],
@@ -317,14 +319,18 @@ async def test_get_todays_activity_buckets_by_hour_and_direction(test_tenant, sc
         "INSERT INTO calls (session_id, tenant_id, direction, started_at) VALUES ($1, $2, 'outbound', NOW())",
         outbound_id, test_tenant["slug"],
     )
+    await pool.execute(
+        "INSERT INTO calls (session_id, tenant_id, direction, started_at) VALUES ($1, $2, 'test', NOW())",
+        test_id, test_tenant["slug"],
+    )
 
     activity = await calls.get_todays_activity(test_tenant["slug"])
-    assert len(activity) == 1  # both calls land in the current hour bucket
+    assert len(activity) == 1  # all calls land in the current hour bucket
     assert activity[0]["inbound"] == 1
     assert activity[0]["outbound"] == 1
-    assert activity[0]["web"] == 0
+    assert activity[0]["web"] == 1
 
-    for sid in (inbound_id, outbound_id):
+    for sid in (inbound_id, outbound_id, test_id):
         await pool.execute("DELETE FROM calls WHERE session_id = $1", sid)
 
 
