@@ -135,7 +135,7 @@ const OVERVIEW_ITEMS: NavItem[] = [{ href: "/dashboard", label: "Dashboard", ico
 const BUILD_ITEMS: NavItem[] = [
   { href: "/tenants", label: "Accounts", icon: "accounts" },
   { href: "/agents", label: "Agents", icon: "agents" },
-  { href: "/phone-menus", label: "Phone menus", icon: "workflows" },
+  { href: "/ivr-call", label: "IVR-Call", icon: "workflows" },
   { href: "/knowledge-bases", label: "Knowledge", icon: "knowledge-bases" },
   { href: "/ai-voice", label: "AI & Voice", icon: "ai-voice" },
   { href: "/telephony", label: "Phone Numbers", icon: "telephony" },
@@ -164,7 +164,7 @@ const ALL_ITEMS = [...OVERVIEW_ITEMS, ...BUILD_ITEMS, USERS_ITEM, ...CALLING_ITE
 const PAGE_SUBTITLE: Record<string, string> = {
   "/dashboard": "Overview of your calls and agents",
   "/agents": "The AI that answers and makes your calls",
-  "/phone-menus": "Menus and routing before an agent picks up",
+  "/ivr-call": "Menus and routing before an agent picks up",
   "/knowledge-bases": "Documents your agents can answer from",
   "/telephony": "Numbers and carriers your calls come through",
   "/integrations": "Calendars, CRMs and helpdesks",
@@ -176,7 +176,7 @@ const PAGE_SUBTITLE: Record<string, string> = {
 // Shown only on the list page itself, and never to viewers (read-only).
 const PAGE_CTA: Record<string, { label: string; href: string }> = {
   "/agents": { label: "+ Create Agent", href: "/agents/new" },
-  "/phone-menus": { label: "+ New menu", href: "/phone-menus/new" },
+  "/ivr-call": { label: "+ New menu", href: "/ivr-call/new" },
   "/knowledge-bases": { label: "+ Add Document", href: "/knowledge-bases?add=1" },
   "/telephony": { label: "+ Add Number", href: "/telephony?add=1" },
   "/integrations": { label: "+ Connect App", href: "/integrations?add=1" },

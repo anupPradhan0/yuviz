@@ -15,7 +15,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "knowledge", label: "Knowledge bases" },
   { id: "apis", label: "APIs" },
   { id: "chained", label: "Dependent APIs" },
-  { id: "flows", label: "Phone menus" },
+  { id: "flows", label: "IVR-Call" },
   { id: "voice", label: "AI & Voice" },
   { id: "other", label: "Other pages" },
   { id: "test", label: "Testing an agent" },
@@ -529,7 +529,7 @@ export default function DocsPage() {
           {section === "flows" && (
             <>
               <P>
-                <strong>Phone menus</strong> are keypad menus — &ldquo;press 1 for sales&rdquo;.
+                <strong>IVR-Call</strong> menus are keypad menus — &ldquo;press 1 for sales&rdquo;.
                 They are a separate thing from an agent: a menu does not hold a conversation, it
                 plays messages, reads keypresses, and sends the caller on. A menu can hand the call
                 to an agent when it is done.
