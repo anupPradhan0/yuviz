@@ -6,12 +6,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Bot, MoreVertical, Pencil, Play, Plus, Workflow } from "lucide-react";
-import { Agent, ApiError, listAgents, listCalls } from "@/lib/api";
+import { Agent, ApiError, listAgents, listCalls, listPhoneNumbers } from "@/lib/api";
 import { AgentTestPopup } from "@/components/AgentTestPopup";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 import { listAgentKnowledgeBases } from "@/lib/knowledgeApi";
 import { listAgentCustomApis } from "@/lib/toolexecApi";
-import { AGENT_TEMPLATES, agentIcon } from "@/lib/agentTemplates";
+import { AGENT_TEMPLATES, agentIcon, agentTemplate } from "@/lib/agentTemplates";
 import { LANGUAGES } from "@/lib/engineCatalog";
 import { AgentDraft, clearAgentDraft, draftSavedLabel, loadAgentDraft } from "@/lib/agentDraft";
 
@@ -24,6 +24,7 @@ interface Attachments {
   sources: number | null; // null = the lookup failed; render "—", never 0
   tools: number | null;
   calls: number | null;
+  numbers: string[] | null;
 }
 
 export default function AgentsPage() {
@@ -74,6 +75,11 @@ export default function AgentsPage() {
       setLoading(false);
 
       // No bulk endpoint for attachment counts; failures degrade to "—" per agent.
+      const tenantNumbers = new Map(
+        await Promise.all(
+          targets.map(async (t) => [t.id, await listPhoneNumbers(t.id).catch(() => null)] as const),
+        ),
+      );
       const entries = await Promise.all(
         list.map(async (a) => {
           const [kbs, apis, calls] = await Promise.all([
@@ -81,7 +87,9 @@ export default function AgentsPage() {
             listAgentCustomApis(a.id).then((r) => r.length).catch(() => null),
             listCalls(a.tenantSlug, { agentId: a.id, limit: 1 }).then((r) => r.total).catch(() => null),
           ]);
-          return [a.id, { sources: kbs, tools: apis, calls }] as const;
+          const nums = tenantNumbers.get(a.tenant_id);
+          const numbers = nums ? nums.filter((n) => n.agent_id === a.id).map((n) => n.did) : null;
+          return [a.id, { sources: kbs, tools: apis, calls, numbers }] as const;
         }),
       );
       setAttachments(Object.fromEntries(entries));
@@ -163,6 +171,7 @@ export default function AgentsPage() {
             const att = attachments[a.id];
             const language = LANGUAGES.find((l) => l.value === a.language)?.label ?? a.language;
             const Icon = agentIcon(a);
+            const tpl = agentTemplate(a);
             const editUrl = `/agents/${a.tenantSlug}/${a.slug}`;
             return (
               <div
@@ -205,6 +214,21 @@ export default function AgentsPage() {
 
                 <div className="agent-card-name">{a.name}</div>
                 {isAllTenants && <div className="agent-card-acct">{a.tenantName}</div>}
+
+                <dl className="agent-card-meta">
+                  <dt>Type</dt>
+                  <dd>
+                    {tpl ? `${tpl.direction === "inbound" ? "Incoming" : "Outgoing"} · ${tpl.label}` : "Custom"}
+                  </dd>
+                  <dt>Number</dt>
+                  <dd className={att?.numbers?.length ? "" : "muted"}>
+                    {att?.numbers == null
+                      ? "—"
+                      : att.numbers.length === 0
+                        ? "Not connected"
+                        : att.numbers.join(", ")}
+                  </dd>
+                </dl>
 
                 <div className="agent-card-facts">
                   {language && <span>{language}</span>}
