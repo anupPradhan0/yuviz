@@ -85,10 +85,10 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
       <div className="d-chart">
         <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img" aria-label="Calls over time">
           <path d={`M0 ${h * 0.25}H${w}M0 ${h * 0.5}H${w}M0 ${h * 0.75}H${w}`} stroke="var(--border)" strokeWidth="1" />
-          <path d={`M${outboundXy[0][0]} ${h} L${outboundLine.replaceAll(" ", " L")} L${outboundXy[outboundXy.length - 1][0]} ${h}Z`} fill="var(--cyan-dim)" />
-          <polyline points={inboundLine} fill="none" stroke="var(--cyan)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+          <path d={`M${outboundXy[0][0]} ${h} L${outboundLine.replaceAll(" ", " L")} L${outboundXy[outboundXy.length - 1][0]} ${h}Z`} fill="#3b82f6" opacity="0.15" />
+          <polyline points={inboundLine} fill="none" stroke="#3b82f6" strokeWidth="2" vectorEffect="non-scaling-stroke" />
           {outboundXy.some(([x, y], i) => y !== inboundXy[i][1]) && (
-            <polyline points={outboundLine} fill="none" stroke="var(--orange)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+            <polyline points={outboundLine} fill="none" stroke="#f97316" strokeWidth="2" vectorEffect="non-scaling-stroke" />
           )}
           {aiXy.length > 1 && (
             <polyline
@@ -121,8 +121,8 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
         ))}
       </div>
       <div className="d-legend">
-        <span><i style={{ background: "var(--cyan)" }} />Inbound</span>
-        <span><i style={{ background: "var(--orange)" }} />Outbound</span>
+        <span><i style={{ background: "#3b82f6" }} />Inbound</span>
+        <span><i style={{ background: "#f97316" }} />Outbound</span>
         <span><i style={{ background: "var(--green)" }} />Handled by AI (%)</span>
       </div>
       <div className="d-ticks">
