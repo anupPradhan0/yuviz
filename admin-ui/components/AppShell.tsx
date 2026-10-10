@@ -12,6 +12,8 @@ import { clearAllAgentDrafts } from "@/lib/agentDraft";
 export const ACTIVE_TENANT_STORAGE_KEY = "yuviz.activeTenantId";
 /** Stored when a superadmin explicitly picks "All tenants" (distinct from nothing stored). */
 export const ALL_TENANTS_SENTINEL = "__all__";
+// The pre-paint script in app/layout.tsx reads the same key.
+const THEME_STORAGE_KEY = "yuviz.theme";
 
 function tenantInitial(name: string): string {
   return (name.trim()[0] || "?").toUpperCase();
@@ -186,7 +188,10 @@ const monthKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).pad
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [theme, setTheme] = useState<"dark" | "light">("light");
+  // The layout script already applied the saved theme; theme only renders inside the closed account menu.
+  const [theme, setTheme] = useState<"dark" | "light">(() =>
+    typeof document !== "undefined" && document.documentElement.dataset.theme === "dark" ? "dark" : "light",
+  );
   const [search, setSearch] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
@@ -510,7 +515,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   </div>
                   <button
                     className="account-dropdown-item"
-                    onClick={() => { setTheme((t) => (t === "dark" ? "light" : "dark")); }}
+                    onClick={() => {
+                      const next = theme === "dark" ? "light" : "dark";
+                      setTheme(next);
+                      try { window.localStorage.setItem(THEME_STORAGE_KEY, next); } catch { /* non-fatal */ }
+                    }}
                   >
                     {theme === "dark" ? <Sun size={13} /> : <Moon size={13} />}
                     <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
