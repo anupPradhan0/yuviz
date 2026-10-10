@@ -63,7 +63,7 @@ export default function CallFlowsPage() {
     return [...matched].sort((a, b) => a.name.localeCompare(b.name));
   }, [flows, search]);
 
-  const open = (f: FlowRow) => router.push(`/phone-menus/${f.id}`);
+  const open = (f: FlowRow) => router.push(`/ivr-call/${f.id}`);
 
   const remove = async (f: FlowRow) => {
     const msg =
@@ -85,7 +85,7 @@ export default function CallFlowsPage() {
     <>
       <div className="card">
         <div className="card-hdr">
-          <span className="card-title">Phone menus</span>
+          <span className="card-title">IVR-Call</span>
           <input
             className="form-input"
             style={{ width: 200, marginLeft: "auto" }}
@@ -101,7 +101,7 @@ export default function CallFlowsPage() {
           <div className="card-body"><div className="error-banner">{error}</div></div>
         ) : rows.length === 0 ? (
           <div className="empty-state">
-            No phone menus yet. A phone menu answers the call, plays options like &ldquo;press 1 for
+            No IVR call menus yet. An IVR call menu answers the call, plays options like &ldquo;press 1 for
             sales&rdquo; and sends the caller on — create one to draw it.
           </div>
         ) : (
@@ -143,7 +143,7 @@ export default function CallFlowsPage() {
       </div>
 
       <div className="form-hint" style={{ marginTop: 10 }}>
-        A phone menu answers before any AI agent does: it plays messages, listens for keypresses,
+        An IVR call menu answers before any AI agent does: it plays messages, listens for keypresses,
         and sends the caller to a person, to an AI agent, or ends the call. Open a menu to pick
         which agents answer behind it.
       </div>
