@@ -6,12 +6,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Bot, MoreVertical, Pencil, Play, Plus, Workflow } from "lucide-react";
-import { Agent, ApiError, listAgents, listCalls, listPhoneNumbers } from "@/lib/api";
+import { Agent, ApiError, CallListResult, listAgents, listCalls, listPhoneNumbers } from "@/lib/api";
+import { outcomeOf } from "@/lib/callOutcome";
 import { AgentTestPopup } from "@/components/AgentTestPopup";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 import { listAgentKnowledgeBases } from "@/lib/knowledgeApi";
 import { listAgentCustomApis } from "@/lib/toolexecApi";
-import { AGENT_TEMPLATES, agentIcon, agentTemplate } from "@/lib/agentTemplates";
+import { AGENT_TEMPLATES, agentDirection, agentIcon, agentTemplate } from "@/lib/agentTemplates";
 import { LANGUAGES } from "@/lib/engineCatalog";
 import { AgentDraft, clearAgentDraft, draftSavedLabel, loadAgentDraft } from "@/lib/agentDraft";
 
@@ -23,9 +24,39 @@ interface AgentRow extends Agent {
 interface Attachments {
   sources: number | null; // null = the lookup failed; render "—", never 0
   tools: number | null;
-  calls: number | null;
+  calls: CallStats | null;
   numbers: string[] | null;
 }
+
+interface CallStats {
+  real: number;
+  tests: number;
+  avgMs: number | null;
+  okPct: number | null; // share of finished real calls that ended normally
+  partial: boolean; // more calls exist than the sampled page
+}
+
+const STATS_SAMPLE = 200;
+
+function callStats(r: CallListResult): CallStats {
+  const real = r.items.filter((c) => (c.direction as string) !== "test");
+  const finished = real.filter((c) => c.status === "completed" && outcomeOf(c.close_reason).key !== "unrecorded");
+  const durations = real.map((c) => c.duration_ms).filter((d): d is number => d != null);
+  return {
+    real: real.length,
+    tests: r.items.length - real.length,
+    avgMs: durations.length ? durations.reduce((s, d) => s + d, 0) / durations.length : null,
+    okPct: finished.length
+      ? Math.round((100 * finished.filter((c) => outcomeOf(c.close_reason).key === "done").length) / finished.length)
+      : null,
+    partial: r.total > r.items.length,
+  };
+}
+
+const fmtDuration = (ms: number) => {
+  const s = Math.round(ms / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+};
 
 export default function AgentsPage() {
   const router = useRouter();
@@ -85,7 +116,7 @@ export default function AgentsPage() {
           const [kbs, apis, calls] = await Promise.all([
             listAgentKnowledgeBases(a.id).then((r) => r.length).catch(() => null),
             listAgentCustomApis(a.id).then((r) => r.length).catch(() => null),
-            listCalls(a.tenantSlug, { agentId: a.id, limit: 1 }).then((r) => r.total).catch(() => null),
+            listCalls(a.tenantSlug, { agentId: a.id, limit: STATS_SAMPLE }).then(callStats).catch(() => null),
           ]);
           const nums = tenantNumbers.get(a.tenant_id);
           const numbers = nums ? nums.filter((n) => n.agent_id === a.id).map((n) => n.did) : null;
@@ -172,6 +203,7 @@ export default function AgentsPage() {
             const language = LANGUAGES.find((l) => l.value === a.language)?.label ?? a.language;
             const Icon = agentIcon(a);
             const tpl = agentTemplate(a);
+            const direction = agentDirection(a);
             const editUrl = `/agents/${a.tenantSlug}/${a.slug}`;
             return (
               <div
@@ -215,20 +247,17 @@ export default function AgentsPage() {
                 <div className="agent-card-name">{a.name}</div>
                 {isAllTenants && <div className="agent-card-acct">{a.tenantName}</div>}
 
-                <dl className="agent-card-meta">
-                  <dt>Type</dt>
-                  <dd>
-                    {tpl ? `${tpl.direction === "inbound" ? "Incoming" : "Outgoing"} · ${tpl.label}` : "Custom"}
-                  </dd>
-                  <dt>Number</dt>
-                  <dd className={att?.numbers?.length ? "" : "muted"}>
-                    {att?.numbers == null
-                      ? "—"
-                      : att.numbers.length === 0
-                        ? "Not connected"
-                        : att.numbers.join(", ")}
-                  </dd>
-                </dl>
+                <div className="agent-card-meta">
+                  {direction && (
+                    <span className={`badge ${direction === "inbound" ? "cyan" : "indigo"}`}>
+                      {direction === "inbound" ? "Inbound" : "Outbound"}
+                    </span>
+                  )}
+                  <span className="badge gray">{tpl?.label ?? "Custom"}</span>
+                  {att?.numbers != null && (att.numbers.length === 0
+                    ? <span className="badge gray">No number</span>
+                    : att.numbers.map((n) => <span key={n} className="badge green">{n}</span>))}
+                </div>
 
                 <div className="agent-card-facts">
                   {language && <span>{language}</span>}
@@ -241,11 +270,24 @@ export default function AgentsPage() {
                   {a.transfer_type !== "none" && <span>Can transfer to a person</span>}
                 </div>
 
+                {att?.calls && (
+                  <div className="agent-card-stats" title={att.calls.partial ? `Based on the latest ${STATS_SAMPLE} calls` : undefined}>
+                    <div><b>{att.calls.real}{att.calls.partial ? "+" : ""}</b><span>Calls</span></div>
+                    <div><b>{att.calls.tests}</b><span>Tests</span></div>
+                    <div><b>{att.calls.avgMs == null ? "—" : fmtDuration(att.calls.avgMs)}</b><span>Avg length</span></div>
+                    <div>
+                      <b className={att.calls.okPct == null ? "" : att.calls.okPct >= 80 ? "good" : att.calls.okPct >= 50 ? "warn" : "bad"}>
+                        {att.calls.okPct == null ? "—" : `${att.calls.okPct}%`}
+                      </b>
+                      <span>Ended well</span>
+                    </div>
+                  </div>
+                )}
+
                 <div className="agent-card-foot">
                   <span className={`agent-card-status${a.status === "active" ? " on" : ""}`}>
                     <i />{a.status === "active" ? "Live" : "Paused"}
                   </span>
-                  {att?.calls != null && <span>{att.calls} call{att.calls === 1 ? "" : "s"}</span>}
                 </div>
               </div>
             );
