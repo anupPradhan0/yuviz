@@ -508,7 +508,7 @@ function Canvas({ flow, tenantSlug }: { flow: CallFlow; tenantSlug: string }) {
                   <div className="form-group">
                     <div className="cf-field-row">
                       <label className="form-label">
-                        Voice <span className="hint">used by every spoken step in this menu</span>
+                        Voice <span className="hint">speaks this menu&apos;s prompts; agent steps use their own voice</span>
                       </label>
                     </div>
                     <select

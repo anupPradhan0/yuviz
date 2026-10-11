@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import os
 import re
 import tempfile
 import uuid
@@ -546,5 +547,9 @@ async def export_calls(spec: CallExport, *, tenant_slug: str | None) -> tuple[st
     with tempfile.NamedTemporaryFile(prefix="calls-export-", suffix=f".{spec.format}", delete=False) as f:
         path = f.name
     writer = _write_xlsx if spec.format == "xlsx" else _write_csv
-    await asyncio.to_thread(writer, path, list(spec.columns), rows)
+    try:
+        await asyncio.to_thread(writer, path, list(spec.columns), rows)
+    except BaseException:
+        os.unlink(path)
+        raise
     return path, truncated

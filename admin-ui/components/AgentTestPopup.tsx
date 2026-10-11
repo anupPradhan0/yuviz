@@ -29,14 +29,27 @@ export function AgentTestPopup({ tenantSlug, agentSlug, name, icon: Icon, onClos
   const [mode, setMode] = useState<Mode>("browser");
   const soon = MODES.find((m) => m.key === mode)?.soon;
   const logRef = useRef<HTMLDivElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
   const live = call.state !== "idle" && call.state !== "ended" && call.state !== "error";
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
   }, [call.transcript.length]);
 
+  useEffect(() => {
+    const trigger = document.activeElement as HTMLElement | null;
+    popRef.current?.querySelector<HTMLElement>(".test-pop-round")?.focus();
+    return () => trigger?.focus();
+  }, []);
+
   return (
-    <div className="test-pop" role="dialog" aria-label={`Test ${name}`}>
+    <div
+      className="test-pop"
+      role="dialog"
+      aria-label={`Test ${name}`}
+      ref={popRef}
+      onKeyDown={(e) => e.key === "Escape" && !live && onClose()}
+    >
       <div className="test-pop-hdr">
         <div className="test-pop-ico">
           <Icon size={18} />

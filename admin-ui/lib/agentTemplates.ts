@@ -88,7 +88,7 @@ export function agentTemplate(agent: { name: string; greeting: string | null }):
   const name = agent.name.trim().toLowerCase();
   return (
     AGENT_TEMPLATES.find(
-      (t) => t.greeting === agent.greeting?.trim() || (name.length > 3 && t.label.toLowerCase().startsWith(name)),
+      (t) => t.greeting === agent.greeting?.trim() || t.label.toLowerCase() === name,
     ) ?? null
   );
 }

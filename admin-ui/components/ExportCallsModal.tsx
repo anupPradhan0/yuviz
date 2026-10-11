@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Download } from "lucide-react";
 import { Modal } from "@/components/Modal";
 import { ApiError, CallExportColumn, CallExportRequest, exportCalls } from "@/lib/api";
@@ -56,6 +56,9 @@ export function ExportCallsModal({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
+  const pending = useRef<AbortController | null>(null);
+
+  useEffect(() => () => pending.current?.abort(), []);
 
   const toggle = (key: CallExportColumn) =>
     setColumns((prev) => {
@@ -65,6 +68,8 @@ export function ExportCallsModal({
     });
 
   const download = async () => {
+    const ctrl = new AbortController();
+    pending.current = ctrl;
     setBusy(true);
     setError(null);
     try {
@@ -73,14 +78,16 @@ export function ExportCallsModal({
         format,
         columns: available.filter((c) => columns.has(c.key)).map((c) => c.key),
         timezone: browserTimezone(),
-      });
+      }, ctrl.signal);
+      if (ctrl.signal.aborted) return;
       saveFile(result.blob, `calls-${new Date().toISOString().slice(0, 10)}.${format}`);
       if (result.truncated) setTruncated(true);
       else onClose();
     } catch (e) {
+      if (ctrl.signal.aborted) return;
       setError(e instanceof ApiError ? e.detail : String(e));
     } finally {
-      setBusy(false);
+      if (!ctrl.signal.aborted) setBusy(false);
     }
   };
 

@@ -592,3 +592,16 @@ async def test_export_never_reads_another_tenants_calls(test_tenant, scoped, poo
     finally:
         await pool.execute("DELETE FROM calls WHERE session_id = ANY($1)", ids)
         await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+
+async def test_export_removes_the_temp_file_when_writing_fails(test_tenant, scoped, pool, monkeypatch, tmp_path):
+    import tempfile
+
+    def boom(*_):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(calls, "_write_csv", boom)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    with pytest.raises(OSError):
+        await _export({"tenant_slugs": [test_tenant["slug"]], "columns": ["session_id"]})
+    assert list(tmp_path.iterdir()) == []

@@ -737,7 +737,10 @@ export interface CallExportRequest {
 }
 
 /** `truncated`: more calls matched than the server's per-export row cap. */
-export const exportCalls = async (body: CallExportRequest): Promise<{ blob: Blob; truncated: boolean }> => {
+export const exportCalls = async (
+  body: CallExportRequest,
+  signal?: AbortSignal,
+): Promise<{ blob: Blob; truncated: boolean }> => {
   const token = getToken();
   const res = await fetch(`${BASE_URL}/calls/export`, {
     method: "POST",
@@ -746,8 +749,13 @@ export const exportCalls = async (body: CallExportRequest): Promise<{ blob: Blob
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify(body),
+    signal,
   });
   if (!res.ok) {
+    if (res.status === 401) {
+      clearToken();
+      if (window.location.pathname !== "/login") window.location.href = "/login";
+    }
     let detail = res.statusText;
     try {
       const raw = (await res.json())?.detail;

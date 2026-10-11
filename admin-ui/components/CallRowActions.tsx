@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
 import { Download, Eye, FileText, LucideIcon, MoreHorizontal, PlayCircle } from "lucide-react";
@@ -55,6 +55,8 @@ export function CallRowActions({ call, onOpen }: { call: CallWithTenant; onOpen:
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
   const [transcript, setTranscript] = useState<TranscriptEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   const recording = playableRecording(call.recording_ref);
   const noRecording = call.recording_ref
@@ -68,26 +70,45 @@ export function CallRowActions({ call, onOpen }: { call: CallWithTenant; onOpen:
     window.addEventListener("scroll", close, true);
     window.addEventListener("resize", close);
     window.addEventListener("keydown", onKey);
+    const trigger = triggerRef.current;
+    menuRef.current?.querySelector<HTMLElement>("[role=menuitem]")?.focus();
     return () => {
       window.removeEventListener("scroll", close, true);
       window.removeEventListener("resize", close);
       window.removeEventListener("keydown", onKey);
+      // The focused item was just unmounted; hand focus back unless something else took it.
+      if (document.activeElement === document.body) trigger?.focus();
     };
   }, [menuPos]);
 
-  const openTranscript = () => {
-    setPanel("transcript");
-    setTranscript(null);
-    if (!call.has_transcript) {
-      setTranscript([]);
-      return;
-    }
+  const onMenuKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Tab") return setMenuPos(null);
+    const items = [...(menuRef.current?.querySelectorAll<HTMLElement>("[role=menuitem]") ?? [])];
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    const next = ({ ArrowDown: at + 1, ArrowUp: at - 1 + items.length, Home: 0, End: items.length - 1 } as Record<string, number>)[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    items[next % items.length]?.focus();
+  };
+
+  useEffect(() => {
+    if (panel !== "transcript" || !call.has_transcript) return;
+    let active = true;
     getTranscript(call.session_id)
-      .then(setTranscript)
+      .then((t) => active && setTranscript(t))
       .catch((e) => {
+        if (!active) return;
         setError(e instanceof ApiError ? e.detail : String(e));
         setPanel("error");
       });
+    return () => {
+      active = false;
+    };
+  }, [panel, call.session_id, call.has_transcript]);
+
+  const openTranscript = () => {
+    setTranscript(call.has_transcript ? null : []);
+    setPanel("transcript");
   };
 
   const downloadRecording = () => {
@@ -110,6 +131,7 @@ export function CallRowActions({ call, onOpen }: { call: CallWithTenant; onOpen:
     // The row itself opens the call; keep clicks and keys here from reaching it.
     <div className="call-actions" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
       <button
+        ref={triggerRef}
         type="button"
         className={`call-action${menuPos ? " on" : ""}`}
         title="Actions"
@@ -128,20 +150,27 @@ export function CallRowActions({ call, onOpen }: { call: CallWithTenant; onOpen:
       {menuPos && createPortal(
         <>
           <div className="ed2-menu-backdrop" onClick={() => setMenuPos(null)} />
-          <div className="ed2-menu-pop call-menu" role="menu" style={{ top: menuPos.top, left: menuPos.left }}>
-            {items.map(({ icon: Icon, label, run, off }) => (
+          <div
+            ref={menuRef}
+            className="ed2-menu-pop call-menu"
+            role="menu"
+            aria-label="Call actions"
+            style={{ top: menuPos.top, left: menuPos.left }}
+            onKeyDown={onMenuKey}
+          >
+            {items.map((item) => (
               <button
-                key={label}
+                key={item.label}
                 role="menuitem"
-                aria-disabled={!!off}
-                title={off}
+                aria-disabled={!!item.off}
+                title={item.off}
                 onClick={() => {
-                  if (off) return;
+                  if (item.off) return;
                   setMenuPos(null);
-                  run();
+                  item.run();
                 }}
               >
-                <Icon size={15} /> {label}
+                <item.icon size={15} /> {item.label}
               </button>
             ))}
           </div>

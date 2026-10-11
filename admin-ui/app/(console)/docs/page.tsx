@@ -550,8 +550,9 @@ export default function DocsPage() {
 
               <H3>The steps you can add</H3>
               <Field name="Start" required>
-                Every menu begins here. It carries the <strong>voice</strong> used by every
-                speaking step in the menu — set it once, here, not per step.
+                Every menu begins here. It carries the <strong>voice</strong> for the menu&apos;s
+                own prompts — set it once, here, not per step. An agent step speaks with the
+                agent&apos;s voice when the agent has one.
               </Field>
               <Field name="Play message">
                 Speaks something and moves on. Use it for a welcome or an announcement.
