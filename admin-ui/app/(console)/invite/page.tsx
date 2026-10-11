@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { acceptInvite, ApiError, getInvite, InviteAcceptInfo } from "@/lib/api";
+import { BrandMark } from "@/components/BrandMark";
 
 // Public accept-invite page. The token lives only in the URL fragment so it never reaches a
 // server; never move it into a query string.
@@ -62,15 +63,7 @@ export default function InvitePage() {
     <div className="login-screen">
       <div className="login-card">
         <div className="login-logo">
-          <div className="login-logo-icon">
-            <svg width="20" height="18" viewBox="0 0 18 16" fill="none">
-              <rect x="0" y="6" width="2.5" height="4" rx="1.25" fill="currentColor" />
-              <rect x="3.75" y="3.5" width="2.5" height="9" rx="1.25" fill="currentColor" />
-              <rect x="7.5" y="0" width="3" height="16" rx="1.5" fill="currentColor" />
-              <rect x="11.75" y="3.5" width="2.5" height="9" rx="1.25" fill="currentColor" />
-              <rect x="15.5" y="5.5" width="2.5" height="5" rx="1.25" fill="currentColor" />
-            </svg>
-          </div>
+          <BrandMark size={38} className="login-logo-icon" />
           <div className="login-logo-text">
             Yuviz<span>.ai</span>
           </div>

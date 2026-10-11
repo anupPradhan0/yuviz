@@ -7,6 +7,7 @@ import { Check, ChevronDown, Moon, Sun } from "lucide-react";
 import { getCurrentUser, isConsoleRole, listAllUsageTrend, listTenants, Tenant, User } from "@/lib/api";
 import { clearToken, getToken } from "@/lib/auth";
 import { clearAllAgentDrafts } from "@/lib/agentDraft";
+import { BrandMark } from "@/components/BrandMark";
 
 // Shared with other pages' tenant pickers (e.g. Live Calls) so they stay in sync with the header.
 export const ACTIVE_TENANT_STORAGE_KEY = "yuviz.activeTenantId";
@@ -361,11 +362,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       <aside className={`sidebar${collapsed ? " collapsed" : ""}`}>
         <div className="logo">
-          <div className="logo-icon" aria-hidden="true">
-            <span className="logo-bar" />
-            <span className="logo-bar" />
-            <span className="logo-bar" />
-          </div>
+          <BrandMark size={32} className="logo-icon" />
           <div className="logo-text">Yuviz<span>.ai</span></div>
           <button
             className="sidebar-collapse-btn"
