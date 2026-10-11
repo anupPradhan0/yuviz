@@ -536,7 +536,7 @@ export default function DocsPage() {
               </P>
 
               <Note>
-                <strong>You do not need a phone menu.</strong> An agent answers perfectly well
+                <strong>You do not need an IVR-Call menu.</strong> An agent answers perfectly well
                 on its own. Add one only when callers should choose from options, key
                 in a number, or reach different destinations before anyone speaks to
                 them.
@@ -621,7 +621,7 @@ export default function DocsPage() {
                 <strong>An attached menu takes over the whole call.</strong> The caller
                 hears the menu, not the agent&apos;s greeting — the agent only speaks if a{" "}
                 <em>hand to agent</em> step reaches it. If an agent that used to
-                talk suddenly answers with a menu, a phone menu is attached to it.
+                talk suddenly answers with a menu, an IVR-Call menu is attached to it.
               </Note>
             </>
           )}
@@ -793,7 +793,7 @@ export default function DocsPage() {
 
               <H3>It answers a menu instead of talking</H3>
               <P>
-                A phone menu is attached to the agent. Detach it unless you meant the
+                An IVR-Call menu is attached to the agent. Detach it unless you meant the
                 call to start with a keypad menu.
               </P>
             </>

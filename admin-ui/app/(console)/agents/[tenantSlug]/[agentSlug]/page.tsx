@@ -22,6 +22,7 @@ import { AgentVoiceSettings, isLanguageError, multilingualPayload } from "@/comp
 import { AgentTestPanel } from "@/components/AgentTestPanel";
 import { LANGUAGES, OTHER } from "@/lib/engineCatalog";
 import { normalizeDialTarget } from "@/lib/dialTargets";
+import { useMenuKeys } from "@/lib/useMenuKeys";
 
 type Section = "instructions" | "voice" | "knowledge" | "settings" | "advanced";
 
@@ -110,6 +111,7 @@ export default function AgentDetailPage() {
   const [beforeRewrite, setBeforeRewrite] = useState<string | null>(null);
 
   const [menuOpen, setMenuOpen] = useState(false);
+  const { triggerRef: menuTriggerRef, menuRef, onMenuKey } = useMenuKeys(menuOpen, () => setMenuOpen(false));
   const [duplicating, setDuplicating] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -486,13 +488,20 @@ export default function AgentDetailPage() {
             Conversation steps <ArrowRight size={13} />
           </button>
           <div className="ed2-menu">
-            <button className="btn btn-ghost btn-sm" aria-label="More actions" aria-expanded={menuOpen} onClick={() => setMenuOpen((o) => !o)}>
+            <button
+              ref={menuTriggerRef}
+              className="btn btn-ghost btn-sm"
+              aria-label="More actions"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              onClick={() => setMenuOpen((o) => !o)}
+            >
               <MoreHorizontal size={15} />
             </button>
             {menuOpen && (
               <>
                 <div className="ed2-menu-backdrop" onClick={() => setMenuOpen(false)} />
-                <div className="ed2-menu-pop" role="menu">
+                <div ref={menuRef} className="ed2-menu-pop" role="menu" onKeyDown={onMenuKey}>
                   <button
                     role="menuitem"
                     onClick={handleDuplicate}

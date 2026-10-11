@@ -4,10 +4,11 @@
 // Cards show only stored values — no invented metrics like containment rate.
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bot, MoreVertical, Pencil, Play, Plus, Workflow } from "lucide-react";
-import { Agent, ApiError, CallListResult, listAgents, listCalls, listPhoneNumbers } from "@/lib/api";
-import { outcomeOf } from "@/lib/callOutcome";
+import { Agent, AgentCallStats, ApiError, getAgentCallStats, listAgents, listPhoneNumbers } from "@/lib/api";
+import { useMenuKeys } from "@/lib/useMenuKeys";
 import { AgentTestPopup } from "@/components/AgentTestPopup";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 import { listAgentKnowledgeBases } from "@/lib/knowledgeApi";
@@ -24,33 +25,47 @@ interface AgentRow extends Agent {
 interface Attachments {
   sources: number | null; // null = the lookup failed; render "—", never 0
   tools: number | null;
-  calls: CallStats | null;
+  calls: AgentCallStats | null;
   numbers: string[] | null;
 }
 
-interface CallStats {
-  real: number;
-  tests: number;
-  avgMs: number | null;
-  okPct: number | null; // share of finished real calls that ended normally
-  partial: boolean; // more calls exist than the sampled page
-}
+const NO_CALLS: Omit<AgentCallStats, "agent_id"> = { calls: 0, tests: 0, avg_duration_ms: null, finished: 0, failed: 0 };
 
-const STATS_SAMPLE = 200;
+// Same rule as the calls page: only transfer-failed and dropped calls count as failed.
+const successPct = (s: AgentCallStats) =>
+  s.finished ? Math.round((100 * (s.finished - s.failed)) / s.finished) : null;
 
-function callStats(r: CallListResult): CallStats {
-  const real = r.items.filter((c) => (c.direction as string) !== "test");
-  const finished = real.filter((c) => c.status === "completed" && outcomeOf(c.close_reason).key !== "unrecorded");
-  const durations = real.map((c) => c.duration_ms).filter((d): d is number => d != null);
-  return {
-    real: real.length,
-    tests: r.items.length - real.length,
-    avgMs: durations.length ? durations.reduce((s, d) => s + d, 0) / durations.length : null,
-    okPct: finished.length
-      ? Math.round((100 * finished.filter((c) => outcomeOf(c.close_reason).key === "done").length) / finished.length)
-      : null,
-    partial: r.total > r.items.length,
-  };
+function AgentCardMenu({ editUrl, stepsUrl }: { editUrl: string; stepsUrl: string }) {
+  const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const { triggerRef, menuRef, onMenuKey } = useMenuKeys(open, () => setOpen(false));
+  return (
+    <div className="ed2-menu">
+      <button
+        ref={triggerRef}
+        className="agent-card-icon-btn"
+        aria-label="More actions"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <MoreVertical size={15} />
+      </button>
+      {open && (
+        <>
+          <div className="ed2-menu-backdrop" onClick={() => setOpen(false)} />
+          <div ref={menuRef} className="ed2-menu-pop" role="menu" onKeyDown={onMenuKey}>
+            <button role="menuitem" onClick={() => router.push(editUrl)}>
+              <Pencil size={13} /> Edit agent
+            </button>
+            <button role="menuitem" onClick={() => router.push(stepsUrl)}>
+              <Workflow size={13} /> Conversation steps
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 const fmtDuration = (ms: number) => {
@@ -67,7 +82,6 @@ export default function AgentsPage() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState<AgentDraft | null>(null);
-  const [menuFor, setMenuFor] = useState<string | null>(null);
   const [testing, setTesting] = useState<AgentRow | null>(null);
 
   useEffect(() => {
@@ -106,20 +120,20 @@ export default function AgentsPage() {
       setLoading(false);
 
       // No bulk endpoint for attachment counts; failures degrade to "—" per agent.
-      const tenantNumbers = new Map(
-        await Promise.all(
-          targets.map(async (t) => [t.id, await listPhoneNumbers(t.id).catch(() => null)] as const),
-        ),
-      );
+      const [tenantNumbers, tenantStats] = await Promise.all([
+        Promise.all(targets.map(async (t) => [t.id, await listPhoneNumbers(t.id).catch(() => null)] as const)),
+        Promise.all(targets.map(async (t) => [t.id, await getAgentCallStats(t.slug).catch(() => null)] as const)),
+      ]).then(([n, s]) => [new Map(n), new Map(s)] as const);
       const entries = await Promise.all(
         list.map(async (a) => {
-          const [kbs, apis, calls] = await Promise.all([
+          const [kbs, apis] = await Promise.all([
             listAgentKnowledgeBases(a.id).then((r) => r.length).catch(() => null),
             listAgentCustomApis(a.id).then((r) => r.length).catch(() => null),
-            listCalls(a.tenantSlug, { agentId: a.id, limit: STATS_SAMPLE }).then(callStats).catch(() => null),
           ]);
           const nums = tenantNumbers.get(a.tenant_id);
           const numbers = nums ? nums.filter((n) => n.agent_id === a.id).map((n) => n.did) : null;
+          const stats = tenantStats.get(a.tenant_id);
+          const calls = stats ? (stats.find((s) => s.agent_id === a.id) ?? { agent_id: a.id, ...NO_CALLS }) : null;
           return [a.id, { sources: kbs, tools: apis, calls, numbers }] as const;
         }),
       );
@@ -206,45 +220,16 @@ export default function AgentsPage() {
             const direction = agentDirection(a);
             const editUrl = `/agents/${a.tenantSlug}/${a.slug}`;
             return (
-              <div
-                key={a.id}
-                className={`agent-card${a.status === "active" ? "" : " paused"}`}
-                role="link"
-                tabIndex={0}
-                onClick={() => router.push(editUrl)}
-                onKeyDown={(e) => e.key === "Enter" && e.target === e.currentTarget && router.push(editUrl)}
-              >
-                <div className="agent-card-top" onClick={(e) => e.stopPropagation()}>
+              <div key={a.id} className={`agent-card${a.status === "active" ? "" : " paused"}`}>
+                <div className="agent-card-top">
                   <div className="agent-card-avatar"><Icon size={22} /></div>
                   <button className="agent-card-icon-btn" aria-label={`Test ${a.name}`} title="Test it" onClick={() => setTesting(a)}>
                     <Play size={15} />
                   </button>
-                  <div className="ed2-menu">
-                    <button
-                      className="agent-card-icon-btn"
-                      aria-label="More actions"
-                      aria-expanded={menuFor === a.id}
-                      onClick={() => setMenuFor(menuFor === a.id ? null : a.id)}
-                    >
-                      <MoreVertical size={15} />
-                    </button>
-                    {menuFor === a.id && (
-                      <>
-                        <div className="ed2-menu-backdrop" onClick={() => setMenuFor(null)} />
-                        <div className="ed2-menu-pop" role="menu">
-                          <button role="menuitem" onClick={() => router.push(editUrl)}>
-                            <Pencil size={13} /> Edit agent
-                          </button>
-                          <button role="menuitem" onClick={() => router.push(`/workflows/${a.tenantSlug}/${a.slug}`)}>
-                            <Workflow size={13} /> Conversation steps
-                          </button>
-                        </div>
-                      </>
-                    )}
-                  </div>
+                  <AgentCardMenu editUrl={editUrl} stepsUrl={`/workflows/${a.tenantSlug}/${a.slug}`} />
                 </div>
 
-                <div className="agent-card-name">{a.name}</div>
+                <Link href={editUrl} className="agent-card-name agent-card-link">{a.name}</Link>
                 {isAllTenants && <div className="agent-card-acct">{a.tenantName}</div>}
 
                 <div className="agent-card-meta">
@@ -270,19 +255,22 @@ export default function AgentsPage() {
                   {a.transfer_type !== "none" && <span>Can transfer to a person</span>}
                 </div>
 
-                {att?.calls && (
-                  <div className="agent-card-stats" title={att.calls.partial ? `Based on the latest ${STATS_SAMPLE} calls` : undefined}>
-                    <div><b>{att.calls.real}{att.calls.partial ? "+" : ""}</b><span>Calls</span></div>
-                    <div><b>{att.calls.tests}</b><span>Tests</span></div>
-                    <div><b>{att.calls.avgMs == null ? "—" : fmtDuration(att.calls.avgMs)}</b><span>Avg length</span></div>
-                    <div>
-                      <b className={att.calls.okPct == null ? "" : att.calls.okPct >= 80 ? "good" : att.calls.okPct >= 50 ? "warn" : "bad"}>
-                        {att.calls.okPct == null ? "—" : `${att.calls.okPct}%`}
-                      </b>
-                      <span>Ended well</span>
+                {att?.calls && (() => {
+                  const pct = successPct(att.calls);
+                  return (
+                    <div className="agent-card-stats">
+                      <div><b>{att.calls.calls}</b><span>Calls</span></div>
+                      <div><b>{att.calls.tests}</b><span>Tests</span></div>
+                      <div><b>{att.calls.avg_duration_ms == null ? "—" : fmtDuration(att.calls.avg_duration_ms)}</b><span>Avg length</span></div>
+                      <div>
+                        <b className={pct == null ? "" : pct >= 80 ? "good" : pct >= 50 ? "warn" : "bad"}>
+                          {pct == null ? "—" : `${pct}%`}
+                        </b>
+                        <span>Success</span>
+                      </div>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
 
                 <div className="agent-card-foot">
                   <span className={`agent-card-status${a.status === "active" ? " on" : ""}`}>

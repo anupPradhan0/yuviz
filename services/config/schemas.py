@@ -271,7 +271,6 @@ class CallExport(BaseModel):
     status: Literal[
         "live", "completed", "succeeded", "failed", "done", "to_person", "transfer_failed", "dropped",
     ] | None = None
-    turns: Literal["0", "few", "many"] | None = None
 
 
 class CallFlowCreate(BaseModel):

@@ -313,6 +313,37 @@ async def get_todays_activity(tenant_slug: str, *, tz: str = "UTC") -> list[dict
     return [dict(r) for r in rows]
 
 
+async def get_agent_call_stats(tenant_slug: str) -> list[dict[str, Any]]:
+    """All-time per-agent totals for the agent cards; "failed" matches the export/calls-page definition."""
+    pool = await db.get_pool()
+    async with tenant_conn(pool) as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                agent_id,
+                COUNT(*) FILTER (WHERE direction IS DISTINCT FROM 'test') AS calls,
+                COUNT(*) FILTER (WHERE direction = 'test') AS tests,
+                AVG(duration_ms) FILTER (WHERE direction IS DISTINCT FROM 'test') AS avg_duration_ms,
+                COUNT(*) FILTER (
+                    WHERE direction IS DISTINCT FROM 'test' AND ended_at IS NOT NULL AND close_reason = ANY($2)
+                ) AS finished,
+                COUNT(*) FILTER (
+                    WHERE direction IS DISTINCT FROM 'test' AND ended_at IS NOT NULL AND close_reason = ANY($3)
+                ) AS failed
+            FROM calls
+            WHERE tenant_id = $1 AND agent_id IS NOT NULL
+            GROUP BY agent_id
+            """,
+            tenant_slug,
+            [reason for reasons in _OUTCOME_REASONS.values() for reason in reasons],
+            [*_OUTCOME_REASONS["transfer_failed"], *_OUTCOME_REASONS["dropped"]],
+        )
+    return [
+        {**dict(r), "avg_duration_ms": None if r["avg_duration_ms"] is None else round(r["avg_duration_ms"])}
+        for r in rows
+    ]
+
+
 async def get_latency_stats(tenant_slug: str, *, hours: int = 24) -> list[dict[str, Any]]:
     """Per-agent, per-LLM-engine latency percentiles; turns without voice_to_voice_ms are excluded."""
     pool = await db.get_pool()
@@ -434,11 +465,6 @@ def _export_where(spec: CallExport, tenant_slugs: list[str]) -> tuple[str, list[
     elif spec.status is not None:
         where.append("c.ended_at IS NOT NULL")
         add("c.close_reason = ANY({p})", list(_OUTCOME_REASONS[spec.status]))
-    where.extend({
-        "0": ["COALESCE(c.turn_count, 0) = 0"],
-        "few": ["c.turn_count BETWEEN 1 AND 5"],
-        "many": ["c.turn_count > 5"],
-    }.get(spec.turns or "", []))
     return " AND ".join(where), params
 
 

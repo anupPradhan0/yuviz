@@ -645,7 +645,6 @@ export interface Call {
   extracted_variables: Record<string, unknown> | null;
   sentiment: CallSentiment | null;
   sentiment_reason: string | null;
-  recording_ref: string | null;
   // List responses only.
   has_transcript?: boolean;
 }
@@ -733,7 +732,6 @@ export interface CallExportRequest {
   duration?: string;
   sentiment?: string;
   status?: string;
-  turns?: string;
 }
 
 /** `truncated`: more calls matched than the server's per-export row cap. */
@@ -1023,6 +1021,19 @@ export interface TodaysActivityPoint {
 
 export const getTodaysActivity = (tenantSlug: string) =>
   request<TodaysActivityPoint[]>(`/tenants/${tenantSlug}/calls/todays-activity?tz=${viewerTz()}`);
+
+/** All-time per agent; test calls are counted separately from `calls`. */
+export interface AgentCallStats {
+  agent_id: string;
+  calls: number;
+  tests: number;
+  avg_duration_ms: number | null;
+  finished: number;
+  failed: number;
+}
+
+export const getAgentCallStats = (tenantSlug: string) =>
+  request<AgentCallStats[]>(`/tenants/${tenantSlug}/calls/agent-stats`);
 
 export const listAllTodaysActivity = async (tenants: Tenant[]): Promise<TodaysActivityPoint[]> => {
   const perTenant = await Promise.all(tenants.map((t) => getTodaysActivity(t.slug)));

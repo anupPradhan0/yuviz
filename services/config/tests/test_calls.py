@@ -127,6 +127,39 @@ async def test_list_calls_filters_by_agent_and_never_crosses_tenants(test_tenant
         await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
 
 
+async def test_agent_call_stats_count_per_agent_and_never_cross_tenants(test_tenant, scoped, pool):
+    other = await pool.fetchrow(
+        "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
+        "Agent Stats Cross Tenant", f"test-call-as-{uuid.uuid4().hex[:8]}",
+    )
+    mine, foreign = [
+        await pool.fetchval(
+            "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, $2, 'A') RETURNING id",
+            tenant_id, f"test-agent-{uuid.uuid4().hex[:8]}",
+        )
+        for tenant_id in (test_tenant["id"], other["id"])
+    ]
+    ids = [f"test-call-{uuid.uuid4().hex[:8]}" for _ in range(5)]
+    await pool.execute(
+        "INSERT INTO calls (session_id, tenant_id, direction, agent_id, ended_at, duration_ms, close_reason) VALUES "
+        "($1, $6, 'inbound',  $8, NOW(), 10000, 'caller_hangup'), "
+        "($2, $6, 'inbound',  $8, NOW(), 30000, 'TRANSFER_SUCCESS'), "
+        "($3, $6, 'outbound', $8, NOW(), 20000, 'transport_error'), "
+        "($4, $6, 'test',     $8, NOW(), 99000, 'caller_hangup'), "
+        "($5, $7, 'inbound',  $9, NOW(), 5000,  'caller_hangup')",
+        *ids, test_tenant["slug"], other["slug"], mine, foreign,
+    )
+    try:
+        [stats] = await calls.get_agent_call_stats(test_tenant["slug"])
+        assert stats["agent_id"] == mine
+        assert (stats["calls"], stats["tests"], stats["avg_duration_ms"]) == (3, 1, 20000)
+        assert (stats["finished"], stats["failed"]) == (3, 1)
+    finally:
+        await pool.execute("DELETE FROM calls WHERE session_id = ANY($1)", ids)
+        await pool.execute("DELETE FROM agents WHERE id = ANY($1)", [mine, foreign])
+        await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+
 async def test_get_call_unknown_returns_none():
     assert await calls.get_call("does-not-exist") is None
 

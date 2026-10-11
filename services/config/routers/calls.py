@@ -102,6 +102,15 @@ async def get_todays_activity(
     return await calls_service.get_todays_activity(tenant_slug, tz=_valid_tz(tz))
 
 
+@tenant_scoped_router.get("/agent-stats")
+async def get_agent_call_stats(
+    tenant_slug: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    await get_or_404(tenants_service.get_tenant(tenant_slug), f"tenant {tenant_slug!r} not found")
+    return await calls_service.get_agent_call_stats(tenant_slug)
+
+
 def _valid_tz(tz: str) -> str:
     """The viewer's IANA zone; buckets days/hours as the browser shows them."""
     try:

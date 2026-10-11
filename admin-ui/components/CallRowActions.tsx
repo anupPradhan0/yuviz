@@ -1,19 +1,17 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import Link from "next/link";
-import { Download, Eye, FileText, LucideIcon, MoreHorizontal, PlayCircle } from "lucide-react";
+import { Eye, FileText, LucideIcon, MoreHorizontal } from "lucide-react";
 import { Modal } from "@/components/Modal";
 import { CallTranscript } from "@/components/CallTranscript";
 import { sentimentLabel } from "@/components/SentimentBadge";
 import { ApiError, CallWithTenant, TranscriptEntry, getTranscript } from "@/lib/api";
 import { outcomeOf } from "@/lib/callOutcome";
+import { useMenuKeys } from "@/lib/useMenuKeys";
 
-type Panel = "transcript" | "recording" | "error";
-
-// recording_ref is a storage locator; only direct http(s) links can play in the browser.
-const playableRecording = (ref: string | null) => (ref && /^https?:\/\//i.test(ref) ? ref : null);
+type Panel = "transcript" | "error";
 
 function callLabel(c: CallWithTenant): string {
   const parties = c.caller_number || c.called_number ? `${c.caller_number || "—"} → ${c.called_number || "—"}` : `${c.mode} call`;
@@ -55,41 +53,18 @@ export function CallRowActions({ call, onOpen }: { call: CallWithTenant; onOpen:
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
   const [transcript, setTranscript] = useState<TranscriptEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
-
-  const recording = playableRecording(call.recording_ref);
-  const noRecording = call.recording_ref
-    ? "This recording can't be played in the browser"
-    : "No recording for this call";
+  const { triggerRef, menuRef, onMenuKey } = useMenuKeys(menuPos !== null, () => setMenuPos(null));
 
   useEffect(() => {
     if (!menuPos) return;
     const close = () => setMenuPos(null);
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
     window.addEventListener("scroll", close, true);
     window.addEventListener("resize", close);
-    window.addEventListener("keydown", onKey);
-    const trigger = triggerRef.current;
-    menuRef.current?.querySelector<HTMLElement>("[role=menuitem]")?.focus();
     return () => {
       window.removeEventListener("scroll", close, true);
       window.removeEventListener("resize", close);
-      window.removeEventListener("keydown", onKey);
-      // The focused item was just unmounted; hand focus back unless something else took it.
-      if (document.activeElement === document.body) trigger?.focus();
     };
   }, [menuPos]);
-
-  const onMenuKey = (e: React.KeyboardEvent) => {
-    if (e.key === "Tab") return setMenuPos(null);
-    const items = [...(menuRef.current?.querySelectorAll<HTMLElement>("[role=menuitem]") ?? [])];
-    const at = items.indexOf(document.activeElement as HTMLElement);
-    const next = ({ ArrowDown: at + 1, ArrowUp: at - 1 + items.length, Home: 0, End: items.length - 1 } as Record<string, number>)[e.key];
-    if (next === undefined) return;
-    e.preventDefault();
-    items[next % items.length]?.focus();
-  };
 
   useEffect(() => {
     if (panel !== "transcript" || !call.has_transcript) return;
@@ -111,20 +86,9 @@ export function CallRowActions({ call, onOpen }: { call: CallWithTenant; onOpen:
     setPanel("transcript");
   };
 
-  const downloadRecording = () => {
-    const a = document.createElement("a");
-    a.href = recording!;
-    a.download = `recording-${call.session_id}`;
-    a.target = "_blank";
-    a.rel = "noopener";
-    a.click();
-  };
-
-  const items: { icon: LucideIcon; label: string; run: () => void; off?: string }[] = [
+  const items: { icon: LucideIcon; label: string; run: () => void }[] = [
     { icon: FileText, label: "Transcript & summary", run: openTranscript },
-    { icon: PlayCircle, label: "Play recording", run: () => setPanel("recording"), off: recording ? undefined : noRecording },
     { icon: Eye, label: "View details", run: onOpen },
-    { icon: Download, label: "Download recording", run: downloadRecording, off: recording ? undefined : noRecording },
   ];
 
   return (
@@ -162,10 +126,7 @@ export function CallRowActions({ call, onOpen }: { call: CallWithTenant; onOpen:
               <button
                 key={item.label}
                 role="menuitem"
-                aria-disabled={!!item.off}
-                title={item.off}
                 onClick={() => {
-                  if (item.off) return;
                   setMenuPos(null);
                   item.run();
                 }}
@@ -181,7 +142,7 @@ export function CallRowActions({ call, onOpen }: { call: CallWithTenant; onOpen:
       {panel && createPortal(
         <Modal
           open
-          title={panel === "transcript" ? "Transcript & summary" : panel === "recording" ? "Recording" : "Something went wrong"}
+          title={panel === "transcript" ? "Transcript & summary" : "Something went wrong"}
           onClose={() => setPanel(null)}
           footer={panel !== "error" && (
             <Link href={`/calls/${call.session_id}`} className="btn btn-ghost btn-sm">Open full details</Link>
@@ -189,15 +150,6 @@ export function CallRowActions({ call, onOpen }: { call: CallWithTenant; onOpen:
         >
           {panel !== "error" && <div className="form-hint" style={{ marginTop: 0, marginBottom: 10 }}>{callLabel(call)}</div>}
           {panel === "error" && <div className="error-banner" style={{ margin: 0 }}>{error}</div>}
-          {panel === "recording" && recording && (
-            <audio
-              controls autoPlay src={recording} style={{ width: "100%" }}
-              onError={() => {
-                setError("The recording couldn't be loaded. It may have expired or been moved.");
-                setPanel("error");
-              }}
-            />
-          )}
           {panel === "transcript" && (
             <>
               <CallSummary call={call} />
