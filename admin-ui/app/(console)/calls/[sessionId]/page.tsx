@@ -134,9 +134,9 @@ export default function CallDetailPage() {
                 <SentimentBadge sentiment={call.sentiment} />
                 {call.sentiment === null ? (
                   <div className="detail-sentiment-reason">
-                    Not scored. Sentiment is read from the finished transcript when a
-                    call ends — calls that ended before scoring was enabled, or with no
-                    caller speech, stay unscored rather than being shown as neutral.
+                    Not scored. Caller mood analysis is off by default; turn it on in the
+                    agent&apos;s settings. Calls from before it was on stay unscored unless an
+                    operator runs the backfill; calls with no caller speech are never scored.
                   </div>
                 ) : call.sentiment_reason ? (
                   <div className="detail-sentiment-reason">{call.sentiment_reason}</div>
