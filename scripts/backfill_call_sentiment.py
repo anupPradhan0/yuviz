@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Backfill calls.sentiment for ended calls that were never scored (safe to re-run).
 
+Only agents with caller mood analysis on *now* are scored, including calls they took
+while it was off: run it after switching an agent on to score that agent's history.
+
 Requires POSTGRES_DSN and VOICEAI_SENTIMENT_API_KEY or OPENAI_API_KEY.
 One model call per scored call; try --limit first.
 """
@@ -20,6 +23,23 @@ import asyncpg  # noqa: E402
 from services.conversation.pipeline_config import SentimentConfig  # noqa: E402
 from services.conversation.providers.llm.openai import OpenAILLM  # noqa: E402
 from services.conversation.sentiment import SentimentScorer, Turn  # noqa: E402
+
+
+def unscored_calls_query(tenant: str | None, limit: int | None) -> tuple[str, list[object]]:
+    # Opted-out agents' calls are unscored on purpose: never send their transcripts to the model.
+    where = [
+        "sentiment IS NULL", "ended_at IS NOT NULL",
+        "agent_id IN (SELECT id FROM agents WHERE sentiment_analysis_enabled)",
+    ]
+    params: list[object] = []
+    if tenant:
+        params.append(tenant)
+        where.append(f"tenant_id = ${len(params)}")
+    sql = f"SELECT session_id FROM calls WHERE {' AND '.join(where)} ORDER BY started_at DESC"
+    if limit:
+        params.append(limit)
+        sql += f" LIMIT ${len(params)}"
+    return sql, params
 
 
 async def main() -> int:
@@ -42,15 +62,7 @@ async def main() -> int:
         )
         return 1
 
-    where = ["sentiment IS NULL", "ended_at IS NOT NULL"]
-    params: list[object] = []
-    if args.tenant:
-        params.append(args.tenant)
-        where.append(f"tenant_id = ${len(params)}")
-    sql = f"SELECT session_id FROM calls WHERE {' AND '.join(where)} ORDER BY started_at DESC"
-    if args.limit:
-        params.append(args.limit)
-        sql += f" LIMIT ${len(params)}"
+    sql, params = unscored_calls_query(args.tenant, args.limit)
 
     # Cross-tenant by design: a hand-run maintenance script.
     pool = await asyncpg.create_pool(dsn)

@@ -19,7 +19,7 @@ export function SentimentBadge({ sentiment }: { sentiment: CallSentiment | null 
   // where a grey "Neutral" pill would quietly assert a reading nobody made.
   if (sentiment === null) {
     return (
-      <span className="sentiment-unscored" title="Not scored — this call ended before sentiment scoring, had no caller speech, or could not be scored">
+      <span className="sentiment-unscored" title="Not scored — caller mood analysis is off for this agent, or the call had no caller speech or could not be scored">
         —
       </span>
     );
