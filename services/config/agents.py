@@ -698,6 +698,8 @@ async def _replace_prompt(
 
     await cache.invalidate(cache_key(tenant_slug, old["slug"]))
     await call_flows.invalidate_runtime_caches_naming_agent(tenant_id, tenant_slug, agent_id)
+    # config_version moved (bump_agent_config_version trigger); keep cached routes' version in step.
+    await phone_numbers.refresh_routes_for_agent(agent_id)
     return _public_agent(new)
 
 

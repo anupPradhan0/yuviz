@@ -233,3 +233,19 @@ async def test_accept_brace_rule_refuses_only_added_template_braces():
 def test_customer_data_error_is_a_prompt_structure_error():
     # Router handlers must list CustomerDataError first; this pins why.
     assert issubclass(CustomerDataError, PromptStructureError)
+
+
+async def test_accept_refreshes_the_cached_route_version(pool, test_tenant, scoped):
+    from services.config import cache, phone_numbers
+
+    base = _prompt("base")
+    agent = await _make_agent(test_tenant, base)
+    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did, agent_id=agent["id"])
+    await phone_numbers.get_by_did(did)
+    before = (await cache.get_json(f"did:{did}"))["version"]
+
+    result = await _accept(test_tenant, agent["id"], base, _prompt("one"))
+
+    assert (await cache.get_json(f"did:{did}"))["version"] == result["config_version"] != before
+    await pool.execute("DELETE FROM phone_numbers WHERE did = $1", did)

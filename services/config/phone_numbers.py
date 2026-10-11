@@ -77,20 +77,25 @@ async def get_by_did(did: str, *, platform_scoped: bool = False) -> dict[str, An
 
 async def refresh_routes_for_agent(agent_id: Any) -> None:
     """Rebuild did:{did} for numbers whose primary or fallback is this agent. Call after the
-    agent change commits, so a paused/deleted agent stops receiving calls."""
+    agent change commits, so a paused/deleted agent stops receiving calls.
+
+    FOR UPDATE + writing Redis before the transaction commits: a concurrent
+    update_phone_number() blocks on the same row's lock (it also takes FOR UPDATE) until this
+    transaction ends, so its newer route always overwrites this one, never the reverse."""
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         rows = await conn.fetch(
             "SELECT did FROM phone_numbers "
-            "WHERE (agent_id = $1 OR fallback_agent_id = $1) AND deleted_at IS NULL",
+            "WHERE (agent_id = $1 OR fallback_agent_id = $1) AND deleted_at IS NULL "
+            "ORDER BY did FOR UPDATE",
             agent_id,
         )
-        routes = {r["did"]: await _load_route(conn, r["did"]) for r in rows}
-    for did, route in routes.items():
-        if route is None:
-            await _drop_route(did)
-        else:
-            await _store_route(did, route)
+        for row in rows:
+            route = await _load_route(conn, row["did"])
+            if route is None:
+                await _drop_route(row["did"])
+            else:
+                await _store_route(row["did"], route)
 
 
 async def _load_route(conn: Any, did: str) -> dict[str, Any] | None:

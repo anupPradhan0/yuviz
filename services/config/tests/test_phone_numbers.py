@@ -270,8 +270,18 @@ async def test_pausing_an_agent_moves_its_numbers_to_the_fallback_and_back(test_
     await agents.update_agent(primary["id"], tenant_slug=test_tenant["slug"], status="inactive")
     assert (await cache.get_json(f"did:{did}"))["agent_slug"] == "backup"
 
+    # Pausing the fallback too, while the primary stays paused, must not leave the paused
+    # fallback as the answer — this is the part a missing "OR fallback_agent_id = $1" would miss.
+    await agents.update_agent(backup["id"], tenant_slug=test_tenant["slug"], status="inactive")
+    assert (await cache.get_json(f"did:{did}"))["agent_slug"] == "default"
+
+    await agents.update_agent(backup["id"], tenant_slug=test_tenant["slug"], status="active")
+    assert (await cache.get_json(f"did:{did}"))["agent_slug"] == "backup"
+
     await agents.update_agent(primary["id"], tenant_slug=test_tenant["slug"], status="active")
     assert (await cache.get_json(f"did:{did}"))["agent_slug"] == "primary"
+
+    await pool.execute("DELETE FROM phone_numbers WHERE did = $1", did)
 
 
 async def test_prewarm_never_overwrites_a_route_written_by_the_api(test_tenant, scoped, pool):
@@ -295,7 +305,10 @@ async def test_deleting_an_agent_stops_routing_its_numbers_to_it(test_tenant, sc
 
     await agents.soft_delete_agent(agent["id"], tenant_slug=test_tenant["slug"])
 
-    assert (await cache.get_json(f"did:{did}"))["agent_slug"] != "leaving"
+    route = await cache.get_json(f"did:{did}")
+    assert route == {"tenant_slug": test_tenant["slug"], "agent_slug": "default", "version": None}
+
+    await pool.execute("DELETE FROM phone_numbers WHERE did = $1", did)
 
 
 async def test_route_reload_survives_non_redis_failures(monkeypatch):
