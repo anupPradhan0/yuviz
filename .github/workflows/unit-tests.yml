@@ -18,7 +18,9 @@ jobs:
         image: pgvector/pgvector:pg14
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          # "password" is the test suite's own accepted placeholder (tests/test_env_catalogue.py
+          # ::_is_placeholder) — any other literal here fails test_no_committed_file_holds_a_credential.
+          POSTGRES_PASSWORD: password
           POSTGRES_DB: voiceai
         ports: ["5432:5432"]
         options: >-
@@ -30,12 +32,19 @@ jobs:
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 5s --health-retries 10
+      ollama:
+        image: ollama/ollama:latest
+        ports: ["11434:11434"]
+        options: >-
+          --health-cmd "ollama list"
+          --health-interval 5s --health-timeout 5s --health-retries 15
     env:
-      POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/voiceai
+      POSTGRES_DSN: postgresql://postgres:password@localhost:5432/voiceai
       REDIS_URL: redis://localhost:6379/0
       PGHOST: localhost
       PGUSER: postgres
-      PGPASSWORD: postgres
+      PGPASSWORD: password
+      JWT_SECRET: ci-only-jwt-secret-not-a-real-credential-0123456789
     steps:
       - uses: actions/checkout@v4
 
@@ -57,6 +66,20 @@ jobs:
           psql voiceai -v ON_ERROR_STOP=1 -f database/knowledge_schema.sql
           psql voiceai -v ON_ERROR_STOP=1 -f database/telephony_schema.sql
           psql voiceai -v ON_ERROR_STOP=1 -v yuviz_app_password=ci-only -f database/rls.sql
+
+      # libs/vad_sdk resolves models/silero_vad.onnx from the repo root; the test suite
+      # has no fallback for a missing file (matches docs/setup.md's own local-setup step).
+      - name: Fetch the VAD model
+        run: |
+          mkdir -p models
+          cp "$(python -c 'import faster_whisper, os; print(os.path.dirname(faster_whisper.__file__))')/assets/silero_vad_v6.onnx" models/silero_vad.onnx
+
+      # tests/test_cross_tenant_admin.py expects this exact seeded account to exist.
+      - name: Seed the conversation-service account
+        run: python scripts/create_service_account.py conversation-service@internal.yuviz.ai ci-only-password-not-a-real-credential
+
+      - name: Pull the embedding model
+        run: curl -sf http://localhost:11434/api/pull -d '{"model": "nomic-embed-text"}'
 
       - name: Run tests
         run: python -m pytest -q -p no:cacheprovider -rfE
