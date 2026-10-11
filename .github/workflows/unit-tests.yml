@@ -1,0 +1,85 @@
+name: Unit tests
+
+on:
+  pull_request:
+  push:
+    branches: [redesign, main]
+
+concurrency:
+  group: unit-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector:pg14
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: voiceai
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/voiceai
+      REDIS_URL: redis://localhost:6379/0
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          # CPU wheel: the default Linux torch pulls GBs of CUDA libraries the tests never use.
+          pip install "torch==$(grep -oP '^torch==\K.*' requirements.txt)" --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Apply database schema
+        run: |
+          psql voiceai -v ON_ERROR_STOP=1 -f database/schema.sql
+          psql voiceai -v ON_ERROR_STOP=1 -f database/knowledge_schema.sql
+          psql voiceai -v ON_ERROR_STOP=1 -f database/telephony_schema.sql
+          psql voiceai -v ON_ERROR_STOP=1 -v yuviz_app_password=ci-only -f database/rls.sql
+
+      - name: Run tests
+        run: python -m pytest -q -p no:cacheprovider -rfE
+
+  admin-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: admin-ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: admin-ui/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+      - name: Type check
+        run: npx tsc --noEmit
+      - name: Lint (errors only)
+        run: npx eslint . --quiet
+      - name: Unit tests
+        run: npm test
