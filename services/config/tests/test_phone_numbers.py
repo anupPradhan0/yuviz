@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 
+import asyncpg
 import pytest
 
 from services.config import agents, cache, phone_numbers
@@ -258,6 +259,32 @@ async def test_update_phone_number_rename_writes_through_new_and_clears_old(test
     await pool.execute("DELETE FROM phone_numbers WHERE did = $1", new_did)
 
 
+async def test_pausing_an_agent_moves_its_numbers_to_the_fallback_and_back(test_tenant, scoped, pool):
+    primary = await agents.create_agent(tenant_id=test_tenant["id"], slug="primary", name="Primary")
+    backup = await agents.create_agent(tenant_id=test_tenant["id"], slug="backup", name="Backup")
+    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    await phone_numbers.create_phone_number(
+        tenant_id=test_tenant["id"], did=did, agent_id=primary["id"], fallback_agent_id=backup["id"],
+    )
+    assert (await cache.get_json(f"did:{did}"))["agent_slug"] == "primary"
+
+    await agents.update_agent(primary["id"], tenant_slug=test_tenant["slug"], status="inactive")
+    assert (await cache.get_json(f"did:{did}"))["agent_slug"] == "backup"
+
+    # Pausing the fallback too, while the primary stays paused, must not leave the paused
+    # fallback as the answer — this is the part a missing "OR fallback_agent_id = $1" would miss.
+    await agents.update_agent(backup["id"], tenant_slug=test_tenant["slug"], status="inactive")
+    assert (await cache.get_json(f"did:{did}"))["agent_slug"] == "default"
+
+    await agents.update_agent(backup["id"], tenant_slug=test_tenant["slug"], status="active")
+    assert (await cache.get_json(f"did:{did}"))["agent_slug"] == "backup"
+
+    await agents.update_agent(primary["id"], tenant_slug=test_tenant["slug"], status="active")
+    assert (await cache.get_json(f"did:{did}"))["agent_slug"] == "primary"
+
+    await pool.execute("DELETE FROM phone_numbers WHERE did = $1", did)
+
+
 async def test_prewarm_never_overwrites_a_route_written_by_the_api(test_tenant, scoped, pool):
     # The API writes routes while a reload runs; the reload's older read must not win.
     did = f"test-did-{uuid.uuid4().hex[:8]}"
@@ -268,6 +295,19 @@ async def test_prewarm_never_overwrites_a_route_written_by_the_api(test_tenant, 
     await phone_numbers.prewarm(overwrite=False)
 
     assert await cache.get_json(f"did:{did}") == newer
+
+    await pool.execute("DELETE FROM phone_numbers WHERE did = $1", did)
+
+
+async def test_deleting_an_agent_stops_routing_its_numbers_to_it(test_tenant, scoped, pool):
+    agent = await agents.create_agent(tenant_id=test_tenant["id"], slug="leaving", name="Leaving")
+    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did, agent_id=agent["id"])
+
+    await agents.soft_delete_agent(agent["id"], tenant_slug=test_tenant["slug"])
+
+    route = await cache.get_json(f"did:{did}")
+    assert route == {"tenant_slug": test_tenant["slug"], "agent_slug": "default", "version": None}
 
     await pool.execute("DELETE FROM phone_numbers WHERE did = $1", did)
 
@@ -299,6 +339,18 @@ async def test_startup_prewarm_repairs_a_stale_route(test_tenant, scoped, pool):
     await pool.execute("DELETE FROM phone_numbers WHERE did = $1", did)
 
 
+async def test_agent_update_refreshes_cached_route_version(test_tenant, scoped, pool):
+    agent = await agents.create_agent(tenant_id=test_tenant["id"], slug="versioned", name="Versioned")
+    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did, agent_id=agent["id"])
+
+    await agents.update_agent(agent["id"], tenant_slug=test_tenant["slug"], greeting="Hello again")
+
+    assert (await cache.get_json(f"did:{did}"))["version"] == 2
+
+    await pool.execute("DELETE FROM phone_numbers WHERE did = $1", did)
+
+
 async def test_failed_route_write_is_logged_as_an_error(caplog, monkeypatch):
     import logging
 
@@ -317,3 +369,41 @@ async def test_failed_route_write_is_logged_as_an_error(caplog, monkeypatch):
         await phone_numbers._drop_route("5555")
 
     assert [r.levelno for r in caplog.records] == [logging.ERROR, logging.ERROR]
+
+
+async def test_update_writes_redis_while_the_rows_lock_is_still_held(test_tenant, scoped, pool):
+    """update_phone_number's Redis write must land before its transaction commits (and so
+    before its FOR UPDATE lock on the number's row releases) — otherwise a concurrent
+    refresh_routes_for_agent() that squeezes in right after commit, but before this call's
+    write lands, gets its own fresher write silently overwritten by this one arriving late.
+
+    Proven directly: a second connection tries to take the same row's lock, NOWAIT, from
+    inside the patched _store_route — it must fail, meaning the main transaction (and
+    its lock) are still open at write time."""
+    agent = await agents.create_agent(tenant_id=test_tenant["id"], slug="lock-check", name="Lock check")
+    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    number = await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did, agent_id=agent["id"])
+
+    original_store = phone_numbers._store_route
+    observations: list[bool] = []
+
+    async def spying_store(did_arg, route):
+        async with pool.acquire() as probe:
+            try:
+                await probe.execute(
+                    "SELECT 1 FROM phone_numbers WHERE id = $1 FOR UPDATE NOWAIT", number["id"],
+                )
+                observations.append(False)  # lock was free: write landed after commit — the bug
+            except asyncpg.LockNotAvailableError:
+                observations.append(True)  # lock still held: write landed before commit
+        await original_store(did_arg, route)
+
+    phone_numbers._store_route = spying_store
+    try:
+        await phone_numbers.update_phone_number(number["id"], region="eu")
+    finally:
+        phone_numbers._store_route = original_store
+
+    assert observations == [True]
+
+    await pool.execute("DELETE FROM phone_numbers WHERE did = $1", did)

@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 
 from libs.config_sdk.workflow import starter_graph
-from services.config import agents, workflows
+import uuid
+
+from services.config import agents, cache, phone_numbers, workflows
 
 GRAPH = {
     "version": 1,
@@ -85,6 +87,20 @@ async def test_publish_writes_the_live_graph_bumps_version_and_appends_history(t
     versions = await workflows.list_versions(agent["id"], test_tenant["slug"])
     assert [v["version"] for v in versions] == [2, 1]
     assert versions[0]["node_count"] == 3 and versions[0]["edge_count"] == 2
+
+
+async def test_publish_refreshes_the_cached_route_version(test_tenant, scoped, pool):
+    agent = await _agent(test_tenant)
+    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did, agent_id=agent["id"])
+    await phone_numbers.get_by_did(did)
+    before = (await cache.get_json(f"did:{did}"))["version"]
+    await workflows.save_draft(agent["id"], tenant_slug=test_tenant["slug"], graph=GRAPH)
+
+    result = await workflows.publish(agent["id"], tenant_slug=test_tenant["slug"])
+
+    assert (await cache.get_json(f"did:{did}"))["version"] == result["config_version"] != before
+    await pool.execute("DELETE FROM phone_numbers WHERE did = $1", did)
 
 
 async def test_an_invalid_graph_can_never_reach_the_live_column(test_tenant, scoped):

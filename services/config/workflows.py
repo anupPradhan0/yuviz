@@ -18,7 +18,7 @@ from libs.config_sdk.workflow import (
 from libs.tenancy import tenant_conn
 
 from . import agents as agents_service
-from . import audit, cache, db
+from . import audit, cache, db, phone_numbers
 
 
 class WorkflowValidationError(Exception):
@@ -274,6 +274,8 @@ async def publish(
             new = dict(new_row)
 
     await cache.invalidate(agents_service.cache_key(tenant_slug, new["slug"]))
+    # config_version moved (bump_config_version trigger); keep cached routes' version in step.
+    await phone_numbers.refresh_routes_for_agent(agent_id)
     return {
         "version": version,
         "config_version": new["config_version"],

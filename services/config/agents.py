@@ -30,7 +30,7 @@ from libs.config_sdk.languages import (
 from libs.config_sdk.workflow import graphs_equivalent, starter_graph
 from libs.tenancy import platform_conn, tenant_conn
 
-from . import audit, cache, call_flows, db
+from . import audit, cache, call_flows, db, phone_numbers
 from .provider_configs import require_usable_tts_voice
 from .system_prompt import check_prompt_structure
 
@@ -639,6 +639,7 @@ async def update_agent(
     # A published IVR flow handing calls to this agent cached whether it can
     # answer; a deactivation must reach the next call, not the next TTL.
     await call_flows.invalidate_runtime_caches_naming_agent(old["tenant_id"], tenant_slug, agent_id)
+    await phone_numbers.refresh_routes_for_agent(agent_id)
     return _public_agent(new)
 
 
@@ -697,6 +698,8 @@ async def _replace_prompt(
 
     await cache.invalidate(cache_key(tenant_slug, old["slug"]))
     await call_flows.invalidate_runtime_caches_naming_agent(tenant_id, tenant_slug, agent_id)
+    # config_version moved (bump_agent_config_version trigger); keep cached routes' version in step.
+    await phone_numbers.refresh_routes_for_agent(agent_id)
     return _public_agent(new)
 
 
@@ -799,3 +802,4 @@ async def soft_delete_agent(
 
     await cache.invalidate(cache_key(tenant_slug, old["slug"]))
     await call_flows.invalidate_runtime_caches_naming_agent(old["tenant_id"], tenant_slug, agent_id)
+    await phone_numbers.refresh_routes_for_agent(agent_id)
