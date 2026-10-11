@@ -10,6 +10,7 @@ import { Bot, MoreVertical, Pencil, Play, Plus, Workflow } from "lucide-react";
 import { Agent, AgentCallStats, ApiError, getAgentCallStats, listAgents, listPhoneNumbers } from "@/lib/api";
 import { useMenuKeys } from "@/lib/useMenuKeys";
 import { AgentTestPopup } from "@/components/AgentTestPopup";
+import { CallStatsGrid, NO_CALLS } from "@/components/CallStatsGrid";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 import { listAgentKnowledgeBases } from "@/lib/knowledgeApi";
 import { listAgentCustomApis } from "@/lib/toolexecApi";
@@ -28,12 +29,6 @@ interface Attachments {
   calls: AgentCallStats | null;
   numbers: string[] | null;
 }
-
-const NO_CALLS: Omit<AgentCallStats, "agent_id"> = { calls: 0, tests: 0, avg_duration_ms: null, finished: 0, failed: 0 };
-
-// Same rule as the calls page: only transfer-failed and dropped calls count as failed.
-const successPct = (s: AgentCallStats) =>
-  s.finished ? Math.round((100 * (s.finished - s.failed)) / s.finished) : null;
 
 function AgentCardMenu({ editUrl, stepsUrl }: { editUrl: string; stepsUrl: string }) {
   const router = useRouter();
@@ -67,11 +62,6 @@ function AgentCardMenu({ editUrl, stepsUrl }: { editUrl: string; stepsUrl: strin
     </div>
   );
 }
-
-const fmtDuration = (ms: number) => {
-  const s = Math.round(ms / 1000);
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-};
 
 export default function AgentsPage() {
   const router = useRouter();
@@ -255,22 +245,7 @@ export default function AgentsPage() {
                   {a.transfer_type !== "none" && <span>Can transfer to a person</span>}
                 </div>
 
-                {att?.calls && (() => {
-                  const pct = successPct(att.calls);
-                  return (
-                    <div className="agent-card-stats">
-                      <div><b>{att.calls.calls}</b><span>Calls</span></div>
-                      <div><b>{att.calls.tests}</b><span>Tests</span></div>
-                      <div><b>{att.calls.avg_duration_ms == null ? "—" : fmtDuration(att.calls.avg_duration_ms)}</b><span>Avg length</span></div>
-                      <div>
-                        <b className={pct == null ? "" : pct >= 80 ? "good" : pct >= 50 ? "warn" : "bad"}>
-                          {pct == null ? "—" : `${pct}%`}
-                        </b>
-                        <span>Success</span>
-                      </div>
-                    </div>
-                  );
-                })()}
+                {att?.calls && <CallStatsGrid stats={att.calls} />}
 
                 <div className="agent-card-foot">
                   <span className={`agent-card-status${a.status === "active" ? " on" : ""}`}>
