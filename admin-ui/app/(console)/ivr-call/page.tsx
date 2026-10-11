@@ -141,7 +141,7 @@ export default function CallFlowsPage() {
       ? flows.filter((f) => `${f.name} ${f.tenantName}`.toLowerCase().includes(q))
       : flows;
     return [...matched].sort(
-      (a, b) => Number(b.status === "active") - Number(a.status === "active") || a.name.localeCompare(b.name),
+      (a, b) => Number(b.is_published) - Number(a.is_published) || a.name.localeCompare(b.name),
     );
   }, [flows, search]);
 
@@ -212,8 +212,10 @@ export default function CallFlowsPage() {
             const l = linked[f.id];
             const dir = DIRECTION[f.direction];
             const url = `/ivr-call/${f.id}`;
+            // The call runtime only plays published inbound menus; it ignores status.
+            const live = f.is_published && f.direction === "inbound";
             return (
-              <div key={f.id} className={`agent-card${f.status === "active" ? "" : " paused"}`}>
+              <div key={f.id} className={`agent-card${live ? "" : " paused"}`}>
                 <div className="agent-card-top">
                   <div className="agent-card-avatar"><Grid3x3 size={22} /></div>
                   <FlowCardMenu onOpen={() => router.push(url)} onDelete={() => remove(f)} deleting={deleting === f.id} />
@@ -240,8 +242,8 @@ export default function CallFlowsPage() {
                 {l?.calls && <CallStatsGrid stats={l.calls} />}
 
                 <div className="agent-card-foot">
-                  <span className={`agent-card-status${f.status === "active" ? " on" : ""}`}>
-                    <i />{f.status === "active" ? "Live" : "Paused"}
+                  <span className={`agent-card-status${live ? " on" : ""}`}>
+                    <i />{live ? "Live" : f.is_published ? "Not playing on calls" : "Draft"}
                   </span>
                 </div>
               </div>
