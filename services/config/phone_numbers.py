@@ -79,9 +79,10 @@ async def refresh_routes_for_agent(agent_id: Any) -> None:
     """Rebuild did:{did} for numbers whose primary or fallback is this agent. Call after the
     agent change commits, so a paused/deleted agent stops receiving calls.
 
-    FOR UPDATE + writing Redis before the transaction commits: a concurrent
-    update_phone_number() blocks on the same row's lock (it also takes FOR UPDATE) until this
-    transaction ends, so its newer route always overwrites this one, never the reverse."""
+    FOR UPDATE + writing Redis before the transaction commits: every other route-mutating
+    function (create/update/soft_delete_phone_number) does the same, locking the same row and
+    writing Redis before its own commit. Whichever transaction's lock wait ends last always
+    writes Redis last, so the two can never land out of order."""
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         rows = await conn.fetch(
@@ -247,9 +248,15 @@ async def create_phone_number(
             user_email=user_email,
             new_value=result,
         )
-    # Invalidate first: a re-added DID may still have its previous owner's route cached.
-    await _drop_route(did)
-    await get_by_did(did)
+        # Resolved and written while this row's lock is held (implicit via the INSERT), before
+        # commit: a concurrent refresh_routes_for_agent() blocked on this did sees this write,
+        # never the reverse. Bypasses the cache-aside read in get_by_did(), which could otherwise
+        # return a re-added DID's previous owner from a stale cache entry.
+        route = await _load_route(conn, did)
+        if route is not None:
+            await _store_route(did, route)
+        else:
+            await _drop_route(did)
     return result
 
 
@@ -301,11 +308,17 @@ async def update_phone_number(
             new_value=new,
         )
 
-    # Invalidate before get_by_did(), or its cache-aside read returns the stale route.
-    if old["did"] != new["did"]:
-        await _drop_route(old["did"])
-    await _drop_route(new["did"])
-    await get_by_did(new["did"])
+        # Resolved and written while this row's FOR UPDATE lock is still held, before commit:
+        # a concurrent refresh_routes_for_agent() blocked on this did sees this write, never the
+        # reverse. Bypasses get_by_did()'s cache-aside read, which could otherwise return a stale
+        # cached entry instead of this transaction's fresh result.
+        if old["did"] != new["did"]:
+            await _drop_route(old["did"])
+        route = await _load_route(conn, new["did"])
+        if route is not None:
+            await _store_route(new["did"], route)
+        else:
+            await _drop_route(new["did"])
     return new
 
 
@@ -334,4 +347,5 @@ async def soft_delete_phone_number(
             old_value=old,
         )
 
-    await _drop_route(old["did"])
+        # While this row's FOR UPDATE lock is still held, before commit — see update_phone_number.
+        await _drop_route(old["did"])

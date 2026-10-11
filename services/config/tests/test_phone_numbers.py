@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 
+import asyncpg
 import pytest
 
 from services.config import agents, cache, phone_numbers
@@ -368,3 +369,41 @@ async def test_failed_route_write_is_logged_as_an_error(caplog, monkeypatch):
         await phone_numbers._drop_route("5555")
 
     assert [r.levelno for r in caplog.records] == [logging.ERROR, logging.ERROR]
+
+
+async def test_update_writes_redis_while_the_rows_lock_is_still_held(test_tenant, scoped, pool):
+    """update_phone_number's Redis write must land before its transaction commits (and so
+    before its FOR UPDATE lock on the number's row releases) — otherwise a concurrent
+    refresh_routes_for_agent() that squeezes in right after commit, but before this call's
+    write lands, gets its own fresher write silently overwritten by this one arriving late.
+
+    Proven directly: a second connection tries to take the same row's lock, NOWAIT, from
+    inside the patched _store_route — it must fail, meaning the main transaction (and
+    its lock) are still open at write time."""
+    agent = await agents.create_agent(tenant_id=test_tenant["id"], slug="lock-check", name="Lock check")
+    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    number = await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did, agent_id=agent["id"])
+
+    original_store = phone_numbers._store_route
+    observations: list[bool] = []
+
+    async def spying_store(did_arg, route):
+        async with pool.acquire() as probe:
+            try:
+                await probe.execute(
+                    "SELECT 1 FROM phone_numbers WHERE id = $1 FOR UPDATE NOWAIT", number["id"],
+                )
+                observations.append(False)  # lock was free: write landed after commit — the bug
+            except asyncpg.LockNotAvailableError:
+                observations.append(True)  # lock still held: write landed before commit
+        await original_store(did_arg, route)
+
+    phone_numbers._store_route = spying_store
+    try:
+        await phone_numbers.update_phone_number(number["id"], region="eu")
+    finally:
+        phone_numbers._store_route = original_store
+
+    assert observations == [True]
+
+    await pool.execute("DELETE FROM phone_numbers WHERE did = $1", did)
