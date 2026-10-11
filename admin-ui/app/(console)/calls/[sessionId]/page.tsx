@@ -135,8 +135,8 @@ export default function CallDetailPage() {
                 {call.sentiment === null ? (
                   <div className="detail-sentiment-reason">
                     Not scored. Caller mood analysis is off by default; turn it on in the
-                    agent&apos;s settings. Calls with no caller speech, or from before it was
-                    on, also stay unscored rather than being shown as neutral.
+                    agent&apos;s settings. Calls from before it was on stay unscored unless an
+                    operator runs the backfill; calls with no caller speech are never scored.
                   </div>
                 ) : call.sentiment_reason ? (
                   <div className="detail-sentiment-reason">{call.sentiment_reason}</div>

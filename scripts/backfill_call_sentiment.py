@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Backfill calls.sentiment for ended calls that were never scored (safe to re-run).
 
+Only agents with caller mood analysis on *now* are scored, including calls they took
+while it was off: run it after switching an agent on to score that agent's history.
+
 Requires POSTGRES_DSN and VOICEAI_SENTIMENT_API_KEY or OPENAI_API_KEY.
 One model call per scored call; try --limit first.
 """
