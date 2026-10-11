@@ -243,7 +243,7 @@ class TranscriptBuilder:
         tenant_slug    = self._tenant_slugs.pop(session_id, None)
         self._spawn(session_id, self._end_call(
             session_id, tenant_slug, close_reason, turn_count, barge_in_count, final_state,
-            score_sentiment,
+            score_sentiment=score_sentiment,
         ))
         self._chains[session_id].add_done_callback(lambda _: self._chains.pop(session_id, None))
 
@@ -373,7 +373,7 @@ class TranscriptBuilder:
 
     async def _end_call(
         self, session_id: str, tenant_slug: str | None, close_reason: str, turn_count: int,
-        barge_in_count: int, final_state: str | None = None, score_sentiment: bool = True,
+        barge_in_count: int, final_state: str | None = None, *, score_sentiment: bool,
     ) -> None:
         turns: list[Turn] = []
         try:

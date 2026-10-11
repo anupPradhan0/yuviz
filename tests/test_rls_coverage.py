@@ -257,6 +257,9 @@ _BYPASS_REASONS = {
     "telephony-account-preload",
     "pre-auth-password-reset",
     "telephony-config-kind", "number-sync-provider-ids", "phone-numbers-provider-sync",
+    # Config startup: encrypts plaintext telephony secrets in every tenant's rows,
+    # stamping each row's own tenant before its audit entry.
+    "telephony-configs-seal-plaintext",
     # The one deliberately cross-tenant READ in the codebase: disconnect asks
     # whether another tenant still holds the same upstream grant, so it can
     # skip the revoke instead of cutting them off. It is a bypass because the

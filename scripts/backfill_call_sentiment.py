@@ -22,6 +22,23 @@ from services.conversation.providers.llm.openai import OpenAILLM  # noqa: E402
 from services.conversation.sentiment import SentimentScorer, Turn  # noqa: E402
 
 
+def unscored_calls_query(tenant: str | None, limit: int | None) -> tuple[str, list[object]]:
+    # Opted-out agents' calls are unscored on purpose: never send their transcripts to the model.
+    where = [
+        "sentiment IS NULL", "ended_at IS NOT NULL",
+        "agent_id IN (SELECT id FROM agents WHERE sentiment_analysis_enabled)",
+    ]
+    params: list[object] = []
+    if tenant:
+        params.append(tenant)
+        where.append(f"tenant_id = ${len(params)}")
+    sql = f"SELECT session_id FROM calls WHERE {' AND '.join(where)} ORDER BY started_at DESC"
+    if limit:
+        params.append(limit)
+        sql += f" LIMIT ${len(params)}"
+    return sql, params
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=None, help="score at most N calls")
@@ -42,15 +59,7 @@ async def main() -> int:
         )
         return 1
 
-    where = ["sentiment IS NULL", "ended_at IS NOT NULL"]
-    params: list[object] = []
-    if args.tenant:
-        params.append(args.tenant)
-        where.append(f"tenant_id = ${len(params)}")
-    sql = f"SELECT session_id FROM calls WHERE {' AND '.join(where)} ORDER BY started_at DESC"
-    if args.limit:
-        params.append(args.limit)
-        sql += f" LIMIT ${len(params)}"
+    sql, params = unscored_calls_query(args.tenant, args.limit)
 
     # Cross-tenant by design: a hand-run maintenance script.
     pool = await asyncpg.create_pool(dsn)
