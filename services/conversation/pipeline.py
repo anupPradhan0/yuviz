@@ -1032,6 +1032,9 @@ class PipelineConversationHandler:
         try:
             async for chunk, tts_audio, _end_call in self._llm_to_tts(
                 messages_for_llm, cancel_event, session_id, directives, store=history,
+                # Not a caller utterance: retrieved text read earlier is still in context, so a planted
+                # passage cannot use a failed transfer to get a clean turn for its write.
+                carry_taint=True,
             ):
                 full_response.append(chunk)
                 if tts_audio:
@@ -1199,6 +1202,7 @@ class PipelineConversationHandler:
         cancel_event: asyncio.Event,
         tool_calls_made: list[str],
         store: list[ChatMessage] | None = None,
+        carry_taint: bool = False,
     ) -> AsyncGenerator[str | ToolCallStartedEvent | LocalToolCompletedEvent, None]:
         """LLM tokens + ToolCallStartedEvent filler + LocalToolCompletedEvent for bridging speech."""
         if self._tool_orchestrator is None:
@@ -1214,7 +1218,7 @@ class PipelineConversationHandler:
             self._agent_id or "", self._tenant_id, self._call_id, session_id, history,
             caller_number=self._caller_number, called_number=self._called_number,
             call_direction=self._direction, cancel_event=cancel_event,
-            local_tools=local_tools, only_tools=only_tools,
+            local_tools=local_tools, only_tools=only_tools, carry_taint=carry_taint,
         ):
             if isinstance(event, ToolCallStartedEvent):
                 if not event.filler_only:
@@ -1241,6 +1245,7 @@ class PipelineConversationHandler:
         directives:   list[Directive],
         tool_calls_made: list[str] | None = None,
         store:        list[ChatMessage] | None = None,
+        carry_taint:  bool = False,
     ) -> AsyncGenerator[tuple[str, bytes, bool], None]:
         """Stream LLM tokens and synthesize per sentence, yielding (raw_token, tts_bytes, end_call).
         Directives are stripped before TTS and appended to `directives` in place."""
@@ -1252,7 +1257,7 @@ class PipelineConversationHandler:
         end_call = False
         try:
             async for item in self._token_stream(
-                history, session_id, cancel_event, tool_calls_made, store,
+                history, session_id, cancel_event, tool_calls_made, store, carry_taint,
             ):
                 if cancel_event.is_set():
                     self._workflow.pending_speech = None

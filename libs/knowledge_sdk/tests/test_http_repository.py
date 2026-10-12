@@ -192,3 +192,19 @@ async def test_client_still_reads_the_old_404_as_no_context_and_an_old_200_witho
     result = await old_200.retrieve("acme", "sup", "q", RetrievalPolicy())
     assert result == {"chunks": [{"content": "x"}], "sources": [], "token_count": 1} and "status" not in result
     await old_200.close()
+
+
+async def test_wrong_service_password_raises_unavailable(pool):
+    email = f"test-service-{uuid.uuid4().hex[:8]}@example.com"
+    user = await users.create_user(email=email, password="correct-password", role="viewer")
+
+    repo = HttpKnowledgeRepository(
+        base_url="http://knowledge-test", auth_base_url="http://config-test",
+        service_email=email, service_password="wrong-password",
+        transport=ASGITransport(app=knowledge_app), auth_transport=ASGITransport(app=config_app),
+    )
+    with pytest.raises(RepositoryUnavailableError):
+        await repo.has_enabled_kb("acme", "sup")
+
+    await repo.close()
+    await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])

@@ -262,15 +262,36 @@ async def test_without_a_shared_board_per_call_orchestrators_never_open_a_breake
     assert len(executor.calls) == 7
 
 
-def test_main_builds_one_board_and_one_cache_and_injects_them_into_every_orchestrator():
+async def test_the_production_factory_shares_one_board_and_one_cache_across_every_orchestrator_it_builds():
+    from services.conversation.tools.factory import orchestrator_factory
+
+    executor = _Executor(ToolResult(status=ToolStatus.FAILED, error="toolexec_unavailable"))
+    registry = ExecutorRegistry()
+    registry.register("execute_api", lambda provider: executor)
+    build = orchestrator_factory(
+        policy_resolver=_FakePolicyResolver([_policy()]), provider_manager=_FakeProviderManager(),
+        executor_registry=registry,
+    )
+
+    first, second = build(LLMAdapter(_ScriptedLLM([]))), build(LLMAdapter(_ScriptedLLM([])))
+    assert first is not second and first._breakers is second._breakers and first._last_good is second._last_good
+
+    for i in range(5):
+        await _turn(build(LLMAdapter(_ScriptedLLM([]))), [_call(1, api_name="crm"), [TokenEvent(text="x")]], call_id=f"c{i}")
+    history, _ = await _turn(build(LLMAdapter(_ScriptedLLM([]))), [_call(1, api_name="crm"), [TokenEvent(text="x")]], call_id="c9")
+
+    assert len(executor.calls) == 5
+    assert _envelopes(history)[0]["error"]["code"] == "circuit_breaker_open"
+
+
+def test_main_builds_every_per_call_orchestrator_through_the_shared_factory():
     import pathlib
     from services.conversation import __main__ as main_module
 
     source = pathlib.Path(main_module.__file__).read_text()
-    assert source.count("BreakerBoard()") == 1 and source.count("LastGoodCache()") == 1
-    assert "breakers=tool_breakers" in source and "last_good=tool_last_good" in source
-    # Built next to the latency store, outside the per-call handler factory.
-    assert source.index("tool_breakers = BreakerBoard()") < source.index("async def _build_pipeline_handler")
+    assert "build_tool_orchestrator(LLMAdapter(bundle.llm))" in source and "ToolCallOrchestrator(" not in source
+    assert source.count("orchestrator_factory(") == 1
+    assert source.index("build_tool_orchestrator = orchestrator_factory(") < source.index("async def _build_pipeline_handler")
 
 
 @pytest.mark.parametrize("error", ["http_status_404", "http_status_422", "missing_fields", "unresolved_placeholder"])
@@ -628,7 +649,7 @@ async def test_a_write_after_a_document_lookup_in_the_same_turn_is_held_for_call
 
     _, refused = _envelopes(history)
     _assert_sayable(refused, "error", "needs_caller_confirmation")
-    assert refused["error"]["retryable"] is True and "confirm" in refused["error"]["user_safe_message"]
+    assert refused["error"]["retryable"] is False and "confirm" in refused["error"]["user_safe_message"]
     assert executor.calls == []
 
 
@@ -834,3 +855,273 @@ async def test_the_tool_keeps_the_answering_match_when_a_prompt_mode_document_al
     [envelope] = _envelopes(history)
     assert any("The refund window is 30 days." in p for p in envelope["data"]["passages"])
     assert "truncated_to_token_budget" in envelope["data"]["degraded"]
+
+
+# --- second review round -----------------------------------------------------------------------------
+
+async def test_one_agents_broken_knowledge_does_not_open_search_for_another_agent_in_the_tenant():
+    board = BreakerBoard()
+    broken = _RecordingKnowledge([RuntimeError("embedder down")])
+    healthy = _RecordingKnowledge([_ctx()])
+
+    def orchestrator() -> ToolCallOrchestrator:
+        o = _local_orchestrator()
+        o._breakers = board
+        return o
+
+    for i in range(5):
+        await _turn(orchestrator(), [_search(), [TokenEvent(text="x")]], local_tools=_knowledge_tools(broken),
+                    agent="agent-a", call_id=f"c{i}")
+    a, _ = await _turn(orchestrator(), [_search(), [TokenEvent(text="x")]], local_tools=_knowledge_tools(broken),
+                       agent="agent-a")
+    b, _ = await _turn(orchestrator(), [_search(), [TokenEvent(text="x")]], local_tools=_knowledge_tools(healthy),
+                       agent="agent-b")
+
+    assert _envelopes(a)[0]["error"]["code"] == "circuit_breaker_open"
+    assert _envelopes(b)[0]["status"] == "ok"
+
+
+# -- real half-open state
+
+class _ClockedExecutor(_Executor):
+    pass
+
+
+async def _breaker_chain(board, executor):
+    from services.conversation.tools.middleware import CircuitBreakerMiddleware, MiddlewareChain
+    return MiddlewareChain(executor, [CircuitBreakerMiddleware(board=board)])
+
+
+def _req(i=0):
+    from services.conversation.tools.types import ToolExecutionContext, ToolExecutionRequest
+    ctx = ToolExecutionContext(
+        tenant_id="t1", agent_id="a1", call_id=f"c{i}", session_id="s", turn_id="t", tool_iteration=1,
+        deadline=0.0, request_id="r",
+    )
+    return ToolExecutionRequest(tool_call_id=f"id{i}", tool_name="execute_api", arguments={"api_name": "crm"}, context=ctx)
+
+
+async def _open_board(cooldown_s=0.05):
+    board = BreakerBoard(fails_before_open=2, cooldown_s=cooldown_s)
+    failing = _Executor(ToolResult(status=ToolStatus.TIMEOUT))
+    chain = await _breaker_chain(board, failing)
+    for i in range(2):
+        await chain.execute(_req(i))
+    await asyncio.sleep(cooldown_s + 0.02)
+    return board
+
+
+async def test_after_the_cooldown_exactly_one_concurrent_caller_is_the_trial_and_the_rest_fail_fast():
+    board = await _open_board()
+    executor = _Executor(ToolResult(status=ToolStatus.SUCCESS, payload={}), delay_s=0.1)
+    chain = await _breaker_chain(board, executor)
+
+    results = await asyncio.gather(*[chain.execute(_req(i)) for i in range(10)])
+
+    assert len(executor.calls) == 1
+    assert sorted(r.status.value for r in results) == ["success"] + ["unavailable"] * 9
+    assert all(r.error == "circuit_breaker_open" for r in results if r.status is ToolStatus.UNAVAILABLE)
+    # The successful trial closed it: everyone is admitted again.
+    again = await asyncio.gather(*[chain.execute(_req(i)) for i in range(3)])
+    assert [r.status for r in again] == [ToolStatus.SUCCESS] * 3
+
+
+async def test_a_failed_trial_reopens_the_breaker_for_a_full_cooldown():
+    board = await _open_board()
+    executor = _Executor(ToolResult(status=ToolStatus.TIMEOUT), delay_s=0.05)
+    chain = await _breaker_chain(board, executor)
+
+    first = await asyncio.gather(*[chain.execute(_req(i)) for i in range(5)])
+    after = await chain.execute(_req(9))
+
+    assert len(executor.calls) == 1 and sorted(r.status.value for r in first).count("timeout") == 1
+    assert after.error == "circuit_breaker_open" and len(executor.calls) == 1  # re-opened, not half-open
+
+
+async def test_a_cancelled_trial_does_not_wedge_the_breaker():
+    board = await _open_board(cooldown_s=0.05)
+    slow = _Executor(delay_s=5)
+    chain = await _breaker_chain(board, slow)
+
+    task = asyncio.ensure_future(chain.execute(_req(1)))
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    ok = _Executor()
+    result = await (await _breaker_chain(board, ok)).execute(_req(2))
+    assert result.status is ToolStatus.SUCCESS  # the next caller becomes the new trial
+
+
+async def test_a_straggler_that_started_before_the_breaker_opened_does_not_close_it():
+    board = BreakerBoard(fails_before_open=2, cooldown_s=60)
+    key = ("t1", "execute_api", "crm")
+    straggler = board.admit(key)
+    for _ in range(2):
+        board.record(key, ToolResult(status=ToolStatus.TIMEOUT), board.admit(key))
+
+    board.record(key, ToolResult(status=ToolStatus.SUCCESS), straggler)
+
+    assert board.admit(key) is None
+
+
+# -- taint refusals stop the loop
+
+async def test_after_one_held_write_the_model_is_not_offered_writes_and_cannot_loop():
+    executor = _Executor()
+    orchestrator = _taint_orchestrator(executor, read_only_apis={"order_status"})
+    knowledge = _RecordingKnowledge([_ctx(texts=(_PLANTED,))])
+
+    _with_llm(orchestrator, [_search(1), _call(2, api_name="cancel_booking"), _call(3, api_name="cancel_booking"),
+                             _call(4, api_name="cancel_booking"), [TokenEvent(text="Shall I cancel?")]])
+    history = [ChatMessage(role="user", content="hi")]
+    llm = orchestrator._llm_adapter._llm
+    events = [e async for e in orchestrator.run_turn("a1", "t1", "call1", "s1", history,
+                                                     local_tools=_knowledge_tools(knowledge))]
+
+    codes = [e["error"]["code"] for e in _envelopes(history)[1:]]
+    assert codes == ["needs_caller_confirmation", "unknown_tool", "unknown_tool"] and executor.calls == []
+    assert _envelopes(history)[1]["error"]["retryable"] is False
+    offered_after = [{x["name"] for x in (sch or [])} for sch in llm.seen_schemas[2:]]
+    assert offered_after and all("execute_api" not in names for names in offered_after)
+    assert TokenEvent(text="Shall I cancel?") in events
+
+
+# -- the held write is released once, on the caller's next utterance
+
+async def _tainted_turn(orchestrator, executor_script, tools, call_id="call1", **kw):
+    return await _turn(orchestrator, executor_script, local_tools=tools, call_id=call_id)
+
+
+async def test_a_held_write_is_allowed_exactly_once_on_the_next_turn_even_if_that_turn_is_tainted_again():
+    executor = _Executor()
+    orchestrator = _taint_orchestrator(executor)
+    tools = _knowledge_tools(_RecordingKnowledge([_ctx(texts=(_PLANTED,))]))
+    write = dict(api_name="cancel_booking", inputs={"id": "7"})
+
+    h1, _ = await _turn(orchestrator, [_search(1), _call(2, **write), [TokenEvent(text="Sure?")]], local_tools=tools)
+    # Caller says yes; the model searches again first (a prompt-mode document always matches), then writes.
+    h2, _ = await _turn(orchestrator, [_search(1), _call(2, **write), _call(3, **write), [TokenEvent(text="Done")]],
+                        local_tools=tools)
+
+    assert _envelopes(h1)[1]["error"]["code"] == "needs_caller_confirmation"
+    statuses = [e["status"] if not e["error"] else e["error"]["code"] for e in _envelopes(h2)]
+    assert statuses[:2] == ["ok", "ok"]            # search, then the confirmed write
+    assert len(executor.calls) == 1
+    assert statuses[2:] and statuses[2:][0] in ("needs_caller_confirmation", "repeated_call")
+
+
+async def test_a_different_write_is_not_covered_by_the_held_one():
+    executor = _Executor()
+    orchestrator = _taint_orchestrator(executor)
+    tools = _knowledge_tools(_RecordingKnowledge([_ctx(texts=(_PLANTED,))]))
+    await _turn(orchestrator, [_search(1), _call(2, api_name="cancel_booking", inputs={"id": "7"}), [TokenEvent(text="?")]],
+                local_tools=tools)
+
+    h2, _ = await _turn(orchestrator, [_search(1), _call(2, api_name="cancel_booking", inputs={"id": "8"}), [TokenEvent(text="x")]],
+                        local_tools=tools)
+
+    assert _envelopes(h2)[1]["error"]["code"] == "needs_caller_confirmation" and executor.calls == []
+
+
+async def test_a_held_write_is_not_confirmed_by_a_different_call():
+    executor = _Executor()
+    orchestrator = _taint_orchestrator(executor)
+    tools = _knowledge_tools(_RecordingKnowledge([_ctx(texts=(_PLANTED,))]))
+    write = dict(api_name="cancel_booking")
+    await _turn(orchestrator, [_search(1), _call(2, **write), [TokenEvent(text="?")]], local_tools=tools, call_id="A")
+
+    other, _ = await _turn(orchestrator, [_search(1), _call(2, **write), [TokenEvent(text="x")]], local_tools=tools, call_id="B")
+
+    assert _envelopes(other)[1]["error"]["code"] == "needs_caller_confirmation"
+
+
+# -- a failed transfer is not a caller utterance
+
+async def test_taint_carries_into_a_recovery_turn_and_that_turn_cannot_confirm_a_held_write():
+    executor = _Executor()
+    orchestrator = _taint_orchestrator(executor)
+    tools = _knowledge_tools(_RecordingKnowledge([_ctx(texts=(_PLANTED,))]))
+    write = dict(api_name="cancel_booking")
+    await _turn(orchestrator, [_search(1), _call(2, **write), [TokenEvent(text="?")]], local_tools=tools)
+
+    _with_llm(orchestrator, [_call(1, **write), [TokenEvent(text="Sorry, transfer failed.")]])
+    history = [ChatMessage(role="user", content="[transfer_failed]")]
+    [e async for e in orchestrator.run_turn("a1", "t1", "call1", "s1", history, local_tools=tools, carry_taint=True)]
+
+    assert _envelopes(history)[0]["error"]["code"] == "needs_caller_confirmation" and executor.calls == []
+
+
+async def test_without_carry_a_recovery_turn_would_be_clean_which_is_the_gap_the_flag_closes():
+    executor = _Executor()
+    orchestrator = _taint_orchestrator(executor)
+    tools = _knowledge_tools(_RecordingKnowledge([_ctx(texts=(_PLANTED,))]))
+    await _turn(orchestrator, [_search(1), [TokenEvent(text="ok")]], local_tools=tools)
+
+    history, _ = await _turn(orchestrator, [_call(1, api_name="cancel_booking"), [TokenEvent(text="x")]], local_tools=tools)
+
+    assert _envelopes(history)[0]["status"] == "ok"  # a genuinely new utterance: taint cleared
+
+
+async def test_the_failed_transfer_recovery_turn_is_run_with_carry_taint():
+    from .test_pipeline import _FakeToolOrchestrator
+
+    orchestrator = _FakeToolOrchestrator([TokenEvent(text="Sorry, I couldn't connect you.")])
+    handler = _make_handler(_make_stt("hi"), _make_llm(["x"]), _make_tts(b"\x00" * 640), tool_orchestrator=orchestrator)
+
+    [r async for r in handler.on_transfer_failed("s1", "1000", "no_answer")]
+
+    assert orchestrator.seen_carry_taint is True
+
+
+# -- normalise before capping
+
+@pytest.mark.parametrize("char", ["\ufdfa", "\u3300", "\u338f", "\u2026", "\ufb03", "\u2475"])
+def test_characters_that_expand_when_normalised_cannot_overshoot_the_character_cap(char):
+    from services.conversation.tools.envelope import cap_passages
+
+    kept, truncated = cap_passages([char * 6000, char * 6000], 1, 1500, 6000)
+
+    assert truncated and sum(len(t) for t in kept) <= 6000
+
+
+async def test_expanding_characters_are_capped_end_to_end_through_the_tool(monkeypatch):
+    knowledge = _RecordingKnowledge([_ctx(texts=("\ufdfa" * 6000,))])
+
+    history, _ = await _turn(_local_orchestrator(), [_search(), [TokenEvent(text="x")]], local_tools=_knowledge_tools(knowledge))
+
+    [envelope] = _envelopes(history)
+    assert sum(len(p) for p in envelope["data"]["passages"]) < 6000 + 100
+
+
+def test_a_held_write_is_never_retryable_this_turn_even_for_a_read_only_tool():
+    envelope = build_envelope(ToolResult(status=ToolStatus.FAILED, error="needs_caller_confirmation"),
+                              read_only=True, latency_ms=0, trace_id="t")
+    assert envelope["error"]["retryable"] is False
+
+
+def test_only_a_bounded_prefix_of_a_huge_passage_is_ever_normalised(monkeypatch):
+    from services.conversation.tools import envelope as envelope_module
+
+    seen: list[int] = []
+    real = envelope_module.fold
+    monkeypatch.setattr(envelope_module, "fold", lambda text: (seen.append(len(text)), real(text))[1])
+
+    envelope_module.cap_passages(["ﷺ" * 2_000_000], 0, 1500, 6000)
+
+    assert seen and max(seen) <= 12000
+
+
+async def test_a_confirmation_is_spent_a_later_tainted_turn_holds_the_same_write_again():
+    executor = _Executor()
+    orchestrator = _taint_orchestrator(executor)
+    tools = _knowledge_tools(_RecordingKnowledge([_ctx(texts=(_PLANTED,))]))
+    write = dict(api_name="cancel_booking", inputs={"id": "7"})
+    await _turn(orchestrator, [_search(1), _call(2, **write), [TokenEvent(text="Sure?")]], local_tools=tools)
+    await _turn(orchestrator, [_search(1), _call(2, **write), [TokenEvent(text="Done")]], local_tools=tools)
+
+    third, _ = await _turn(orchestrator, [_search(1), _call(2, **write), [TokenEvent(text="x")]], local_tools=tools)
+
+    assert len(executor.calls) == 1
+    assert _envelopes(third)[1]["error"]["code"] == "needs_caller_confirmation"

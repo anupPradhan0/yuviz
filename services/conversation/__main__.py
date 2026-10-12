@@ -53,10 +53,8 @@ from .servicer import ConversationServicer
 from .session import AgentUnavailable, RoutingStatus, SessionContext
 from .tools.executor_registry import ExecutorRegistry
 from .tools.executors.api_exec_executor import ApiExecExecutor
-from .tools.guard import LastGoodCache
+from .tools.factory import orchestrator_factory
 from .tools.llm_adapter import LLMAdapter
-from .tools.middleware import BreakerBoard
-from .tools.orchestrator import ToolCallOrchestrator
 from .tools.policy_resolver import ToolPolicyResolver
 from .tools.provider_manager import ToolProviderManager
 from .tools.registry import ToolRegistry
@@ -309,11 +307,6 @@ async def serve(port: int, args: argparse.Namespace) -> None:
 
     # Process-scoped so filler calibration survives across calls; keys are tenant/agent-scoped.
     tool_latency_store = ToolLatencyStore()
-    # Also process-scoped, and injected into every per-call orchestrator: a breaker or last-good cache
-    # that lived and died with one call would never see enough failures to open. Both are bounded
-    # (breaker keys are per tenant/tool/API; the cache is LRU+TTL capped).
-    tool_breakers = BreakerBoard()
-    tool_last_good = LastGoodCache()
     filler_selector = FillerSelector()
     # execute_api is the only DB-gated tool. Per-agent max_chain_depth arrives via
     # ToolExecutionContext, since this factory is shared by every tenant.
@@ -321,6 +314,11 @@ async def serve(port: int, args: argparse.Namespace) -> None:
     tool_provider_manager = ToolProviderManager(CompositeSecretResolver())
     tool_policy_resolver = await ToolPolicyResolver.connect(
         os.environ.get("POSTGRES_DSN"), tool_registry,
+    )
+    # Process-scoped breaker board and last-good cache, shared by every per-call orchestrator (see tools/factory.py).
+    build_tool_orchestrator = orchestrator_factory(
+        policy_resolver=tool_policy_resolver, provider_manager=tool_provider_manager,
+        executor_registry=executor_registry, latency_store=tool_latency_store,
     )
 
     # Providers (STT/LLM/TTS) are shared across streams because they are stateless
@@ -358,15 +356,7 @@ async def serve(port: int, args: argparse.Namespace) -> None:
             *, initial_variables: dict | None = None,
         ) -> PipelineConversationHandler:
             """Build a pipeline handler; shared by direct calls and call-flow handoffs."""
-            tool_orchestrator = ToolCallOrchestrator(
-                llm_adapter=LLMAdapter(bundle.llm),
-                policy_resolver=tool_policy_resolver,
-                provider_manager=tool_provider_manager,
-                executor_registry=executor_registry,
-                latency_store=tool_latency_store,
-                breakers=tool_breakers,
-                last_good=tool_last_good,
-            )
+            tool_orchestrator = build_tool_orchestrator(LLMAdapter(bundle.llm))
 
             # "Can act" (gates caller-ID prompt block and booking-claim guard) means execute_api is enabled.
             enabled_policies = await tool_policy_resolver.enabled_tools(

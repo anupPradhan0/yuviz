@@ -24,7 +24,9 @@ from .llm_adapter import (
     TurnEvent,
 )
 from .envelope import build_envelope
-from .guard import DEFAULT_MAX_TOOL_CALLS_PER_TURN, LastGoodCache, TurnGuard, scrub_scope_args, validate_json
+from .guard import (
+    DEFAULT_MAX_TOOL_CALLS_PER_TURN, LastGoodCache, TurnGuard, call_signature, scrub_scope_args, validate_json,
+)
 from .middleware import BreakerBoard, _redact, build_default_chain
 from .policy_resolver import ToolPolicyResolver
 from .provider_manager import ToolProviderManager
@@ -39,6 +41,9 @@ DEFAULT_MAX_LOCAL_TOOL_CALLS = 8
 # A tool still running after this long gets a spoken filler (ToolCallStartedEvent -> the pipeline's
 # filler path). Remote tools signal at dispatch instead, sized by their measured latency.
 SLOW_TOOL_FILLER_AFTER_S = 0.8
+_HELD_WRITE_TTL_S = 600.0   # a held write can be confirmed for this long
+_MAX_HELD_WRITES = 16
+_MAX_TRACKED_CALLS = 256
 
 # In-process tools (no policy/provider/circuit breaker). Callable source = re-read mid-turn.
 LocalTools: TypeAlias = dict[
@@ -75,6 +80,10 @@ class ToolCallOrchestrator:
         # instances (services/conversation/__main__.py does). The defaults are per-orchestrator.
         self._breakers = breakers if breakers is not None else BreakerBoard()
         self._last_good = last_good if last_good is not None else LastGoodCache()
+        # Per call (the orchestrator is built per call), keyed (tenant, call_id) so a reused instance cannot
+        # mix calls: whether retrieved text is still in context, and writes held for the caller's yes.
+        self._call_taint: dict[tuple[str, str], bool] = {}
+        self._held_writes: dict[tuple[str, str], dict[str, tuple[str, float]]] = {}
 
     async def run_turn(
         self, agent_id: str, tenant_id: str, call_id: str, session_id: str, history: list[ChatMessage],
@@ -83,11 +92,19 @@ class ToolCallOrchestrator:
         force_tool_name: str | None = None,
         local_tools: LocalToolsSource = None,
         only_tools: list[str] | Callable[[], list[str] | None] | None = None,
+        carry_taint: bool = False,
     ) -> AsyncGenerator[TurnEvent, None]:
         """only_tools subsets DB tools for this turn (never grants). Both tool
-        args may be callables so a mid-turn node change re-resolves schemas."""
+        args may be callables so a mid-turn node change re-resolves schemas.
+        carry_taint: this turn is not a new caller utterance (e.g. recovery after a failed transfer), so
+        retrieved text read earlier is still in context and the held writes are not yet confirmed."""
         local_calls = 0
         guard = TurnGuard(self._max_tool_calls_per_turn)
+        call_key = (tenant_id, call_id)
+        guard.tainted = carry_taint and self._call_taint.get(call_key, False)
+        self._call_taint[call_key] = guard.tainted
+        if len(self._call_taint) > _MAX_TRACKED_CALLS:
+            self._call_taint.pop(next(iter(self._call_taint)))
         seen_local_names: set[str] = set()
 
         async def resolve() -> tuple[LocalTools, dict, list[dict] | None, list[dict]]:
@@ -102,6 +119,9 @@ class ToolCallOrchestrator:
             else:
                 only = only_tools() if callable(only_tools) else only_tools
                 policies = await self._policy_resolver.enabled_tools(agent_id, tenant_id, only=only)
+                if guard.taint_refused:
+                    # A write was held: only tools known to be read-only stay, so the model must ask the caller.
+                    policies = [p for p in policies if p.definition.read_only]
             llm_schemas = [
                 p.definition.to_generic_schema() for p in policies if p.definition.llm_visible
             ]
@@ -170,14 +190,30 @@ class ToolCallOrchestrator:
                     log.warning("tool call turn=%s tool=%s: dropped undeclared args %s",
                                 turn_id, event.tool_name, sorted(event.arguments))
                     event = replace(event, arguments={})
+                side_effecting = _is_side_effecting(event, policy, definition) if local_entry is None else False
+                signature = call_signature(event.tool_name, event.arguments)
+                held = self._held_writes.get(call_key, {})
+                held_turn = held.get(signature)
+                # Confirmed = this exact write was held on an earlier turn and this is a real new utterance.
+                confirmed = (
+                    side_effecting and not carry_taint and held_turn is not None
+                    and held_turn[0] != turn_id and time.monotonic() - held_turn[1] < _HELD_WRITE_TTL_S
+                )
                 refusal = guard.check(
                     event.tool_name, event.arguments,
                     definition.parameters_schema if definition is not None else None,
                     policy.max_calls_per_turn if policy is not None else None,
                     # A local workflow tool may legitimately repeat (a cyclic node); max_local_tool_calls bounds it.
                     detect_repeats=policy is not None or (local_entry is not None and local_entry[0].read_only),
-                    side_effecting=_is_side_effecting(event, policy, definition) if local_entry is None else False,
+                    side_effecting=side_effecting, confirmed=confirmed,
                 )
+                if refusal is not None and refusal.error == "needs_caller_confirmation":
+                    held = self._held_writes.setdefault(call_key, {})
+                    held[signature] = (turn_id, time.monotonic())
+                    while len(held) > _MAX_HELD_WRITES:
+                        held.pop(next(iter(held)))
+                elif refusal is None and side_effecting and held_turn is not None:
+                    held.pop(signature, None)  # a held write is released once, whether or not it was tainted
                 if refusal is not None:
                     log.warning("tool call refused turn=%s tool=%s error=%s", turn_id, event.tool_name, refusal.error)
                     result = refusal
@@ -200,6 +236,7 @@ class ToolCallOrchestrator:
                         and result.payload.get("found")
                     ):
                         guard.tainted = True
+                        self._call_taint[call_key] = True
                     if not (result.status == ToolStatus.FAILED and result.error == "cancelled"):
                         yield LocalToolCompletedEvent(tool_name=event.tool_name)
                         # Re-resolve: a local tool may have moved the workflow node.
@@ -254,7 +291,7 @@ class ToolCallOrchestrator:
             if not tool_call_happened:
                 return
 
-            if iteration >= self._max_tool_iterations or guard.exhausted:
+            if iteration >= self._max_tool_iterations or guard.exhausted or guard.taint_refused:
                 local, policies_by_name, schemas, local_schemas = await resolve()
 
     async def _call_local(
@@ -269,22 +306,30 @@ class ToolCallOrchestrator:
             result = await _execute_local_tool(name, handler, arguments, cancel_event, definition.timeout_ms)
             return _validated_output(definition, result)
 
-        breaker_key = (tenant_id, name, "")
+        # Per agent: retrieval runs with each agent's own knowledge bases and embedding config, so one
+        # agent's broken embedder must not open the tool for the tenant's other agents.
+        breaker_key = (tenant_id, name, agent_id)
         cache_key = LastGoodCache.key(tenant_id, agent_id, call_id, name, arguments)
-        if not self._breakers.allow(breaker_key):
+        admission = self._breakers.admit(breaker_key)
+        if admission is None:
             log.warning("tool_call circuit_breaker_open tool=%s", name)
             return self._fallback(cache_key, ToolResult(status=ToolStatus.UNAVAILABLE, error="circuit_breaker_open"))
 
-        result = await _execute_local_tool(name, handler, arguments, cancel_event, definition.timeout_ms)
-        if result.status == ToolStatus.FAILED and result.error != "cancelled":
-            # Fast transient failure only: a timeout already spent its budget and is not retried.
-            log.info("tool_call retry tool=%s", name)
+        try:
             result = await _execute_local_tool(name, handler, arguments, cancel_event, definition.timeout_ms)
+            if result.status == ToolStatus.FAILED and result.error != "cancelled":
+                # Fast transient failure only: a timeout already spent its budget and is not retried.
+                log.info("tool_call retry tool=%s", name)
+                result = await _execute_local_tool(name, handler, arguments, cancel_event, definition.timeout_ms)
+        except BaseException:
+            self._breakers.abandon(breaker_key, admission)
+            raise
         result = _validated_output(definition, result)
 
         if result.error == "cancelled":
+            self._breakers.abandon(breaker_key, admission)
             return result
-        self._breakers.record(breaker_key, result)
+        self._breakers.record(breaker_key, result, admission)
         if result.status == ToolStatus.SUCCESS:
             self._last_good.put(cache_key, result)
             return result

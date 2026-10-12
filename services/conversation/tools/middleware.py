@@ -94,26 +94,44 @@ class BreakerBoard:
         self._cooldown_s = cooldown_s
         self._consecutive_failures: dict[Any, int] = {}
         self._opened_at: dict[Any, float] = {}
+        self._trial_started: dict[Any, float] = {}
 
-    def allow(self, key: Any) -> bool:
+    def admit(self, key: Any) -> str | None:
+        """"closed" = normal call, "trial" = the single half-open probe, None = refuse (fail fast).
+        After the cooldown exactly one caller is admitted as the trial; the rest keep failing fast until
+        it resolves, so a still-broken service costs one step timeout per cycle, not one per caller."""
         opened_at = self._opened_at.get(key)
         if opened_at is None:
-            return True
-        if time.monotonic() - opened_at < self._cooldown_s:
-            return False
-        # Cooldown elapsed: allow one attempt through ("half-open"); the count is kept, so one more failure re-opens.
-        del self._opened_at[key]
-        return True
+            return "closed"
+        now = time.monotonic()
+        if now - opened_at < self._cooldown_s:
+            return None
+        started = self._trial_started.get(key)
+        if started is not None and now - started < self._cooldown_s:
+            return None  # a trial is in flight (and a lost one is replaced after one more cooldown)
+        self._trial_started[key] = now
+        return "trial"
 
-    def record(self, key: Any, result: ToolResult) -> None:
+    def record(self, key: Any, result: ToolResult, admission: str = "closed") -> None:
+        trial = admission == "trial"
+        if trial:
+            self._trial_started.pop(key, None)
         if is_infrastructure_failure(result):
             count = self._consecutive_failures.get(key, 0) + 1
             self._consecutive_failures[key] = count
-            if count >= self._fails_before_open:
-                self._opened_at[key] = time.monotonic()
+            if count >= self._fails_before_open or trial:
+                self._opened_at[key] = time.monotonic()  # (re-)open, restarting the cooldown
                 log.warning("tool_call circuit_breaker_opened key=%s consecutive_failures=%d", key, count)
         elif result.status is not ToolStatus.CANCELLED:
+            if key in self._opened_at and not trial:
+                return  # a straggler that started before the breaker opened says nothing about now
             self._consecutive_failures[key] = 0
+            self._opened_at.pop(key, None)  # the trial succeeded (or the service answered): close
+
+    def abandon(self, key: Any, admission: str) -> None:
+        """A trial that never produced a result (cancelled, raised) must not wedge the breaker half-open."""
+        if admission == "trial":
+            self._trial_started.pop(key, None)
 
 
 # Errors a caller can cause (a wrong order number is a customer-API 404): they must never count, or a few
@@ -153,11 +171,16 @@ class CircuitBreakerMiddleware:
 
     async def __call__(self, request: ToolExecutionRequest, call_next: NextCall) -> ToolResult:
         key = breaker_key(request)
-        if not self._board.allow(key):
+        admission = self._board.admit(key)
+        if admission is None:
             log.warning("tool_call circuit_breaker_open tool=%s", request.tool_name)
             return ToolResult(status=ToolStatus.UNAVAILABLE, error="circuit_breaker_open")
-        result = await call_next(request)
-        self._board.record(key, result)
+        try:
+            result = await call_next(request)
+        except BaseException:
+            self._board.abandon(key, admission)
+            raise
+        self._board.record(key, result, admission)
         return result
 
 

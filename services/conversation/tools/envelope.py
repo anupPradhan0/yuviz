@@ -33,15 +33,16 @@ _ERRORS: dict[str, tuple[str, str]] = {
     "unknown_tool": ("error", f"I can't do that. {_TRANSFER}"),
     "cancelled": ("error", "The caller interrupted; do not mention this call."),
     "partial_failure": ("partial", "Only part of that went through. Do not say it is done; tell the caller and offer to connect them with someone."),
-    "needs_caller_confirmation": ("error", "Reference documents were read this turn, so do not change anything yet. Ask the caller to confirm out loud exactly what they want done, then make the call after their reply."),
+    "needs_caller_confirmation": ("error", "Reference documents were read this turn, so nothing can be changed yet. Do not call that again now: ask the caller to confirm out loud exactly what they want done, and make the call after their reply."),
     "tool_failed": ("error", f"I wasn't able to do that. {_TRANSFER}"),
 }
 # A transient failure is retryable for a read tool, but never when the guard itself refused the call.
 _NOT_RETRYABLE = frozenset({
     "repeated_call", "tool_call_cap_exceeded", "local_tool_call_cap_exceeded", "invalid_arguments_unrecoverable",
     "unknown_tool", "cancelled", "invalid_tool_output",
+    "needs_caller_confirmation",  # not this turn: the confirmation path is the caller's next utterance
 })
-_REPAIRABLE = frozenset({"invalid_arguments", "invalid_argument", "needs_caller_confirmation"})
+_REPAIRABLE = frozenset({"invalid_arguments", "invalid_argument"})
 _SAFE_CODE = re.compile(r"[a-z0-9_]{1,48}")
 
 
@@ -104,12 +105,15 @@ _TAG = re.compile(
 )
 
 
-def defang(text: str) -> str:
+def fold(text: str) -> str:
     """NFKC-fold (fullwidth brackets become ASCII) and drop invisible format characters (zero-width joiners
     and the like) so a disguised delimiter is caught. This also drops Indic ZWJ/ZWNJ, which only affects
     glyph shaping, not what is read."""
-    folded = "".join(ch for ch in unicodedata.normalize("NFKC", text) if unicodedata.category(ch) != "Cf")
-    return _TAG.sub("[tag removed]", folded)
+    return "".join(ch for ch in unicodedata.normalize("NFKC", text) if unicodedata.category(ch) != "Cf")
+
+
+def defang(text: str) -> str:
+    return _TAG.sub("[tag removed]", fold(text))
 
 
 def wrap_untrusted(text: str) -> str:
@@ -152,6 +156,10 @@ def cap_passages(
     """Cap retrieval output where the first `always_count` passages are always-included prompt-mode documents.
     Those get at most half of each budget, so the vector matches that answer the question keep the rest and
     are never the ones dropped (the top-ranked one is at worst truncated)."""
+    # Fold first: NFKC can expand one character into many (U+FDFA becomes 18), so capping raw text would let
+    # the folded result overshoot. The raw input is bounded before folding so a huge string is never
+    # normalised whole (2x leaves room for the few characters that shrink on folding).
+    passages = [fold(t[:budget_chars * 2]) for t in passages]
     always, ranked = passages[:always_count], passages[always_count:]
     kept_always, cut_a = cap_to_budget(always, budget_words // 2, budget_chars // 2)
     used_w = sum(len(t.split()) for t in kept_always)

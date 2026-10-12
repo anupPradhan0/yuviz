@@ -6,6 +6,7 @@ The model supplies arguments, never scope: tenant, agent and knowledge-base ids 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -76,6 +77,13 @@ def _canonical(arguments: Any) -> str:
     return json.dumps(arguments, sort_keys=True, default=str)
 
 
+def call_signature(tool_name: str, arguments: Any) -> str:
+    """Identity of one write for the confirmation memory: tool, api_name and a hash of the normalised arguments."""
+    api = arguments.get("api_name", "") if isinstance(arguments, dict) else ""
+    digest = hashlib.sha256(_canonical(arguments).encode()).hexdigest()[:24]
+    return f"{tool_name}:{api}:{digest}"
+
+
 class TurnGuard:
     """Per-turn state: call budget, repeated-identical-call detection, one repair attempt per tool."""
 
@@ -87,6 +95,7 @@ class TurnGuard:
         self._per_tool: dict[str, int] = {}
         self._repairs: dict[str, int] = {}
         self.tainted = False  # untrusted retrieved text is in context for this user turn
+        self.taint_refused = False  # a write was held this turn: stop offering writes, the model must ask
 
     @property
     def exhausted(self) -> bool:
@@ -101,6 +110,7 @@ class TurnGuard:
     def check(
         self, tool_name: str, arguments: dict[str, Any], schema: dict[str, Any] | None,
         max_calls_for_tool: int | None = None, detect_repeats: bool = True, side_effecting: bool = False,
+        confirmed: bool = False,
     ) -> ToolResult | None:
         """None = proceed; otherwise the refusal to hand the model instead of executing."""
         self._attempts += 1
@@ -121,9 +131,11 @@ class TurnGuard:
                 "expected_schema": schema,
             })
 
-        if side_effecting and self.tainted and taint_blocks_writes():
-            # Not a loop refusal: the model is meant to ask the caller, then call again next turn.
-            return ToolResult(status=ToolStatus.FAILED, error="needs_caller_confirmation")
+        if side_effecting and self.tainted and taint_blocks_writes() and not confirmed:
+            # Counts as a refusal and withdraws writes for the rest of the turn: the model has to answer in
+            # words (ask the caller), not loop. The confirmation path is the next caller utterance.
+            self.taint_refused = True
+            return self._refuse("needs_caller_confirmation")
 
         key = (tool_name, _canonical(arguments))
         if detect_repeats and key in self._seen:
