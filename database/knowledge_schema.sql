@@ -184,12 +184,22 @@ ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS next_attempt_at   TIMESTA
 ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS max_attempts      INT NOT NULL DEFAULT 5;
 ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS stage             TEXT;
 ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS error_class       TEXT;
-ALTER TABLE kb_ingestion_jobs DROP CONSTRAINT IF EXISTS kb_ingestion_jobs_status_check;
-ALTER TABLE kb_ingestion_jobs ADD CONSTRAINT kb_ingestion_jobs_status_check
-    CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'dead_letter'));
-ALTER TABLE kb_ingestion_jobs DROP CONSTRAINT IF EXISTS kb_ingestion_jobs_error_class_check;
-ALTER TABLE kb_ingestion_jobs ADD CONSTRAINT kb_ingestion_jobs_error_class_check
-    CHECK (error_class IS NULL OR error_class IN ('transient', 'permanent'));
+-- Each pair is one DO block so the drop and the re-add commit together.
+DO $$ BEGIN
+    ALTER TABLE kb_ingestion_jobs DROP CONSTRAINT IF EXISTS kb_ingestion_jobs_status_check;
+    ALTER TABLE kb_ingestion_jobs ADD CONSTRAINT kb_ingestion_jobs_status_check
+        CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'dead_letter'));
+END $$;
+DO $$ BEGIN
+    ALTER TABLE kb_ingestion_jobs DROP CONSTRAINT IF EXISTS kb_ingestion_jobs_error_class_check;
+    ALTER TABLE kb_ingestion_jobs ADD CONSTRAINT kb_ingestion_jobs_error_class_check
+        CHECK (error_class IS NULL OR error_class IN ('transient', 'permanent'));
+END $$;
+
+-- Jobs a pre-lease worker left running have no lease; give them one so the reaper can recover them
+-- (a NULL lease never compares as expired, and they would otherwise count against the tenant cap forever).
+UPDATE kb_ingestion_jobs SET lease_expires_at = now() + interval '120 seconds'
+ WHERE status = 'running' AND lease_expires_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_kb_ingestion_jobs_claim ON kb_ingestion_jobs(next_attempt_at) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_kb_ingestion_jobs_lease ON kb_ingestion_jobs(lease_expires_at) WHERE status = 'running';

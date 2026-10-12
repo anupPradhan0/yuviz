@@ -16,15 +16,17 @@ import json
 import logging
 import os
 import random
+import re
 import time
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import db
-from .chunking import Chunk, chunk_text
+from .chunking import Chunk, chunk_text, count_tokens
 from .embedding_manager import EmbeddingProviderConfig, EmbeddingProviderManager
 from .storage import StorageProvider
 
@@ -40,7 +42,8 @@ REAP_INTERVAL_S = 15.0
 BACKOFF_BASE_S = 5.0
 BACKOFF_CAP_S = 300.0
 DEFAULT_MAX_ATTEMPTS = 5
-# Soft cap: two workers claiming for one tenant at the same instant can overshoot it by one.
+# Soft cap: W workers claiming for one tenant at the same instant can overshoot it by up to W-1.
+# It only bites with several worker processes; one run_loop runs one job at a time.
 PER_TENANT_RUNNING_CAP = int(os.environ.get("KB_INGEST_PER_TENANT_CAP", "2"))
 
 _PERMANENT_ERRORS = (ValueError, FileNotFoundError)
@@ -49,6 +52,25 @@ _PERMANENT_ERRORS = (ValueError, FileNotFoundError)
 def classify_error(exc: BaseException) -> str:
     """'permanent' = retrying cannot help (bad type, empty doc, missing config/file); else 'transient'."""
     return "permanent" if isinstance(exc, _PERMANENT_ERRORS) else "transient"
+
+
+_URL_RE = re.compile(r"https?://[^\s'\"<>]+")
+
+
+def _scrub_url(match: re.Match) -> str:
+    parts = urlsplit(match.group(0))
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def redact_error(exc: BaseException) -> str:
+    """Exception type + message with URL credentials and query strings removed.
+
+    Stored in document/job/event rows that other members of the tenant can read, and provider
+    errors (httpx) embed the request URL, which can carry user:password@ or a key in the query."""
+    return f"{type(exc).__name__}: {_URL_RE.sub(_scrub_url, str(exc))}"[:1000]
 
 
 def backoff_seconds(attempt: int, rand: float | None = None) -> float:
@@ -75,7 +97,7 @@ class _StageLog:
         self._add("ok", detail)
 
     def error(self, exc: BaseException) -> None:
-        self._add("error", {"error_class": classify_error(exc), "error": str(exc)[:1000]})
+        self._add("error", {"error_class": classify_error(exc), "error": redact_error(exc)})
 
     def add(self, stage: str, status: str, **detail: Any) -> None:
         self.events.append({"stage": stage, "status": status, "duration_ms": None, "detail": detail})
@@ -131,16 +153,22 @@ _MARK_RUNNING_SQL = (
 )
 
 
-async def _heartbeat(pool: asyncpg.Pool, job_id: Any, tenant_id: str, lease_s: float, interval_s: float) -> None:
+async def _heartbeat(
+    pool: asyncpg.Pool, job_id: Any, tenant_id: str, attempt: int, lease_s: float, interval_s: float,
+) -> None:
+    """Extends this attempt's lease; stops once the job belongs to another attempt (its writes are fenced)."""
     while True:
         await asyncio.sleep(interval_s)
         try:
             async with tenant_conn(pool, explicit_tenant=tenant_id, reason="kb-ingestion-job") as conn:
-                await conn.execute(
+                status = await conn.execute(
                     "UPDATE kb_ingestion_jobs SET lease_expires_at = now() + make_interval(secs => $2), "
-                    "updated_at = now() WHERE id = $1 AND status = 'running'",
-                    job_id, lease_s,
+                    "updated_at = now() WHERE id = $1 AND status = 'running' AND attempts = $3",
+                    job_id, lease_s, attempt,
                 )
+            if status == "UPDATE 0":
+                log.warning("heartbeat job=%s attempt=%s: job no longer owned by this attempt; stopping", job_id, attempt)
+                return
         except Exception:
             log.warning("heartbeat failed job=%s; the reaper requeues the job if the lease lapses", job_id, exc_info=True)
 
@@ -183,7 +211,7 @@ async def process_one_job(
     tenant_id = str(doc_row["tenant_id"])
 
     stages = _StageLog(job["attempts"])
-    heartbeat = asyncio.create_task(_heartbeat(pool, job["id"], tenant_id, lease_s, heartbeat_s))
+    heartbeat = asyncio.create_task(_heartbeat(pool, job["id"], tenant_id, job["attempts"], lease_s, heartbeat_s))
     try:
         stages.begin("read")
         raw = await storage.read(doc_row["source_ref"])
@@ -195,12 +223,12 @@ async def process_one_job(
 
         stages.begin("chunk")
         if len(raw) < AUTO_INLINE_THRESHOLD_BYTES:
-            new_chunks: list[Chunk] = [Chunk(content=text, token_count=len(text.split()))]
+            new_chunks: list[Chunk] = [Chunk(content=text, token_count=count_tokens(text, doc_row["language"]))]
             vectors: list[list[float] | None] = [None]
             new_usage_mode = "prompt"
             stages.ok(chunks=1, inline=True)
         else:
-            new_chunks = chunk_text(text)
+            new_chunks = chunk_text(text, language=doc_row["language"])
             if not new_chunks:
                 raise ValueError("document produced zero chunks (empty or unextractable content)")
             stages.ok(chunks=len(new_chunks), inline=False)
@@ -262,7 +290,7 @@ async def _record_failure(
     """Permanent -> failed; transient -> pending with backoff; transient out of attempts -> dead_letter."""
     klass = classify_error(exc)
     attempts, max_attempts = job["attempts"], job.get("max_attempts") or DEFAULT_MAX_ATTEMPTS
-    error = str(exc)
+    error = redact_error(exc)
     if klass == "permanent":
         job_status, doc_status, delay = "failed", "failed", None
     elif attempts >= max_attempts:
@@ -299,16 +327,20 @@ async def _claim_next_job(
     async with platform_conn(pool, reason="kb-ingestion-job-claim") as conn:
         row = await conn.fetchrow(
             """
+            WITH running AS (
+                SELECT rd.tenant_id, count(*) AS n FROM kb_ingestion_jobs r
+                JOIN kb_documents rd ON rd.id = r.document_id
+                WHERE r.status = 'running' GROUP BY rd.tenant_id
+            )
             UPDATE kb_ingestion_jobs j
                SET status = 'running', started_at = now(), updated_at = now(), attempts = j.attempts + 1,
                    stage = 'claimed', lease_expires_at = now() + make_interval(secs => $1)
              WHERE j.id = (
                  SELECT c.id FROM kb_ingestion_jobs c
-                 JOIN kb_documents d ON d.id = c.document_id
+                 JOIN kb_documents d ON d.id = c.document_id AND d.deleted_at IS NULL
+                 LEFT JOIN running ru ON ru.tenant_id = d.tenant_id
                  WHERE c.status = 'pending' AND c.next_attempt_at <= now()
-                   AND (SELECT count(*) FROM kb_ingestion_jobs r
-                        JOIN kb_documents rd ON rd.id = r.document_id
-                        WHERE r.status = 'running' AND rd.tenant_id = d.tenant_id) < $2
+                   AND COALESCE(ru.n, 0) < $2
                  ORDER BY c.next_attempt_at, c.created_at
                  FOR UPDATE OF c SKIP LOCKED
                  LIMIT 1)
@@ -326,8 +358,11 @@ async def reap_expired_leases(pool: asyncpg.Pool) -> int:
         rows = await conn.fetch(
             "SELECT j.*, d.tenant_id AS doc_tenant_id FROM kb_ingestion_jobs j "
             "JOIN kb_documents d ON d.id = j.document_id "
-            "WHERE j.status = 'running' AND j.lease_expires_at < now() "
+            "WHERE j.status = 'running' AND ("
+            "  j.lease_expires_at < now() "
+            "  OR (j.lease_expires_at IS NULL AND j.started_at < now() - make_interval(secs => $1))) "
             "FOR UPDATE OF j SKIP LOCKED",
+            LEASE_SECONDS,
         )
         for row in rows:
             attempts, max_attempts = row["attempts"], row["max_attempts"]
