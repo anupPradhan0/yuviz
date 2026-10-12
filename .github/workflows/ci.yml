@@ -89,7 +89,8 @@ jobs:
 
       - name: Pull the embedding model
         run: |
-          curl -sf http://localhost:11434/api/pull -d '{"model": "nomic-embed-text"}'
+          curl -sf http://localhost:11434/api/pull -X POST -H 'Content-Type: application/json' -d '{"model": "nomic-embed-text"}'
+          sleep 5
 
       - name: Run tests
         run: python -m pytest -q -p no:cacheprovider -rfE
