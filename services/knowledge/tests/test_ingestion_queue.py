@@ -8,6 +8,7 @@ import asyncio
 from libs.tenancy import set_caller_tenant
 from services.config import provider_configs
 from services.knowledge import documents as documents_service
+from services.knowledge import embedding_manager
 from services.knowledge import ingestion_worker as worker
 from services.knowledge import knowledge_bases as kb_service
 from services.knowledge.embedding_manager import EmbeddingProviderManager
@@ -152,7 +153,8 @@ async def test_claim_skips_jobs_not_yet_due(tenant_agent, pool):
 
 # ── retry, dead-letter, permanent ───────────────────────────────────────
 
-async def test_transient_failure_retries_with_backoff_then_succeeds(tenant_agent, pool):
+async def test_transient_failure_retries_with_backoff_then_succeeds(tenant_agent, pool, monkeypatch):
+    monkeypatch.setattr(embedding_manager, "EMBED_BATCH_RETRIES", 0)  # isolate the job-level retry from the in-batch one
     tenant, _ = tenant_agent
     await _drain_pending(pool)
     kb = await _make_kb(tenant, "retry-kb")
@@ -188,7 +190,8 @@ async def test_transient_failure_retries_with_backoff_then_succeeds(tenant_agent
     assert (2, "embed", "ok") in trail and (2, "index", "ok") in trail
 
 
-async def test_transient_failures_dead_letter_after_max_attempts(tenant_agent, pool):
+async def test_transient_failures_dead_letter_after_max_attempts(tenant_agent, pool, monkeypatch):
+    monkeypatch.setattr(embedding_manager, "EMBED_BATCH_RETRIES", 0)
     tenant, _ = tenant_agent
     await _drain_pending(pool)
     kb = await _make_kb(tenant, "dlq-kb")

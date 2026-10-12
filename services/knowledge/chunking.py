@@ -1,5 +1,6 @@
-"""Paragraph-first chunking into ~chunk_size-word windows with chunk_overlap words of overlap.
-Word count is the token-count proxy throughout.
+"""Fixed-window chunking: paragraph-first ~chunk_size-word windows with chunk_overlap words of overlap.
+Word count is the token-count proxy throughout. The structure-aware chunker (chunker.py) is the ingestion default;
+this is its last-resort fallback and the behaviour existing callers of chunk_text() rely on.
 
 Languages written without spaces between words (Chinese, Japanese, Thai, Lao, Khmer,
 Myanmar) have no words to count, so they are sized by characters instead: token
@@ -34,6 +35,11 @@ _UNSPACED_CHARS_PER_WORD = 1.5
 class Chunk:
     content: str
     token_count: int
+    # Set by the structure-aware chunker (chunker.py); the fixed-window path here leaves them at their defaults.
+    section_path: str | None = None
+    page: int | None = None
+    parent: int | None = None   # index into the parents list of the ChunkResult this child belongs to
+    is_parent: bool = False
 
 
 def is_unspaced(text: str, language: str | None = None) -> bool:

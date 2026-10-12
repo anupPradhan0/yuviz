@@ -28,8 +28,11 @@ import asyncpg
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import db
-from .chunking import Chunk, chunk_text, count_tokens
-from .embedding_manager import EmbeddingProviderConfig, EmbeddingProviderManager
+from .chunker import CHUNKER_VERSION, ChunkConfig, chunk_document
+from .chunking import Chunk, count_tokens
+from .embedding_manager import (
+    EMBEDDING_DIMS, EmbeddingProviderConfig, EmbeddingProviderManager, effective_model, embed_in_batches,
+)
 from .parsers import SUPPORTED_CONTENT_TYPES, ParsedDocument, ParseRejected, parse_document
 from .storage import StorageProvider
 
@@ -230,25 +233,38 @@ async def process_one_job(
         )
 
         stages.begin("chunk")
+        parents: list[Chunk] = []
+        strategy = "inline"
+        embedding_model: str | None = None
         if len(raw) < AUTO_INLINE_THRESHOLD_BYTES:
             new_chunks: list[Chunk] = [Chunk(content=text, token_count=count_tokens(text, doc_row["language"]))]
             vectors: list[list[float] | None] = [None]
             new_usage_mode = "prompt"
             stages.ok(chunks=1, inline=True)
         else:
-            new_chunks = chunk_text(text, language=doc_row["language"])
+            try:  # the model's token limit sizes the chunks; a missing config is reported by the embed stage below
+                async with tenant_conn(pool, explicit_tenant=tenant_id, reason="kb-ingestion-job") as conn:
+                    embedding_cfg: EmbeddingProviderConfig | None = await _fetch_embedding_config(conn, kb_id)
+            except ValueError:
+                embedding_cfg = None
+            max_tokens = embedding_cfg.extra.get("max_tokens") if embedding_cfg else None
+            result = chunk_document(parsed.blocks, doc_row["language"], config=ChunkConfig.for_embedder(max_tokens))
+            new_chunks, parents, strategy = result.children, result.parents, result.strategy
             if not new_chunks:
                 raise ValueError("document produced zero chunks (empty or unextractable content)")
-            stages.ok(chunks=len(new_chunks), inline=False)
+            stages.ok(chunks=len(new_chunks), parents=len(parents), strategy=strategy, inline=False)
 
             stages.begin("embed")
-            async with tenant_conn(pool, explicit_tenant=tenant_id, reason="kb-ingestion-job") as conn:
-                embedding_cfg = await _fetch_embedding_config(conn, kb_id)
+            if embedding_cfg is None:
+                async with tenant_conn(pool, explicit_tenant=tenant_id, reason="kb-ingestion-job") as conn:
+                    embedding_cfg = await _fetch_embedding_config(conn, kb_id)
             provider = await embedding_manager.get(embedding_cfg)
-            vectors = await provider.embed([c.content for c in new_chunks])
+            embed_stats: dict[str, int] = {}
+            vectors = await embed_in_batches(provider, [c.content for c in new_chunks], stats=embed_stats)
+            embedding_model = effective_model(embedding_cfg)
             # Preserve an admin's manual usage_mode across re-ingestion.
             new_usage_mode = doc_row["usage_mode"]
-            stages.ok(vectors=len(vectors))
+            stages.ok(vectors=len(vectors), **embed_stats)
 
         stages.begin("index")
         async with tenant_conn(pool, explicit_tenant=tenant_id, reason="kb-ingestion-job") as conn:
@@ -259,24 +275,37 @@ async def process_one_job(
             # so readers see the old chunks until commit and the new ones after, never a gap.
             version = doc_row["version"]
             await conn.execute("DELETE FROM kb_chunks WHERE document_id = $1", document_id)
+            # Parents first (chunk_index = -1 - ordinal, never colliding with a child's index); children point at them.
+            parent_ids: list[Any] = []
+            for ordinal, parent in enumerate(parents):
+                parent_ids.append(await conn.fetchval(
+                    "INSERT INTO kb_chunks "
+                    "(document_id, kb_id, tenant_id, chunk_index, content, embedding, token_count, page, language, "
+                    " version, is_parent, section_path) "
+                    "VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, true, $10) RETURNING id",
+                    document_id, kb_id, doc_row["tenant_id"], -1 - ordinal, parent.content, parent.token_count,
+                    parent.page, doc_row["language"], version, parent.section_path,
+                ))
             for i, (chunk, vector) in enumerate(zip(new_chunks, vectors)):
                 vector_literal = None if vector is None else "[" + ",".join(repr(float(x)) for x in vector) + "]"
                 await conn.execute(
                     "INSERT INTO kb_chunks "
-                    "(document_id, kb_id, tenant_id, chunk_index, content, embedding, "
-                    " token_count, language, version) "
-                    "VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8, $9)",
-                    document_id, kb_id, doc_row["tenant_id"], i, chunk.content,
-                    vector_literal, chunk.token_count, doc_row["language"], version,
+                    "(document_id, kb_id, tenant_id, chunk_index, content, embedding, token_count, page, language, "
+                    " version, parent_id, section_path, embedding_model, dims) "
+                    "VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8, $9, $10, $11, $12, $13, $14)",
+                    document_id, kb_id, doc_row["tenant_id"], i, chunk.content, vector_literal, chunk.token_count,
+                    chunk.page, doc_row["language"], version,
+                    None if chunk.parent is None else parent_ids[chunk.parent], chunk.section_path,
+                    embedding_model if vector is not None else None, EMBEDDING_DIMS if vector is not None else None,
                 )
             # ready_degraded keeps its reason in `error` so the console can say what was unreadable.
             await conn.execute(
                 "UPDATE kb_documents SET status = $4, error = $5, version = $2, usage_mode = $3, "
-                "parser_used = $6, quality_score = $7, updated_at = now() WHERE id = $1",
+                "parser_used = $6, quality_score = $7, chunker_version = $8, updated_at = now() WHERE id = $1",
                 document_id, version, new_usage_mode,
                 "ready_degraded" if parsed.degraded else "ready",
                 "; ".join(parsed.warnings)[:1000] if parsed.degraded else None,
-                parsed.parser_used, parsed.quality_score,
+                parsed.parser_used, parsed.quality_score, CHUNKER_VERSION if strategy != "inline" else "inline",
             )
             stages.ok(chunks=len(new_chunks))
             await _write_events(conn, job, doc_row["tenant_id"], stages.events)

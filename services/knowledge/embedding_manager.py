@@ -4,6 +4,8 @@ Copies AIProviderManager's pattern; Knowledge Service must not import Conversati
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol
@@ -12,8 +14,24 @@ import httpx
 
 from .secret_resolver import SecretResolver
 
+log = logging.getLogger(__name__)
+
 # kb_chunks.embedding is vector(768); every provider must return exactly this width.
 EMBEDDING_DIMS = 768
+# Texts per provider call, and how a failed batch is retried in place (so one flaky batch does not redo the document).
+EMBED_BATCH_SIZE = 32
+EMBED_BATCH_RETRIES = 2
+EMBED_RETRY_BASE_S = 0.5
+_DEFAULT_MODELS = {"ollama": "nomic-embed-text", "openai": "text-embedding-3-small"}
+
+
+class EmbeddingError(RuntimeError):
+    """Transient: the provider answered, but not usably (count mismatch, NaN/inf, all-zero vector). RuntimeError, so
+    the worker classifies it as retryable."""
+
+
+class EmbeddingDimensionError(ValueError):
+    """Permanent: the model's vectors cannot fit the vector(768) column, and retrying will not change that."""
 
 
 class IEmbeddingProvider(Protocol):
@@ -27,6 +45,56 @@ class EmbeddingProviderConfig:
     model: str | None = None
     api_key_ref: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+
+
+def effective_model(cfg: "EmbeddingProviderConfig") -> str:
+    return cfg.model or _DEFAULT_MODELS.get(cfg.engine, cfg.engine)
+
+
+def _validate(vector: list[float]) -> None:
+    if len(vector) != EMBEDDING_DIMS:
+        raise EmbeddingDimensionError(
+            f"embedding provider returned {len(vector)}-dimensional vectors but kb_chunks.embedding is "
+            f"vector({EMBEDDING_DIMS}); use a {EMBEDDING_DIMS}-dimension embedding model",
+        )
+    if not all(math.isfinite(x) for x in vector):
+        raise EmbeddingError("embedding provider returned NaN or infinite values")
+    if not any(vector):
+        raise EmbeddingError("embedding provider returned an all-zero vector")
+
+
+async def embed_in_batches(
+    provider: "IEmbeddingProvider", texts: list[str], *, batch_size: int | None = None,
+    retries: int | None = None, stats: dict | None = None,
+) -> list[list[float]]:
+    """Embed `texts` in bounded batches. A failing batch is retried alone with backoff; batches already done are
+    kept. Vectors are validated (count, width, finite, non-zero); a width mismatch is permanent, the rest retry."""
+    size = batch_size or EMBED_BATCH_SIZE
+    attempts = (EMBED_BATCH_RETRIES if retries is None else retries) + 1
+    vectors: list[list[float]] = []
+    retried = 0
+    for start in range(0, len(texts), size):
+        batch = texts[start:start + size]
+        for attempt in range(1, attempts + 1):
+            try:
+                got = await provider.embed(batch)
+                if len(got) != len(batch):
+                    raise EmbeddingError(f"embedding provider returned {len(got)} vectors for {len(batch)} texts")
+                for v in got:
+                    _validate(v)
+                vectors.extend(got)
+                break
+            except EmbeddingDimensionError:
+                raise
+            except Exception as exc:
+                if attempt == attempts:
+                    raise
+                retried += 1
+                log.warning("embedding batch at %d failed (attempt %d/%d): %s", start, attempt, attempts, type(exc).__name__)
+                await asyncio.sleep(EMBED_RETRY_BASE_S * (2 ** (attempt - 1)))
+    if stats is not None:
+        stats.update(batches=-(-len(texts) // size), batch_retries=retried)
+    return vectors
 
 
 class OllamaEmbeddingProvider:
