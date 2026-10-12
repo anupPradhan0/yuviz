@@ -451,6 +451,17 @@ BEGIN
     ALTER TABLE kb_ingestion_jobs FORCE  ROW LEVEL SECURITY;
 END $$;
 
+DO $$
+BEGIN
+    DROP POLICY IF EXISTS kb_ingestion_events_tenant_isolation ON kb_ingestion_events;
+    CREATE POLICY kb_ingestion_events_tenant_isolation ON kb_ingestion_events
+        FOR ALL TO yuviz_app
+        USING      (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+        WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+    ALTER TABLE kb_ingestion_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE kb_ingestion_events FORCE  ROW LEVEL SECURITY;
+END $$;
+
 -- ── Call flows (IVR/OBD) ────────────────────────────────────────────────────
 DO $$
 BEGIN

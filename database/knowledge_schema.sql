@@ -173,6 +173,45 @@ CREATE TABLE IF NOT EXISTS kb_ingestion_jobs (
 CREATE INDEX IF NOT EXISTS idx_kb_ingestion_jobs_status ON kb_ingestion_jobs(status) WHERE status IN ('pending', 'running');
 CREATE INDEX IF NOT EXISTS idx_kb_ingestion_jobs_document ON kb_ingestion_jobs(document_id);
 
+-- Queue hardening: lease + heartbeat, retry with backoff, dead-letter, error class.
+--   pending      = waiting (also a retry waiting for next_attempt_at)
+--   running      = claimed; lease_expires_at is pushed forward by the worker heartbeat
+--   succeeded    = done
+--   failed       = permanent error (retrying cannot help), not retried
+--   dead_letter  = transient errors exhausted max_attempts; an admin can retry the document
+ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS next_attempt_at   TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS max_attempts      INT NOT NULL DEFAULT 5;
+ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS stage             TEXT;
+ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS error_class       TEXT;
+ALTER TABLE kb_ingestion_jobs DROP CONSTRAINT IF EXISTS kb_ingestion_jobs_status_check;
+ALTER TABLE kb_ingestion_jobs ADD CONSTRAINT kb_ingestion_jobs_status_check
+    CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'dead_letter'));
+ALTER TABLE kb_ingestion_jobs DROP CONSTRAINT IF EXISTS kb_ingestion_jobs_error_class_check;
+ALTER TABLE kb_ingestion_jobs ADD CONSTRAINT kb_ingestion_jobs_error_class_check
+    CHECK (error_class IS NULL OR error_class IN ('transient', 'permanent'));
+
+CREATE INDEX IF NOT EXISTS idx_kb_ingestion_jobs_claim ON kb_ingestion_jobs(next_attempt_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_kb_ingestion_jobs_lease ON kb_ingestion_jobs(lease_expires_at) WHERE status = 'running';
+
+-- ── kb_ingestion_events — append-only trail: where is my document, and why did it fail ──
+CREATE TABLE IF NOT EXISTS kb_ingestion_events (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_id       UUID NOT NULL REFERENCES kb_ingestion_jobs(id) ON DELETE CASCADE,
+    document_id  UUID NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    tenant_id    UUID NOT NULL REFERENCES tenants(id),
+    attempt      INT NOT NULL,
+    stage        TEXT NOT NULL,  -- read | extract | chunk | embed | index | worker
+    status       TEXT NOT NULL CHECK (status IN ('ok', 'error', 'retry_scheduled', 'dead_letter', 'lease_expired')),
+    duration_ms  INT,
+    detail       JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()  -- not now(): events in one transaction must keep insert order
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_ingestion_events_job ON kb_ingestion_events(job_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_kb_ingestion_events_document ON kb_ingestion_events(document_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_kb_ingestion_events_tenant ON kb_ingestion_events(tenant_id);
+
 -- knowledge_base_ids is default-deny: give the start node the agent's enabled KBs
 -- when no node in the graph lists any.
 DO $kb_workflow_backfill$

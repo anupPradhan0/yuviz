@@ -249,6 +249,9 @@ _BYPASS_REASONS = {
     "calls-platform-read", "audit-log-platform-read",
     "campaign-by-id", "dnc-by-id", "campaign-worker-scan",
     "kb-by-id", "kb-admin-by-id", "agent-kb-by-id", "kb-ingestion-job-claim",
+    # Requeues running ingestion jobs whose worker died, across every tenant; each event row it
+    # writes carries the document's own tenant_id.
+    "kb-ingestion-lease-reaper",
     "document-by-id", "document-admin-by-id",
     "custom-apis-admin-by-id", "custom-apis-admin-mutation",
     "agent-apis-admin-by-id", "agent-apis-admin-mutation", "agent-apis-chain-runs",
@@ -278,7 +281,7 @@ _UNSTAMPED_MUTATION_EXEMPT_REASONS = {
     "invites-create-null-tenant", "invites-null-tenant-listing",
     "tenants-out-of-rls-scope", "phone-numbers-prewarm",
     "campaign-worker-scan", "conversation-reconcile-sweep",
-    "kb-ingestion-job-claim", "agent-apis-chain-runs",
+    "kb-ingestion-job-claim", "kb-ingestion-lease-reaper", "agent-apis-chain-runs",
     "calls-platform-read", "audit-log-platform-read",
 }
 

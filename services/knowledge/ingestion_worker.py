@@ -1,19 +1,30 @@
-"""Ingestion worker: polls kb_ingestion_jobs; read -> extract -> chunk -> embed -> kb_chunks.
+"""Ingestion worker: claims kb_ingestion_jobs; read -> extract -> chunk -> embed -> kb_chunks.
 Small docs (< AUTO_INLINE_THRESHOLD_BYTES) skip embedding and become usage_mode='prompt'.
-Job claim uses platform_conn(); all later statements re-scope to the document's tenant."""
+
+Queue semantics (many workers are safe):
+  - claim is one UPDATE ... FOR UPDATE SKIP LOCKED, with a soft per-tenant running cap
+  - a running job holds a lease that a heartbeat extends; reap_expired_leases() requeues a dead worker's job
+  - permanent errors (ValueError, missing file) fail at once; anything else retries with backoff,
+    then dead-letters after max_attempts. Retrying a dead-lettered document goes through retry_document()
+  - final writes are fenced on (status='running', attempts) so a stale worker cannot overwrite a newer one
+Job claim and lease reaping use platform_conn(); all later statements re-scope to the document's tenant."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
+import random
+import time
+from typing import Any
 
 import asyncpg
 
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import db
-from .chunking import Chunk, chunk_text, count_tokens
+from .chunking import Chunk, chunk_text
 from .embedding_manager import EmbeddingProviderConfig, EmbeddingProviderManager
 from .storage import StorageProvider
 
@@ -22,6 +33,70 @@ log = logging.getLogger(__name__)
 SUPPORTED_CONTENT_TYPES = {"text/plain", "text/markdown"}
 AUTO_INLINE_THRESHOLD_BYTES = 500
 POLL_INTERVAL_S = 2.0
+
+LEASE_SECONDS = 120.0
+HEARTBEAT_SECONDS = 30.0
+REAP_INTERVAL_S = 15.0
+BACKOFF_BASE_S = 5.0
+BACKOFF_CAP_S = 300.0
+DEFAULT_MAX_ATTEMPTS = 5
+# Soft cap: two workers claiming for one tenant at the same instant can overshoot it by one.
+PER_TENANT_RUNNING_CAP = int(os.environ.get("KB_INGEST_PER_TENANT_CAP", "2"))
+
+_PERMANENT_ERRORS = (ValueError, FileNotFoundError)
+
+
+def classify_error(exc: BaseException) -> str:
+    """'permanent' = retrying cannot help (bad type, empty doc, missing config/file); else 'transient'."""
+    return "permanent" if isinstance(exc, _PERMANENT_ERRORS) else "transient"
+
+
+def backoff_seconds(attempt: int, rand: float | None = None) -> float:
+    """Delay before retry number `attempt` (1-based): exponential, capped, +/-20% jitter."""
+    base = min(BACKOFF_CAP_S, BACKOFF_BASE_S * (2 ** max(0, attempt - 1)))
+    r = random.random() if rand is None else rand
+    return base * (0.8 + 0.4 * r)
+
+
+class _StageLog:
+    """Collects per-stage events in memory; flushed in the same transaction as the job's final state."""
+
+    def __init__(self, attempt: int) -> None:
+        self.attempt = attempt
+        self.events: list[dict[str, Any]] = []
+        self.stage = "read"
+        self._t0 = time.monotonic()
+
+    def begin(self, stage: str) -> None:
+        self.stage = stage
+        self._t0 = time.monotonic()
+
+    def ok(self, **detail: Any) -> None:
+        self._add("ok", detail)
+
+    def error(self, exc: BaseException) -> None:
+        self._add("error", {"error_class": classify_error(exc), "error": str(exc)[:1000]})
+
+    def add(self, stage: str, status: str, **detail: Any) -> None:
+        self.events.append({"stage": stage, "status": status, "duration_ms": None, "detail": detail})
+
+    def _add(self, status: str, detail: dict[str, Any]) -> None:
+        self.events.append({
+            "stage": self.stage, "status": status,
+            "duration_ms": int((time.monotonic() - self._t0) * 1000), "detail": detail,
+        })
+
+
+async def _write_events(
+    conn: asyncpg.Connection, job: dict, tenant_id: Any, events: list[dict[str, Any]],
+) -> None:
+    for e in events:
+        await conn.execute(
+            "INSERT INTO kb_ingestion_events (job_id, document_id, tenant_id, attempt, stage, status, duration_ms, detail) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)",
+            job["id"], job["document_id"], tenant_id, job["attempts"],
+            e["stage"], e["status"], e["duration_ms"], json.dumps(e["detail"]),
+        )
 
 
 async def _fetch_embedding_config(conn: asyncpg.Connection, kb_id) -> EmbeddingProviderConfig:
@@ -48,48 +123,105 @@ async def _extract_text(content_type: str, raw: bytes) -> str:
     return raw.decode("utf-8")
 
 
+_MARK_RUNNING_SQL = (
+    "UPDATE kb_ingestion_jobs SET status = 'running', started_at = now(), updated_at = now(), "
+    "attempts = attempts + 1, stage = 'claimed', "
+    "lease_expires_at = now() + make_interval(secs => $2) "
+    "WHERE id = $1 RETURNING *"
+)
+
+
+async def _heartbeat(pool: asyncpg.Pool, job_id: Any, tenant_id: str, lease_s: float, interval_s: float) -> None:
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            async with tenant_conn(pool, explicit_tenant=tenant_id, reason="kb-ingestion-job") as conn:
+                await conn.execute(
+                    "UPDATE kb_ingestion_jobs SET lease_expires_at = now() + make_interval(secs => $2), "
+                    "updated_at = now() WHERE id = $1 AND status = 'running'",
+                    job_id, lease_s,
+                )
+        except Exception:
+            log.warning("heartbeat failed job=%s; the reaper requeues the job if the lease lapses", job_id, exc_info=True)
+
+
+async def _still_owns_job(conn: asyncpg.Connection, job: dict) -> bool:
+    """Row-locks the job and checks this worker's attempt still owns it (not reaped and reclaimed)."""
+    row = await conn.fetchrow(
+        "SELECT 1 FROM kb_ingestion_jobs WHERE id = $1 AND status = 'running' AND attempts = $2 FOR UPDATE",
+        job["id"], job["attempts"],
+    )
+    return row is not None
+
+
 async def process_one_job(
     pool: asyncpg.Pool,
     storage: StorageProvider,
     embedding_manager: EmbeddingProviderManager,
     job: dict,
+    *,
+    lease_s: float = LEASE_SECONDS,
+    heartbeat_s: float = HEARTBEAT_SECONDS,
 ) -> None:
     document_id, kb_id = job["document_id"], job["kb_id"]
 
     async with platform_conn(pool, reason="kb-ingestion-job-claim") as conn:
-        await conn.execute(
-            "UPDATE kb_ingestion_jobs SET status = 'running', started_at = now(), attempts = attempts + 1 "
-            "WHERE id = $1",
-            job["id"],
-        )
-        await conn.execute("UPDATE kb_documents SET status = 'processing' WHERE id = $1", document_id)
+        if job.get("status") != "running":  # called directly rather than through _claim_next_job
+            job = dict(await conn.fetchrow(_MARK_RUNNING_SQL, job["id"], lease_s))
         doc_row = await conn.fetchrow("SELECT * FROM kb_documents WHERE id = $1", document_id)
-
+        if doc_row is not None:
+            await conn.execute("UPDATE kb_documents SET status = 'processing' WHERE id = $1", document_id)
+        else:
+            await conn.execute(
+                "UPDATE kb_ingestion_jobs SET status = 'failed', error_class = 'permanent', "
+                "error = 'document not found', finished_at = now(), lease_expires_at = NULL WHERE id = $1",
+                job["id"],
+            )
     if doc_row is None:
-        raise ValueError(f"kb_document {document_id} not found")
+        log.error("Ingestion job=%s references missing document=%s", job["id"], document_id)
+        return
     tenant_id = str(doc_row["tenant_id"])
 
+    stages = _StageLog(job["attempts"])
+    heartbeat = asyncio.create_task(_heartbeat(pool, job["id"], tenant_id, lease_s, heartbeat_s))
     try:
+        stages.begin("read")
         raw = await storage.read(doc_row["source_ref"])
-        text = await _extract_text(doc_row["content_type"], raw)
+        stages.ok(bytes=len(raw))
 
+        stages.begin("extract")
+        text = await _extract_text(doc_row["content_type"], raw)
+        stages.ok(chars=len(text))
+
+        stages.begin("chunk")
         if len(raw) < AUTO_INLINE_THRESHOLD_BYTES:
-            new_chunks: list[Chunk] = [Chunk(content=text, token_count=count_tokens(text, doc_row["language"]))]
+            new_chunks: list[Chunk] = [Chunk(content=text, token_count=len(text.split()))]
             vectors: list[list[float] | None] = [None]
             new_usage_mode = "prompt"
+            stages.ok(chunks=1, inline=True)
         else:
-            new_chunks = chunk_text(text, language=doc_row["language"])
+            new_chunks = chunk_text(text)
             if not new_chunks:
                 raise ValueError("document produced zero chunks (empty or unextractable content)")
+            stages.ok(chunks=len(new_chunks), inline=False)
+
+            stages.begin("embed")
             async with tenant_conn(pool, explicit_tenant=tenant_id, reason="kb-ingestion-job") as conn:
                 embedding_cfg = await _fetch_embedding_config(conn, kb_id)
             provider = await embedding_manager.get(embedding_cfg)
             vectors = await provider.embed([c.content for c in new_chunks])
             # Preserve an admin's manual usage_mode across re-ingestion.
             new_usage_mode = doc_row["usage_mode"]
+            stages.ok(vectors=len(vectors))
 
+        stages.begin("index")
         async with tenant_conn(pool, explicit_tenant=tenant_id, reason="kb-ingestion-job") as conn:
-            new_version = (doc_row["version"] or 1) + 1 if doc_row["status"] == "ready" else doc_row["version"]
+            if not await _still_owns_job(conn, job):
+                log.warning("Ingestion job=%s attempt=%s lost its lease; dropping results", job["id"], job["attempts"])
+                return
+            # The queuer owns the version (retry_document bumps it); this swap is one transaction,
+            # so readers see the old chunks until commit and the new ones after, never a gap.
+            version = doc_row["version"]
             await conn.execute("DELETE FROM kb_chunks WHERE document_id = $1", document_id)
             for i, (chunk, vector) in enumerate(zip(new_chunks, vectors)):
                 vector_literal = None if vector is None else "[" + ",".join(repr(float(x)) for x in vector) + "]"
@@ -99,38 +231,140 @@ async def process_one_job(
                     " token_count, language, version) "
                     "VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8, $9)",
                     document_id, kb_id, doc_row["tenant_id"], i, chunk.content,
-                    vector_literal, chunk.token_count, doc_row["language"], new_version,
+                    vector_literal, chunk.token_count, doc_row["language"], version,
                 )
             await conn.execute(
                 "UPDATE kb_documents SET status = 'ready', error = NULL, version = $2, "
                 "usage_mode = $3, updated_at = now() WHERE id = $1",
-                document_id, new_version, new_usage_mode,
+                document_id, version, new_usage_mode,
             )
+            stages.ok(chunks=len(new_chunks))
+            await _write_events(conn, job, doc_row["tenant_id"], stages.events)
             await conn.execute(
-                "UPDATE kb_ingestion_jobs SET status = 'succeeded', finished_at = now() WHERE id = $1",
+                "UPDATE kb_ingestion_jobs SET status = 'succeeded', stage = 'done', error = NULL, "
+                "error_class = NULL, lease_expires_at = NULL, finished_at = now(), updated_at = now() WHERE id = $1",
                 job["id"],
             )
         log.info("Ingested document=%s kb=%s chunks=%d usage_mode=%s", document_id, kb_id, len(new_chunks), new_usage_mode)
 
     except Exception as exc:
-        log.exception("Ingestion failed document=%s kb=%s", document_id, kb_id)
-        async with tenant_conn(pool, explicit_tenant=tenant_id, reason="kb-ingestion-job") as conn:
-            await conn.execute(
-                "UPDATE kb_documents SET status = 'failed', error = $2 WHERE id = $1", document_id, str(exc),
-            )
-            await conn.execute(
-                "UPDATE kb_ingestion_jobs SET status = 'failed', error = $2, finished_at = now() WHERE id = $1",
-                job["id"], str(exc),
-            )
+        log.exception("Ingestion failed document=%s kb=%s stage=%s attempt=%s", document_id, kb_id, stages.stage, job["attempts"])
+        stages.error(exc)
+        await _record_failure(pool, job, doc_row, tenant_id, stages, exc)
+    finally:
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
 
 
-async def _claim_next_job(pool: asyncpg.Pool) -> dict | None:
-    """Pick one pending job. Plain SELECT assumes a single worker (else use FOR UPDATE SKIP LOCKED)."""
-    async with platform_conn(pool, reason="kb-ingestion-job-claim") as conn:
-        job_row = await conn.fetchrow(
-            "SELECT * FROM kb_ingestion_jobs WHERE status = 'pending' ORDER BY created_at LIMIT 1",
+async def _record_failure(
+    pool: asyncpg.Pool, job: dict, doc_row: Any, tenant_id: str, stages: _StageLog, exc: BaseException,
+) -> None:
+    """Permanent -> failed; transient -> pending with backoff; transient out of attempts -> dead_letter."""
+    klass = classify_error(exc)
+    attempts, max_attempts = job["attempts"], job.get("max_attempts") or DEFAULT_MAX_ATTEMPTS
+    error = str(exc)
+    if klass == "permanent":
+        job_status, doc_status, delay = "failed", "failed", None
+    elif attempts >= max_attempts:
+        job_status, doc_status, delay = "dead_letter", "failed", None
+        stages.add("worker", "dead_letter", attempts=attempts, max_attempts=max_attempts)
+    else:
+        job_status, doc_status, delay = "pending", "pending", backoff_seconds(attempts)
+        stages.add("worker", "retry_scheduled", attempts=attempts, retry_in_s=round(delay, 1))
+
+    async with tenant_conn(pool, explicit_tenant=tenant_id, reason="kb-ingestion-job") as conn:
+        if not await _still_owns_job(conn, job):
+            log.warning("Ingestion job=%s attempt=%s lost its lease; dropping failure", job["id"], job["attempts"])
+            return
+        await _write_events(conn, job, doc_row["tenant_id"], stages.events)
+        await conn.execute(
+            "UPDATE kb_documents SET status = $2, error = $3 WHERE id = $1", doc_row["id"], doc_status, error,
         )
-    return dict(job_row) if job_row is not None else None
+        await conn.execute(
+            "UPDATE kb_ingestion_jobs SET status = $2, error = $3, error_class = $4, stage = $5, "
+            "lease_expires_at = NULL, updated_at = now(), "
+            "finished_at = CASE WHEN $2 = 'pending' THEN NULL ELSE now() END, "
+            "next_attempt_at = CASE WHEN $6::float8 IS NULL THEN next_attempt_at "
+            "                       ELSE now() + make_interval(secs => $6::float8) END "
+            "WHERE id = $1",
+            job["id"], job_status, error, klass, stages.stage, delay,
+        )
+
+
+async def _claim_next_job(
+    pool: asyncpg.Pool, lease_s: float = LEASE_SECONDS, tenant_cap: int | None = None,
+) -> dict | None:
+    """Claim one due pending job (SKIP LOCKED, so concurrent workers never take the same one)."""
+    cap = PER_TENANT_RUNNING_CAP if tenant_cap is None else tenant_cap
+    async with platform_conn(pool, reason="kb-ingestion-job-claim") as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE kb_ingestion_jobs j
+               SET status = 'running', started_at = now(), updated_at = now(), attempts = j.attempts + 1,
+                   stage = 'claimed', lease_expires_at = now() + make_interval(secs => $1)
+             WHERE j.id = (
+                 SELECT c.id FROM kb_ingestion_jobs c
+                 JOIN kb_documents d ON d.id = c.document_id
+                 WHERE c.status = 'pending' AND c.next_attempt_at <= now()
+                   AND (SELECT count(*) FROM kb_ingestion_jobs r
+                        JOIN kb_documents rd ON rd.id = r.document_id
+                        WHERE r.status = 'running' AND rd.tenant_id = d.tenant_id) < $2
+                 ORDER BY c.next_attempt_at, c.created_at
+                 FOR UPDATE OF c SKIP LOCKED
+                 LIMIT 1)
+            RETURNING j.*
+            """,
+            lease_s, cap,
+        )
+    return dict(row) if row is not None else None
+
+
+async def reap_expired_leases(pool: asyncpg.Pool) -> int:
+    """Requeue (or dead-letter) running jobs whose worker stopped heartbeating. Returns jobs reaped."""
+    reaped = 0
+    async with platform_conn(pool, reason="kb-ingestion-lease-reaper") as conn:
+        rows = await conn.fetch(
+            "SELECT j.*, d.tenant_id AS doc_tenant_id FROM kb_ingestion_jobs j "
+            "JOIN kb_documents d ON d.id = j.document_id "
+            "WHERE j.status = 'running' AND j.lease_expires_at < now() "
+            "FOR UPDATE OF j SKIP LOCKED",
+        )
+        for row in rows:
+            attempts, max_attempts = row["attempts"], row["max_attempts"]
+            exhausted = attempts >= max_attempts
+            message = f"worker lease expired during {row['stage'] or 'processing'}"
+            if exhausted:
+                await conn.execute(
+                    "UPDATE kb_ingestion_jobs SET status = 'dead_letter', error = $2, error_class = 'transient', "
+                    "lease_expires_at = NULL, finished_at = now(), updated_at = now() WHERE id = $1",
+                    row["id"], message,
+                )
+                await conn.execute(
+                    "UPDATE kb_documents SET status = 'failed', error = $2 WHERE id = $1", row["document_id"], message,
+                )
+                event_status = "dead_letter"
+            else:
+                delay = backoff_seconds(attempts)
+                await conn.execute(
+                    "UPDATE kb_ingestion_jobs SET status = 'pending', error = $2, error_class = 'transient', "
+                    "lease_expires_at = NULL, updated_at = now(), "
+                    "next_attempt_at = now() + make_interval(secs => $3::float8) WHERE id = $1",
+                    row["id"], message, delay,
+                )
+                await conn.execute(
+                    "UPDATE kb_documents SET status = 'pending', error = $2 WHERE id = $1", row["document_id"], message,
+                )
+                event_status = "lease_expired"
+            await conn.execute(
+                "INSERT INTO kb_ingestion_events (job_id, document_id, tenant_id, attempt, stage, status, detail) "
+                "VALUES ($1, $2, $3, $4, 'worker', $5, $6::jsonb)",
+                row["id"], row["document_id"], row["doc_tenant_id"], attempts, event_status,
+                json.dumps({"stage_at_expiry": row["stage"], "attempts": attempts, "max_attempts": max_attempts}),
+            )
+            reaped += 1
+    if reaped:
+        log.warning("Reaped %d ingestion job(s) with expired leases", reaped)
+    return reaped
 
 
 async def run_loop(
@@ -140,9 +374,22 @@ async def run_loop(
 ) -> None:
     """Worker entry point; runs forever, holding no transaction between polls."""
     pool = await db.get_pool()
+    last_reap = 0.0
     while True:
-        job = await _claim_next_job(pool)
-        if job is None:
+        if time.monotonic() - last_reap >= REAP_INTERVAL_S:
+            last_reap = time.monotonic()
+            try:
+                await reap_expired_leases(pool)
+            except Exception:
+                log.exception("lease reaper failed; will retry next interval")
+        try:
+            job = await _claim_next_job(pool)
+            if job is None:
+                await asyncio.sleep(poll_interval_s)
+                continue
+            await process_one_job(pool, storage, embedding_manager, job)
+        except Exception:
+            # process_one_job records its own failures; this is a DB-level fault. The lease reaper
+            # recovers a job left running, so keep the worker alive.
+            log.exception("ingestion loop iteration failed")
             await asyncio.sleep(poll_interval_s)
-            continue
-        await process_one_job(pool, storage, embedding_manager, job)
