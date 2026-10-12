@@ -47,6 +47,15 @@ class EmbeddingProviderConfig:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+class EmbeddingRequestRejected(ValueError):
+    """Permanent: the provider answered 4xx (bad key, unknown model, malformed request). Retrying the batch cannot
+    help and a misconfigured provider would otherwise be called 3x per batch, per attempt."""
+
+
+# 408 (timeout), 425 and 429 (rate limit) are the 4xx codes that are worth retrying.
+_PERMANENT_STATUS = frozenset({400, 401, 402, 403, 404, 405, 409, 410, 411, 413, 414, 415, 422})
+
+
 def effective_model(cfg: "EmbeddingProviderConfig") -> str:
     return cfg.model or _DEFAULT_MODELS.get(cfg.engine, cfg.engine)
 
@@ -86,6 +95,14 @@ async def embed_in_batches(
                 break
             except EmbeddingDimensionError:
                 raise
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status in _PERMANENT_STATUS:
+                    raise EmbeddingRequestRejected(f"embedding provider rejected the request (HTTP {status})") from None
+                if attempt == attempts:
+                    raise
+                retried += 1
+                await asyncio.sleep(EMBED_RETRY_BASE_S * (2 ** (attempt - 1)))
             except Exception as exc:
                 if attempt == attempts:
                     raise

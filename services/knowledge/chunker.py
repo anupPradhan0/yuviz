@@ -25,8 +25,15 @@ from .tokens import EstimatingTokenCounter, TokenCounter
 
 log = logging.getLogger(__name__)
 
-CHUNKER_VERSION = "structure-v1"
+CHUNKER_VERSIONS = {"structure": "structure-v1", "prose": "recursive-v1", "qa": "qa-v1", "table": "table-v1",
+                    "fixed": "fixed-v1"}
+
+
+def chunker_version(strategy: str) -> str:
+    """What is recorded on the document: the strategy that actually produced the chunks, never the one intended."""
+    return CHUNKER_VERSIONS.get(strategy, f"{strategy}-v1")
 DEFAULT_EMBED_MAX_TOKENS = 512
+MIN_EMBED_TOKENS, MAX_EMBED_TOKENS = 64, 8192
 
 
 @dataclass(frozen=True)
@@ -37,8 +44,12 @@ class ChunkConfig:
     min_section: int = 40                # a section smaller than this folds into the next one
 
     @classmethod
-    def for_embedder(cls, max_tokens: int | None) -> "ChunkConfig":
-        cap = max(64, int(max_tokens or DEFAULT_EMBED_MAX_TOKENS))
+    def for_embedder(cls, max_tokens: object) -> "ChunkConfig":
+        """`max_tokens` comes from provider_configs.extra, which a tenant admin writes: anything that is not a plain
+        int is ignored (default 512) and an int is clamped to a sane range."""
+        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
+            max_tokens = DEFAULT_EMBED_MAX_TOKENS
+        cap = min(MAX_EMBED_TOKENS, max(MIN_EMBED_TOKENS, max_tokens))
         return cls(cap=cap, child_target=min(250, int(cap * 0.55)))
 
 
@@ -182,7 +193,8 @@ def _merge_siblings(sections: list[_Section], counter: TokenCounter, target: int
 
     for sec in sections:
         size = sum(counter.count(b.render()) for b in sec.blocks) + counter.count(sec.path[-1] if sec.path else "")
-        same_parent = group and sec.path and group[0].path[:-1] == sec.path[:-1]
+        # A section with no heading (text before the first heading) is never merged: it has no heading to keep inline.
+        same_parent = group and sec.path and group[0].path and group[0].path[:-1] == sec.path[:-1]
         if group and (not same_parent or used + size > target):
             flush()
             used = 0
@@ -414,7 +426,7 @@ def route(blocks: list[Block]) -> str:
 def _fixed(blocks: list[Block], language: str | None, counter: TokenCounter, cfg: ChunkConfig) -> ChunkResult:
     text = "\n\n".join(b.render() for b in blocks if b.render().strip())
     res = ChunkResult(strategy="fixed")
-    for c in chunk_text(text, chunk_size=max(20, cfg.child_target // 2), chunk_overlap=20, language=language):
+    for c in chunk_text(text, chunk_size=max(20, cfg.child_target // 2), chunk_overlap=min(20, max(20, cfg.child_target // 2) // 4), language=language):
         for piece in split_to_budget(c.content, cfg.cap, counter):
             if piece.strip():
                 res.children.append(Chunk(piece.strip(), counter.count(piece)))
@@ -432,6 +444,8 @@ def chunk_document(
     blocks = [b for b in blocks if b.render().strip()]
     if not blocks:
         return ChunkResult()
+    if all(b.kind == HEADING for b in blocks):  # nothing under any heading: the headings are the content
+        blocks = [Block(PARAGRAPH, b.text, page=b.page) for b in blocks]
     chosen = strategy or route(blocks)
     try:
         if chosen == "qa":
@@ -453,7 +467,7 @@ def chunk_document(
             raise ValueError("splitter produced no chunks")
         _check(res, counter, cfg)
     except Exception:
-        log.exception("chunking strategy %r failed; falling back to fixed windows", chosen)
+        log.warning("chunking strategy %r failed; falling back to fixed windows", chosen, exc_info=True)
         res = _fixed(blocks, language, counter, cfg)
     return res
 

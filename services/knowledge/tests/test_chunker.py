@@ -236,3 +236,94 @@ def test_a_lone_child_gets_no_parent_row():
     r = chunk_plain_text("# Title\n\nOne short paragraph that fits in a single chunk easily and stays alone here.\n\n"
                          "## Next\n\nAnother short paragraph with enough words to avoid folding into its neighbour okay.\n")
     assert r.parents == []
+
+
+# ── review fixes: degenerate caps, intro-before-heading, honest version ──
+
+import signal  # noqa: E402
+
+from services.knowledge.chunker import chunker_version  # noqa: E402
+
+
+@pytest.fixture
+def watchdog():
+    """Fails the test (instead of hanging or eating memory) if a chunking call does not return quickly."""
+    class Hang(BaseException):  # not Exception: chunk_document's fallback must not swallow it and loop again
+        pass
+
+    def boom(*_):
+        raise Hang("chunking did not return: the loop is not advancing")
+    old = signal.signal(signal.SIGALRM, boom)
+    yield lambda seconds=3: signal.alarm(seconds)
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, old)
+
+
+@pytest.mark.parametrize("cap", list(range(-2, 101)))
+@pytest.mark.parametrize("strategy", [None, "fixed"])
+def test_every_small_cap_terminates_and_holds_the_cap(cap, strategy, watchdog):
+    cfg = ChunkConfig.for_embedder(cap)
+    assert 64 <= cfg.cap <= 8192
+    watchdog(3)
+    r = chunk_document(blocks_from_text(ENGLISH[:6000] + "\n\n" + HINDI[:3000]), config=cfg, strategy=strategy)
+    signal.alarm(0)
+    _assert_within_cap(r, cfg.cap)
+    assert len(r.children) < 2000
+
+
+def test_max_tokens_from_provider_extra_is_validated():
+    default = ChunkConfig.for_embedder(None).cap
+    for junk in ("abc", "512", 12.5, True, [1], {"a": 1}, None):
+        assert ChunkConfig.for_embedder(junk).cap == default
+    assert ChunkConfig.for_embedder(10**12).cap == 8192 and ChunkConfig.for_embedder(1).cap == 64
+
+
+def test_fixed_window_refuses_a_window_that_cannot_advance():
+    with pytest.raises(ValueError):
+        chunk_text("word " * 500, chunk_size=20, chunk_overlap=20)
+    with pytest.raises(ValueError):
+        chunk_text("word " * 500, chunk_size=0, chunk_overlap=0)
+    assert chunk_text("word " * 500, chunk_size=20, chunk_overlap=19)  # advances one unit at a time, still finite
+
+
+INTRO_DOC = (
+    "This handbook explains how Acme handles orders, returns and billing for retail customers across every region "
+    "we serve today. It is written for support staff and is reviewed once a year by the policy team.\n\n"
+    "# Returns\n\nItems can be returned within thirty days of delivery if they are unused and still in their original "
+    "packaging. Proof of purchase is required for every return and the refund goes back to the original payment "
+    "method once the parcel has been inspected at our warehouse.\n\n"
+    "## Damaged items\n\nReport damage within seven days with a photo.\n"
+)
+
+
+def test_intro_paragraph_before_the_first_heading_does_not_crash_the_structure_route(caplog):
+    caplog.set_level("WARNING")
+    r = chunk_plain_text(INTRO_DOC)
+    assert r.strategy == "structure", "must not silently fall back to fixed windows"
+    assert not [x for x in caplog.records if "falling back" in x.getMessage()]
+    assert any(c.section_path for c in r.children)
+    assert any("This handbook explains" in c.content for c in r.children)
+    assert chunker_version(r.strategy) == "structure-v1"
+
+
+def test_headings_only_and_heading_less_documents_chunk_without_falling_back(caplog):
+    caplog.set_level("WARNING")
+    only = chunk_plain_text("# Policy\n\n## Returns\n\n## Shipping\n\n## Billing\n")
+    assert only.strategy == "prose" and "Shipping" in only.children[0].content
+    plain = chunk_plain_text(ENGLISH)
+    assert plain.strategy == "prose" and chunker_version(plain.strategy) == "recursive-v1"
+    assert not [x for x in caplog.records if "falling back" in x.getMessage()]
+
+
+def test_recorded_version_is_the_strategy_that_actually_ran(monkeypatch, caplog):
+    caplog.set_level("WARNING")
+
+    def boom(*a, **k):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(chunker, "_build_sections", boom)
+    r = chunk_plain_text(POLICY)
+    assert r.strategy == "fixed" and chunker_version(r.strategy) == "fixed-v1"
+    assert any("falling back to fixed windows" in x.getMessage() for x in caplog.records)
+    assert {chunker_version(s) for s in ("structure", "prose", "qa", "table", "fixed")} == {
+        "structure-v1", "recursive-v1", "qa-v1", "table-v1", "fixed-v1"}

@@ -17,6 +17,16 @@ class ParseRejected(ValueError):
         self.reason = reason
 
 
+class LimitExceeded(ParseRejected):
+    """A resource limit (cells, columns, rows, characters) was hit. Final: the ladder does not try a cheaper parser,
+    because the document is too big for the platform, not unreadable."""
+
+
+class ParseInfrastructureError(RuntimeError):
+    """The parser could not run (killed by a signal, import failure, no output): not the document's fault, so
+    a RuntimeError, which the worker classifies as transient and retries."""
+
+
 @dataclass(frozen=True)
 class Block:
     kind: str
@@ -47,7 +57,8 @@ class ParsedDocument:
     degraded: bool = False
     warnings: list[str] = field(default_factory=list)
     pages: int | None = None
-    page_texts: list[str] | None = None   # per-page text, for the quality gate
+    page_texts: list[str] | None = None   # per-page text, for the quality gate (not sent back from the sandbox)
+    hidden_removed: dict[str, int] = field(default_factory=dict)  # invisible content dropped, by kind
 
     def text(self) -> str:
         return "\n\n".join(b.render() for b in self.blocks if b.render().strip())

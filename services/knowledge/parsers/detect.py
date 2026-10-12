@@ -108,7 +108,8 @@ def _delimited(text: str) -> str | None:
 def detect_content_type(raw: bytes, hint: str | None = None) -> str:
     if not raw:
         return EMPTY
-    if b"%PDF-" in raw[:1024]:
+    # The header must open the file (after a BOM or whitespace): a markdown note that merely mentions "%PDF-" is text.
+    if raw[:64].lstrip(b"\xef\xbb\xbf \t\r\n\x00").startswith(b"%PDF-"):
         return PDF
     if raw[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
         return _zip_kind(raw)

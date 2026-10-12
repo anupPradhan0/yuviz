@@ -185,3 +185,81 @@ async def test_wrong_dimension_fails_the_document_permanently_with_a_clear_reaso
     assert d["status"] == "failed" and "1536-dimensional" in d["error"] and "vector(768)" in d["error"]
     assert j["status"] == "failed" and j["error_class"] == "permanent" and j["attempts"] == 1
     await _purge_tenant(pool, tenant["id"])
+
+
+# ── R10: permanent provider errors are not retried; the shipped retry default works end to end ──
+
+import httpx  # noqa: E402
+
+from services.knowledge.embedding_manager import EmbeddingRequestRejected  # noqa: E402
+
+
+def _http_error(status: int) -> httpx.HTTPStatusError:
+    req = httpx.Request("POST", "https://user:secret@embed.example.com/v1/embeddings?key=sk-live")
+    return httpx.HTTPStatusError("boom", request=req, response=httpx.Response(status, request=req))
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+async def test_permanent_client_errors_are_not_retried(status):
+    p = Scripted({n: _http_error(status) for n in range(1, 20)})
+    with pytest.raises(EmbeddingRequestRejected, match=f"HTTP {status}") as e:
+        await embed_in_batches(p, ["a", "b"])
+    assert len(p.batches) == 1 and classify_error(e.value) == "permanent"
+    assert "secret" not in str(e.value) and "sk-live" not in str(e.value)
+
+
+@pytest.mark.parametrize("status", [408, 429, 500, 502, 503])
+async def test_rate_limits_timeouts_and_server_errors_are_retried(status):
+    p = Scripted({1: _http_error(status), 2: _http_error(status)})
+    assert len(await embed_in_batches(p, ["a"])) == 1 and len(p.batches) == 3
+    always = Scripted({n: _http_error(status) for n in range(1, 20)})
+    with pytest.raises(httpx.HTTPStatusError):
+        await embed_in_batches(always, ["a"])
+    assert len(always.batches) == em.EMBED_BATCH_RETRIES + 1 and classify_error(_http_error(status)) == "transient"
+
+
+def test_shipped_retry_defaults_are_what_the_docs_say():
+    assert (em.EMBED_BATCH_RETRIES, em.EMBED_BATCH_SIZE) == (2, 32)
+
+
+async def test_worker_with_the_shipped_default_retries_survives_two_provider_errors(tenant_agent, pool):
+    """No monkeypatch of EMBED_BATCH_RETRIES here: the Phase 1 tests pin it to 0, so this is what production runs."""
+    tenant, _ = tenant_agent
+    kb = await _make_kb(tenant, "default-retry-kb")
+    flaky = Scripted({1: _http_error(503), 2: _http_error(429)})
+    doc = await _ingest(pool, tenant, kb, flaky)
+    job = dict(await pool.fetchrow("SELECT * FROM kb_ingestion_jobs WHERE id = $1", doc["ingestion_job_id"]))
+    assert job["status"] == "succeeded" and job["attempts"] == 1
+    assert (await pool.fetchval("SELECT status FROM kb_documents WHERE id = $1", doc["id"])) == "ready"
+    await _purge_tenant(pool, tenant["id"])
+
+
+async def test_worker_fails_a_misconfigured_provider_after_one_call_per_batch(tenant_agent, pool):
+    tenant, _ = tenant_agent
+    kb = await _make_kb(tenant, "bad-key-kb")
+    bad = Scripted({n: _http_error(401) for n in range(1, 50)})
+    doc = await _ingest(pool, tenant, kb, bad)
+    j = dict(await pool.fetchrow("SELECT * FROM kb_ingestion_jobs WHERE id = $1", doc["ingestion_job_id"]))
+    d = dict(await pool.fetchrow("SELECT * FROM kb_documents WHERE id = $1", doc["id"]))
+    assert j["status"] == "failed" and j["error_class"] == "permanent" and j["attempts"] == 1
+    assert d["status"] == "failed" and "HTTP 401" in d["error"] and "secret" not in d["error"]
+    assert len(bad.batches) == 1
+    await _purge_tenant(pool, tenant["id"])
+
+
+async def test_chunker_version_records_the_strategy_that_ran(tenant_agent, pool, monkeypatch):
+    from services.knowledge import chunker
+    tenant, _ = tenant_agent
+    kb = await _make_kb(tenant, "version-kb")
+    intro = (b"This handbook explains how Acme handles returns for retail customers in every region we serve today "
+             b"and is reviewed once a year by the policy team.\n\n# Returns\n\n" + b"Items can be returned within thirty days. " * 12)
+    ok = await _ingest(pool, tenant, kb, Scripted(), content=intro, title="intro")
+    assert await pool.fetchval("SELECT chunker_version FROM kb_documents WHERE id = $1", ok["id"]) == "structure-v1"
+    assert await pool.fetchval("SELECT count(*) FROM kb_chunks WHERE document_id = $1 AND section_path IS NOT NULL", ok["id"]) >= 1
+
+    def boom(*a, **k):
+        raise RuntimeError("splitter bug")
+    monkeypatch.setattr(chunker, "_build_sections", boom)
+    fb = await _ingest(pool, tenant, kb, Scripted(), content=intro, title="fallback")
+    assert await pool.fetchval("SELECT chunker_version FROM kb_documents WHERE id = $1", fb["id"]) == "fixed-v1"
+    await _purge_tenant(pool, tenant["id"])

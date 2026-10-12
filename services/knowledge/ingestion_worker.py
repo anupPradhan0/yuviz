@@ -28,7 +28,7 @@ import asyncpg
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import db
-from .chunker import CHUNKER_VERSION, ChunkConfig, chunk_document
+from .chunker import ChunkConfig, chunk_document, chunker_version
 from .chunking import Chunk, count_tokens
 from .embedding_manager import (
     EMBEDDING_DIMS, EmbeddingProviderConfig, EmbeddingProviderManager, effective_model, embed_in_batches,
@@ -230,6 +230,7 @@ async def process_one_job(
         stages.ok(
             chars=len(text), detected_type=parsed.detected_type, parser=parsed.parser_used,
             quality=parsed.quality_score, degraded=parsed.degraded, warnings=parsed.warnings[:5],
+            hidden_removed=parsed.hidden_removed,
         )
 
         stages.begin("chunk")
@@ -305,7 +306,7 @@ async def process_one_job(
                 document_id, version, new_usage_mode,
                 "ready_degraded" if parsed.degraded else "ready",
                 "; ".join(parsed.warnings)[:1000] if parsed.degraded else None,
-                parsed.parser_used, parsed.quality_score, CHUNKER_VERSION if strategy != "inline" else "inline",
+                parsed.parser_used, parsed.quality_score, chunker_version(strategy) if strategy != "inline" else "inline",
             )
             stages.ok(chunks=len(new_chunks))
             await _write_events(conn, job, doc_row["tenant_id"], stages.events)

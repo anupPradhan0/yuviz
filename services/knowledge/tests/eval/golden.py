@@ -148,7 +148,29 @@ In 2021 Acme committed to carbon neutral deliveries. All delivery vans in Mumbai
 Today Acme serves customers in twenty countries and runs three fulfilment centres. Its largest centre, in Hyderabad, processes about 30 thousand parcels each day and operates around the clock.
 """
 
+# Shapes that broke or degraded the first chunker: text before the first heading, headings with no body, no headings.
+WARRANTY = """This handbook describes how Acme Retail handles warranty claims for hardware sold in its stores and online. It is maintained by the service team and applies to every region unless a local addendum says otherwise.
+
+# Coverage
+
+Acme hardware carries a warranty of 24 months from the delivery date. Batteries are covered for 12 months. Accidental damage and liquid damage are not covered by the standard warranty.
+
+# Making a claim
+
+Start a claim from the order page and upload a photo of the serial number. A service agent replies within 2 business days with a prepaid courier label.
+
+## Repairs
+
+Repairs take 10 business days from the day the device reaches the service centre. A replacement is shipped instead when the repair is not possible.
+"""
+
+OUTLINE = "# Acme Employee Handbook\n\n## Onboarding\n\n## Payroll\n\n## Leave policy\n\n## Expenses\n\n## Security training\n"
+
+NOTES = """Platform team meeting notes. The team agreed to freeze deployments on 20 December until the new year. The on-call rotation for the holidays is Meera, then Karan, then Isha. The database migration moves to the first week of February because the vendor delayed the replica upgrade.
+"""
+
 DOCS = {
+    "warranty": ("policy", WARRANTY), "outline": ("outline", OUTLINE), "notes": ("prose", NOTES),
     "returns": ("policy", RETURNS), "shipping": ("policy", SHIPPING), "billing": ("policy", BILLING),
     "faq": ("faq", FAQ), "delivery_rates": ("table", DELIVERY_CSV), "history": ("prose", HISTORY),
 }
@@ -199,6 +221,12 @@ QUESTIONS: list[Question] = [
     Q("delivery_rates", "Is cash on delivery available in Jaipur?", "Jaipur,4,60,no", ("Jaipur", "no")),
     Q("delivery_rates", "How many days does delivery to Kochi take?", "Kochi,4,55,yes", ("Kochi", "4")),
     Q("delivery_rates", "What does shipping to Patna cost?", "Patna,6,80,no", ("Patna", "80")),
+    # intro-before-heading, headings-only and heading-less shapes
+    Q("warranty", "How long is the hardware warranty?", "Acme hardware carries a warranty of 24 months from the delivery date.", ("24 months",)),
+    Q("warranty", "How long do repairs take?", "Repairs take 10 business days from the day the device reaches the service centre.", ("10 business days",)),
+    Q("warranty", "Who maintains the warranty handbook?", "It is maintained by the service team", ("service team",)),
+    Q("outline", "Which handbook section covers leave?", "Leave policy", ("Leave policy",)),
+    Q("notes", "When is the deployment freeze?", "freeze deployments on 20 December", ("20 December",)),
     # history (prose)
     Q("history", "Who founded Acme Retail?", "The founders, Meera Nair and Karan Shah", ("Meera Nair", "Karan Shah")),
     Q("history", "Where is the largest fulfilment centre?", "Its largest centre, in Hyderabad, processes about 30 thousand parcels each day", ("Hyderabad",)),

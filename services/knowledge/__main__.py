@@ -12,6 +12,7 @@ import logging
 import sys
 
 from . import db
+from .hardening import harden_worker_process
 from .embedding_manager import EmbeddingProviderManager
 from .ingestion_worker import run_loop
 from .secret_resolver import CompositeSecretResolver
@@ -43,6 +44,7 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
+    harden_worker_process()
     asyncio.run(serve())
 
 

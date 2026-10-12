@@ -68,7 +68,7 @@ async def test_parser_metadata_is_stored_and_prompt_injection_is_just_content(te
     await _purge_tenant(pool, tenant["id"])
 
 
-async def test_upload_route_decides_by_bytes_not_declared_type(test_tenant, test_admin, pool):
+async def test_upload_route_decides_by_bytes_not_declared_type(test_tenant, test_admin, pool, monkeypatch):
     from httpx import ASGITransport, AsyncClient
 
     from libs.tenancy import set_caller_tenant
@@ -83,6 +83,17 @@ async def test_upload_route_decides_by_bytes_not_declared_type(test_tenant, test
         return await c.post(f"/knowledge-bases/{kb['id']}/documents", files={"file": (name, data, declared)},
                             data={"title": name}, headers=headers)
 
+    import threading
+    from services.knowledge.routers import documents as documents_router
+
+    detect_threads: list[threading.Thread] = []
+    real_detect = documents_router.detect_content_type
+
+    def spy(*a, **k):
+        detect_threads.append(threading.current_thread())
+        return real_detect(*a, **k)
+
+    monkeypatch.setattr(documents_router, "detect_content_type", spy)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         pdf = await post("policy.txt", CORPUS["text.pdf"].data, "text/plain")  # a PDF mislabelled as text
         assert pdf.status_code == 201 and pdf.json()["content_type"] == "application/pdf"
@@ -91,6 +102,8 @@ async def test_upload_route_decides_by_bytes_not_declared_type(test_tenant, test
         png = await post("notes.txt", CORPUS["fake_extension_png.txt"].data, "text/plain")  # an image called .txt
         assert png.status_code == 415 and "not supported" in png.json()["detail"]
         assert (await post("empty.txt", b"", "text/plain")).status_code == 400
+    # detection is CPU work (zip inspection, charset detection): it must not run on the API event-loop thread
+    assert detect_threads and all(t is not threading.main_thread() for t in detect_threads)
     await pool.execute("DELETE FROM kb_ingestion_jobs WHERE kb_id = $1", kb["id"])
     await pool.execute("DELETE FROM audit_log WHERE tenant_id = $1", test_tenant["id"])
     await pool.execute("DELETE FROM kb_documents WHERE kb_id = $1", kb["id"])

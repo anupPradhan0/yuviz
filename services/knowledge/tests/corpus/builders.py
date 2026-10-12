@@ -32,6 +32,7 @@ def make_pdf(pages: list[dict]) -> bytes:
         if spec.get("text"):
             lines = "".join(f"({_esc(ln)}) Tj T*\n" for ln in spec["text"].split("\n"))
             ops += f"BT /F1 12 Tf 14 TL 72 720 Td\n{lines}ET\n"
+        ops += spec.get("ops", "")  # raw content-stream operators (hidden-text fixtures)
         resources = "/Font << /F1 3 0 R >>"
         extra: list[bytes] = []
         if spec.get("image"):
@@ -255,3 +256,43 @@ def build_corpus() -> dict[str, CorpusFile]:
         CorpusFile("fake_extension_png.txt", b"\x89PNG\r\n\x1a\n" + bytes(300), "text/plain", failed),
     ]
     return {f.name: f for f in files}
+
+
+# ── hostile inputs for the resource-limit tests: tiny on disk, enormous if a parser trusted them ──
+
+def _zip(members: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        for name, data in members.items():
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+def huge_dimension_xlsx() -> bytes:
+    """~1.5 KB XLSX whose sheet declares A1:XFD1048576; openpyxl pads every row to that width (~1 GB)."""
+    ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+    return _zip({
+        "[Content_Types].xml": b'<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+        "xl/workbook.xml": (f'<?xml version="1.0"?><workbook {ns} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                            '<sheets><sheet name="Big" sheetId="1" r:id="rId1"/></sheets></workbook>').encode(),
+        "xl/_rels/workbook.xml.rels": (b'<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                                       b'<Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>'),
+        "xl/worksheets/sheet1.xml": (f'<?xml version="1.0"?><worksheet {ns}><dimension ref="A1:XFD1048576"/>'
+                                     '<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>x</t></is></c></row></sheetData></worksheet>').encode(),
+    })
+
+
+def wide_csv() -> bytes:
+    """~42 KB CSV: 100 short rows (so type detection sees a CSV), one 6,000-column row, then 6,000 short rows."""
+    short = "a,b,c"
+    wide = ",".join(f"c{i}" for i in range(6000))
+    return "\n".join([short] * 100 + [wide] + [short] * 6000).encode()
+
+
+def empty_paragraph_docx(paragraphs: int = 8_000_000) -> bytes:
+    """~100 KB DOCX that inflates to ~48 MB of empty paragraphs (python-docx would build ~1 GB of objects)."""
+    head = b'<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+    return _zip({
+        "[Content_Types].xml": b'<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+        "word/document.xml": head + b"<w:p/>" * paragraphs + b"</w:body></w:document>",
+    })

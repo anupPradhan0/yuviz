@@ -107,7 +107,7 @@ class Report:
     failures: dict[str, list[str]]
 
     def winner(self, kind: str) -> str:
-        return max(STRATEGIES, key=lambda s: (self.by_strategy_and_kind[(s, kind)].mrr, self.by_strategy_and_kind[(s, kind)].recall_at_5))
+        return max(self.by_strategy, key=lambda s: (self.by_strategy_and_kind[(s, kind)].mrr, self.by_strategy_and_kind[(s, kind)].recall_at_5))
 
 
 def _score(index: list[IndexedChunk], questions: list, docs: dict, embed, k: int, into: list[Metrics]) -> list[str]:

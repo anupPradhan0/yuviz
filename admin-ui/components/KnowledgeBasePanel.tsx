@@ -33,6 +33,7 @@ const POLL_MS = 4000;
 
 const STATUS_LABEL: Record<KbDocument["status"], { text: string; cls: string }> = {
   ready: { text: "Ready", cls: "green" },
+  ready_degraded: { text: "Ready (partly readable)", cls: "amber" },
   pending: { text: "Getting ready…", cls: "amber" },
   processing: { text: "Getting ready…", cls: "amber" },
   failed: { text: "Couldn't read this file", cls: "red" },

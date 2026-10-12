@@ -42,6 +42,7 @@ type Tab = "sources" | "apis";
 
 const STATUS_BADGE: Record<string, string> = {
   ready: "green",
+  ready_degraded: "amber",
   processing: "amber",
   pending: "amber",
   failed: "red",
@@ -367,7 +368,7 @@ export default function KnowledgeBasesPage() {
                     <td className="mono">{s.byte_size != null ? `${(s.byte_size / 1024).toFixed(1)} KB` : "—"}</td>
                     <td>
                       <span className={`badge ${STATUS_BADGE[s.status] ?? "gray"}`}>{s.status}</span>
-                      {s.status === "failed" && s.error && (
+                      {(s.status === "failed" || s.status === "ready_degraded") && s.error && (
                         <div className="kb-source-sub" style={{ marginTop: 4, maxWidth: 260 }} title={s.error}>
                           {s.error}
                         </div>

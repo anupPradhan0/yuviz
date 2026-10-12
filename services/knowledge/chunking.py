@@ -85,10 +85,18 @@ def _chunk_units(
         if content:
             chunks.append(Chunk(content=content, token_count=count(units)))
 
+    if chunk_size < 1 or chunk_overlap < 0 or chunk_overlap >= chunk_size:
+        # With overlap >= size the window never advances and the loop below appends chunks until memory runs out.
+        raise ValueError(f"invalid chunking window: chunk_size={chunk_size}, chunk_overlap={chunk_overlap}")
+    # Each emitted chunk consumes at least (chunk_size - chunk_overlap) >= 1 fresh unit, so more chunks than
+    # units plus one per paragraph means the loop is not advancing; fail permanently instead of spinning.
+    max_chunks = sum(len(u) for u in paragraphs) + len(paragraphs) + 1
     chunks: list[Chunk] = []
     current: list[str] = []
 
     for units in paragraphs:
+        if len(chunks) > max_chunks:
+            raise ValueError("chunking made no progress")
         if current and len(current) + len(units) > chunk_size:
             emit(current)
             overlap = current[-chunk_overlap:] if chunk_overlap else []
@@ -99,6 +107,8 @@ def _chunk_units(
         # A single paragraph longer than chunk_size on its own still needs
         # splitting, or it would produce one oversized chunk forever.
         while len(current) > chunk_size:
+            if len(chunks) > max_chunks:
+                raise ValueError("chunking made no progress")
             head, current = current[:chunk_size], current[chunk_size:]
             emit(head)
             if chunk_overlap:

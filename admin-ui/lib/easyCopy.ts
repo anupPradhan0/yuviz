@@ -66,7 +66,7 @@ export const easyCopy = {
   documentsHint: "It searches these when a caller asks something.",
   collectionsLabel: "Collections you already have",
   uploadFilesLabel: "Upload files",
-  uploadFilesHint: "Text (.txt) or Markdown (.md) files only.",
+  uploadFilesHint: "PDF, Word, Excel, PowerPoint, HTML, CSV, text (.txt) or Markdown (.md) files.",
   filesChosenLabel: "Files to upload",
   removeFile: "Remove",
   wrongFileType: "Only PDF, Word, Excel, PowerPoint, HTML, CSV and text files can be uploaded. Other files were skipped.",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 
@@ -87,7 +88,8 @@ async def upload_document(
     if not content:
         raise HTTPException(status_code=400, detail="file is empty")
     declared = (file.content_type or "").split(";")[0].strip().lower()
-    content_type = detect_content_type(content, declared)
+    # Zip inspection and charset detection are CPU work (a crafted 10 MB zip costs ~0.3 s): keep it off the event loop.
+    content_type = await asyncio.to_thread(detect_content_type, content, declared)
     if content_type not in SUPPORTED_CONTENT_TYPES:
         raise HTTPException(status_code=415, detail=unsupported_reason(content_type))
     return await documents_service.upload_document(
