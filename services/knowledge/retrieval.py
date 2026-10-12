@@ -1,25 +1,72 @@
 """retrieve() backs POST /internal/retrieve. Policy precedence: call override > agent row > system default.
-KBs are grouped by embedding config (one query embedding per group); usage_mode='prompt' docs are always
-included first. Returns None (router → 404, "no context") when nothing qualifies."""
+
+Hot path: cached plan (no DB) -> dense (embed + pgvector) and lexical (tsvector) in parallel, each on its own
+tenant-scoped connection -> Reciprocal Rank Fusion -> dedupe by parent section -> optional rerank -> token budget.
+Every stage has a timeout and the call has a hard deadline; a stage that fails or is late is dropped and the
+rest answers, with the fallback recorded in `degraded`. usage_mode='prompt' docs are always included first.
+
+Always returns a dict. status: ok | no_match | partial | unavailable.
+  ok        answered by every branch that was meant to run (a skipped reranker alone still counts as ok)
+  no_match  every branch ran, nothing cleared the threshold (chunks: [])
+  partial   a branch failed or missed the deadline; chunks are what the survivors found (possibly none, which is
+            NOT "no match": the missing branch might have had one)
+  unavailable  raised as RetrievalUnavailable when nothing could answer; the router turns it into this status.
+`conn` is only used to resolve a cold plan; pass None (the hot path opens its own connections) and release any
+connection you hold before calling, or each request pins three pool connections instead of two."""
 
 from __future__ import annotations
 
-import json
-from typing import Any
+import asyncio
+import dataclasses
+import logging
+import time
+import uuid
+from array import array
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 import asyncpg
 
-from .embedding_manager import EmbeddingProviderConfig, EmbeddingProviderManager
+from libs.tenancy import TenantScopeConflict, tenant_conn
+
+from . import cache, db, retrieval_log
+from . import retrieval_plan as plans
+from .embedding_manager import EmbeddingProviderManager
+from .resilience import RetrievalConfig, RetrievalUnavailable, breakers
 from .vector_repository import IVectorRepository, VectorMatch
 
-_SYSTEM_DEFAULT_POLICY: dict[str, Any] = {
-    "top_k": 5,
-    "max_tokens": 1000,
-    "minimum_score": 0.3,
-    "rerank": False,
-    "hybrid_search": False,
-    "include_citations": True,
-}
+log = logging.getLogger(__name__)
+
+RRF_K = 60
+
+_config = RetrievalConfig.from_env()
+
+_embeddings = cache.TTLCache(ttl_s=600.0, max_entries=4096)
+
+
+def clear_caches() -> None:
+    """Drop the plan and query-embedding caches and breaker state (tests, admin reset)."""
+    plans.clear_cache()
+    _embeddings.clear()
+    breakers.clear()
+
+
+class IReranker(Protocol):
+    """Phase 7 plugs a hosted reranker in here. rerank() returns the same matches, best first; it may rescore."""
+
+    configured: bool
+
+    async def rerank(self, query: str, matches: list[VectorMatch]) -> list[VectorMatch]: ...
+
+
+class NoopReranker:
+    configured = False
+
+    async def rerank(self, query: str, matches: list[VectorMatch]) -> list[VectorMatch]:
+        return matches
+
+
+_NOOP_RERANKER = NoopReranker()
 
 
 async def _agent_id_for(conn: asyncpg.Connection, tenant_slug: str, agent_slug: str) -> str | None:
@@ -34,121 +81,195 @@ async def _agent_id_for(conn: asyncpg.Connection, tenant_slug: str, agent_slug: 
 async def _resolve_policy(
     conn: asyncpg.Connection, tenant_slug: str, agent_slug: str, overrides: dict[str, Any],
 ) -> dict[str, Any]:
+    """Uncached policy resolution (the plan caches the agent-row half); kept for callers that hold a conn."""
     agent_id = await _agent_id_for(conn, tenant_slug, agent_slug)
     agent_policy_row = None
     if agent_id is not None:
         agent_policy_row = await conn.fetchrow(
             "SELECT * FROM agent_retrieval_policies WHERE agent_id = $1", agent_id,
         )
-
-    resolved: dict[str, Any] = {}
-    for field, system_default in _SYSTEM_DEFAULT_POLICY.items():
-        override_value = overrides.get(field)
-        if override_value is not None:
-            resolved[field] = override_value
-        elif agent_policy_row is not None and agent_policy_row[field] is not None:
-            resolved[field] = agent_policy_row[field]
-        else:
-            resolved[field] = system_default
-    return resolved
-
-
-async def _fetch_embedding_config(conn: asyncpg.Connection, embedding_config_id: str) -> EmbeddingProviderConfig:
-    row = await conn.fetchrow(
-        "SELECT * FROM provider_configs WHERE id = $1 AND deleted_at IS NULL", embedding_config_id,
-    )
-    if row is None:
-        raise ValueError(f"provider_config {embedding_config_id} not found")
-    extra = json.loads(row["extra"]) if row["extra"] else {}
-    return EmbeddingProviderConfig(
-        id=str(row["id"]), engine=row["engine"], model=row["model"],
-        api_key_ref=row["api_key_ref"], extra=extra,
-    )
-
-
-async def _agent_kb_groups(conn: asyncpg.Connection, tenant_slug: str, agent_slug: str) -> dict[str, list[str]]:
-    """{embedding_config_id: [kb_id, ...]} for the agent's enabled, active KBs."""
-    rows = await conn.fetch(
-        "SELECT kb.id AS kb_id, kb.embedding_config_id "
-        "FROM agent_knowledge_bases akb "
-        "JOIN agents a ON a.id = akb.agent_id AND a.deleted_at IS NULL "
-        "JOIN tenants t ON t.id = a.tenant_id AND t.deleted_at IS NULL "
-        "JOIN knowledge_bases kb ON kb.id = akb.kb_id AND kb.tenant_id = a.tenant_id "
-        "AND kb.deleted_at IS NULL AND kb.status = 'active' "
-        "WHERE t.slug = $1 AND a.slug = $2 AND akb.enabled AND kb.embedding_config_id IS NOT NULL",
-        tenant_slug, agent_slug,
-    )
-    groups: dict[str, list[str]] = {}
-    for row in rows:
-        groups.setdefault(str(row["embedding_config_id"]), []).append(str(row["kb_id"]))
-    return groups
-
-
-async def _agent_enabled_kb_ids(conn: asyncpg.Connection, tenant_slug: str, agent_slug: str) -> list[str]:
-    """Enabled, active KBs, including those with no embedding config (prompt-mode only)."""
-    rows = await conn.fetch(
-        "SELECT kb.id AS kb_id "
-        "FROM agent_knowledge_bases akb "
-        "JOIN agents a ON a.id = akb.agent_id AND a.deleted_at IS NULL "
-        "JOIN tenants t ON t.id = a.tenant_id AND t.deleted_at IS NULL "
-        "JOIN knowledge_bases kb ON kb.id = akb.kb_id AND kb.tenant_id = a.tenant_id "
-        "AND kb.deleted_at IS NULL AND kb.status = 'active' "
-        "WHERE t.slug = $1 AND a.slug = $2 AND akb.enabled",
-        tenant_slug, agent_slug,
-    )
-    return [str(row["kb_id"]) for row in rows]
-
-
-async def _fetch_prompt_mode_matches(conn: asyncpg.Connection, kb_ids: list[str]) -> list[VectorMatch]:
-    """One VectorMatch per prompt-mode document (chunks reassembled); score=1.0 is an "always include" sentinel."""
-    if not kb_ids:
-        return []
-    rows = await conn.fetch(
-        """
-        SELECT
-            (array_agg(c.id ORDER BY c.chunk_index))[1] AS chunk_id,
-            c.document_id, c.kb_id,
-            string_agg(c.content, ' ' ORDER BY c.chunk_index) AS content,
-            sum(coalesce(c.token_count, 0)) AS token_count,
-            (array_agg(c.page ORDER BY c.chunk_index))[1] AS page,
-            (array_agg(c.language ORDER BY c.chunk_index))[1] AS language,
-            (array_agg(c.tags ORDER BY c.chunk_index))[1] AS tags,
-            (array_agg(c.version ORDER BY c.chunk_index))[1] AS version,
-            d.title AS document_title, kb.slug AS kb_slug
-        FROM kb_chunks c
-        JOIN kb_documents d ON d.id = c.document_id AND d.deleted_at IS NULL
-                            AND d.usage_mode = 'prompt' AND d.status = 'ready'
-        JOIN knowledge_bases kb ON kb.id = c.kb_id
-        WHERE c.kb_id = ANY($1::uuid[])
-        GROUP BY c.document_id, c.kb_id, d.title, kb.slug
-        """,
-        kb_ids,
-    )
-    return [
-        VectorMatch(
-            chunk_id=str(row["chunk_id"]),
-            document_id=str(row["document_id"]),
-            kb_id=str(row["kb_id"]),
-            content=row["content"],
-            score=1.0,
-            token_count=row["token_count"],
-            page=row["page"],
-            language=row["language"],
-            tags=json.loads(row["tags"]) if row["tags"] else {},
-            version=row["version"],
-            document_title=row["document_title"],
-            kb_slug=row["kb_slug"],
-        )
-        for row in rows
-    ]
+    return plans.merge_policy(agent_policy_row, overrides)
 
 
 def _approx_token_count(text: str) -> int:
     return len(text.split())
 
 
+# --- fusion ----------------------------------------------------------------------------------------------------
+
+def rrf_merge(ranked_lists: list[list[VectorMatch]], k: int = RRF_K) -> list[VectorMatch]:
+    """Reciprocal Rank Fusion: score(d) = sum over lists of 1/(k + rank). A chunk both branches found outranks one
+    only a single branch found. The returned match keeps its dense cosine when it has one, else its lexical score."""
+    fused_scores: dict[str, float] = {}
+    best: dict[str, VectorMatch] = {}
+    found_by: dict[str, list[str]] = {}
+    for ranked in ranked_lists:
+        for rank, match in enumerate(ranked, start=1):
+            fused_scores[match.chunk_id] = fused_scores.get(match.chunk_id, 0.0) + 1.0 / (k + rank)
+            found_by.setdefault(match.chunk_id, []).extend(match.found_by)
+            current = best.get(match.chunk_id)
+            if current is None or ("dense" in match.found_by and "dense" not in current.found_by):
+                best[match.chunk_id] = match
+    order = sorted(fused_scores, key=lambda cid: (-fused_scores[cid], -best[cid].score))
+    return [dataclasses.replace(best[cid], found_by=tuple(dict.fromkeys(found_by[cid]))) for cid in order]
+
+
+def dedupe_sections(matches: list[VectorMatch]) -> list[VectorMatch]:
+    """Keep the best-ranked match per parent section, and drop a match whose text is already inside one kept
+    from the same document (overlapping chunks). Order is preserved."""
+    kept: list[VectorMatch] = []
+    seen_sections: set[str] = set()
+    texts: dict[str, list[str]] = {}
+    for m in matches:
+        section = m.parent_id or m.chunk_id
+        if section in seen_sections:
+            continue
+        doc_texts = texts.setdefault(m.document_id, [])
+        if any(m.content in t or t in m.content for t in doc_texts):
+            continue
+        seen_sections.add(section)
+        doc_texts.append(m.content)
+        kept.append(m)
+    return kept
+
+
+# --- branches --------------------------------------------------------------------------------------------------
+
+@dataclass
+class _Branch:
+    name: str
+    matches: list[VectorMatch] | None = None  # None = failed or unfinished
+    error: str | None = None
+    notes: list[str] | None = None
+    embed_failed: bool = False
+
+
+def _embedding_to_list(packed: array) -> list[float]:
+    return packed.tolist()
+
+
+async def _embed(
+    plan: plans.RetrievalPlan, embedding_manager: EmbeddingProviderManager, config_id: str, query: str,
+    cfg: RetrievalConfig,
+) -> list[float]:
+    key = cache.embedding_key(plan.tenant_id, config_id, query)
+    hit = _embeddings.get(key)
+    if hit is not None:
+        return _embedding_to_list(hit)
+    breaker = breakers.get(f"embed:{config_id}", cfg)
+    if not breaker.allow():
+        raise RuntimeError("embedder circuit open")
+    try:
+        async with asyncio.timeout(cfg.embed_timeout_s):
+            provider = await embedding_manager.get(plan.embedding_configs[config_id])
+            [vector] = await provider.embed([query])
+    except asyncio.CancelledError:
+        breaker.release_probe()  # the overall deadline cancelled us; that says nothing about the embedder
+        raise
+    except Exception:
+        breaker.record_failure()
+        raise
+    breaker.record_success()
+    _embeddings.set(key, array("f", vector))
+    return vector
+
+
+async def _dense_branch(
+    plan: plans.RetrievalPlan, vector_repo: IVectorRepository, embedding_manager: EmbeddingProviderManager,
+    pool: asyncpg.Pool, query: str, limit: int, minimum_score: float, cfg: RetrievalConfig, timings: dict[str, float],
+) -> _Branch:
+    branch = _Branch("dense")
+    t0 = time.monotonic()
+    try:
+        config_ids = list(plan.groups)
+        vectors = await asyncio.gather(
+            *[_embed(plan, embedding_manager, cid, query, cfg) for cid in config_ids], return_exceptions=True,
+        )
+        timings["embed"] = (time.monotonic() - t0) * 1000
+        usable = [(cid, v) for cid, v in zip(config_ids, vectors) if not isinstance(v, BaseException)]
+        for v in vectors:
+            if isinstance(v, asyncio.CancelledError):
+                raise v
+        if not usable:
+            branch.embed_failed = True
+            branch.error = f"embedding failed: {vectors[0]!r}"
+            return branch
+        if len(usable) < len(config_ids):
+            branch.notes = ["embed_partial"]
+        t1 = time.monotonic()
+        matches: list[VectorMatch] = []
+        async with asyncio.timeout(cfg.dense_timeout_s):
+            async with tenant_conn(pool, explicit_tenant=plan.tenant_id, reason="retrieval-search") as conn:
+                for cid, vector in usable:
+                    matches.extend(await vector_repo.search(conn, plan.groups[cid], vector, limit, minimum_score))
+        matches.sort(key=lambda m: m.score, reverse=True)
+        branch.matches = matches[:limit]
+        timings["dense"] = (time.monotonic() - t1) * 1000
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a dead branch is dropped, never raised
+        branch.error = branch.error or f"{type(exc).__name__}: {exc}"
+        log.warning("dense branch failed: %s", branch.error)
+    return branch
+
+
+async def _lexical_branch(
+    plan: plans.RetrievalPlan, vector_repo: IVectorRepository, pool: asyncpg.Pool, query: str, limit: int,
+    cfg: RetrievalConfig, timings: dict[str, float],
+) -> _Branch:
+    branch = _Branch("lexical")
+    t0 = time.monotonic()
+    try:
+        async with asyncio.timeout(cfg.lexical_timeout_s):
+            async with tenant_conn(pool, explicit_tenant=plan.tenant_id, reason="retrieval-search") as conn:
+                branch.matches = await vector_repo.lexical_search(conn, plan.kb_ids, query, limit, cfg.lexical_min_score)
+        timings["lexical"] = (time.monotonic() - t0) * 1000
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        branch.error = f"{type(exc).__name__}: {exc}"
+        log.warning("lexical branch failed: %s", branch.error)
+    return branch
+
+
+def _swallow(task: asyncio.Task) -> None:
+    if not task.cancelled():
+        task.exception()  # mark retrieved so asyncio does not log "never retrieved"
+
+
+# --- retrieve --------------------------------------------------------------------------------------------------
+
+def _chunk_payload(m: VectorMatch) -> dict[str, Any]:
+    return {
+        "content": m.content,
+        "score": m.score,
+        "source": {
+            "kb_id": m.kb_id, "kb_slug": m.kb_slug, "document_id": m.document_id,
+            "document_title": m.document_title, "chunk_id": m.chunk_id, "page": m.page,
+            "language": m.language, "tags": m.tags, "version": m.version, "section_path": m.section_path,
+        },
+    }
+
+
+def _result(
+    status: str, *, selected: list[VectorMatch], policy: dict[str, Any], degraded: list[str], trace_id: str,
+    low_confidence: bool, metadata: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "chunks": [_chunk_payload(m) for m in selected],
+        "sources": list(dict.fromkeys(m.document_title for m in selected)),
+        "token_count": sum(m.token_count or _approx_token_count(m.content) for m in selected),
+        "include_citations": policy["include_citations"],
+        "retrieval_metadata": metadata,
+        "degraded": degraded,
+        "trace_id": trace_id,
+        "low_confidence": low_confidence,
+    }
+
+
 async def retrieve(
-    conn: asyncpg.Connection,
+    conn: asyncpg.Connection | None,
     vector_repo: IVectorRepository,
     embedding_manager: EmbeddingProviderManager,
     *,
@@ -161,74 +282,203 @@ async def retrieve(
     rerank: bool | None = None,
     hybrid_search: bool | None = None,
     include_citations: bool | None = None,
-) -> dict[str, Any] | None:
-    policy = await _resolve_policy(
-        conn, tenant_slug, agent_slug,
-        {
-            "top_k": top_k, "max_tokens": max_tokens, "minimum_score": minimum_score,
-            "rerank": rerank, "hybrid_search": hybrid_search, "include_citations": include_citations,
-        },
-    )
+    trace_id: str | None = None,
+    pool: asyncpg.Pool | None = None,
+    reranker: IReranker | None = None,
+    config: RetrievalConfig | None = None,
+) -> dict[str, Any]:
+    cfg = config or _config
+    started = time.monotonic()
+    deadline_at = started + cfg.deadline_s
+    trace_id = trace_id or uuid.uuid4().hex
+    timings: dict[str, float] = {}
+    degraded: list[str] = []
+    overrides = {
+        "top_k": top_k, "max_tokens": max_tokens, "minimum_score": minimum_score,
+        "rerank": rerank, "hybrid_search": hybrid_search, "include_citations": include_citations,
+    }
 
-    kb_ids = await _agent_enabled_kb_ids(conn, tenant_slug, agent_slug)
-    if not kb_ids:
-        return None
+    def remaining() -> float:
+        return deadline_at - time.monotonic()
 
-    # Prompt-mode docs bypass top_k, minimum_score and the token budget.
-    prompt_matches = await _fetch_prompt_mode_matches(conn, kb_ids)
+    def finish_timings() -> dict[str, float]:
+        timings["total"] = (time.monotonic() - started) * 1000
+        return {k: round(v, 2) for k, v in timings.items()}
 
-    groups = await _agent_kb_groups(conn, tenant_slug, agent_slug)
-    all_matches: list[VectorMatch] = []
-    for embedding_config_id, group_kb_ids in groups.items():
-        embedding_cfg = await _fetch_embedding_config(conn, embedding_config_id)
-        provider = await embedding_manager.get(embedding_cfg)
-        [query_vector] = await provider.embed([query])
-        matches = await vector_repo.search(conn, group_kb_ids, query_vector, policy["top_k"], policy["minimum_score"])
-        all_matches.extend(matches)
+    # 1. plan: free when cached; four queries on a cold miss, still inside the deadline.
+    pool = pool or await db.get_pool()
+    try:
+        async with asyncio.timeout(max(remaining(), 0.001)):
+            plan, was_cached = await plans.resolve_plan(tenant_slug, agent_slug, conn=conn, pool=pool)
+    except TenantScopeConflict:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise RetrievalUnavailable(
+            f"retrieval plan unavailable: {type(exc).__name__}", degraded=["plan_unavailable"], trace_id=trace_id,
+        ) from exc
+    timings["plan"] = (time.monotonic() - started) * 1000
+    if not was_cached:
+        degraded.append("plan_cache_miss")
 
-    if not prompt_matches and not all_matches:
-        return None
+    policy = plans.merge_policy(None, {}) if plan is None else {
+        key: (overrides[key] if overrides[key] is not None else plan.agent_policy[key]) for key in overrides
+    }
+    if plan is None:
+        return _result(
+            "no_match", selected=[], policy=policy, degraded=degraded, trace_id=trace_id, low_confidence=False,
+            metadata={"top_k": policy["top_k"], "candidates": 0, "groups": 0, "rerank": policy["rerank"],
+                      "hybrid_search": policy["hybrid_search"], "always_included": 0, "reason": "agent_not_found",
+                      "timings_ms": finish_timings()},
+        )
+    degraded.extend(plan.degraded)
 
-    all_matches.sort(key=lambda m: m.score, reverse=True)
+    limit = min(max(policy["top_k"] * 3, 10), 50)
+    run_dense = bool(plan.groups)
+    run_lexical = bool(plan.kb_ids) and bool(policy["hybrid_search"])
+
+    # 2. dense and lexical in parallel, each on its own pooled connection.
+    tasks: dict[str, asyncio.Task] = {}
+    if run_dense:
+        tasks["dense"] = asyncio.create_task(_dense_branch(
+            plan, vector_repo, embedding_manager, pool, query, limit, policy["minimum_score"], cfg, timings))
+    if run_lexical:
+        tasks["lexical"] = asyncio.create_task(_lexical_branch(plan, vector_repo, pool, query, limit, cfg, timings))
+    results: dict[str, _Branch] = {}
+    if tasks:
+        done, pending = await asyncio.wait(tasks.values(), timeout=max(remaining(), 0.0))
+        for name, task in tasks.items():
+            if task in done:
+                results[name] = task.result()
+        for task in pending:
+            task.cancel()
+            task.add_done_callback(_swallow)
+        if pending:
+            degraded.append("deadline")
+
+    # Policy says dense-only, but dense produced nothing (or cannot run): lexical beats silence.
+    dense_res = results.get("dense")
+    dense_dead = (run_dense and (dense_res is None or dense_res.matches is None)) or (
+        not run_dense and "embedding_config_missing" in plan.degraded)
+    if not run_lexical and plan.kb_ids and dense_dead and remaining() > 0.02:
+        results["lexical"] = await _lexical_branch(plan, vector_repo, pool, query, limit, cfg, timings)
+        run_lexical = True
+
+    ranked_lists: list[list[VectorMatch]] = []
+    lost: list[str] = []
+    intended = [n for n, on in (("dense", run_dense), ("lexical", run_lexical)) if on]
+    for name in intended:
+        res = results.get(name)
+        if res is not None and res.matches is not None:
+            ranked_lists.append(res.matches)
+            degraded.extend(res.notes or [])
+        else:
+            lost.append(name)
+            if name == "dense":
+                degraded.append("embedding_unavailable" if res is not None and res.embed_failed else "dense_failed")
+            else:
+                degraded.append("lexical_failed")
+    survivors = [n for n in intended if n not in lost]
+    if intended and lost:
+        if survivors == ["lexical"]:
+            degraded.append("lexical_only")
+        elif survivors == ["dense"]:
+            degraded.append("dense_only")
+
+    prompt_matches = list(plan.prompt_matches)
+    if intended and not survivors and not prompt_matches:
+        timings_out = finish_timings()
+        _log(plan, agent_slug, trace_id, query, "unavailable", degraded, [], None, 0, timings_out)
+        raise RetrievalUnavailable("every retrieval branch failed", degraded=degraded, trace_id=trace_id)
+
+    # 3. fuse, dedupe by parent section, rerank.
+    t_fuse = time.monotonic()
+    fused = dedupe_sections(rrf_merge(ranked_lists)) if ranked_lists else []
+    timings["fuse"] = (time.monotonic() - t_fuse) * 1000
+
+    if policy["rerank"] and fused:
+        rr = reranker or _NOOP_RERANKER
+        if not getattr(rr, "configured", True):
+            degraded.append("rerank_skipped")
+        else:
+            fused = await _rerank(rr, query, fused, cfg, remaining(), degraded, timings)
+
+    # 4. token budget. Prompt-mode docs bypass top_k, minimum_score and the budget, and come first.
     selected: list[VectorMatch] = list(prompt_matches)
-    token_budget = policy["max_tokens"] - sum(
-        m.token_count or _approx_token_count(m.content) for m in prompt_matches
-    )
-    for match in all_matches[: policy["top_k"]]:
+    budget = policy["max_tokens"] - sum(m.token_count or _approx_token_count(m.content) for m in prompt_matches)
+    for match in fused[: policy["top_k"]]:
         tokens = match.token_count or _approx_token_count(match.content)
-        if selected and token_budget - tokens < 0:
-            break
+        if selected and budget - tokens < 0:
+            # The whole parent section does not fit; the matched child alone might.
+            child_tokens = match.child_token_count or (
+                _approx_token_count(match.child_content) if match.child_content else None)
+            if match.child_content and match.child_content != match.content and child_tokens is not None \
+                    and budget - child_tokens >= 0:
+                match = dataclasses.replace(match, content=match.child_content, token_count=child_tokens)
+                tokens = child_tokens
+            else:
+                break
         selected.append(match)
-        token_budget -= tokens
+        budget -= tokens
+
+    top_two = [m.score for m in fused[:2]]
+    low_confidence = bool(
+        len(top_two) == 2 and top_two[0] < cfg.low_confidence_top
+        and (top_two[0] - top_two[1]) < cfg.low_confidence_gap
+    )
 
     if not selected:
-        return None
+        status = "partial" if lost else "no_match"
+    else:
+        status = "partial" if lost else "ok"
+    timings_out = finish_timings()
+    chunk_ids = [m.chunk_id for m in selected]
+    top_score = fused[0].score if fused else None
+    _log(plan, agent_slug, trace_id, query, status, degraded, chunk_ids, top_score, len(fused), timings_out)
 
-    return {
-        "chunks": [
-            {
-                "content": m.content,
-                "score": m.score,
-                "source": {
-                    "kb_id": m.kb_id,
-                    "kb_slug": m.kb_slug,
-                    "document_id": m.document_id,
-                    "document_title": m.document_title,
-                    "chunk_id": m.chunk_id,
-                    "page": m.page,
-                    "language": m.language,
-                    "tags": m.tags,
-                    "version": m.version,
-                },
-            }
-            for m in selected
-        ],
-        "sources": list(dict.fromkeys(m.document_title for m in selected)),
-        "token_count": sum(m.token_count or _approx_token_count(m.content) for m in selected),
-        "include_citations": policy["include_citations"],
-        "retrieval_metadata": {
-            "top_k": policy["top_k"], "candidates": len(all_matches), "groups": len(groups),
+    return _result(
+        status, selected=selected, policy=policy, degraded=degraded, trace_id=trace_id, low_confidence=low_confidence,
+        metadata={
+            "top_k": policy["top_k"], "candidates": len(fused), "groups": len(plan.groups),
             "rerank": policy["rerank"], "hybrid_search": policy["hybrid_search"],
-            "always_included": len(prompt_matches),
+            "always_included": len(prompt_matches), "timings_ms": timings_out,
+            "dense_candidates": len(results["dense"].matches or []) if "dense" in results else 0,
+            "lexical_candidates": len(results["lexical"].matches or []) if "lexical" in results else 0,
         },
-    }
+    )
+
+
+async def _rerank(
+    reranker: IReranker, query: str, matches: list[VectorMatch], cfg: RetrievalConfig, time_left: float,
+    degraded: list[str], timings: dict[str, float],
+) -> list[VectorMatch]:
+    breaker = breakers.get("rerank", cfg)
+    budget = min(cfg.rerank_timeout_s, time_left)
+    if budget <= 0.005 or not breaker.allow():
+        degraded.append("rerank_skipped")
+        return matches
+    t0 = time.monotonic()
+    try:
+        async with asyncio.timeout(budget):
+            ordered = await reranker.rerank(query, matches)
+    except asyncio.CancelledError:
+        breaker.release_probe()
+        raise
+    except Exception:  # noqa: BLE001 - fused order is the fallback
+        breaker.record_failure()
+        degraded.append("rerank_skipped")
+        return matches
+    finally:
+        timings["rerank"] = (time.monotonic() - t0) * 1000
+    breaker.record_success()
+    return ordered
+
+
+def _log(
+    plan: plans.RetrievalPlan, agent_slug: str, trace_id: str, query: str, status: str, degraded: list[str],
+    chunk_ids: list[str], top_score: float | None, candidates: int, timings_ms: dict[str, float],
+) -> None:
+    retrieval_log.record(retrieval_log.RetrievalLogRow(
+        tenant_id=plan.tenant_id, agent_id=plan.agent_id, trace_id=trace_id, query=query, status=status,
+        degraded=list(degraded), chunk_ids=chunk_ids, top_score=top_score, candidates=candidates,
+        timings_ms=timings_ms,
+    ))

@@ -235,6 +235,9 @@ _EXPLICIT_OVERRIDE_REASONS = {
     "conversation-session-write",
     "conversation-tool-policy",
     "kb-ingestion-job",
+    # Retrieval hot path: parallel search branches and the post-response log writer have no request context
+    # of their own (separate tasks), so they name the tenant the resolved plan belongs to.
+    "retrieval-search", "retrieval-log",
 }
 
 # Every platform_conn(reason=...) literal; a new bypass must be added here.

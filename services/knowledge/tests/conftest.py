@@ -8,11 +8,21 @@ os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("JWT_SECRET", "dev-only-insecure-secret-do-not-deploy-" * 2)
 os.environ.setdefault("KNOWLEDGE_STORAGE_ROOT", "/tmp/voiceai-knowledge-test-storage")
 
+import pytest
 import pytest_asyncio
 
 from services.config import auth as config_auth  # noqa: E402
 from services.config import users as users_service  # noqa: E402
 from services.knowledge import db  # noqa: E402
+from services.knowledge import retrieval  # noqa: E402
+from services.knowledge import retrieval_log  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fresh_retrieval_caches():
+    """Plan/embedding caches and breakers are process-wide; no test may inherit another's."""
+    retrieval.clear_caches()
+    yield
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -29,6 +39,8 @@ async def test_tenant(pool):
     )
     tenant = dict(row)
     yield tenant
+    await retrieval_log.flush()
+    await pool.execute("DELETE FROM retrieval_logs WHERE tenant_id = $1", tenant["id"])
     await pool.execute(
         "DELETE FROM agent_knowledge_bases WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = $1)",
         tenant["id"],
@@ -88,6 +100,8 @@ async def other_tenant_admin(pool):
     token = config_auth.create_access_token(user)
     yield {"user": user, "token": token, "tenant": tenant}
     await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])
+    await retrieval_log.flush()
+    await pool.execute("DELETE FROM retrieval_logs WHERE tenant_id = $1", tenant["id"])
     await pool.execute("UPDATE users SET tenant_id = NULL WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM tenants WHERE id = $1", tenant["id"])
 
@@ -102,6 +116,8 @@ async def tenant_agent(pool):
         "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, 'sup', 'Support') RETURNING *", tenant["id"],
     ))
     yield tenant, agent
+    await retrieval_log.flush()
+    await pool.execute("DELETE FROM retrieval_logs WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM agent_retrieval_policies WHERE agent_id = $1", agent["id"])
     await pool.execute("DELETE FROM agent_knowledge_bases WHERE agent_id = $1", agent["id"])
     await pool.execute("DELETE FROM kb_chunks WHERE tenant_id = $1", tenant["id"])
