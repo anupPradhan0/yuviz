@@ -206,7 +206,8 @@ async def test_parent_rows_are_never_hits_but_their_text_is_returned(pool, world
         dense = await repo.search(conn, [str(world["kb"]["id"])], embed_text(parent_text), 10, -1.0)
         lexical = await repo.lexical_search(conn, [str(world["kb"]["id"])], "claims receipt void", 10, 0.0)
     assert [m.content for m in dense if m.document_title == "Warranty"] == [parent_text]
-    assert lexical == [] or all(m.parent_id is not None for m in lexical if m.document_title == "Warranty")
+    # The parent text matches "claims receipt void", but only children are hits: the parent is context, not a result.
+    assert [m for m in lexical if m.document_title == "Warranty"] == []
     assert len([m for m in dense if m.document_title == "Warranty"]) == 1  # the parent row itself is not a second hit
 
 
@@ -257,6 +258,13 @@ def test_rrf_prefers_chunks_both_branches_found():
     assert set(next(m for m in fused if m.chunk_id == "a").found_by) == {"dense", "lexical"}
 
 
+def test_rrf_uses_k_60_so_agreement_beats_a_single_first_place():
+    # y: 1/62 + 1/62 = .0323 (both lists, rank 2) beats x: 1/61 = .0164 (rank 1, one list). A steeper
+    # decay (k small) would put x first, so this pins the constant.
+    fused = rrf_merge([[_match("x"), _match("y")], [_match("z", found_by=("lexical",)), _match("y", found_by=("lexical",))]])
+    assert fused[0].chunk_id == "y"
+
+
 def test_rrf_single_list_keeps_order_and_scores_use_k_60():
     assert [m.chunk_id for m in rrf_merge([[_match("x"), _match("y")]])] == ["x", "y"]
     # rank 1 in one list (1/61) beats rank 3 in two lists only if 2/(60+3) < 1/61 is false; check the arithmetic.
@@ -270,7 +278,7 @@ def test_rrf_single_list_keeps_order_and_scores_use_k_60():
 def test_dedupe_collapses_children_of_one_parent_and_overlaps():
     children = [
         _match("c1", parent_id="P", content="whole section text with c1 and c2"),
-        _match("c2", parent_id="P", content="whole section text with c1 and c2"),
+        _match("c2", parent_id="P", content="a different rendering of the same section"),
         _match("c3", parent_id=None, content="alpha beta gamma delta"),
         _match("c4", parent_id=None, content="beta gamma"),  # inside c3's text, same document
         _match("c5", parent_id=None, content="beta gamma", document_id="other-doc"),

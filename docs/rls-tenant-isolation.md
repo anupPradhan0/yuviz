@@ -163,7 +163,7 @@ table T60's staging log-line comparison checks observed traffic against.
 context to read a scope from at all — `reason=` is mandatory here too, and a
 caller with its own resolved tenant conflicting with `explicit_tenant` raises
 `TenantScopeConflict` before yielding, so the ambient caller scope always
-wins. Exactly three sites, matching `tests/test_rls_coverage.py::
+wins. Exactly five sites, matching `tests/test_rls_coverage.py::
 _EXPLICIT_OVERRIDE_REASONS`:
 
 - `conversation-session-write` — `services/conversation/transcript_builder.py`
@@ -175,6 +175,13 @@ _EXPLICIT_OVERRIDE_REASONS`:
   the claimed job's own tenant, one `platform_conn()`-claimed job at a time,
   with the poll loop kept *outside* the transaction (see the ingestion-worker
   and campaign-worker note below).
+- `retrieval-search` — `services/knowledge/retrieval.py` runs the dense and
+  lexical branches as parallel tasks, each on its own connection, scoped to the
+  tenant of the resolved retrieval plan (a UUID read from the agent's own row).
+- `retrieval-log` — `services/knowledge/retrieval_log.py` writes the
+  `retrieval_logs` row from a background task that outlives the request (and
+  runs in an empty `contextvars` context so it never inherits a request's
+  scope); each queued row names its own tenant.
 
 ## The cache-key rule
 
@@ -192,6 +199,14 @@ tenant-prefix shape. A new cache key that is a bare slug/name/email with no
 tenant component fails this test (verified: a scratch `"kb:acme-docs"`-shaped
 key does fail the classifier — `test_a_bare_slug_keyed_cache_key_fails_the_
 classifier`).
+
+The knowledge service's in-process caches follow the same rule
+(`services/knowledge/cache.py`): the retrieval plan is `plan:{tenant_slug}:
+{agent_slug}` (tenant-slug-prefixed; "no such agent" is never cached, and a
+hit is re-checked against the caller's tenant), and the query-embedding cache
+is `qemb:{tenant_id}:{embedding_config_id}:{hash}` (UUID-bearing). Both are
+asserted in `services/knowledge/tests/test_retrieval_hotpath.py` through
+`tests/test_rls_coverage.py`'s own classifier.
 
 ## What a new addition must do
 

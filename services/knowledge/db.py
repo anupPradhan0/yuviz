@@ -17,7 +17,7 @@ async def get_pool(dsn: str | None = None) -> asyncpg.Pool:
         # They make the filtered HNSW scan keep going past ef_search (pgvector 0.8+); the vector repository
         # probes whether they took effect and compensates per query when they did not.
         _pool = await asyncpg.create_pool(
-            dsn, min_size=1, max_size=int(os.environ.get("KNOWLEDGE_DB_POOL_MAX", "10")),
+            dsn, min_size=1, max_size=int(os.environ.get("KNOWLEDGE_DB_POOL_MAX", "20")),
             server_settings={
                 "hnsw.iterative_scan": "relaxed_order",
                 "hnsw.max_scan_tuples": os.environ.get("KNOWLEDGE_HNSW_MAX_SCAN_TUPLES", "20000"),
