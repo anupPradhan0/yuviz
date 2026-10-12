@@ -57,7 +57,7 @@ def test_winner_is_the_best_strategy_and_a_broken_strategy_never_wins():
     report = evaluate(ALL_DOCS, QUESTIONS, strategies=strategies)
     for kind in ("policy", "faq", "table", "prose"):
         best = max(m.mrr for (s, k), m in report.by_strategy_and_kind.items() if k == kind)
-        w = max(strategies, key=lambda s: (report.by_strategy_and_kind[(s, kind)].mrr, report.by_strategy_and_kind[(s, kind)].recall_at_5))
+        w = report.winner(kind)
         assert report.by_strategy_and_kind[(w, kind)].mrr == best and w != "broken"
         assert report.by_strategy_and_kind[("broken", kind)].mrr < best
     assert report.by_strategy["broken"].recall_at_5 < 0.3 < report.by_strategy["fixed-window"].recall_at_5
