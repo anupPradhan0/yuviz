@@ -18,7 +18,8 @@ class IKnowledgeProvider(Protocol):
         query: str,
         policy: RetrievalPolicy | None = None,
     ) -> RetrievedContext | None:
-        """None when no eligible KB or the retrieval plane is down; never raises."""
+        """None when there is no eligible KB; a context with status "unavailable" when the retrieval plane
+        is down (so a broken lookup is never mistaken for "nothing found"); never raises."""
         ...
 
     async def close(self) -> None: ...

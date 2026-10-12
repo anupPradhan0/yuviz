@@ -54,3 +54,7 @@ class RetrievedContext:
     token_count: int            # sum of chunks' approximate token counts
     include_citations: bool = True  # resolved policy's citation setting
     retrieval_metadata: dict[str, Any] = field(default_factory=dict)
+    # ok | no_match | partial | unavailable. "unavailable" is a broken lookup, never to be read as "nothing found".
+    status: str = "ok"
+    degraded: list[str] = field(default_factory=list)  # stages that fell back, when status is partial
+    trace_id: str | None = None

@@ -98,11 +98,98 @@ async def test_has_enabled_kb_true_after_assignment(service_account, tenant_agen
     await repo.close()
 
 
-async def test_retrieve_returns_none_when_404(service_account, tenant_agent):
+async def test_retrieve_with_nothing_relevant_is_200_no_match_not_404(service_account, tenant_agent):
     tenant, agent = tenant_agent
     repo = _repo(service_account)
     result = await repo.retrieve(tenant["slug"], agent["slug"], "anything", RetrievalPolicy())
-    assert result is None
+    assert result["status"] == "no_match"
+    assert result["chunks"] == [] and result["trace_id"]
+    await repo.close()
+
+
+def _stub_retrieve(monkeypatch, impl):
+    from services.knowledge.routers import retrieve as router_module
+    monkeypatch.setattr(router_module.retrieval_service, "retrieve", impl)
+
+
+async def test_router_passes_through_a_result_that_already_has_a_status(service_account, tenant_agent, monkeypatch):
+    async def partial(conn, *a, **kw):
+        return {"status": "partial", "chunks": [{"content": "x"}], "degraded": ["rerank_timeout"], "trace_id": "abc"}
+    _stub_retrieve(monkeypatch, partial)
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    result = await repo.retrieve(tenant["slug"], agent["slug"], "q", RetrievalPolicy())
+    assert (result["status"], result["degraded"], result["trace_id"]) == ("partial", ["rerank_timeout"], "abc")
+    await repo.close()
+
+
+async def test_router_adds_status_ok_to_a_result_from_before_the_status_contract(service_account, tenant_agent, monkeypatch):
+    async def old_shape(conn, *a, **kw):
+        return {"chunks": [{"content": "x"}], "sources": [], "token_count": 1}
+    _stub_retrieve(monkeypatch, old_shape)
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    result = await repo.retrieve(tenant["slug"], agent["slug"], "q", RetrievalPolicy())
+    assert result["status"] == "ok" and result["trace_id"]
+    await repo.close()
+
+
+async def test_router_turns_a_none_result_into_no_match(service_account, tenant_agent, monkeypatch):
+    async def nothing(conn, *a, **kw):
+        return None
+    _stub_retrieve(monkeypatch, nothing)
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    result = await repo.retrieve(tenant["slug"], agent["slug"], "q", RetrievalPolicy())
+    assert result["status"] == "no_match" and result["chunks"] == []
+    await repo.close()
+
+
+async def test_router_turns_an_exception_into_unavailable_without_leaking_its_text(
+    service_account, tenant_agent, monkeypatch,
+):
+    async def boom(conn, *a, **kw):
+        raise RuntimeError("connect failed postgres://svc:hunter2@db.internal/knowledge")
+    _stub_retrieve(monkeypatch, boom)
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    result = await repo.retrieve(tenant["slug"], agent["slug"], "q", RetrievalPolicy())
+    assert result["status"] == "unavailable" and result["chunks"] == []
+    assert result["degraded"] == ["retrieval_error"]
+    assert "hunter2" not in str(result)
+    await repo.close()
+
+
+async def test_router_turns_a_slow_retrieval_into_unavailable_timeout(service_account, tenant_agent, monkeypatch):
+    import asyncio
+
+    async def slow(conn, *a, **kw):
+        await asyncio.sleep(5)
+    _stub_retrieve(monkeypatch, slow)
+    monkeypatch.setenv("KNOWLEDGE_RETRIEVE_TIMEOUT_S", "0.05")
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    result = await repo.retrieve(tenant["slug"], agent["slug"], "q", RetrievalPolicy())
+    assert result["status"] == "unavailable" and result["degraded"] == ["timeout"]
+    await repo.close()
+
+
+async def test_client_still_reads_the_old_404_as_no_context_and_an_old_200_without_status():
+    import httpx
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/auth/login":
+            return httpx.Response(200, json={"access_token": "t"})
+        if request.headers.get("x-case") == "404":
+            return httpx.Response(404, json={"detail": "no eligible context"})
+        return httpx.Response(200, json={"chunks": [], "sources": [], "token_count": 0})
+
+    repo = HttpKnowledgeRepository(
+        base_url="http://k", auth_base_url="http://c", service_email="e", service_password="p",
+        transport=httpx.MockTransport(lambda r: httpx.Response(404, json={"detail": "x"})),
+        auth_transport=httpx.MockTransport(_handler),
+    )
+    assert await repo.retrieve("acme", "sup", "q", RetrievalPolicy()) is None
     await repo.close()
 
 

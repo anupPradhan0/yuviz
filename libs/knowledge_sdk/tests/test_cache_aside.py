@@ -108,12 +108,60 @@ async def test_redis_miss_and_http_says_no_kb_returns_none():
     assert retrieval.retrieve_calls == []
 
 
-async def test_retrieval_repo_unavailable_degrades_to_none_not_exception():
+async def test_retrieval_repo_unavailable_is_status_unavailable_not_none_and_not_exception():
+    """A broken lookup must not look like "no context": the caller is told to offer a transfer, not "we have no policy"."""
     availability = FakeAvailabilityRepo(value=True)
     retrieval = FakeRetrievalRepo(unavailable=True)
     provider = CacheAsideKnowledgeProvider(availability, retrieval)
 
-    assert await provider.retrieve("acme", "sup", "q") is None
+    result = await provider.retrieve("acme", "sup", "q")
+
+    assert result is not None
+    assert result.status == "unavailable"
+    assert result.chunks == [] and result.degraded == ["retrieval_unavailable"]
+
+
+async def test_old_shape_with_chunks_and_no_status_key_is_ok():
+    provider = CacheAsideKnowledgeProvider(FakeAvailabilityRepo(value=True), FakeRetrievalRepo(raw=_raw_context()))
+
+    result = await provider.retrieve("acme", "sup", "q")
+
+    assert result.status == "ok" and result.degraded == [] and result.trace_id is None
+
+
+async def test_old_shape_empty_chunks_and_no_status_key_is_no_match():
+    raw = _raw_context(chunks=[], sources=[], token_count=0)
+    provider = CacheAsideKnowledgeProvider(FakeAvailabilityRepo(value=True), FakeRetrievalRepo(raw=raw))
+
+    assert (await provider.retrieve("acme", "sup", "q")).status == "no_match"
+
+
+async def test_new_shape_no_match_without_sources_or_token_count_keys():
+    provider = CacheAsideKnowledgeProvider(
+        FakeAvailabilityRepo(value=True),
+        FakeRetrievalRepo(raw={"status": "no_match", "chunks": [], "trace_id": "t1"}),
+    )
+
+    result = await provider.retrieve("acme", "sup", "q")
+
+    assert (result.status, result.chunks, result.sources, result.token_count, result.trace_id) == (
+        "no_match", [], [], 0, "t1")
+
+
+async def test_new_shape_partial_carries_degraded_stages():
+    raw = _raw_context(status="partial", degraded=["rerank_timeout"], trace_id="t2")
+    provider = CacheAsideKnowledgeProvider(FakeAvailabilityRepo(value=True), FakeRetrievalRepo(raw=raw))
+
+    result = await provider.retrieve("acme", "sup", "q")
+
+    assert result.status == "partial" and result.degraded == ["rerank_timeout"] and len(result.chunks) == 1
+
+
+async def test_new_shape_unavailable_from_the_server_is_passed_through():
+    raw = {"status": "unavailable", "chunks": [], "degraded": ["timeout"]}
+    provider = CacheAsideKnowledgeProvider(FakeAvailabilityRepo(value=True), FakeRetrievalRepo(raw=raw))
+
+    assert (await provider.retrieve("acme", "sup", "q")).status == "unavailable"
 
 
 async def test_no_chunks_in_raw_response_yields_confidence_zero():
