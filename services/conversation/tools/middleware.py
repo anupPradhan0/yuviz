@@ -96,8 +96,8 @@ class BreakerBoard:
         self._opened_at: dict[Any, float] = {}
         self._trial_started: dict[Any, float] = {}
 
-    def admit(self, key: Any) -> str | None:
-        """"closed" = normal call, "trial" = the single half-open probe, None = refuse (fail fast).
+    def admit(self, key: Any) -> str | tuple[str, float] | None:
+        """"closed" = normal call, ("trial", token) = the single half-open probe, None = refuse (fail fast).
         After the cooldown exactly one caller is admitted as the trial; the rest keep failing fast until
         it resolves, so a still-broken service costs one step timeout per cycle, not one per caller."""
         opened_at = self._opened_at.get(key)
@@ -110,12 +110,18 @@ class BreakerBoard:
         if started is not None and now - started < self._cooldown_s:
             return None  # a trial is in flight (and a lost one is replaced after one more cooldown)
         self._trial_started[key] = now
-        return "trial"
+        return ("trial", now)
 
-    def record(self, key: Any, result: ToolResult, admission: str = "closed") -> None:
-        trial = admission == "trial"
+    def _end_trial(self, key: Any, admission: Any) -> None:
+        # Only the trial that owns the marker clears it: a replaced (stale) trial finishing late must not
+        # clear the newer trial's marker and let a third caller in alongside it.
+        if self._trial_started.get(key) == admission[1]:
+            del self._trial_started[key]
+
+    def record(self, key: Any, result: ToolResult, admission: Any = "closed") -> None:
+        trial = isinstance(admission, tuple)
         if trial:
-            self._trial_started.pop(key, None)
+            self._end_trial(key, admission)
         if is_infrastructure_failure(result):
             count = self._consecutive_failures.get(key, 0) + 1
             self._consecutive_failures[key] = count
@@ -128,10 +134,10 @@ class BreakerBoard:
             self._consecutive_failures[key] = 0
             self._opened_at.pop(key, None)  # the trial succeeded (or the service answered): close
 
-    def abandon(self, key: Any, admission: str) -> None:
+    def abandon(self, key: Any, admission: Any) -> None:
         """A trial that never produced a result (cancelled, raised) must not wedge the breaker half-open."""
-        if admission == "trial":
-            self._trial_started.pop(key, None)
+        if isinstance(admission, tuple):
+            self._end_trial(key, admission)
 
 
 # Errors a caller can cause (a wrong order number is a customer-API 404): they must never count, or a few

@@ -131,15 +131,18 @@ class TurnGuard:
                 "expected_schema": schema,
             })
 
-        if side_effecting and self.tainted and taint_blocks_writes() and not confirmed:
-            # Counts as a refusal and withdraws writes for the rest of the turn: the model has to answer in
-            # words (ask the caller), not loop. The confirmation path is the next caller utterance.
-            self.taint_refused = True
-            return self._refuse("needs_caller_confirmation")
-
+        # Repeats first: a write already run or already held this turn is refused as a repeat, never held
+        # a second time (a second hold would be released and sent again on the next utterance).
         key = (tool_name, _canonical(arguments))
         if detect_repeats and key in self._seen:
             return self._refuse("repeated_call")
+
+        if side_effecting and self.tainted and taint_blocks_writes() and not confirmed:
+            # Counts as a refusal and withdraws writes for the rest of the turn: the model has to answer in
+            # words (ask the caller), not loop. The confirmation path is the next caller utterance.
+            self._seen.add(key)
+            self.taint_refused = True
+            return self._refuse("needs_caller_confirmation")
         self._seen.add(key)
 
         count = self._per_tool.get(tool_name, 0) + 1

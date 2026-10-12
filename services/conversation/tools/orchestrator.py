@@ -66,6 +66,7 @@ class ToolCallOrchestrator:
         max_tool_calls_per_turn: int = DEFAULT_MAX_TOOL_CALLS_PER_TURN,
         breakers: BreakerBoard | None = None,
         last_good: LastGoodCache | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._llm_adapter = llm_adapter
         self._policy_resolver = policy_resolver
@@ -82,6 +83,7 @@ class ToolCallOrchestrator:
         self._last_good = last_good if last_good is not None else LastGoodCache()
         # Per call (the orchestrator is built per call), keyed (tenant, call_id) so a reused instance cannot
         # mix calls: whether retrieved text is still in context, and writes held for the caller's yes.
+        self._clock = clock  # injectable so the held-write expiry can be tested without sleeping
         self._call_taint: dict[tuple[str, str], bool] = {}
         self._held_writes: dict[tuple[str, str], dict[str, tuple[str, float]]] = {}
 
@@ -197,7 +199,7 @@ class ToolCallOrchestrator:
                 # Confirmed = this exact write was held on an earlier turn and this is a real new utterance.
                 confirmed = (
                     side_effecting and not carry_taint and held_turn is not None
-                    and held_turn[0] != turn_id and time.monotonic() - held_turn[1] < _HELD_WRITE_TTL_S
+                    and held_turn[0] != turn_id and self._clock() - held_turn[1] < _HELD_WRITE_TTL_S
                 )
                 refusal = guard.check(
                     event.tool_name, event.arguments,
@@ -209,7 +211,7 @@ class ToolCallOrchestrator:
                 )
                 if refusal is not None and refusal.error == "needs_caller_confirmation":
                     held = self._held_writes.setdefault(call_key, {})
-                    held[signature] = (turn_id, time.monotonic())
+                    held[signature] = (turn_id, self._clock())
                     while len(held) > _MAX_HELD_WRITES:
                         held.pop(next(iter(held)))
                 elif refusal is None and side_effecting and held_turn is not None:

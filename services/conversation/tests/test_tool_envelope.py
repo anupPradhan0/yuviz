@@ -1009,7 +1009,7 @@ async def test_a_held_write_is_allowed_exactly_once_on_the_next_turn_even_if_tha
     statuses = [e["status"] if not e["error"] else e["error"]["code"] for e in _envelopes(h2)]
     assert statuses[:2] == ["ok", "ok"]            # search, then the confirmed write
     assert len(executor.calls) == 1
-    assert statuses[2:] and statuses[2:][0] in ("needs_caller_confirmation", "repeated_call")
+    assert statuses[2:] == ["repeated_call"]
 
 
 async def test_a_different_write_is_not_covered_by_the_held_one():
@@ -1125,3 +1125,176 @@ async def test_a_confirmation_is_spent_a_later_tainted_turn_holds_the_same_write
 
     assert len(executor.calls) == 1
     assert _envelopes(third)[1]["error"]["code"] == "needs_caller_confirmation"
+
+
+async def test_a_repeated_write_in_the_confirmation_turn_is_refused_as_a_repeat_not_held_again_and_never_resent():
+    """search, book(X), book(X) on the turn the caller confirmed: the second must be repeated_call. Held a second
+    time it would be released and sent again on the next utterance."""
+    executor = _Executor()
+    orchestrator = _taint_orchestrator(executor)
+    tools = _knowledge_tools(_RecordingKnowledge([_ctx(texts=(_PLANTED,))]))
+    book = dict(api_name="book_appointment", inputs={"slot": "fri-3pm"})
+    await _turn(orchestrator, [_search(1), _call(2, **book), [TokenEvent(text="Shall I book it?")]], local_tools=tools)
+
+    h2, _ = await _turn(orchestrator, [_search(1), _call(2, **book), _call(3, **book), [TokenEvent(text="Booked")]],
+                        local_tools=tools)
+    # Next utterance; the model searches and tries the booking again.
+    h3, _ = await _turn(orchestrator, [_search(1), _call(2, **book), [TokenEvent(text="x")]], local_tools=tools)
+
+    codes = [e["error"]["code"] if e["error"] else e["status"] for e in _envelopes(h2)]
+    assert codes == ["ok", "ok", "repeated_call"]
+    assert len(executor.calls) == 1  # sent once
+    assert _envelopes(h3)[1]["error"]["code"] == "needs_caller_confirmation"  # nothing left over to auto-release
+
+
+def test_a_write_held_this_turn_is_refused_as_a_repeat_if_the_model_retries_it():
+    from services.conversation.tools.guard import TurnGuard
+
+    guard = TurnGuard()
+    guard.tainted = True
+    args = {"api_name": "x"}
+
+    first = guard.check("execute_api", args, None, side_effecting=True)
+    second = guard.check("execute_api", args, None, side_effecting=True)
+
+    assert (first.error, second.error) == ("needs_caller_confirmation", "repeated_call")
+
+
+def test_a_held_write_counts_toward_the_per_turn_refusal_limit():
+    from services.conversation.tools.guard import TurnGuard
+
+    guard = TurnGuard()
+    guard.tainted = True
+    guard.check("execute_api", {"api_name": "a"}, None, side_effecting=True)         # held: refusal 1
+    guard.check("execute_api", {"api_name": "a"}, None, side_effecting=True)         # repeat: refusal 2
+    assert not guard.exhausted
+    guard.check("execute_api", {"api_name": "a"}, None, side_effecting=True)         # refusal 3
+
+    assert guard.exhausted
+
+
+def test_one_held_write_plus_two_other_refusals_exhausts_the_turn():
+    from services.conversation.tools.guard import TurnGuard
+
+    guard = TurnGuard()
+    guard.tainted = True
+    schema = {"type": "object", "required": ["q"]}
+    guard.check("execute_api", {"api_name": "w"}, None, side_effecting=True)
+    guard.check("lookup", {}, schema)
+    assert not guard.exhausted
+    guard.check("lookup", {}, schema)
+
+    assert guard.exhausted  # without counting the hold this is only two refusals
+
+
+async def test_a_held_write_expires_after_ten_minutes_and_is_then_held_again():
+    now = [1000.0]
+    executor = _Executor()
+    orchestrator = _taint_orchestrator(executor)
+    orchestrator._clock = lambda: now[0]
+    tools = _knowledge_tools(_RecordingKnowledge([_ctx(texts=(_PLANTED,))]))
+    write = dict(api_name="cancel_booking", inputs={"id": "7"})
+    await _turn(orchestrator, [_search(1), _call(2, **write), [TokenEvent(text="Sure?")]], local_tools=tools)
+
+    now[0] += 601
+    late, _ = await _turn(orchestrator, [_search(1), _call(2, **write), [TokenEvent(text="x")]], local_tools=tools)
+    assert _envelopes(late)[1]["error"]["code"] == "needs_caller_confirmation" and executor.calls == []
+
+    now[0] += 30  # inside the window of the fresh hold
+    soon, _ = await _turn(orchestrator, [_search(1), _call(2, **write), [TokenEvent(text="x")]], local_tools=tools)
+    assert _envelopes(soon)[1]["status"] == "ok" and len(executor.calls) == 1
+
+
+async def test_a_caller_barging_in_during_a_half_open_trial_does_not_lock_the_search_for_another_cooldown():
+    board = BreakerBoard(fails_before_open=2, cooldown_s=0.2)
+    broken = _RecordingKnowledge([RuntimeError("down")])
+
+    def orchestrator() -> ToolCallOrchestrator:
+        o = _local_orchestrator()
+        o._breakers = board
+        return o
+
+    for i in range(2):
+        await _turn(orchestrator(), [_search(), [TokenEvent(text="x")]], local_tools=_knowledge_tools(broken), call_id=f"c{i}")
+    await asyncio.sleep(0.25)
+
+    class _Slow:
+        async def retrieve(self, *a, **kw):
+            await asyncio.sleep(5)
+
+        async def close(self):
+            pass
+
+    cancel = asyncio.Event()
+    _with_llm(o1 := orchestrator(), [_search(), [TokenEvent(text="x")]])
+    history = [ChatMessage(role="user", content="hi")]
+
+    async def run():
+        return [e async for e in o1.run_turn("a1", "t1", "call-x", "s1", history, cancel_event=cancel,
+                                             local_tools=_knowledge_tools(_Slow()))]
+
+    task = asyncio.ensure_future(run())
+    await asyncio.sleep(0.05)
+    cancel.set()  # barge-in while the trial is in flight
+    await task
+
+    healthy = _RecordingKnowledge([_ctx()])
+    after, _ = await _turn(orchestrator(), [_search(), [TokenEvent(text="x")]], local_tools=_knowledge_tools(healthy),
+                           call_id="call-y")
+
+    assert _envelopes(after)[0]["status"] == "ok"  # admitted as the next trial, not circuit_breaker_open
+
+
+def test_a_stale_trial_finishing_late_does_not_clear_the_newer_trials_marker():
+    board = BreakerBoard(fails_before_open=1, cooldown_s=0.01)
+    key = ("t", "tool", "a")
+    board.record(key, ToolResult(status=ToolStatus.TIMEOUT), board.admit(key))
+    import time as _t
+    _t.sleep(0.02)
+    stale = board.admit(key)
+    _t.sleep(0.02)  # the lost trial is replaced after another cooldown
+    newer = board.admit(key)
+    assert stale is not None and newer is not None
+
+    board.abandon(key, stale)
+
+    assert board.admit(key) is None  # the newer trial is still in flight; no third caller slips in
+
+
+async def test_tearing_down_the_turn_during_a_half_open_trial_does_not_lock_the_search():
+    board = BreakerBoard(fails_before_open=2, cooldown_s=0.2)
+    broken = _RecordingKnowledge([RuntimeError("down")])
+
+    def orchestrator() -> ToolCallOrchestrator:
+        o = _local_orchestrator()
+        o._breakers = board
+        return o
+
+    for i in range(2):
+        await _turn(orchestrator(), [_search(), [TokenEvent(text="x")]], local_tools=_knowledge_tools(broken), call_id=f"c{i}")
+    await asyncio.sleep(0.25)
+
+    class _Slow:
+        async def retrieve(self, *a, **kw):
+            await asyncio.sleep(5)
+
+        async def close(self):
+            pass
+
+    o1 = orchestrator()
+    _with_llm(o1, [_search(), [TokenEvent(text="x")]])
+    task = asyncio.ensure_future(_collect_turn(o1, _knowledge_tools(_Slow())))
+    await asyncio.sleep(0.05)
+    task.cancel()  # the call ended mid-trial
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.05)  # the orphaned tool task unwinds (and releases the trial) on the next loop turns
+
+    after, _ = await _turn(orchestrator(), [_search(), [TokenEvent(text="x")]],
+                           local_tools=_knowledge_tools(_RecordingKnowledge([_ctx()])), call_id="call-y")
+    assert _envelopes(after)[0]["status"] == "ok"
+
+
+async def _collect_turn(orchestrator, tools):
+    history = [ChatMessage(role="user", content="hi")]
+    return [e async for e in orchestrator.run_turn("a1", "t1", "call-x", "s1", history, local_tools=tools)]
