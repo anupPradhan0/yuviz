@@ -222,6 +222,55 @@ CREATE INDEX IF NOT EXISTS idx_kb_ingestion_events_job ON kb_ingestion_events(jo
 CREATE INDEX IF NOT EXISTS idx_kb_ingestion_events_document ON kb_ingestion_events(document_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_kb_ingestion_events_tenant ON kb_ingestion_events(tenant_id);
 
+-- ── Phases 3-6 schema (parsers, chunking, hybrid retrieval, measurement) ────
+-- One idempotent block so the parallel phase branches share a single schema change.
+
+-- Documents: how they were parsed, how good the parse was, which chunker produced the chunks.
+-- ready_degraded = indexed, but some of the document could not be read (still retrievable).
+ALTER TABLE kb_documents ADD COLUMN IF NOT EXISTS content_hash    TEXT;
+ALTER TABLE kb_documents ADD COLUMN IF NOT EXISTS parser_used     TEXT;
+ALTER TABLE kb_documents ADD COLUMN IF NOT EXISTS quality_score   REAL;
+ALTER TABLE kb_documents ADD COLUMN IF NOT EXISTS chunker_version TEXT;
+DO $$ BEGIN
+    ALTER TABLE kb_documents DROP CONSTRAINT IF EXISTS kb_documents_status_check;
+    ALTER TABLE kb_documents ADD CONSTRAINT kb_documents_status_check
+        CHECK (status IN ('pending', 'processing', 'ready', 'ready_degraded', 'failed'));
+END $$;
+
+-- Chunks. Parent-child: small child chunks are embedded and searched; the enclosing section is stored as
+-- a parent row (is_parent = true, embedding NULL, chunk_index = -1 - parent ordinal so it never collides
+-- with a child's index) and returned for context. Lexical search runs on tsv ('simple' config: no
+-- language-specific stemming, so it works for every language the platform serves).
+ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS parent_id       UUID REFERENCES kb_chunks(id) ON DELETE SET NULL;
+ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS is_parent       BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS section_path    TEXT;   -- heading breadcrumb, e.g. 'Refunds > Eligibility'
+ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS embedding_model TEXT;
+ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS dims            INT;
+ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS tsv tsvector
+    GENERATED ALWAYS AS (to_tsvector('simple', coalesce(content, ''))) STORED;
+
+CREATE INDEX IF NOT EXISTS idx_kb_chunks_tsv ON kb_chunks USING gin (tsv);
+CREATE INDEX IF NOT EXISTS idx_kb_chunks_parent ON kb_chunks(parent_id) WHERE parent_id IS NOT NULL;
+
+-- ── retrieval_logs — one row per retrieval: what was asked, what came back, where the time went ──
+CREATE TABLE IF NOT EXISTS retrieval_logs (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id    UUID NOT NULL REFERENCES tenants(id),
+    agent_id     UUID REFERENCES agents(id),
+    trace_id     TEXT NOT NULL,
+    query        TEXT NOT NULL,
+    status       TEXT NOT NULL CHECK (status IN ('ok', 'no_match', 'partial', 'unavailable', 'error')),
+    degraded     TEXT[] NOT NULL DEFAULT '{}',          -- fallbacks taken, e.g. {lexical_only, rerank_skipped}
+    chunk_ids    UUID[] NOT NULL DEFAULT '{}',
+    top_score    REAL,
+    candidates   INT,
+    timings_ms   JSONB NOT NULL DEFAULT '{}'::jsonb,    -- plan, embed, dense, lexical, fuse, rerank, total
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_retrieval_logs_tenant_time ON retrieval_logs(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_retrieval_logs_trace ON retrieval_logs(trace_id);
+
 -- knowledge_base_ids is default-deny: give the start node the agent's enabled KBs
 -- when no node in the graph lists any.
 DO $kb_workflow_backfill$
