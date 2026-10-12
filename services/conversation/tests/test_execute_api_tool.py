@@ -558,14 +558,14 @@ async def test_cancel_event_mid_call_yields_failed_cancelled_and_never_folds_the
 
     assert events == [ToolCallStartedEvent(tool_name="execute_api")]
     folded = json.loads(history[2].content)
-    assert folded["status"] == "failed"
-    assert folded["error"] == "cancelled"
+    assert folded["status"] == "error"
+    assert folded["error"]["code"] == "cancelled"
 
     # Let the abandoned call finish server-side and confirm its (late,
     # successful) result is never folded into history after the fact.
     client.release_event.set()
     await asyncio.sleep(0)
-    assert json.loads(history[2].content)["error"] == "cancelled"
+    assert json.loads(history[2].content)["error"]["code"] == "cancelled"
 
 
 # ── logging redaction (finding 8), against the real build_default_chain ──
@@ -801,6 +801,7 @@ async def test_a_crm_projection_reaches_the_model_as_exactly_four_keys_with_the_
 
     folded = json.loads(history[-1].content)
     assert history[-1].role == "tool"
-    assert set(folded) == {"status", "outcome", "items", "spoken"}
-    assert set(folded["items"][0]) == {"contact_id", "full_name", "company", "owner_name"}
-    assert folded["items"][0]["full_name"] == name
+    assert set(folded) == {"status", "data", "error", "latency_ms", "trace_id"}
+    assert set(folded["data"]) == {"outcome", "items", "spoken"}
+    assert set(folded["data"]["items"][0]) == {"contact_id", "full_name", "company", "owner_name"}
+    assert folded["data"]["items"][0]["full_name"] == name

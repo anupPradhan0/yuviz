@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -46,6 +47,7 @@ from .tools.llm_adapter import LocalToolCompletedEvent
 from .tools.llm_adapter import TokenEvent as ToolTokenEvent
 from .tools.llm_adapter import ToolCallStartedEvent
 from .tools.orchestrator import ToolCallOrchestrator
+from .tools.envelope import UNTRUSTED_NOTICE, cap_to_budget, wrap_untrusted
 from .tools.registry import SEARCH_KNOWLEDGE
 from .tools.types import ToolResult, ToolStatus
 from .transcript_builder import TranscriptBuilder, TurnLatency
@@ -236,6 +238,10 @@ _MAX_DURATION_GOODBYE = t("max_duration_goodbye", "en")
 _FALLBACK_LLM_ERROR = t("fallback_llm_error", "en")
 
 _TOOL_CALL_FILLER_MIN_GAP_S = 4.0
+# Hard ceiling on retrieved text handed to the LLM, in the knowledge service's own token unit (words).
+# The agent's token budget is enforced server-side; this also bounds always-included prompt-mode documents,
+# which bypass that budget.
+_KNOWLEDGE_TOOL_MAX_TOKENS = int(os.environ.get("KNOWLEDGE_TOOL_MAX_TOKENS", "1500"))
 
 # Masks turn-1 LLM latency; generic so it fits any first utterance.
 _FIRST_TURN_FILLER = t("first_turn_filler", "en")
@@ -1343,15 +1349,31 @@ class PipelineConversationHandler:
             except Exception:
                 log.exception("search_knowledge retrieval failed session=%s", session_id)
                 return ToolResult(status=ToolStatus.FAILED, error="knowledge_unavailable")
+            if context is not None and context.status == "unavailable":
+                log.warning("search_knowledge: retrieval unavailable session=%s degraded=%s", session_id, context.degraded)
+                return ToolResult(status=ToolStatus.FAILED, error="knowledge_unavailable")
             if context is None or not context.chunks:
-                return ToolResult(status=ToolStatus.SUCCESS, payload={"found": False, "passages": []})
+                return ToolResult(
+                    status=ToolStatus.SUCCESS, outcome="no_match", payload={"found": False, "passages": []},
+                )
+            # Retrieved text is tenant-uploaded, so it is data to quote, never instructions to follow.
+            kept, truncated = cap_to_budget([c.content for c in context.chunks], _KNOWLEDGE_TOOL_MAX_TOKENS)
             payload: dict[str, Any] = {
                 "found": True,
-                "passages": [chunk.content for chunk in context.chunks],
+                "untrusted_notice": UNTRUSTED_NOTICE,
+                "passages": [wrap_untrusted(text) for text in kept],
             }
+            degraded = list(context.degraded)
+            if truncated:
+                degraded.append("truncated_to_token_budget")
+            if degraded:
+                payload["degraded"] = degraded
             if context.include_citations and context.sources:
-                payload["sources"] = list(context.sources)
-            return ToolResult(status=ToolStatus.SUCCESS, payload=payload)
+                payload["sources"] = [title[:120] for title in context.sources]
+            partial = context.status == "partial" or truncated
+            return ToolResult(
+                status=ToolStatus.SUCCESS, payload=payload, outcome="partial" if partial else None,
+            )
 
         return handler
 

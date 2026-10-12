@@ -84,40 +84,58 @@ class LatencyRecorderMiddleware:
         return result
 
 
-class CircuitBreakerMiddleware:
-    """Consecutive-failure counting, not a rolling time window."""
+class BreakerBoard:
+    """Consecutive-failure counting per key, not a rolling time window. Must outlive a single call:
+    the orchestrator owns one so failures accumulate across calls (a chain built per call would never open)."""
 
     def __init__(self, fails_before_open: int = 5, cooldown_s: float = 30.0) -> None:
         self._fails_before_open = fails_before_open
         self._cooldown_s = cooldown_s
-        self._consecutive_failures: dict[str, int] = {}
-        self._opened_at: dict[str, float] = {}
+        self._consecutive_failures: dict[Any, int] = {}
+        self._opened_at: dict[Any, float] = {}
 
-    def _breaker_key(self, request: ToolExecutionRequest) -> str:
-        return request.tool_name
-
-    async def __call__(self, request: ToolExecutionRequest, call_next: NextCall) -> ToolResult:
-        key = self._breaker_key(request)
+    def allow(self, key: Any) -> bool:
         opened_at = self._opened_at.get(key)
-        if opened_at is not None:
-            if time.monotonic() - opened_at < self._cooldown_s:
-                log.warning("tool_call circuit_breaker_open tool=%s", request.tool_name)
-                return ToolResult(status=ToolStatus.UNAVAILABLE, error="circuit_breaker_open")
-            # Cooldown elapsed — allow one attempt through ("half-open").
-            del self._opened_at[key]
+        if opened_at is None:
+            return True
+        if time.monotonic() - opened_at < self._cooldown_s:
+            return False
+        # Cooldown elapsed: allow one attempt through ("half-open"); the count is kept, so one more failure re-opens.
+        del self._opened_at[key]
+        return True
 
-        result = await call_next(request)
+    def record(self, key: Any, result: ToolResult) -> None:
         if result.status in (ToolStatus.FAILED, ToolStatus.TIMEOUT):
             count = self._consecutive_failures.get(key, 0) + 1
             self._consecutive_failures[key] = count
             if count >= self._fails_before_open:
                 self._opened_at[key] = time.monotonic()
-                log.warning(
-                    "tool_call circuit_breaker_opened tool=%s consecutive_failures=%d",
-                    request.tool_name, count,
-                )
-        else:
+                log.warning("tool_call circuit_breaker_opened key=%s consecutive_failures=%d", key, count)
+        elif result.status is not ToolStatus.CANCELLED:
             self._consecutive_failures[key] = 0
+
+
+def breaker_key(request: ToolExecutionRequest) -> tuple[str, str, str]:
+    """Per tenant and, for execute_api, per API: one tenant's dead CRM must not open the breaker for
+    another tenant, nor for that tenant's other APIs."""
+    return (
+        request.context.tenant_id, request.tool_name, str(request.arguments.get("api_name") or ""),
+    )
+
+
+class CircuitBreakerMiddleware:
+    def __init__(
+        self, fails_before_open: int = 5, cooldown_s: float = 30.0, board: BreakerBoard | None = None,
+    ) -> None:
+        self._board = board if board is not None else BreakerBoard(fails_before_open, cooldown_s)
+
+    async def __call__(self, request: ToolExecutionRequest, call_next: NextCall) -> ToolResult:
+        key = breaker_key(request)
+        if not self._board.allow(key):
+            log.warning("tool_call circuit_breaker_open tool=%s", request.tool_name)
+            return ToolResult(status=ToolStatus.UNAVAILABLE, error="circuit_breaker_open")
+        result = await call_next(request)
+        self._board.record(key, result)
         return result
 
 
@@ -176,6 +194,7 @@ def build_default_chain(
     executor, timeout_ms: int = 6000, metrics: IMetrics | None = None,
     redact_arg_keys: frozenset[str] = frozenset(),
     latency_store: ToolLatencyStore | None = None,
+    breaker_board: BreakerBoard | None = None,
 ) -> MiddlewareChain:
     """Standard chain: Logging, Metrics, Latency (if a store is given), CircuitBreaker, Retry, Timeout."""
     middlewares = [
@@ -185,7 +204,7 @@ def build_default_chain(
     if latency_store is not None:
         middlewares.append(LatencyRecorderMiddleware(latency_store))
     middlewares += [
-        CircuitBreakerMiddleware(),
+        CircuitBreakerMiddleware(board=breaker_board),
         RetryMiddleware(),
         TimeoutMiddleware(timeout_ms=timeout_ms),
     ]

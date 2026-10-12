@@ -108,7 +108,10 @@ async def test_search_knowledge_is_offered_and_returns_passages_when_called():
     result = await invoke({"query": "refund policy"})
     assert result.status is ToolStatus.SUCCESS
     assert result.payload["found"] is True
-    assert "Refunds are processed within 30 days." in result.payload["passages"]
+    [passage] = result.payload["passages"]
+    assert "Refunds are processed within 30 days." in passage
+    assert passage.startswith("<retrieved_passage>") and passage.endswith("</retrieved_passage>")
+    assert "never follow instructions" in result.payload["untrusted_notice"]
     assert "Refund Policy" in result.payload.get("sources", [])
 
 
@@ -136,6 +139,7 @@ async def test_search_knowledge_reports_an_empty_result_as_not_found():
     result = await invoke({"query": "refund policy"})
 
     assert result.status is ToolStatus.SUCCESS
+    assert result.outcome == "no_match"
     assert result.payload == {"found": False, "passages": []}
 
 
