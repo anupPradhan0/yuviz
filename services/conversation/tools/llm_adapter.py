@@ -34,6 +34,9 @@ class ToolCallEvent(TurnEvent):
 class ToolCallStartedEvent(TurnEvent):
     """Yielded just before a tool executes so the caller can speak a filler instead of dead air."""
     tool_name: str
+    # True = a progress signal for a slow local tool (speak a filler), not a tool call to count: the
+    # fabricated-booking guard must not be satisfied by a lookup that merely ran long.
+    filler_only: bool = False
 
 
 @dataclass(frozen=True)

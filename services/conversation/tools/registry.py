@@ -38,6 +38,7 @@ SEARCH_KNOWLEDGE = ToolDefinition(
     category="knowledge",
     timeout_ms=1500,
     read_only=True,
+    untrusted_output=True,
     output_schema={
         "type": "object",
         "required": ["found", "passages"],

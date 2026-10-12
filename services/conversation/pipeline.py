@@ -47,7 +47,7 @@ from .tools.llm_adapter import LocalToolCompletedEvent
 from .tools.llm_adapter import TokenEvent as ToolTokenEvent
 from .tools.llm_adapter import ToolCallStartedEvent
 from .tools.orchestrator import ToolCallOrchestrator
-from .tools.envelope import UNTRUSTED_NOTICE, cap_to_budget, wrap_untrusted
+from .tools.envelope import UNTRUSTED_NOTICE, cap_passages, defang, wrap_untrusted
 from .tools.registry import SEARCH_KNOWLEDGE
 from .tools.types import ToolResult, ToolStatus
 from .transcript_builder import TranscriptBuilder, TurnLatency
@@ -242,6 +242,8 @@ _TOOL_CALL_FILLER_MIN_GAP_S = 4.0
 # The agent's token budget is enforced server-side; this also bounds always-included prompt-mode documents,
 # which bypass that budget.
 _KNOWLEDGE_TOOL_MAX_TOKENS = int(os.environ.get("KNOWLEDGE_TOOL_MAX_TOKENS", "1500"))
+# Words are no bound for CJK, minified JSON or base64 (no spaces), so characters are capped as well.
+_KNOWLEDGE_TOOL_MAX_CHARS = int(os.environ.get("KNOWLEDGE_TOOL_MAX_CHARS", "6000"))
 
 # Masks turn-1 LLM latency; generic so it fits any first utterance.
 _FIRST_TURN_FILLER = t("first_turn_filler", "en")
@@ -1215,7 +1217,8 @@ class PipelineConversationHandler:
             local_tools=local_tools, only_tools=only_tools,
         ):
             if isinstance(event, ToolCallStartedEvent):
-                tool_calls_made.append(event.tool_name)
+                if not event.filler_only:
+                    tool_calls_made.append(event.tool_name)
                 yield event
                 continue
             if isinstance(event, LocalToolCompletedEvent):
@@ -1351,13 +1354,22 @@ class PipelineConversationHandler:
                 return ToolResult(status=ToolStatus.FAILED, error="knowledge_unavailable")
             if context is not None and context.status == "unavailable":
                 log.warning("search_knowledge: retrieval unavailable session=%s degraded=%s", session_id, context.degraded)
+                if "timeout" in context.degraded:
+                    # The service already spent its budget; a retry would only double the caller's wait.
+                    return ToolResult(status=ToolStatus.TIMEOUT, error="timeout")
                 return ToolResult(status=ToolStatus.FAILED, error="knowledge_unavailable")
             if context is None or not context.chunks:
                 return ToolResult(
                     status=ToolStatus.SUCCESS, outcome="no_match", payload={"found": False, "passages": []},
                 )
             # Retrieved text is tenant-uploaded, so it is data to quote, never instructions to follow.
-            kept, truncated = cap_to_budget([c.content for c in context.chunks], _KNOWLEDGE_TOOL_MAX_TOKENS)
+            # Prompt-mode documents come first (retrieval_metadata.always_included) and bypass the server's
+            # budget; capping them apart keeps the matches that answer the question from being dropped.
+            kept, truncated = cap_passages(
+                [c.content for c in context.chunks],
+                int(context.retrieval_metadata.get("always_included") or 0),
+                _KNOWLEDGE_TOOL_MAX_TOKENS, _KNOWLEDGE_TOOL_MAX_CHARS,
+            )
             payload: dict[str, Any] = {
                 "found": True,
                 "untrusted_notice": UNTRUSTED_NOTICE,
@@ -1369,7 +1381,7 @@ class PipelineConversationHandler:
             if degraded:
                 payload["degraded"] = degraded
             if context.include_citations and context.sources:
-                payload["sources"] = [title[:120] for title in context.sources]
+                payload["sources"] = [defang(title)[:120] for title in context.sources]
             partial = context.status == "partial" or truncated
             return ToolResult(
                 status=ToolStatus.SUCCESS, payload=payload, outcome="partial" if partial else None,

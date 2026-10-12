@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from collections import OrderedDict
 from typing import Any
@@ -65,6 +66,12 @@ def validate_json(value: Any, schema: dict[str, Any] | None) -> list[str]:
     ]
 
 
+def taint_blocks_writes() -> bool:
+    """KNOWLEDGE_TAINT_BLOCKS_WRITES (default on). Off lets a write follow a document lookup in the same
+    turn, at the cost of a planted passage being able to steer it."""
+    return os.environ.get("KNOWLEDGE_TAINT_BLOCKS_WRITES", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def _canonical(arguments: Any) -> str:
     return json.dumps(arguments, sort_keys=True, default=str)
 
@@ -79,6 +86,7 @@ class TurnGuard:
         self._seen: set[tuple[str, str]] = set()
         self._per_tool: dict[str, int] = {}
         self._repairs: dict[str, int] = {}
+        self.tainted = False  # untrusted retrieved text is in context for this user turn
 
     @property
     def exhausted(self) -> bool:
@@ -92,7 +100,7 @@ class TurnGuard:
 
     def check(
         self, tool_name: str, arguments: dict[str, Any], schema: dict[str, Any] | None,
-        max_calls_for_tool: int | None = None, detect_repeats: bool = True,
+        max_calls_for_tool: int | None = None, detect_repeats: bool = True, side_effecting: bool = False,
     ) -> ToolResult | None:
         """None = proceed; otherwise the refusal to hand the model instead of executing."""
         self._attempts += 1
@@ -112,6 +120,10 @@ class TurnGuard:
                 "problems": problems,
                 "expected_schema": schema,
             })
+
+        if side_effecting and self.tainted and taint_blocks_writes():
+            # Not a loop refusal: the model is meant to ask the caller, then call again next turn.
+            return ToolResult(status=ToolStatus.FAILED, error="needs_caller_confirmation")
 
         key = (tool_name, _canonical(arguments))
         if detect_repeats and key in self._seen:

@@ -59,6 +59,8 @@ class ToolCallOrchestrator:
         max_local_tool_calls: int = DEFAULT_MAX_LOCAL_TOOL_CALLS,
         latency_store: ToolLatencyStore | None = None,
         max_tool_calls_per_turn: int = DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+        breakers: BreakerBoard | None = None,
+        last_good: LastGoodCache | None = None,
     ) -> None:
         self._llm_adapter = llm_adapter
         self._policy_resolver = policy_resolver
@@ -69,9 +71,10 @@ class ToolCallOrchestrator:
         self._max_local_tool_calls = max_local_tool_calls
         self._latency_store = latency_store
         self._max_tool_calls_per_turn = max_tool_calls_per_turn
-        # Process-wide, not per call: failures must accumulate across calls for a breaker to ever open.
-        self._breakers = BreakerBoard()
-        self._last_good = LastGoodCache()
+        # An orchestrator is built per call, so these only outlive a call if the caller injects shared
+        # instances (services/conversation/__main__.py does). The defaults are per-orchestrator.
+        self._breakers = breakers if breakers is not None else BreakerBoard()
+        self._last_good = last_good if last_good is not None else LastGoodCache()
 
     async def run_turn(
         self, agent_id: str, tenant_id: str, call_id: str, session_id: str, history: list[ChatMessage],
@@ -157,12 +160,23 @@ class ToolCallOrchestrator:
                 definition = local_entry[0] if local_entry is not None else (
                     policy.definition if policy is not None else None
                 )
+                if (
+                    local_entry is not None and isinstance(event.arguments, dict) and event.arguments
+                    and local_entry[0].parameters_schema.get("properties") == {}
+                    and local_entry[0].parameters_schema.get("additionalProperties") is not True
+                ):
+                    # A tool that declares no parameters takes none: whatever the model stuffed in (caller PII
+                    # included) is dropped here rather than accepted, passed on and logged.
+                    log.warning("tool call turn=%s tool=%s: dropped undeclared args %s",
+                                turn_id, event.tool_name, sorted(event.arguments))
+                    event = replace(event, arguments={})
                 refusal = guard.check(
                     event.tool_name, event.arguments,
                     definition.parameters_schema if definition is not None else None,
                     policy.max_calls_per_turn if policy is not None else None,
                     # A local workflow tool may legitimately repeat (a cyclic node); max_local_tool_calls bounds it.
                     detect_repeats=policy is not None or (local_entry is not None and local_entry[0].read_only),
+                    side_effecting=_is_side_effecting(event, policy, definition) if local_entry is None else False,
                 )
                 if refusal is not None:
                     log.warning("tool call refused turn=%s tool=%s error=%s", turn_id, event.tool_name, refusal.error)
@@ -175,11 +189,17 @@ class ToolCallOrchestrator:
                     try:
                         done, _ = await asyncio.wait({local_task}, timeout=SLOW_TOOL_FILLER_AFTER_S)
                         if not done:
-                            yield ToolCallStartedEvent(tool_name=event.tool_name)
+                            # Progress signal only: it must not count as a tool call made (see ToolCallStartedEvent).
+                            yield ToolCallStartedEvent(tool_name=event.tool_name, filler_only=True)
                         result = await local_task
                     except BaseException:
                         local_task.cancel()
                         raise
+                    if (
+                        local_entry[0].untrusted_output and result.status == ToolStatus.SUCCESS
+                        and result.payload.get("found")
+                    ):
+                        guard.tainted = True
                     if not (result.status == ToolStatus.FAILED and result.error == "cancelled"):
                         yield LocalToolCompletedEvent(tool_name=event.tool_name)
                         # Re-resolve: a local tool may have moved the workflow node.
@@ -207,13 +227,17 @@ class ToolCallOrchestrator:
                         raise
                 latency_ms = (time.monotonic() - call_t0) * 1000
                 read_only = definition.read_only if definition is not None else False
-                # Local tools have no policy row; their query text is the caller's words, so it is never logged.
-                log_redact = (policy.sensitive_arg_keys if policy is not None else frozenset({"query"}))
+                # Local tools have no policy row to say which values are sensitive, and their arguments are the
+                # caller's own words (a search query), so only the key names are logged.
+                logged_args = (
+                    _redact(event.arguments, policy.sensitive_arg_keys) if policy is not None
+                    else sorted(event.arguments) if isinstance(event.arguments, dict) else "<not an object>"
+                )
                 log.info(
                     "tool_call result turn=%s tool=%s tenant=%s agent=%s status=%s error=%s latency_ms=%d "
                     "trace_id=%s args=%r",
                     turn_id, event.tool_name, tenant_id, agent_id, result.status.value, result.error,
-                    latency_ms, trace_id, _redact(event.arguments, log_redact),
+                    latency_ms, trace_id, logged_args,
                 )
                 _fold_tool_result_into_history(
                     history, event, result, read_only=read_only, latency_ms=latency_ms, trace_id=trace_id,
@@ -350,6 +374,16 @@ def _log_background_tool_result(task: "asyncio.Task[ToolResult]") -> None:
     exc = task.exception()
     if exc is not None:
         log.warning("ToolCallOrchestrator: backgrounded tool call (post-cancel) failed: %r", exc)
+
+
+def _is_side_effecting(event: ToolCallEvent, policy: Any, definition: ToolDefinition | None) -> bool:
+    """Remote tools write unless known not to. execute_api is judged per API from custom_apis.side_effecting
+    (surfaced by the policy resolver); an API missing from that set is treated as a write."""
+    if policy is None or (definition is not None and definition.read_only):
+        return False
+    if event.tool_name == "execute_api" and isinstance(event.arguments, dict):
+        return str(event.arguments.get("api_name") or "").lower() not in policy.read_only_apis
+    return True
 
 
 async def _invoke_local_handler(

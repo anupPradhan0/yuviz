@@ -805,3 +805,63 @@ async def test_a_crm_projection_reaches_the_model_as_exactly_four_keys_with_the_
     assert set(folded["data"]) == {"outcome", "items", "spoken"}
     assert set(folded["data"]["items"][0]) == {"contact_id", "full_name", "company", "owner_name"}
     assert folded["data"]["items"][0]["full_name"] == name
+
+
+async def test_the_resolver_surfaces_which_offered_apis_are_read_only_across_their_whole_chain():
+    """side_effecting lives in custom_apis (default true). An API is read-only only if every API in its
+    chain is, so a read-only root that pulls a value from a write is still treated as a write."""
+    pool = await _pg_pool()
+    try:
+        tenant = await pool.fetchrow(
+            "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *", "RO Test", f"ro-{uuid_hex()}",
+        )
+        agent = await pool.fetchrow(
+            "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, 'sup', 'Support') RETURNING *", tenant["id"],
+        )
+
+        async def api(name: str, side_effecting: bool | None):
+            cols, vals = ("tenant_id, name, description, endpoint_url, method", "$1, $2, 'd', 'https://example.com/x', 'GET'")
+            args = [tenant["id"], name]
+            if side_effecting is not None:
+                cols += ", side_effecting"
+                vals += ", $3"
+                args.append(side_effecting)
+            row = await pool.fetchrow(f"INSERT INTO custom_apis ({cols}) VALUES ({vals}) RETURNING *", *args)
+            await pool.execute(
+                "INSERT INTO agent_custom_apis (agent_id, custom_api_id, enabled) VALUES ($1, $2, true)",
+                agent["id"], row["id"],
+            )
+            return row
+
+        await api("Status_Only", False)
+        await api("cancel_it", None)                      # column default: a write
+        writer = await api("hidden_writer", True)
+        chain_root = await api("lookup_chain", False)
+        await pool.execute(
+            "INSERT INTO custom_api_params (custom_api_id, name, location, json_type, source, upstream_api_id, "
+            "upstream_json_path) VALUES ($1, 'x', 'query', 'string', 'upstream', $2, '$.id')",
+            chain_root["id"], writer["id"],
+        )
+
+        resolver = ToolPolicyResolver(pool=pool, registry=ToolRegistry())
+        _defn, _sensitive, read_only = await resolver._specialize_execute_api(
+            ToolRegistry().resolve("execute_api"), str(agent["id"]), tenant["slug"],
+        )
+
+        assert read_only == frozenset({"status_only"})
+    finally:
+        await pool.execute("DELETE FROM agent_custom_apis WHERE agent_id = $1", agent["id"])
+        await pool.execute("DELETE FROM custom_api_params WHERE custom_api_id IN (SELECT id FROM custom_apis WHERE tenant_id = $1)", tenant["id"])
+        await pool.execute("DELETE FROM custom_apis WHERE tenant_id = $1", tenant["id"])
+        await pool.execute("DELETE FROM agents WHERE tenant_id = $1", tenant["id"])
+        await pool.execute("DELETE FROM tenants WHERE id = $1", tenant["id"])
+        await pool.close()
+
+
+async def test_a_row_without_the_side_effecting_column_is_treated_as_a_write():
+    conn = _FakeConn([[_atp_row("execute_api")], [_api_row("lookup_customer")]])
+    resolver = ToolPolicyResolver(pool=_FakePool(conn), registry=ToolRegistry())
+
+    [policy] = [p for p in await resolver.enabled_tools("agent1", "t1") if p.definition.name == "execute_api"]
+
+    assert policy.read_only_apis == frozenset()

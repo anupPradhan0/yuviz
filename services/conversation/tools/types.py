@@ -49,6 +49,9 @@ class ToolDefinition:
     read_only:         bool = False
     # Optional JSON schema for the payload a tool returns; a mismatch becomes an error, not LLM input.
     output_schema:     dict[str, Any] | None = None
+    # True = the result carries text written by third parties (retrieved documents). Once such a result is
+    # in context, side-effecting calls are held for the caller's confirmation for the rest of the turn.
+    untrusted_output:  bool = False
 
     def to_generic_schema(self) -> dict[str, Any]:
         """Vendor-neutral {name, description, parameters}; each LLM provider wraps it in its wire format."""

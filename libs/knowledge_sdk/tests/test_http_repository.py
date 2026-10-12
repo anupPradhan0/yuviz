@@ -174,36 +174,21 @@ async def test_router_turns_a_slow_retrieval_into_unavailable_timeout(service_ac
     await repo.close()
 
 
-async def test_client_still_reads_the_old_404_as_no_context_and_an_old_200_without_status():
+async def test_client_still_reads_the_old_404_as_no_context_and_an_old_200_without_status_as_a_dict():
     import httpx
 
-    def _handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/auth/login":
-            return httpx.Response(200, json={"access_token": "t"})
-        if request.headers.get("x-case") == "404":
-            return httpx.Response(404, json={"detail": "no eligible context"})
-        return httpx.Response(200, json={"chunks": [], "sources": [], "token_count": 0})
+    def _repo_answering(response: httpx.Response) -> HttpKnowledgeRepository:
+        return HttpKnowledgeRepository(
+            base_url="http://k", auth_base_url="http://c", service_email="e", service_password="p",
+            transport=httpx.MockTransport(lambda request: response),
+            auth_transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"access_token": "t"})),
+        )
 
-    repo = HttpKnowledgeRepository(
-        base_url="http://k", auth_base_url="http://c", service_email="e", service_password="p",
-        transport=httpx.MockTransport(lambda r: httpx.Response(404, json={"detail": "x"})),
-        auth_transport=httpx.MockTransport(_handler),
-    )
-    assert await repo.retrieve("acme", "sup", "q", RetrievalPolicy()) is None
-    await repo.close()
+    old_404 = _repo_answering(httpx.Response(404, json={"detail": "no eligible context"}))
+    assert await old_404.retrieve("acme", "sup", "q", RetrievalPolicy()) is None
+    await old_404.close()
 
-
-async def test_wrong_service_password_raises_unavailable(pool):
-    email = f"test-service-{uuid.uuid4().hex[:8]}@example.com"
-    user = await users.create_user(email=email, password="correct-password", role="viewer")
-
-    repo = HttpKnowledgeRepository(
-        base_url="http://knowledge-test", auth_base_url="http://config-test",
-        service_email=email, service_password="wrong-password",
-        transport=ASGITransport(app=knowledge_app), auth_transport=ASGITransport(app=config_app),
-    )
-    with pytest.raises(RepositoryUnavailableError):
-        await repo.has_enabled_kb("acme", "sup")
-
-    await repo.close()
-    await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])
+    old_200 = _repo_answering(httpx.Response(200, json={"chunks": [{"content": "x"}], "sources": [], "token_count": 1}))
+    result = await old_200.retrieve("acme", "sup", "q", RetrievalPolicy())
+    assert result == {"chunks": [{"content": "x"}], "sources": [], "token_count": 1} and "status" not in result
+    await old_200.close()

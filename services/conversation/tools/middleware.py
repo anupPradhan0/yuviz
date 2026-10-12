@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any, Awaitable, Callable
 
@@ -105,7 +106,7 @@ class BreakerBoard:
         return True
 
     def record(self, key: Any, result: ToolResult) -> None:
-        if result.status in (ToolStatus.FAILED, ToolStatus.TIMEOUT):
+        if is_infrastructure_failure(result):
             count = self._consecutive_failures.get(key, 0) + 1
             self._consecutive_failures[key] = count
             if count >= self._fails_before_open:
@@ -113,6 +114,27 @@ class BreakerBoard:
                 log.warning("tool_call circuit_breaker_opened key=%s consecutive_failures=%d", key, count)
         elif result.status is not ToolStatus.CANCELLED:
             self._consecutive_failures[key] = 0
+
+
+# Errors a caller can cause (a wrong order number is a customer-API 404): they must never count, or a few
+# callers could shut a tenant's API off for everyone.
+_INFRA_FAILED_ERRORS = frozenset({
+    "toolexec_unavailable", "provider_unavailable", "knowledge_unavailable", "local_tool_failed",
+})
+_CALLER_DRIVEN_UNAVAILABLE = frozenset({"send_cap_reached", "circuit_breaker_open"})
+_HTTP_5XX = re.compile(r"http_status_5\d\d")
+
+
+def is_infrastructure_failure(result: ToolResult) -> bool:
+    """Timeouts, 5xx/transport errors and unavailability count against a breaker; 4xx, validation and
+    business-rule failures mean the service answered."""
+    if result.status is ToolStatus.TIMEOUT:
+        return True
+    if result.status is ToolStatus.UNAVAILABLE:
+        return result.error not in _CALLER_DRIVEN_UNAVAILABLE
+    if result.status is ToolStatus.FAILED:
+        return bool(result.error) and (result.error in _INFRA_FAILED_ERRORS or bool(_HTTP_5XX.fullmatch(result.error)))
+    return False
 
 
 def breaker_key(request: ToolExecutionRequest) -> tuple[str, str, str]:
