@@ -30,6 +30,7 @@ from rag_fakes import FakeEmbedder, embed_text, make_manager, vec_literal  # noq
 from libs.tenancy import set_caller_tenant  # noqa: E402
 from services.config import provider_configs  # noqa: E402
 from services.knowledge import agent_kb, db, retrieval, retrieval_log  # noqa: E402
+from services.knowledge import retrieval_plan as plans  # noqa: E402
 from services.knowledge import knowledge_bases as kb_service  # noqa: E402
 from services.knowledge.resilience import RetrievalConfig, RetrievalUnavailable  # noqa: E402
 from services.knowledge.vector_repository import PgVectorRepository  # noqa: E402
@@ -173,7 +174,7 @@ async def main(n: int, n_chunks: int) -> None:
         await scenario("B. warm plan + embed MISS (60 ms injected)", n, miss_call, results)
 
         def cold(i):
-            retrieval.clear_caches()
+            plans.clear_cache()  # the plan only: the embedding cache stays warm, so this row is "cold plan, embed hit"
             return hit_call(i, hit_queries[i % 50])
         await scenario("D. cold plan every call (embed hit)", min(n, 100), cold, results)
 

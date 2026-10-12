@@ -11,8 +11,20 @@ Always returns a dict. status: ok | no_match | partial | unavailable.
   partial   a branch failed or missed the deadline; chunks are what the survivors found (possibly none, which is
             NOT "no match": the missing branch might have had one)
   unavailable  raised as RetrievalUnavailable when nothing could answer; the router turns it into this status.
-`conn` is only used to resolve a cold plan; pass None (the hot path opens its own connections) and release any
-connection you hold before calling, or each request pins three pool connections instead of two."""
+Integration requirement: the router should call retrieve(None, ...) and release its own connection first. With
+conn=None the two search branches run in parallel on their own pooled connections (2 per retrieval). If a
+caller does still pass a connection it keeps it: retrieve() then runs the branches one after the other on that
+connection (inside a savepoint) and takes nothing more from the pool, so a router that holds a connection around
+the call cannot starve the pool. Either way an in-process limiter caps concurrent retrievals (overall and per
+tenant) and answers past the cap with RetrievalUnavailable(degraded=['overloaded']); the router must map
+RetrievalUnavailable to status 'unavailable'.
+
+Score scales: minimum_score applies to dense similarity (cosine). Lexical hits are floored separately
+(KNOWLEDGE_LEXICAL_MIN_SCORE) and carry ts_rank_cd scores, a different scale. A result whose best hit has no dense
+support is low_confidence unless its lexical score reaches KNOWLEDGE_LEXICAL_CONFIDENT_SCORE.
+
+Token budget: prompt-mode docs may use at most half of max_tokens (any beyond that are trimmed and reported), and
+the best-ranked match is always returned, truncated to fit if it must be."""
 
 from __future__ import annotations
 
@@ -22,6 +34,7 @@ import logging
 import time
 import uuid
 from array import array
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -32,7 +45,9 @@ from libs.tenancy import TenantScopeConflict, tenant_conn
 from . import cache, db, retrieval_log
 from . import retrieval_plan as plans
 from .embedding_manager import EmbeddingProviderManager
-from .resilience import RetrievalConfig, RetrievalUnavailable, breakers
+from .resilience import (
+    BoundedPool, PoolOverloaded, RetrievalConfig, RetrievalUnavailable, admission, breakers,
+)
 from .vector_repository import IVectorRepository, VectorMatch
 
 log = logging.getLogger(__name__)
@@ -142,32 +157,53 @@ class _Branch:
     error: str | None = None
     notes: list[str] | None = None
     embed_failed: bool = False
+    overloaded: bool = False
 
 
-def _embedding_to_list(packed: array) -> list[float]:
-    return packed.tolist()
+_last_warned: dict[str, float] = {}
+
+
+def _warn_rate_limited(key: str, message: str, *args: Any, every_s: float = 30.0) -> None:
+    now = time.monotonic()
+    if now - _last_warned.get(key, -every_s) >= every_s:
+        _last_warned[key] = now
+        log.warning(message, *args)
+
+
+@asynccontextmanager
+async def _branch_conn(held: asyncpg.Connection | None, bpool: BoundedPool, tenant_id: str):
+    """The caller's connection (inside a savepoint, so a cancelled statement cannot poison the caller's
+    transaction) or a fresh one scoped to the plan's tenant."""
+    if held is not None:
+        async with held.transaction():
+            yield held
+    else:
+        async with tenant_conn(bpool, explicit_tenant=tenant_id, reason="retrieval-search") as conn:
+            yield conn
 
 
 async def _embed(
     plan: plans.RetrievalPlan, embedding_manager: EmbeddingProviderManager, config_id: str, query: str,
-    cfg: RetrievalConfig,
+    cfg: RetrievalConfig, time_left: float,
 ) -> list[float]:
     key = cache.embedding_key(plan.tenant_id, config_id, query)
     hit = _embeddings.get(key)
     if hit is not None:
-        return _embedding_to_list(hit)
+        return hit.tolist()
     breaker = breakers.get(f"embed:{config_id}", cfg)
     if not breaker.allow():
         raise RuntimeError("embedder circuit open")
     try:
-        async with asyncio.timeout(cfg.embed_timeout_s):
+        async with asyncio.timeout(max(min(cfg.embed_timeout_s, time_left), 0.001)):
             provider = await embedding_manager.get(plan.embedding_configs[config_id])
             [vector] = await provider.embed([query])
     except asyncio.CancelledError:
         breaker.release_probe()  # the overall deadline cancelled us; that says nothing about the embedder
         raise
-    except Exception:
+    except Exception as exc:
         breaker.record_failure()
+        _warn_rate_limited(f"embed:{config_id}", "embedding failed embedding_config=%s error=%s",
+                           config_id, type(exc).__name__)
         raise
     breaker.record_success()
     _embeddings.set(key, array("f", vector))
@@ -176,37 +212,44 @@ async def _embed(
 
 async def _dense_branch(
     plan: plans.RetrievalPlan, vector_repo: IVectorRepository, embedding_manager: EmbeddingProviderManager,
-    pool: asyncpg.Pool, query: str, limit: int, minimum_score: float, cfg: RetrievalConfig, timings: dict[str, float],
+    held: asyncpg.Connection | None, bpool: BoundedPool, query: str, limit: int, minimum_score: float,
+    cfg: RetrievalConfig, timings: dict[str, float], remaining,
 ) -> _Branch:
     branch = _Branch("dense")
     t0 = time.monotonic()
     try:
         config_ids = list(plan.groups)
         vectors = await asyncio.gather(
-            *[_embed(plan, embedding_manager, cid, query, cfg) for cid in config_ids], return_exceptions=True,
+            *[_embed(plan, embedding_manager, cid, query, cfg, remaining()) for cid in config_ids],
+            return_exceptions=True,
         )
         timings["embed"] = (time.monotonic() - t0) * 1000
-        usable = [(cid, v) for cid, v in zip(config_ids, vectors) if not isinstance(v, BaseException)]
         for v in vectors:
             if isinstance(v, asyncio.CancelledError):
                 raise v
+            if isinstance(v, TenantScopeConflict):
+                raise v
+        usable = [(cid, v) for cid, v in zip(config_ids, vectors) if not isinstance(v, BaseException)]
         if not usable:
             branch.embed_failed = True
-            branch.error = f"embedding failed: {vectors[0]!r}"
+            branch.error = f"embedding failed: {type(vectors[0]).__name__}"
             return branch
         if len(usable) < len(config_ids):
             branch.notes = ["embed_partial"]
         t1 = time.monotonic()
         matches: list[VectorMatch] = []
-        async with asyncio.timeout(cfg.dense_timeout_s):
-            async with tenant_conn(pool, explicit_tenant=plan.tenant_id, reason="retrieval-search") as conn:
+        async with asyncio.timeout(max(min(cfg.dense_timeout_s, remaining()), 0.001)):
+            async with _branch_conn(held, bpool, plan.tenant_id) as conn:
                 for cid, vector in usable:
                     matches.extend(await vector_repo.search(conn, plan.groups[cid], vector, limit, minimum_score))
         matches.sort(key=lambda m: m.score, reverse=True)
         branch.matches = matches[:limit]
         timings["dense"] = (time.monotonic() - t1) * 1000
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, TenantScopeConflict):
         raise
+    except PoolOverloaded:
+        branch.overloaded = True
+        branch.error = "pool overloaded"
     except Exception as exc:  # noqa: BLE001 - a dead branch is dropped, never raised
         branch.error = branch.error or f"{type(exc).__name__}: {exc}"
         log.warning("dense branch failed: %s", branch.error)
@@ -214,18 +257,23 @@ async def _dense_branch(
 
 
 async def _lexical_branch(
-    plan: plans.RetrievalPlan, vector_repo: IVectorRepository, pool: asyncpg.Pool, query: str, limit: int,
-    cfg: RetrievalConfig, timings: dict[str, float],
+    plan: plans.RetrievalPlan, vector_repo: IVectorRepository, held: asyncpg.Connection | None, bpool: BoundedPool,
+    query: str, limit: int, cfg: RetrievalConfig, timings: dict[str, float], remaining,
 ) -> _Branch:
     branch = _Branch("lexical")
     t0 = time.monotonic()
     try:
-        async with asyncio.timeout(cfg.lexical_timeout_s):
-            async with tenant_conn(pool, explicit_tenant=plan.tenant_id, reason="retrieval-search") as conn:
-                branch.matches = await vector_repo.lexical_search(conn, plan.kb_ids, query, limit, cfg.lexical_min_score)
+        # Every stage, fallbacks included, gets min(its own timeout, what is left of the deadline).
+        async with asyncio.timeout(max(min(cfg.lexical_timeout_s, remaining()), 0.001)):
+            async with _branch_conn(held, bpool, plan.tenant_id) as conn:
+                branch.matches = await vector_repo.lexical_search(
+                    conn, plan.kb_ids, query, limit, cfg.lexical_min_score, approx_chunks=plan.chunk_count)
         timings["lexical"] = (time.monotonic() - t0) * 1000
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, TenantScopeConflict):
         raise
+    except PoolOverloaded:
+        branch.overloaded = True
+        branch.error = "pool overloaded"
     except Exception as exc:  # noqa: BLE001
         branch.error = f"{type(exc).__name__}: {exc}"
         log.warning("lexical branch failed: %s", branch.error)
@@ -268,6 +316,41 @@ def _result(
     }
 
 
+def _truncate(m: VectorMatch, tokens: int) -> VectorMatch:
+    words = m.content.split()
+    return dataclasses.replace(m, content=" ".join(words[:tokens]), token_count=min(tokens, len(words)))
+
+
+def _fit_prompt_docs(prompt: list[VectorMatch], max_tokens: int) -> tuple[list[VectorMatch], int]:
+    """Prompt-mode docs may use at most half the budget so a ranked answer always has room. Returns the docs
+    kept (in order; the first one is truncated rather than dropped) and how many were trimmed away."""
+    cap = max(max_tokens // 2, 1)
+    kept: list[VectorMatch] = []
+    used = 0
+    for doc in prompt:
+        tokens = doc.token_count or _approx_token_count(doc.content)
+        if used + tokens <= cap:
+            kept.append(doc)
+            used += tokens
+        elif not kept:
+            kept.append(_truncate(doc, cap))
+            used = cap
+            break
+        else:
+            break
+    return kept, len(prompt) - len(kept)
+
+
+def _is_low_confidence(fused: list[VectorMatch], cfg: RetrievalConfig) -> bool:
+    if not fused:
+        return False
+    top = fused[0]
+    if "dense" not in top.found_by:  # only lexical evidence: a different, weaker scale
+        return top.score < cfg.lexical_confident_score
+    second = fused[1] if len(fused) > 1 and "dense" in fused[1].found_by else None
+    return second is not None and top.score < cfg.low_confidence_top and (top.score - second.score) < cfg.low_confidence_gap
+
+
 async def retrieve(
     conn: asyncpg.Connection | None,
     vector_repo: IVectorRepository,
@@ -289,14 +372,32 @@ async def retrieve(
 ) -> dict[str, Any]:
     cfg = config or _config
     started = time.monotonic()
-    deadline_at = started + cfg.deadline_s
     trace_id = trace_id or uuid.uuid4().hex
+    # Cap before anything touches the text (NFKC, regexes, hashing, embedding): a megabyte query must cost
+    # microseconds, not an event-loop stall every other tenant would feel.
+    query = query[: cfg.max_query_chars]
+    wait = min(cfg.queue_wait_s, max(cfg.deadline_s - (time.monotonic() - started), 0.0))
+    if not await admission.acquire(tenant_slug, cfg, wait):
+        raise RetrievalUnavailable("retrieval overloaded", degraded=["overloaded"], trace_id=trace_id)
+    try:
+        return await _retrieve(
+            conn, vector_repo, embedding_manager, cfg, started, trace_id, tenant_slug, agent_slug, query,
+            {"top_k": top_k, "max_tokens": max_tokens, "minimum_score": minimum_score, "rerank": rerank,
+             "hybrid_search": hybrid_search, "include_citations": include_citations},
+            pool, reranker,
+        )
+    finally:
+        admission.release(tenant_slug)
+
+
+async def _retrieve(
+    held: asyncpg.Connection | None, vector_repo: IVectorRepository, embedding_manager: EmbeddingProviderManager,
+    cfg: RetrievalConfig, started: float, trace_id: str, tenant_slug: str, agent_slug: str, query: str,
+    overrides: dict[str, Any], pool: asyncpg.Pool | None, reranker: IReranker | None,
+) -> dict[str, Any]:
+    deadline_at = started + cfg.deadline_s
     timings: dict[str, float] = {}
     degraded: list[str] = []
-    overrides = {
-        "top_k": top_k, "max_tokens": max_tokens, "minimum_score": minimum_score,
-        "rerank": rerank, "hybrid_search": hybrid_search, "include_citations": include_citations,
-    }
 
     def remaining() -> float:
         return deadline_at - time.monotonic()
@@ -305,13 +406,15 @@ async def retrieve(
         timings["total"] = (time.monotonic() - started) * 1000
         return {k: round(v, 2) for k, v in timings.items()}
 
-    # 1. plan: free when cached; four queries on a cold miss, still inside the deadline.
-    pool = pool or await db.get_pool()
+    # 1. plan: free when cached; a few queries on a cold miss, still inside the deadline.
+    bpool = BoundedPool(pool or await db.get_pool(), cfg.acquire_timeout_s)
     try:
         async with asyncio.timeout(max(remaining(), 0.001)):
-            plan, was_cached = await plans.resolve_plan(tenant_slug, agent_slug, conn=conn, pool=pool)
+            plan, was_cached = await plans.resolve_plan(tenant_slug, agent_slug, conn=held, pool=bpool)
     except TenantScopeConflict:
         raise
+    except PoolOverloaded as exc:
+        raise RetrievalUnavailable("retrieval overloaded", degraded=["overloaded"], trace_id=trace_id) from exc
     except Exception as exc:  # noqa: BLE001
         raise RetrievalUnavailable(
             f"retrieval plan unavailable: {type(exc).__name__}", degraded=["plan_unavailable"], trace_id=trace_id,
@@ -336,22 +439,42 @@ async def retrieve(
     run_dense = bool(plan.groups)
     run_lexical = bool(plan.kb_ids) and bool(policy["hybrid_search"])
 
-    # 2. dense and lexical in parallel, each on its own pooled connection.
-    tasks: dict[str, asyncio.Task] = {}
-    if run_dense:
-        tasks["dense"] = asyncio.create_task(_dense_branch(
-            plan, vector_repo, embedding_manager, pool, query, limit, policy["minimum_score"], cfg, timings))
-    if run_lexical:
-        tasks["lexical"] = asyncio.create_task(_lexical_branch(plan, vector_repo, pool, query, limit, cfg, timings))
+    # 2. dense and lexical. Own connections: in parallel. The caller's connection: one after the other on it.
     results: dict[str, _Branch] = {}
+
+    def dense_coro():
+        return _dense_branch(plan, vector_repo, embedding_manager, held, bpool, query, limit,
+                             policy["minimum_score"], cfg, timings, remaining)
+
+    def lexical_coro():
+        return _lexical_branch(plan, vector_repo, held, bpool, query, limit, cfg, timings, remaining)
+
+    async def sequential() -> None:
+        if run_dense:
+            results["dense"] = await dense_coro()
+        if run_lexical:
+            results["lexical"] = await lexical_coro()
+
+    tasks: dict[str, asyncio.Task] = {}
+    if held is not None:
+        tasks["sequential"] = asyncio.create_task(sequential())
+    else:
+        if run_dense:
+            tasks["dense"] = asyncio.create_task(dense_coro())
+        if run_lexical:
+            tasks["lexical"] = asyncio.create_task(lexical_coro())
     if tasks:
         done, pending = await asyncio.wait(tasks.values(), timeout=max(remaining(), 0.0))
-        for name, task in tasks.items():
-            if task in done:
-                results[name] = task.result()
-        for task in pending:
-            task.cancel()
-            task.add_done_callback(_swallow)
+        try:
+            for name, task in tasks.items():
+                if task in done:
+                    outcome = task.result()  # re-raises TenantScopeConflict: that is an error, not a lost branch
+                    if name != "sequential":
+                        results[name] = outcome
+        finally:
+            for task in pending:
+                task.cancel()
+                task.add_done_callback(_swallow)
         if pending:
             degraded.append("deadline")
 
@@ -360,7 +483,8 @@ async def retrieve(
     dense_dead = (run_dense and (dense_res is None or dense_res.matches is None)) or (
         not run_dense and "embedding_config_missing" in plan.degraded)
     if not run_lexical and plan.kb_ids and dense_dead and remaining() > 0.02:
-        results["lexical"] = await _lexical_branch(plan, vector_repo, pool, query, limit, cfg, timings)
+        results["lexical"] = await _lexical_branch(
+            plan, vector_repo, held, bpool, query, limit, cfg, timings, remaining)
         run_lexical = True
 
     ranked_lists: list[list[VectorMatch]] = []
@@ -373,6 +497,8 @@ async def retrieve(
             degraded.extend(res.notes or [])
         else:
             lost.append(name)
+            if res is not None and res.overloaded:
+                degraded.append("overloaded")
             if name == "dense":
                 degraded.append("embedding_unavailable" if res is not None and res.embed_failed else "dense_failed")
             else:
@@ -383,11 +509,14 @@ async def retrieve(
             degraded.append("lexical_only")
         elif survivors == ["dense"]:
             degraded.append("dense_only")
+    degraded[:] = list(dict.fromkeys(degraded))
 
-    prompt_matches = list(plan.prompt_matches)
+    prompt_matches, trimmed = _fit_prompt_docs(list(plan.prompt_matches), policy["max_tokens"])
+    if trimmed:
+        degraded.append("prompt_docs_trimmed")
     if intended and not survivors and not prompt_matches:
         timings_out = finish_timings()
-        _log(plan, agent_slug, trace_id, query, "unavailable", degraded, [], None, 0, timings_out)
+        _log(plan, trace_id, query, "unavailable", degraded, [], None, 0, timings_out)
         raise RetrievalUnavailable("every retrieval branch failed", degraded=degraded, trace_id=trace_id)
 
     # 3. fuse, dedupe by parent section, rerank.
@@ -402,12 +531,13 @@ async def retrieve(
         else:
             fused = await _rerank(rr, query, fused, cfg, remaining(), degraded, timings)
 
-    # 4. token budget. Prompt-mode docs bypass top_k, minimum_score and the budget, and come first.
+    # 4. token budget. Prompt-mode docs come first (capped at half the budget); the best-ranked match is always
+    # returned, truncated if it has to be.
     selected: list[VectorMatch] = list(prompt_matches)
     budget = policy["max_tokens"] - sum(m.token_count or _approx_token_count(m.content) for m in prompt_matches)
-    for match in fused[: policy["top_k"]]:
+    for rank, match in enumerate(fused[: policy["top_k"]]):
         tokens = match.token_count or _approx_token_count(match.content)
-        if selected and budget - tokens < 0:
+        if (selected or rank == 0) and budget - tokens < 0:
             # The whole parent section does not fit; the matched child alone might.
             child_tokens = match.child_token_count or (
                 _approx_token_count(match.child_content) if match.child_content else None)
@@ -415,32 +545,27 @@ async def retrieve(
                     and budget - child_tokens >= 0:
                 match = dataclasses.replace(match, content=match.child_content, token_count=child_tokens)
                 tokens = child_tokens
+            elif rank == 0:
+                match = _truncate(match, max(budget, 1))
+                tokens = match.token_count or 1
             else:
                 break
         selected.append(match)
         budget -= tokens
 
-    top_two = [m.score for m in fused[:2]]
-    low_confidence = bool(
-        len(top_two) == 2 and top_two[0] < cfg.low_confidence_top
-        and (top_two[0] - top_two[1]) < cfg.low_confidence_gap
-    )
-
-    if not selected:
-        status = "partial" if lost else "no_match"
-    else:
-        status = "partial" if lost else "ok"
+    low_confidence = _is_low_confidence(fused, cfg)
+    status = "partial" if lost else ("ok" if selected else "no_match")
     timings_out = finish_timings()
     chunk_ids = [m.chunk_id for m in selected]
     top_score = fused[0].score if fused else None
-    _log(plan, agent_slug, trace_id, query, status, degraded, chunk_ids, top_score, len(fused), timings_out)
+    _log(plan, trace_id, query, status, degraded, chunk_ids, top_score, len(fused), timings_out)
 
     return _result(
         status, selected=selected, policy=policy, degraded=degraded, trace_id=trace_id, low_confidence=low_confidence,
         metadata={
             "top_k": policy["top_k"], "candidates": len(fused), "groups": len(plan.groups),
             "rerank": policy["rerank"], "hybrid_search": policy["hybrid_search"],
-            "always_included": len(prompt_matches), "timings_ms": timings_out,
+            "always_included": len(prompt_matches), "prompt_docs_trimmed": trimmed, "timings_ms": timings_out,
             "dense_candidates": len(results["dense"].matches or []) if "dense" in results else 0,
             "lexical_candidates": len(results["lexical"].matches or []) if "lexical" in results else 0,
         },
@@ -474,7 +599,7 @@ async def _rerank(
 
 
 def _log(
-    plan: plans.RetrievalPlan, agent_slug: str, trace_id: str, query: str, status: str, degraded: list[str],
+    plan: plans.RetrievalPlan, trace_id: str, query: str, status: str, degraded: list[str],
     chunk_ids: list[str], top_score: float | None, candidates: int, timings_ms: dict[str, float],
 ) -> None:
     retrieval_log.record(retrieval_log.RetrievalLogRow(

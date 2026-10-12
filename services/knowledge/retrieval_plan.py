@@ -12,18 +12,23 @@ prompt-mode document. prewarm() resolves a plan ahead of the first turn."""
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
+import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import asyncpg
 
-from libs.tenancy import TenantScopeConflict, current_scope, tenant_conn
+from libs.tenancy import TenantScopeConflict, current_tenant, tenant_conn
 
 from . import cache, db
 from .embedding_manager import EmbeddingProviderConfig, EmbeddingProviderManager
 from .vector_repository import SEARCHABLE_STATUSES, VectorMatch
+
+log = logging.getLogger(__name__)
 
 SYSTEM_DEFAULT_POLICY: dict[str, Any] = {
     "top_k": 5,
@@ -54,6 +59,8 @@ def merge_policy(agent_row: Any, overrides: dict[str, Any]) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class RetrievalPlan:
+    tenant_slug: str  # the slugs this plan was resolved for: every cache hit must match them exactly
+    agent_slug: str
     tenant_id: str
     agent_id: str
     agent_policy: dict[str, Any]  # system default + agent row; call overrides are applied per request
@@ -62,38 +69,96 @@ class RetrievalPlan:
     embedding_configs: dict[str, EmbeddingProviderConfig]
     prompt_matches: list[VectorMatch]
     kb_versions: dict[str, int] = field(default_factory=dict)
+    chunk_count: int = 0  # searchable child chunks across kb_ids; lets lexical search skip DF probing on small KBs
     # Static degradation discovered while resolving (e.g. a KB whose embedding config was deleted).
     degraded: tuple[str, ...] = ()
 
 
-_plans = cache.TTLCache(
-    ttl_s=float(os.environ.get("KNOWLEDGE_PLAN_TTL_S", "30")),
-    max_entries=int(os.environ.get("KNOWLEDGE_PLAN_CACHE_MAX", "2048")),
-)
+_PLAN_TTL_S = float(os.environ.get("KNOWLEDGE_PLAN_TTL_S", "30"))
+_plans = cache.TTLCache(ttl_s=_PLAN_TTL_S, max_entries=int(os.environ.get("KNOWLEDGE_PLAN_CACHE_MAX", "2048")))
+_loaded_at: dict[str, float] = {}  # key -> monotonic time of the load, for stale-while-revalidate
+_refreshing: set[str] = set()
+_MAX_BACKGROUND_REFRESHES = 8
+# Bumped by every invalidation. A load that started before a bump must not be stored: it may carry the data
+# the invalidation was meant to evict.
+_generation = 0
 
 
 def invalidate_agent(tenant_slug: str, agent_slug: str) -> None:
+    global _generation
+    _generation += 1
     _plans.delete(cache.plan_key(tenant_slug, agent_slug))
 
 
 def invalidate_tenant(tenant_slug: str) -> None:
+    global _generation
+    _generation += 1
     _plans.delete_prefix(cache.plan_tenant_prefix(tenant_slug))
 
 
 def clear_cache() -> None:
+    global _generation
+    _generation += 1
     _plans.clear()
+    _loaded_at.clear()
 
 
-def cached_plan(tenant_slug: str, agent_slug: str) -> RetrievalPlan | None:
-    plan = _plans.get(cache.plan_key(tenant_slug, agent_slug))
+def check_scope(plan: "RetrievalPlan") -> None:
+    """The ambient scope (caller's tenant, or the router-set target for platform-scoped actors such as the
+    Conversation service account) must be the plan's tenant. Applied on cold fills and hits alike."""
+    effective = current_tenant()
+    if effective is not None and str(effective) not in (plan.tenant_id, plan.tenant_slug):
+        raise TenantScopeConflict(f"plan belongs to tenant {plan.tenant_id!r}, scope is {effective!r}")
+
+
+def cached_plan(tenant_slug: str, agent_slug: str) -> "RetrievalPlan | None":
+    key = cache.plan_key(tenant_slug, agent_slug)
+    plan = _plans.get(key)
     if plan is None:
         return None
-    # The router has already authorised the tenant; this is the second lock. A hit for another tenant's
-    # plan is never served, whatever the key said.
-    caller = current_scope().caller
-    if caller is not None and str(caller) != plan.tenant_id:
-        raise TenantScopeConflict(f"cached plan belongs to tenant {plan.tenant_id!r}, caller is {caller!r}")
+    if plan.tenant_slug != tenant_slug or plan.agent_slug != agent_slug:
+        _plans.delete(key)  # belt and braces behind the injective key: never serve a plan for other slugs
+        return None
+    check_scope(plan)
+    if time.monotonic() - _loaded_at.get(key, 0.0) > _PLAN_TTL_S / 2:
+        _refresh_in_background(key, plan)
     return plan
+
+
+def _refresh_in_background(key: str, plan: "RetrievalPlan") -> None:
+    """Stale-while-revalidate: past TTL/2 the cached plan is still served while one bounded background task
+    reloads it, so a live agent does not pay a cold plan whenever the hard TTL lapses. Failure keeps the old
+    plan until the hard TTL evicts it."""
+    if key in _refreshing or len(_refreshing) >= _MAX_BACKGROUND_REFRESHES:
+        return
+    _refreshing.add(key)
+    generation = _generation
+
+    async def run() -> None:
+        try:
+            pool = await db.get_pool()
+            async with tenant_conn(pool, explicit_tenant=plan.tenant_id, reason="retrieval-search") as conn:
+                fresh = await load_plan(conn, plan.tenant_slug, plan.agent_slug)
+            if fresh is not None and generation == _generation:
+                _store(key, fresh)
+        except Exception:  # noqa: BLE001
+            log.warning("retrieval plan refresh failed agent=%s", plan.agent_id, exc_info=True)
+        finally:
+            _refreshing.discard(key)
+
+    try:
+        # Empty context: the refresh must not run under whichever request happened to trigger it.
+        asyncio.get_running_loop().create_task(run(), context=contextvars.Context())
+    except RuntimeError:
+        _refreshing.discard(key)
+
+
+def _store(key: str, plan: "RetrievalPlan") -> None:
+    _plans.set(key, plan)
+    _loaded_at[key] = time.monotonic()
+    if len(_loaded_at) > 4 * _plans._max:  # keep the side table bounded
+        for stale in [k for k in _loaded_at if k not in _plans._data]:
+            del _loaded_at[stale]
 
 
 async def _load_prompt_matches(conn: asyncpg.Connection, kb_ids: list[str]) -> list[VectorMatch]:
@@ -136,7 +201,7 @@ async def _load_prompt_matches(conn: asyncpg.Connection, kb_ids: list[str]) -> l
 async def load_plan(conn: asyncpg.Connection, tenant_slug: str, agent_slug: str) -> RetrievalPlan | None:
     """Resolve from Postgres on `conn` (tenant-scoped, so RLS applies). None = no such agent in this tenant."""
     agent = await conn.fetchrow(
-        "SELECT a.id, a.tenant_id, p.top_k, p.max_tokens, p.minimum_score, p.rerank, p.hybrid_search, "
+        "SELECT a.id, a.tenant_id, t.slug AS tenant_slug, a.slug AS agent_slug, p.top_k, p.max_tokens, p.minimum_score, p.rerank, p.hybrid_search, "
         "       p.include_citations "
         "FROM agents a JOIN tenants t ON t.id = a.tenant_id "
         "LEFT JOIN agent_retrieval_policies p ON p.agent_id = a.id "
@@ -145,6 +210,8 @@ async def load_plan(conn: asyncpg.Connection, tenant_slug: str, agent_slug: str)
     )
     if agent is None:
         return None
+    if agent["tenant_slug"] != tenant_slug or agent["agent_slug"] != agent_slug:
+        raise TenantScopeConflict("resolved agent does not belong to the requested tenant/agent slugs")
     kb_rows = await conn.fetch(
         "SELECT kb.id, kb.embedding_config_id, kb.config_version "
         "FROM agent_knowledge_bases akb "
@@ -177,7 +244,11 @@ async def load_plan(conn: asyncpg.Connection, tenant_slug: str, agent_slug: str)
                 degraded.append("embedding_config_missing")
             continue
         groups.setdefault(cfg_id, []).append(str(r["id"]))
+    chunk_count = await conn.fetchval(
+        "SELECT count(*) FROM kb_chunks WHERE kb_id = ANY($1::uuid[]) AND NOT is_parent", kb_ids,
+    ) if kb_ids else 0
     return RetrievalPlan(
+        tenant_slug=tenant_slug, agent_slug=agent_slug, chunk_count=chunk_count,
         tenant_id=str(agent["tenant_id"]), agent_id=str(agent["id"]),
         agent_policy=merge_policy(agent, {}),
         kb_ids=kb_ids, groups=groups, embedding_configs=configs,
@@ -195,13 +266,16 @@ async def resolve_plan(
     hit = cached_plan(tenant_slug, agent_slug)
     if hit is not None:
         return hit, True
+    generation = _generation
     if conn is not None:
         plan = await load_plan(conn, tenant_slug, agent_slug)
     else:
         async with tenant_conn(pool or await db.get_pool()) as own_conn:
             plan = await load_plan(own_conn, tenant_slug, agent_slug)
     if plan is not None:
-        _plans.set(cache.plan_key(tenant_slug, agent_slug), plan)
+        check_scope(plan)  # cold path too: a plan for another tenant is neither cached nor returned
+        if generation == _generation:
+            _store(cache.plan_key(tenant_slug, agent_slug), plan)
     return plan, False
 
 

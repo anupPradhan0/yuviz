@@ -10,6 +10,7 @@ import os
 import pathlib
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 import asyncpg
 import pytest
@@ -80,7 +81,8 @@ async def test_retrieve_end_to_end_with_fake_embeddings(world):
     assert result["sources"][0] == "Refund Policy"
     assert result["retrieval_metadata"]["top_k"] == 5
     assert result["degraded"] == ["plan_cache_miss"]
-    assert result["trace_id"] and result["low_confidence"] is False
+    assert result["trace_id"]
+    assert result["low_confidence"] is True  # lexical-only evidence this weak is flagged (see test_retrieval_hardening)
 
 
 async def test_prompt_mode_document_coexists_with_search_results(pool, world):
@@ -204,7 +206,8 @@ async def test_parent_rows_are_never_hits_but_their_text_is_returned(pool, world
     repo = PgVectorRepository()
     async with tenant_conn(pool) as conn:
         dense = await repo.search(conn, [str(world["kb"]["id"])], embed_text(parent_text), 10, -1.0)
-        lexical = await repo.lexical_search(conn, [str(world["kb"]["id"])], "claims receipt void", 10, 0.0)
+        lexical = await repo.lexical_search(conn, [str(world["kb"]["id"])], "claims receipt void", 10, 0.0,
+                                            approx_chunks=100)
     assert [m.content for m in dense if m.document_title == "Warranty"] == [parent_text]
     # The parent text matches "claims receipt void", but only children are hits: the parent is context, not a result.
     assert [m for m in lexical if m.document_title == "Warranty"] == []
@@ -226,26 +229,58 @@ async def _selective_world(pool, tenant, agent, big_n: int):
     return big, small
 
 
+@asynccontextmanager
+async def _hnsw_forced(pool):
+    """A rolled-back transaction in which the other kb_chunks indexes, bitmap/seq scans and sorts are unavailable, so the planner has
+    only the HNSW index to order by (it otherwise picks the btree for a selective filter: the very case this
+    guards, which production hits on large multi-KB tables)."""
+    async with pool.acquire() as conn:
+        tx = conn.transaction()
+        await tx.start()
+        try:
+            for index in ("idx_kb_chunks_kb", "idx_kb_chunks_tenant", "idx_kb_chunks_document", "idx_kb_chunks_tsv",
+                          "idx_kb_chunks_parent"):
+                await conn.execute(f"DROP INDEX {index}")
+            await conn.execute("SELECT set_config('enable_bitmapscan', 'off', true), "
+                               "set_config('enable_seqscan', 'off', true), set_config('enable_sort', 'off', true)")
+            yield conn
+        finally:
+            await tx.rollback()
+
+
 @pytest.mark.parametrize("mode", ["session", "local", "fallback"])
-async def test_selective_kb_filter_still_returns_top_k(pool, tenant_agent, mode):
+async def test_selective_kb_filter_still_returns_top_k_through_hnsw(pool, tenant_agent, mode):
+    from services.knowledge import vector_repository as vr
     tenant, agent = tenant_agent
     set_caller_tenant(str(tenant["id"]))
     big, small = await _selective_world(pool, tenant, agent, 1500 if mode != "fallback" else 300)
+    args = (vec_literal(embed_text("alpha beta gamma")), [str(small["id"])], 5, vr.SEARCHABLE_STATUSES, -1.0)
+
+    async with _hnsw_forced(pool) as conn:
+        # Premise 1: the repository's own SQL is driven by the HNSW index here.
+        plan = [r[0].strip() for r in await conn.fetch("EXPLAIN " + vr._DENSE_SQL, *args)]
+        assert any("idx_kb_chunks_embedding_hnsw" in line for line in plan), [ln[:90] for ln in plan]
+        # Premise 2: the starvation is real. Plain ef_search = 40 returns fewer than top_k rows on this data.
+        await conn.execute("SELECT set_config('hnsw.iterative_scan', 'off', true), set_config('hnsw.ef_search', '40', true)")
+        starved = await conn.fetch(vr._DENSE_SQL, *args)
+        assert len(starved) < 5, len(starved)
+
+    # The repository, on the same HNSW-driven plan, must still return top_k.
     repo = PgVectorRepository()
     test_pool = pool
     if mode == "local":  # a pool without the startup parameters: the repository must compensate per query
         test_pool = await asyncpg.create_pool(os.environ["POSTGRES_DSN"], min_size=1, max_size=2)
     try:
-        async with tenant_conn(test_pool) as conn:
+        async with _hnsw_forced(test_pool) as conn:
             if mode == "fallback":
                 repo._hnsw_mode = "fallback"
             found = await repo.search(conn, [str(small["id"])], embed_text("alpha beta gamma"), 5, -1.0)
-            assert repo._hnsw_mode == mode if mode != "fallback" else True
+            if mode != "fallback":
+                assert repo._hnsw_mode == mode
     finally:
         if test_pool is not pool:
             await test_pool.close()
-    assert len(found) == 5  # ef_search alone (40) would starve this: every near neighbour is in the other KB
-    assert all(m.kb_id == str(small["id"]) for m in found)
+    assert len(found) == 5 and all(m.kb_id == str(small["id"]) for m in found)
 
 
 # --- fusion and dedupe (pure) --------------------------------------------------------------------------------
@@ -697,7 +732,7 @@ async def test_every_retrieval_writes_a_tenant_scoped_log_row(pool, app_pool, wo
     set_caller_tenant(str(world["tenant"]["id"]))
     async with tenant_conn(app_pool) as conn:
         row = await conn.fetchrow("SELECT * FROM retrieval_logs WHERE trace_id = $1", result["trace_id"])
-    assert row["status"] == result["status"] and len(row["query"]) == 1000
+    assert row["status"] == result["status"] and len(row["query"]) == 500
     assert "plan_cache_miss" in row["degraded"] and str(row["agent_id"]) == str(world["agent"]["id"])
     assert {"plan", "total"} <= set(json.loads(row["timings_ms"]))
     assert [str(c) for c in row["chunk_ids"]] == [c["source"]["chunk_id"] for c in result["chunks"]]

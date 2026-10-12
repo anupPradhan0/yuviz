@@ -61,6 +61,7 @@ class IVectorRepository(Protocol):
         query: str,
         limit: int,
         minimum_score: float,
+        approx_chunks: int | None = None,
     ) -> list[VectorMatch]: ...
 
 
@@ -72,11 +73,8 @@ _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 _MAX_QUERY_TERMS = 24
 
 
-def build_tsquery(query: str) -> str | None:
-    """OR of the query's content words as a to_tsquery('simple', ...) string; None if nothing is left.
-    OR, not plainto_tsquery's AND: a spoken question rarely contains every word of the passage that answers it,
-    and ts_rank_cd already prefers the chunks that match more of the terms. Tokens are \\w+ only, so quoting
-    them is enough to keep user text out of tsquery syntax."""
+def query_terms(query: str) -> list[str]:
+    """Distinct content words of the query, in order (stopwords and 1-letter tokens dropped)."""
     terms: list[str] = []
     for token in _TOKEN_RE.findall(query.casefold()):
         if token in _STOPWORDS or (len(token) < 2 and not token.isdigit()) or token in terms:
@@ -84,10 +82,38 @@ def build_tsquery(query: str) -> str | None:
         terms.append(token)
         if len(terms) >= _MAX_QUERY_TERMS:
             break
-    if not terms:
-        return None
-    return " | ".join(f"'{t}'" for t in terms)
+    return terms
 
+
+def tsquery_from_terms(terms: list[str]) -> str | None:
+    """OR of the terms as a to_tsquery('simple', ...) string; None if there are none.
+    OR, not plainto_tsquery's AND: a spoken question rarely contains every word of the passage that answers it,
+    and ts_rank_cd already prefers the chunks that match more of the terms. Tokens are \\w+ only, so quoting
+    them is enough to keep user text out of tsquery syntax."""
+    return " | ".join(f"'{t}'" for t in terms) if terms else None
+
+
+def build_tsquery(query: str) -> str | None:
+    return tsquery_from_terms(query_terms(query))
+
+
+# On a KB bigger than _SMALL_KB_CHUNKS a term found in >= _MAX_TERM_DF (2000) chunks is too common to discriminate and
+# ranking every chunk it matches costs more than the lexical budget (a common-word query on 100k chunks took
+# 0.4-2.7 s). Such terms are dropped, the rarest _MAX_LEXICAL_TERMS of the rest are kept, and a query made only
+# of common words contributes nothing lexically (dense still answers it).
+_SMALL_KB_CHUNKS = 3000
+_MAX_TERM_DF = int(os.environ.get("KNOWLEDGE_LEXICAL_MAX_TERM_DF", "2000"))
+_MAX_LEXICAL_TERMS = 4
+_MAX_TOTAL_DF = 6000  # bound on the rows ranked: the kept terms' document frequencies sum to at most this
+_DF_TTL_S = 600.0
+
+_DF_SQL = """
+    SELECT t AS term, (SELECT count(*) FROM (
+        SELECT 1 FROM kb_chunks c
+        WHERE c.kb_id = ANY($2::uuid[]) AND NOT c.is_parent AND c.tsv @@ to_tsquery('simple', quote_literal(t))
+        LIMIT $3) capped) AS df
+    FROM unnest($1::text[]) AS t
+"""
 
 _SELECT_COLUMNS = """
     c.id AS chunk_id, c.document_id, c.kb_id, c.content AS child_content, c.token_count AS child_tokens,
@@ -100,7 +126,8 @@ _DOC_JOINS = """
     JOIN kb_documents d ON d.id = c.document_id AND d.deleted_at IS NULL AND d.usage_mode = 'auto'
                        AND d.status = ANY($4::text[])
     JOIN knowledge_bases kb ON kb.id = c.kb_id
-    LEFT JOIN kb_chunks p ON p.id = c.parent_id
+    LEFT JOIN kb_chunks p ON p.id = c.parent_id AND p.document_id = c.document_id
+                         AND p.tenant_id = c.tenant_id AND p.is_parent
 """
 
 _DENSE_SQL = f"""
@@ -158,6 +185,10 @@ class PgVectorRepository:
     connection so every query stays under its RLS scope."""
 
     def __init__(self) -> None:
+        from .cache import TTLCache
+
+        # Capped document frequency per (KB set, term). The key carries the KB UUIDs, so it is tenant-scoped.
+        self._df = TTLCache(ttl_s=_DF_TTL_S, max_entries=20000)
         # None = not probed; "session" = iterative scan already on for every connection (db.get_pool sets it
         # as a startup parameter, so it survives asyncpg's RESET ALL); "local" = set it per transaction;
         # "fallback" = pgvector < 0.8, widen ef_search instead.
@@ -183,6 +214,33 @@ class PgVectorRepository:
             )
         elif self._hnsw_mode == "fallback":
             await conn.execute("SELECT set_config('hnsw.ef_search', $1, true)", str(_HNSW_FALLBACK_EF_SEARCH))
+
+    async def _discriminating_terms(self, conn: asyncpg.Connection, kb_ids: list[str], terms: list[str]) -> list[str]:
+        scope = ",".join(sorted(kb_ids))
+        known: dict[str, int] = {}
+        unknown: list[str] = []
+        for term in terms:
+            df = self._df.get(f"df:{scope}:{term}")
+            if df is None:
+                unknown.append(term)
+            else:
+                known[term] = df
+        if unknown:  # one statement for all unseen terms; later queries hit the cache
+            rows = await conn.fetch(_DF_SQL, unknown, kb_ids, _MAX_TERM_DF)
+            for row in rows:
+                known[row["term"]] = row["df"]
+                if row["df"] > 0:  # a term nobody has used yet may be ingested any minute: never cache "absent"
+                    self._df.set(f"df:{scope}:{row['term']}", row["df"])
+        usable = [t for t in terms if 0 < known.get(t, _MAX_TERM_DF) < _MAX_TERM_DF]
+        usable.sort(key=lambda t: (known[t], -len(t)))
+        kept: list[str] = []
+        total = 0
+        for term in usable[:_MAX_LEXICAL_TERMS]:
+            if kept and total + known[term] > _MAX_TOTAL_DF:
+                break
+            kept.append(term)
+            total += known[term]
+        return kept
 
     async def search(
         self,
@@ -211,8 +269,12 @@ class PgVectorRepository:
         query: str,
         limit: int,
         minimum_score: float,
+        approx_chunks: int | None = None,
     ) -> list[VectorMatch]:
-        tsquery = build_tsquery(query)
+        terms = query_terms(query)
+        if kb_ids and terms and (approx_chunks is None or approx_chunks > _SMALL_KB_CHUNKS):
+            terms = await self._discriminating_terms(conn, kb_ids, terms)
+        tsquery = tsquery_from_terms(terms)
         if not kb_ids or tsquery is None:  # nothing searchable in the query: no round trip
             return []
         rows = await conn.fetch(_LEXICAL_SQL, tsquery, kb_ids, limit, SEARCHABLE_STATUSES, minimum_score)

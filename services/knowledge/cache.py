@@ -1,5 +1,5 @@
 """Caches for Knowledge Service.
-Redis: write-through, no TTL: agent_kb:{tenant}:{agent} -> "1"/"0"; an outage degrades to a cache miss (Postgres).
+Redis: write-through, no TTL: agent_kb:{len}:{tenant}:{agent} -> "1"/"0"; an outage degrades to a cache miss (Postgres).
 In-process (TTLCache): the resolved retrieval plan and query embeddings, both on the retrieval hot path. Every
 key carries the tenant (slug prefix or tenant/config UUID) so tests/test_rls_coverage.py's tripwire holds."""
 
@@ -37,7 +37,9 @@ async def close() -> None:
 
 
 def _agent_kb_key(tenant_slug: str, agent_slug: str) -> str:
-    return f"agent_kb:{tenant_slug}:{agent_slug}"
+    # Injective (see slug_key): the old agent_kb:{t}:{a} shape could collide across tenants. Old keys are
+    # orphaned and read as a miss, which falls back to Postgres.
+    return slug_key("agent_kb", tenant_slug, agent_slug)
 
 
 async def set_has_enabled_kb(tenant_slug: str, agent_slug: str, enabled: bool) -> None:
@@ -110,12 +112,19 @@ def normalise_query(query: str) -> str:
     return _WS_RE.sub(" ", unicodedata.normalize("NFKC", query)).strip().casefold()
 
 
+def slug_key(prefix: str, tenant_slug: str, agent_slug: str) -> str:
+    """Slugs have no charset constraint, so "acme" + "support:bot" and "acme:support" + "bot" must not share a key.
+    The tenant slug is length-prefixed, which makes the encoding injective, and it still reads "...:{tenant}:..."
+    for the tenant-safe tripwire."""
+    return f"{prefix}:{len(tenant_slug)}:{tenant_slug}:{agent_slug}"
+
+
 def plan_key(tenant_slug: str, agent_slug: str) -> str:
-    return f"plan:{tenant_slug}:{agent_slug}"
+    return slug_key("plan", tenant_slug, agent_slug)
 
 
 def plan_tenant_prefix(tenant_slug: str) -> str:
-    return f"plan:{tenant_slug}:"
+    return f"plan:{len(tenant_slug)}:{tenant_slug}:"
 
 
 def embedding_key(tenant_id: Any, embedding_config_id: Any, query: str) -> str:
