@@ -21,8 +21,25 @@ _NOT_IN_CATALOGUE = {"PORT"}
 # Helpers that read os.environ by name (pipeline_config._env, email._env, ...).
 _ENV_HELPERS = {"_env", "_env_int", "_env_float", "_env_bool"}
 _SECRET_NAME = re.compile(r"(PASSWORD|SECRET|_KEY|TOKEN)$")
+
+
+def _connector_keys(auth_kind: str) -> list[str]:
+    """OAuthProvider(key=...) entries in oauth.py's PROVIDERS for one auth_kind (absent = "oauth2"),
+    read from source so a new connector's env vars can't ship undocumented."""
+    tree = ast.parse((_REPO / "services/toolexec/oauth.py").read_text())
+    keys = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "OAuthProvider":
+            kw = {k.arg: k.value.value for k in node.keywords if isinstance(k.value, ast.Constant)}
+            if kw.get("auth_kind", "oauth2") == auth_kind:
+                keys.append(kw["key"].upper())
+    assert keys, f"no {auth_kind} connectors found in oauth.py — the scan is broken"
+    return keys
+
+
 # Env reads whose name is computed, keyed (file, name expression) -> the names it can produce.
-_OAUTH2_PROVIDERS = ("GOOGLE", "MICROSOFT", "ZOHO", "SALESFORCE", "HUBSPOT")
+_OAUTH2_PROVIDERS = _connector_keys("oauth2")
+_API_KEY_PROVIDERS = _connector_keys("api_key")
 _DYNAMIC_READS = {
     ("services/conversation/__main__.py", "f'VOICEAI_ENABLE_{leg}'"): {"VOICEAI_ENABLE_STT", "VOICEAI_ENABLE_TTS"},
     # Bodies of the _env helpers; their callers are scanned by name.
@@ -39,7 +56,8 @@ _DYNAMIC_READS = {
         {f"TOOLEXEC_OAUTH_{p}_CLIENT_SECRET_REF" for p in _OAUTH2_PROVIDERS},
     ("services/toolexec/oauth.py", "f'TOOLEXEC_OAUTH_{provider.key.upper()}_REQUIRED_SCOPES'"):
         {f"TOOLEXEC_OAUTH_{p}_REQUIRED_SCOPES" for p in _OAUTH2_PROVIDERS},
-    ("services/toolexec/oauth.py", "f'TOOLEXEC_{provider.key.upper()}_ENABLED'"): {"TOOLEXEC_CALCOM_ENABLED"},
+    ("services/toolexec/oauth.py", "f'TOOLEXEC_{provider.key.upper()}_ENABLED'"):
+        {f"TOOLEXEC_{p}_ENABLED" for p in _API_KEY_PROVIDERS},
 }
 
 
