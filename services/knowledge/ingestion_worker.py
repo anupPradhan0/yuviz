@@ -1,5 +1,7 @@
 """Ingestion worker: claims kb_ingestion_jobs; read -> extract -> chunk -> embed -> kb_chunks.
 Small docs (< AUTO_INLINE_THRESHOLD_BYTES) skip embedding and become usage_mode='prompt'.
+Parsing detects the type from the bytes and runs in a sandboxed subprocess (parsers/); a document ends in
+ready, ready_degraded (indexed, but part of it was unreadable) or failed with a plain reason.
 
 Queue semantics (many workers are safe):
   - claim is one UPDATE ... FOR UPDATE SKIP LOCKED, with a soft per-tenant running cap
@@ -28,11 +30,11 @@ from libs.tenancy import platform_conn, tenant_conn
 from . import db
 from .chunking import Chunk, chunk_text, count_tokens
 from .embedding_manager import EmbeddingProviderConfig, EmbeddingProviderManager
+from .parsers import SUPPORTED_CONTENT_TYPES, ParsedDocument, ParseRejected, parse_document
 from .storage import StorageProvider
 
 log = logging.getLogger(__name__)
 
-SUPPORTED_CONTENT_TYPES = {"text/plain", "text/markdown"}
 AUTO_INLINE_THRESHOLD_BYTES = 500
 POLL_INTERVAL_S = 2.0
 
@@ -63,6 +65,11 @@ def _scrub_url(match: re.Match) -> str:
     if parts.port:
         host = f"{host}:{parts.port}"
     return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def stored_error(exc: BaseException) -> str:
+    """What goes in the document/job error column: a parse rejection's reason is already plain and tenant-safe."""
+    return exc.reason if isinstance(exc, ParseRejected) else redact_error(exc)
 
 
 def redact_error(exc: BaseException) -> str:
@@ -97,7 +104,7 @@ class _StageLog:
         self._add("ok", detail)
 
     def error(self, exc: BaseException) -> None:
-        self._add("error", {"error_class": classify_error(exc), "error": redact_error(exc)})
+        self._add("error", {"error_class": classify_error(exc), "error": stored_error(exc)})
 
     def add(self, stage: str, status: str, **detail: Any) -> None:
         self.events.append({"stage": stage, "status": status, "duration_ms": None, "detail": detail})
@@ -137,12 +144,9 @@ async def _fetch_embedding_config(conn: asyncpg.Connection, kb_id) -> EmbeddingP
     )
 
 
-async def _extract_text(content_type: str, raw: bytes) -> str:
-    if content_type not in SUPPORTED_CONTENT_TYPES:
-        raise ValueError(
-            f"unsupported content_type={content_type!r} — supported: {sorted(SUPPORTED_CONTENT_TYPES)}",
-        )
-    return raw.decode("utf-8")
+async def _extract(doc_row: Any, raw: bytes) -> ParsedDocument:
+    """The stored content_type is only a hint (text/markdown vs text/plain); the bytes decide the parser."""
+    return await parse_document(raw, hint=doc_row["content_type"], language=doc_row["language"])
 
 
 _MARK_RUNNING_SQL = (
@@ -218,8 +222,12 @@ async def process_one_job(
         stages.ok(bytes=len(raw))
 
         stages.begin("extract")
-        text = await _extract_text(doc_row["content_type"], raw)
-        stages.ok(chars=len(text))
+        parsed = await _extract(doc_row, raw)
+        text = parsed.text()
+        stages.ok(
+            chars=len(text), detected_type=parsed.detected_type, parser=parsed.parser_used,
+            quality=parsed.quality_score, degraded=parsed.degraded, warnings=parsed.warnings[:5],
+        )
 
         stages.begin("chunk")
         if len(raw) < AUTO_INLINE_THRESHOLD_BYTES:
@@ -261,10 +269,14 @@ async def process_one_job(
                     document_id, kb_id, doc_row["tenant_id"], i, chunk.content,
                     vector_literal, chunk.token_count, doc_row["language"], version,
                 )
+            # ready_degraded keeps its reason in `error` so the console can say what was unreadable.
             await conn.execute(
-                "UPDATE kb_documents SET status = 'ready', error = NULL, version = $2, "
-                "usage_mode = $3, updated_at = now() WHERE id = $1",
+                "UPDATE kb_documents SET status = $4, error = $5, version = $2, usage_mode = $3, "
+                "parser_used = $6, quality_score = $7, updated_at = now() WHERE id = $1",
                 document_id, version, new_usage_mode,
+                "ready_degraded" if parsed.degraded else "ready",
+                "; ".join(parsed.warnings)[:1000] if parsed.degraded else None,
+                parsed.parser_used, parsed.quality_score,
             )
             stages.ok(chunks=len(new_chunks))
             await _write_events(conn, job, doc_row["tenant_id"], stages.events)
@@ -290,7 +302,7 @@ async def _record_failure(
     """Permanent -> failed; transient -> pending with backoff; transient out of attempts -> dead_letter."""
     klass = classify_error(exc)
     attempts, max_attempts = job["attempts"], job.get("max_attempts") or DEFAULT_MAX_ATTEMPTS
-    error = redact_error(exc)
+    error = stored_error(exc)
     if klass == "permanent":
         job_status, doc_status, delay = "failed", "failed", None
     elif attempts >= max_attempts:

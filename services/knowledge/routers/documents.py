@@ -11,7 +11,7 @@ from services.config.deps import assert_tenant_access, get_current_user, is_plat
 
 from .. import documents as documents_service
 from .. import knowledge_bases as kb_service
-from ..ingestion_worker import SUPPORTED_CONTENT_TYPES
+from ..parsers import SUPPORTED_CONTENT_TYPES, detect_content_type, unsupported_reason
 from ..schemas import DocumentUpdate
 from ..storage import LocalStorageProvider
 
@@ -81,13 +81,15 @@ async def upload_document(
 ):
     kb = await _authorize_kb(kb_id, current_user)
 
-    content_type = (file.content_type or "").split(";")[0].strip().lower()
-    if content_type not in SUPPORTED_CONTENT_TYPES:
-        raise HTTPException(
-            status_code=415,
-            detail=f"unsupported content_type {content_type!r} — supported: {sorted(SUPPORTED_CONTENT_TYPES)}",
-        )
+    # The declared type is only a hint: the bytes decide, so a PDF sent as text/plain (or octet-stream) is
+    # accepted and an image renamed .txt is not.
     content = await _read_capped(file)
+    if not content:
+        raise HTTPException(status_code=400, detail="file is empty")
+    declared = (file.content_type or "").split(";")[0].strip().lower()
+    content_type = detect_content_type(content, declared)
+    if content_type not in SUPPORTED_CONTENT_TYPES:
+        raise HTTPException(status_code=415, detail=unsupported_reason(content_type))
     return await documents_service.upload_document(
         tenant_id=kb["tenant_id"],
         kb_id=kb_id,

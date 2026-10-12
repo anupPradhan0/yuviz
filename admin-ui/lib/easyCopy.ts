@@ -69,7 +69,7 @@ export const easyCopy = {
   uploadFilesHint: "Text (.txt) or Markdown (.md) files only.",
   filesChosenLabel: "Files to upload",
   removeFile: "Remove",
-  wrongFileType: "Only .txt and .md files can be uploaded. Other files were skipped.",
+  wrongFileType: "Only PDF, Word, Excel, PowerPoint, HTML, CSV and text files can be uploaded. Other files were skipped.",
   uploadNeedsSetup: "File uploads need document search set up first.",
   uploadNeedsSetupLink: "Set it up",
   documentsWarning: "Your receptionist was created, but some documents didn't get attached.",

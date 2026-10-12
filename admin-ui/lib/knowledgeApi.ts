@@ -72,7 +72,7 @@ export const deleteKnowledgeBase = (kbId: string) =>
 
 // ── Documents ────────────────────────────────────────────────────────────
 
-export type DocumentStatus = "pending" | "processing" | "ready" | "failed";
+export type DocumentStatus = "pending" | "processing" | "ready" | "ready_degraded" | "failed";
 export type UsageMode = "auto" | "prompt";
 
 export interface KbDocument {

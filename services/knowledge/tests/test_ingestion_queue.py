@@ -227,7 +227,7 @@ async def test_permanent_error_fails_immediately_without_retry(tenant_agent, poo
     final = await _job(pool, doc["ingestion_job_id"])
     assert final["status"] == "failed" and final["error_class"] == "permanent" and final["attempts"] == 1
     assert final["stage"] == "extract"
-    assert "unsupported content_type" in (await documents_service.get_document(doc["id"]))["error"]
+    assert "no text" in (await documents_service.get_document(doc["id"]))["error"]  # a PDF with no readable content
 
 
 # ── lease, heartbeat, reaper, fencing ───────────────────────────────────
