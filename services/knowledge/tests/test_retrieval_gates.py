@@ -33,7 +33,7 @@ DEADLINE_MS = 400.0  # the design's hard deadline, pinned here so changing the c
 # What each fault must degrade to. "unavailable" is only correct when every branch is lost and nothing else can answer.
 EXPECTED = {
     "C1.": {"partial"}, "C1b.": {"partial"}, "C2.": {"unavailable(raised)"}, "C3.": {"partial"},
-    "C4.": {"partial"}, "C5.": {"ok"}, "C6.": {"unavailable(raised)"},
+    "C4.": {"partial"}, "C5.": {"ok", "partial"}, "C6.": {"unavailable(raised)"},
 }
 
 

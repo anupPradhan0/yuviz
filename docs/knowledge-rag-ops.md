@@ -209,4 +209,40 @@ SELECT pg_size_pretty(pg_total_relation_size('retrieval_logs')), (SELECT min(cre
 
 ## Measured numbers
 
-__MEASURED__
+Run with `python services/knowledge/tests/bench_retrieval.py --n 300 --chunks 4000 --json-out results.json` against a
+scratch database (it seeds and removes its own tenant). Measured on macOS-26.5.2-arm64-arm-64bit (arm),
+Python 3.11.17, one process, Postgres on localhost, 4000 child chunks (plus parents) in one KB,
+deterministic fake embedder with injected latency, N=300 calls per scenario, deadline 400 ms.
+Statuses `unavailable(raised)` are the typed `RetrievalUnavailable` that the router turns into `status: "unavailable"`.
+
+| Scenario | n | p50 ms | p95 ms | p99 ms | max ms | Statuses |
+|---|---|---|---|---|---|---|
+| A. warm plan + embed cache HIT | 300 | 27 | 43 | 50 | 64 | ok 300 |
+| A8. same, 8 concurrent callers | 300 | 124 | 174 | 199 | 201 | ok 300 |
+| B. warm plan + embed MISS (60 ms injected) | 300 | 86 | 91 | 102 | 114 | ok 300 |
+| D. cold plan every call (embed hit) | 100 | 13 | 14 | 16 | 21 | ok 100 |
+| C1. embedder hangs 5 s (breaker opens after 5) | 300 | 11 | 11 | 152 | 153 | partial 300 |
+| C1b. embedder hangs 5 s, breaker disabled | 300 | 152 | 152 | 153 | 153 | partial 300 |
+| C2. DB slowed 500 ms (pg_sleep) on both branches | 300 | 189 | 192 | 193 | 196 | unavailable(raised) 300 |
+| C3. lexical branch errors (dense answers) | 300 | 84 | 122 | 167 | 177 | partial 300 |
+| C4. dense DB statement slowed 500 ms (lexical answers) | 300 | 189 | 191 | 199 | 227 | partial 300 |
+| C5. reranker dead, rerank=true | 300 | 88 | 95 | 108 | 175 | ok 299, partial 1 |
+| C6. embedder hung AND DB slowed (typed unavailable) | 300 | 153 | 153 | 153 | 155 | unavailable(raised) 300 |
+
+Against the targets (rerank off): p50 < 100 ms holds in every healthy scenario (27 ms warm, 86 ms with a 60 ms embedder
+miss); p95 < 250 ms holds (43 ms warm, 91 ms miss, 174 ms with 8 concurrent callers queueing on the per-tenant limiter);
+p99 <= 400 ms holds in every scenario including every injected fault (worst single call 227 ms). No pool connection or
+limiter slot was left behind after any scenario.
+
+Caveats, read before quoting these:
+- The database is on localhost, so network round trips are about zero; a remote database adds its round trips to every
+  DB stage. The fault scenarios measure the deadline logic, which does not depend on that.
+- The embedder is a fake. A real provider's latency on a cache miss is the largest variable in production; the 60 ms
+  "MISS" row is an assumption, not a measurement. The query-embedding cache makes repeated queries free.
+- Developer laptop with other load running (the p50 of the warm row moved between 16 ms and 27 ms across runs). Treat
+  differences under about 2x as noise. Rerun on production-shaped hardware before signing the SLOs off.
+- 4,000 chunks is small. The 100k-chunk lexical benchmark (`bench_lexical_100k.py`) covers the lexical branch at scale;
+  nothing here measures dense search at 100k+ chunks or with a real HNSW build under write load.
+- Sequential callers except the 8-way row. This is latency of one call, not throughput.
+- The C2/C6 scenarios answer `unavailable` by design (every branch lost, no prompt-mode content to fall back on): the
+  point is that they say so inside the deadline instead of hanging.
