@@ -21,7 +21,7 @@ from services.knowledge.tests.eval.harness import Metrics, _norm
 from services.knowledge.tests.rag_fakes import FakeEmbedder, make_kb, make_manager
 
 TOP_K = 5
-_BENIGN = frozenset({"plan_cache_miss", "prompt_docs_trimmed"})  # not fallbacks: a cold plan, and tiny prompt-mode docs
+_BENIGN = frozenset({"prompt_docs_trimmed"})  # not a fallback: tiny prompt-mode docs (a cold plan is retrieval_metadata.plan_cache)
 # The default minimum_score (0.3) is a cosine threshold tuned for real embedding models; the bag-of-words fake scores
 # lower, so under it the dense branch returned nothing and the eval was lexical-only, where equal ts_rank scores
 # tie in arbitrary order (one golden question flipped between runs). With no floor both branches rank and RRF

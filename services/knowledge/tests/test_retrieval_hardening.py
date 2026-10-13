@@ -511,7 +511,7 @@ async def test_stale_plan_is_served_while_one_background_refresh_runs(world, mon
         return await original(conn, *args)
     monkeypatch.setattr(plans, "load_plan", counting)
     results = await asyncio.gather(*[_run(t, a, world["embedder"], "refunds processed days") for _ in range(5)])
-    assert all("plan_cache_miss" not in r["degraded"] for r in results)  # nobody paid for a cold plan
+    assert all(r["retrieval_metadata"]["plan_cache"] == "stale" for r in results)  # nobody paid for a cold plan
     await asyncio.sleep(0.2)
     assert len(loads) == 1  # a single bounded refresh, not one per request
     assert time.monotonic() - plans._loaded_at[key] < 1.0 and not plans._refresh_tasks

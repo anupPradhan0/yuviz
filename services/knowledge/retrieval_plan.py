@@ -324,12 +324,14 @@ async def load_plan(conn: asyncpg.Connection, tenant_slug: str, agent_slug: str)
 
 async def resolve_plan(
     tenant_slug: str, agent_slug: str, *, conn: asyncpg.Connection | None = None, pool: asyncpg.Pool | None = None,
-) -> tuple[RetrievalPlan | None, bool]:
-    """(plan, was_cached). A found plan is cached; "no such agent" is not, so a caller probing another
+) -> tuple[RetrievalPlan | None, str]:
+    """(plan, "hit" | "stale" | "miss"). A found plan is cached; "no such agent" is not, so a caller probing another
     tenant's slug can never plant an empty plan under that tenant's key."""
     hit = cached_plan(tenant_slug, agent_slug)
     if hit is not None:
-        return hit, True
+        key = cache.plan_key(tenant_slug, agent_slug)
+        stale = time.monotonic() - _loaded_at.get(key, 0.0) > _PLAN_TTL_S / 2
+        return hit, "stale" if stale else "hit"
     started = _seq
     if conn is not None:
         plan = await load_plan(conn, tenant_slug, agent_slug)
@@ -340,7 +342,7 @@ async def resolve_plan(
         check_scope(plan)  # cold path too: a plan for another tenant is neither cached nor returned
         if _may_store(plan, started):
             _store(cache.plan_key(tenant_slug, agent_slug), plan)
-    return plan, False
+    return plan, "miss"
 
 
 async def prewarm(

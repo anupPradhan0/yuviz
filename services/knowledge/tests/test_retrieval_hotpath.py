@@ -80,7 +80,7 @@ async def test_retrieve_end_to_end_with_fake_embeddings(world):
     assert result["chunks"][0]["content"] == REFUND
     assert result["sources"][0] == "Refund Policy"
     assert result["retrieval_metadata"]["top_k"] == 5
-    assert result["degraded"] == ["plan_cache_miss"]
+    assert result["degraded"] == [] and result["retrieval_metadata"]["plan_cache"] == "miss"  # not a fallback
     assert result["trace_id"]
     assert result["low_confidence"] is True  # lexical-only evidence this weak is flagged (see test_retrieval_hardening)
 
@@ -370,7 +370,7 @@ async def test_warm_hot_path_makes_no_plan_queries_and_only_the_search_queries(w
     result = await _run(world["tenant"], world["agent"], world["embedder"], "refunds processed days", repo=repo)
     seen = list(seen)  # snapshot before the background log writer runs: its own queries are off the hot path
     await retrieval_log.flush()
-    assert "plan_cache_miss" not in result["degraded"] and result["status"] == "ok"
+    assert result["retrieval_metadata"]["plan_cache"] == "hit" and result["status"] == "ok"
     plan_queries = [q for q in seen if any(t in q for t in _PLAN_TABLES) and "kb_chunks" not in q]
     assert plan_queries == []
     non_log = [q for q in seen if "retrieval_logs" not in q and q.strip().rstrip(";") not in ("BEGIN", "COMMIT")
@@ -386,7 +386,7 @@ async def test_cold_plan_costs_queries_and_prewarm_removes_them(world, monkeypat
                                embedding_manager=make_manager(world["embedder"])) is True
     assert len([q for q in seen if "FROM agents" in q or "agent_knowledge_bases" in q]) >= 2
     result = await _run(world["tenant"], world["agent"], world["embedder"], "refund")
-    assert "plan_cache_miss" not in result["degraded"]
+    assert result["retrieval_metadata"]["plan_cache"] == "hit"
 
 
 async def test_plan_invalidates_when_a_kb_is_assigned_or_disabled(pool, world):
@@ -776,7 +776,7 @@ async def test_every_retrieval_writes_a_tenant_scoped_log_row(pool, app_pool, wo
     async with tenant_conn(app_pool) as conn:
         row = await conn.fetchrow("SELECT * FROM retrieval_logs WHERE trace_id = $1", result["trace_id"])
     assert row["status"] == result["status"] and len(row["query"]) == 500
-    assert "plan_cache_miss" in row["degraded"] and str(row["agent_id"]) == str(world["agent"]["id"])
+    assert row["degraded"] == [] and str(row["agent_id"]) == str(world["agent"]["id"])
     assert {"plan", "total"} <= set(json.loads(row["timings_ms"]))
     assert [str(c) for c in row["chunk_ids"]] == [c["source"]["chunk_id"] for c in result["chunks"]]
     set_caller_tenant(str(other_tenant_admin["tenant"]["id"]))

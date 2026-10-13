@@ -421,7 +421,7 @@ async def _retrieve(
     bpool = BoundedPool(pool or await db.get_pool(), cfg.acquire_timeout_s)
     try:
         async with asyncio.timeout(max(remaining(), 0.001)):
-            plan, was_cached = await plans.resolve_plan(tenant_slug, agent_slug, conn=held, pool=bpool)
+            plan, plan_cache = await plans.resolve_plan(tenant_slug, agent_slug, conn=held, pool=bpool)
     except TenantScopeConflict:
         raise
     except PoolOverloaded as exc:
@@ -432,9 +432,9 @@ async def _retrieve(
             f"retrieval plan unavailable: {type(exc).__name__}", degraded=["plan_unavailable"], trace_id=trace_id,
         ) from exc
     timings["plan"] = (time.monotonic() - started) * 1000
-    ops_metrics.inc("plan_cache_hit" if was_cached else "plan_cache_miss")
-    if not was_cached:
-        degraded.append("plan_cache_miss")
+    # A cold plan is reported in retrieval_metadata, not in `degraded`: it is not a fallback, and `degraded` reaches
+    # the model's payload and feeds the degraded-ratio alert.
+    ops_metrics.inc("plan_cache_miss" if plan_cache == "miss" else "plan_cache_hit")
 
     policy = plans.merge_policy(None, {}) if plan is None else {
         key: (overrides[key] if overrides[key] is not None else plan.agent_policy[key]) for key in overrides
@@ -446,7 +446,7 @@ async def _retrieve(
     if plan is None:
         return _result(
             "no_match", selected=[], policy=policy, degraded=degraded, trace_id=trace_id, low_confidence=False,
-            metadata={"top_k": policy["top_k"], "candidates": 0, "groups": 0, "rerank": policy["rerank"],
+            metadata={"plan_cache": plan_cache, "top_k": policy["top_k"], "candidates": 0, "groups": 0, "rerank": policy["rerank"],
                       "hybrid_search": policy["hybrid_search"], "always_included": 0, "reason": "agent_not_found",
                       "timings_ms": finish_timings()},
         )
@@ -582,7 +582,7 @@ async def _retrieve(
         metadata={
             "top_k": policy["top_k"], "candidates": len(fused), "groups": len(plan.groups),
             "rerank": policy["rerank"], "hybrid_search": policy["hybrid_search"],
-            "always_included": len(prompt_matches), "prompt_docs_trimmed": trimmed, "timings_ms": timings_out,
+            "always_included": len(prompt_matches), "prompt_docs_trimmed": trimmed, "plan_cache": plan_cache, "timings_ms": timings_out,
             "dense_candidates": len(results["dense"].matches or []) if "dense" in results else 0,
             "lexical_candidates": len(results["lexical"].matches or []) if "lexical" in results else 0,
         },
