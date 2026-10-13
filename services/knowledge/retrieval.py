@@ -433,6 +433,10 @@ async def _retrieve(
     policy = plans.merge_policy(None, {}) if plan is None else {
         key: (overrides[key] if overrides[key] is not None else plan.agent_policy[key]) for key in overrides
     }
+    # Rerank sends the query and chunk text to a third party under the PLATFORM key, so the agent's policy is the
+    # only thing that can switch it on: a request may turn it off for one call, never on.
+    if plan is not None:
+        policy["rerank"] = bool(plan.agent_policy["rerank"]) and overrides["rerank"] is not False
     if plan is None:
         return _result(
             "no_match", selected=[], policy=policy, degraded=degraded, trace_id=trace_id, low_confidence=False,

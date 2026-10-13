@@ -32,6 +32,7 @@ async def _purge(pool, tenant_id) -> None:
         "DELETE FROM kb_ingestion_jobs WHERE document_id IN (SELECT id FROM kb_documents WHERE tenant_id = $1)",
         "DELETE FROM audit_log WHERE tenant_id = $1",
         "DELETE FROM kb_documents WHERE tenant_id = $1",
+        "DELETE FROM agent_retrieval_policies WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = $1)",
         "DELETE FROM agent_knowledge_bases WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = $1)",
         "DELETE FROM knowledge_bases WHERE tenant_id = $1",
         "DELETE FROM agents WHERE tenant_id = $1",
@@ -57,6 +58,8 @@ async def run_pipeline_eval(
         agent = dict(await pool.fetchrow(
             "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, 'golden', 'Golden') RETURNING *", tenant["id"]))
         set_caller_tenant(str(tenant["id"]))
+        if reranker is not None:  # only the agent's policy can switch rerank on
+            await pool.execute("INSERT INTO agent_retrieval_policies (agent_id, rerank) VALUES ($1, true)", agent["id"])
         kb = await make_kb(pool, tenant, agent, "golden")
         if llm_config:
             cfg_id = await pool.fetchval(
