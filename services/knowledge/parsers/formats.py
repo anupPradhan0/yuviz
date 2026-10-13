@@ -702,12 +702,20 @@ _BOILERPLATE_ATTR_RE = re.compile(
     r"(^|[\s_-])(nav|navbar|menu|footer|sidebar|cookie|consent|banner|advert|ads?|breadcrumb|share|social|popup|modal)([\s_-]|$)",
     re.IGNORECASE,
 )
-_CSS_RULE_RE = re.compile(r"([^{}@]+)\{([^{}]*)\}")
 _CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-_MAX_CSS_RULES = 400
+_BRACE_RE = re.compile(r"[{}]")
+MAX_CSS_BYTES = 1_000_000
+MAX_CSS_RULES = 5_000
+MAX_SELECTORS_PER_RULE = 20
+MAX_SELECTOR_LEN = 300
+CSS_TIME_BUDGET_S = 10.0
 _WHITE_VALUES = frozenset({"#fff", "#ffffff", "white", "rgb(255,255,255)", "rgba(255,255,255,1)", "hsl(0,0%,100%)"})
-_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+_NUM_RE = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)")
 _OPTIONAL_END = frozenset({"p", "li", "dt", "dd", "tr", "td", "th", "option", "thead", "tbody", "tfoot"})
+_HIDE_PROPS = frozenset({
+    "display", "visibility", "opacity", "font-size", "color", "clip", "clip-path", "text-indent", "position", "left", "top",
+    "right", "bottom", "margin-left", "margin-top", "height", "width", "max-height", "max-width", "overflow", "background",
+    "background-color", "background-image"})
 
 
 def _css_decls(text: str) -> dict[str, str]:
@@ -719,21 +727,59 @@ def _css_decls(text: str) -> dict[str, str]:
     return out
 
 
+def _css_rules(css: str) -> list[tuple[str, str]]:
+    """(selector list, declaration block) of the top-level rules, in one pass with str.find (a regex over
+    unterminated input is quadratic: a 196 KB <style> with no braces ran to the timeout). At-rules are skipped whole."""
+    if len(css) > MAX_CSS_BYTES:
+        raise LimitExceeded("stylesheet is too large to evaluate safely")
+    out: list[tuple[str, str]] = []
+    pos, n = 0, len(css)
+    while pos < n:
+        j = css.find("{", pos)
+        if j < 0:
+            break
+        head = css[pos:j]
+        head = head[head.rfind(";") + 1:].strip()
+        if head.startswith("@"):
+            depth, k = 1, j + 1
+            for m in _BRACE_RE.finditer(css, j + 1):
+                depth += 1 if m.group() == "{" else -1
+                k = m.end()
+                if depth == 0:
+                    break
+            pos = k if depth == 0 else n
+            continue
+        e = css.find("}", j + 1)
+        if e < 0:
+            break
+        out.append((head, css[j + 1:e]))
+        if len(out) > MAX_CSS_RULES:
+            raise LimitExceeded("stylesheet has too many rules to evaluate safely")
+        pos = e + 1
+    return out
+
+
 def _stylesheet_decls(soup) -> dict[int, dict[str, str]]:
     """Declarations that <style> rules give each element, keyed by id(tag). Later rules override earlier ones;
-    specificity is not modelled, at-rules (@media, @font-face) are ignored. Selectors are matched with soupsieve."""
-    css = _CSS_COMMENT_RE.sub(" ", "\n".join(st.get_text() for st in soup.find_all("style")))
-    css = re.sub(r"@[^{;]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}", " ", css)  # whole @media blocks
+    specificity is not modelled and at-rules (@media, @font-face) are ignored. Selectors are matched with soupsieve,
+    under a time budget and with caps on rules, selectors per rule and selector length."""
+    css = "\n".join(st.get_text() for st in soup.find_all("style"))
+    if len(css) > MAX_CSS_BYTES:   # before the comment strip: a megabyte-long comment is as costly as a megabyte of rules
+        raise LimitExceeded("stylesheet is too large to evaluate safely")
+    css = _CSS_COMMENT_RE.sub(" ", css)
     out: dict[int, dict[str, str]] = {}
-    for n, m in enumerate(_CSS_RULE_RE.finditer(css)):
-        if n >= _MAX_CSS_RULES:
-            break
-        decls = _css_decls(m.group(2))
-        if not decls:
+    deadline = time.monotonic() + CSS_TIME_BUDGET_S
+    for head, body in _css_rules(css):
+        decls = _css_decls(body)
+        if not (decls.keys() & _HIDE_PROPS):
             continue
-        for sel in m.group(1).split(","):
-            sel = sel.strip()
-            if not sel:
+        selectors = [x.strip() for x in head.split(",") if x.strip()]
+        if len(selectors) > MAX_SELECTORS_PER_RULE:
+            raise LimitExceeded("stylesheet rule has too many selectors to evaluate safely")
+        for sel in selectors:
+            if time.monotonic() > deadline:
+                raise LimitExceeded("stylesheet evaluation exceeded its time budget")
+            if len(sel) > MAX_SELECTOR_LEN:
                 continue
             try:
                 matched = soup.select(sel)
@@ -744,19 +790,38 @@ def _stylesheet_decls(soup) -> dict[int, dict[str, str]]:
     return out
 
 
-def _px(value: str) -> float | None:
-    m = _NUM_RE.match(value)
+_ABS_UNITS = {"px": 1.0, "pt": 96 / 72, "pc": 16.0, "in": 96.0, "cm": 96 / 2.54, "mm": 96 / 25.4, "q": 96 / 101.6}
+
+
+def _css_length(value: str, parent_px: float | None = 16.0) -> float | None:
+    """Length in px, or None when it cannot be known (viewport units, calc(), keywords): unknown is treated by every
+    caller as NOT hidden, so a relative unit never removes visible text."""
+    m = _NUM_RE.fullmatch(value) or _NUM_RE.match(value)
     if not m:
         return None
-    n = float(m.group())
-    unit = value[m.end():]
-    return n * 16 if unit.startswith("em") or unit.startswith("rem") else n
+    n, unit = float(m.group()), value[m.end():]
+    if unit == "" :
+        return 0.0 if n == 0 else None            # a bare non-zero number is not a length
+    if unit in _ABS_UNITS:
+        return n * _ABS_UNITS[unit]
+    if unit in ("em", "%") and parent_px is not None:
+        return n * parent_px * (0.01 if unit == "%" else 1.0)
+    if unit == "rem":
+        return n * 16.0
+    return None
 
 
 class _HtmlStyles:
+    """Evaluates what a browser would paint. Properties that children can override (font-size, visibility, colour) are
+    resolved per element through inheritance, so a zero-size container with normal-size children hides nothing but
+    its own text; properties no child can undo (display:none, opacity, clip, off-screen) hide the subtree."""
+
     def __init__(self, soup) -> None:
         self.rules = _stylesheet_decls(soup)
         self._cache: dict[int, dict[str, str]] = {}
+        self._size: dict[int, float | None] = {}
+        self._inh: dict[tuple, str] = {}
+        self._dark: dict[int, bool] = {}
 
     def decls(self, tag) -> dict[str, str]:
         d = self._cache.get(id(tag))
@@ -765,22 +830,58 @@ class _HtmlStyles:
             self._cache[id(tag)] = d
         return d
 
-    def dark_background(self, tag) -> bool:
-        """True when this element or an ancestor paints a background that is not white (so white text can be read)."""
-        for t in [tag, *tag.parents]:
-            if t.name == "[document]":
-                continue
-            d = self.decls(t)
-            bg = d.get("background-color") or d.get("background") or ""
-            bg = bg.split("url(")[0] if "url(" not in bg else "url"
-            if bg and bg not in _WHITE_VALUES and bg not in ("none", "transparent", "inherit", "initial", "unset"):
-                return True
-            bgcolor = str((getattr(t, "attrs", None) or {}).get("bgcolor", "")).lower().replace(" ", "")
-            if bgcolor and bgcolor not in _WHITE_VALUES and bgcolor != "white":
-                return True
-        return False
+    def _inherited(self, tag, prop: str) -> str:
+        """Nearest declared value up the tree, memoised per element so a 400-deep chain is not walked per element."""
+        key = (id(tag), prop)
+        hit = self._inh.get(key)
+        if hit is not None:
+            return hit
+        v = self.decls(tag).get(prop)
+        if v and v not in ("inherit", "unset"):
+            out = v
+        else:
+            parent = tag.parent
+            out = "" if parent is None or getattr(parent, "name", None) == "[document]" else self._inherited(parent, prop)
+        self._inh[key] = out
+        return out
 
-    def hidden(self, tag) -> bool:
+    def font_px(self, tag) -> float | None:
+        key = id(tag)
+        if key in self._size:
+            return self._size[key]
+        parent = tag.parent
+        parent_px = 16.0 if parent is None or getattr(parent, "name", None) == "[document]" else self.font_px(parent)
+        raw = self.decls(tag).get("font-size")
+        if not raw or raw in ("inherit", "unset", "initial"):
+            px = parent_px
+        else:
+            px = _css_length(raw, parent_px)
+        self._size[key] = px
+        return px
+
+    def dark_background(self, tag) -> bool:
+        """True when this element or an ancestor paints anything that is not plain white: a colour, an image, a
+        gradient. Unknown means readable, so white text over any of those is kept."""
+        hit = self._dark.get(id(tag))
+        if hit is not None:
+            return hit
+        d = self.decls(tag)
+        out = False
+        for prop in ("background-color", "background", "background-image"):
+            bg = d.get(prop, "")
+            if bg and bg not in _WHITE_VALUES and bg not in ("none", "transparent", "inherit", "initial", "unset"):
+                out = True
+        bgcolor = str((getattr(tag, "attrs", None) or {}).get("bgcolor", "")).lower().replace(" ", "")
+        if bgcolor and bgcolor not in _WHITE_VALUES and bgcolor != "white":
+            out = True
+        parent = tag.parent
+        if not out and parent is not None and getattr(parent, "name", None) != "[document]":
+            out = self.dark_background(parent)
+        self._dark[id(tag)] = out
+        return out
+
+    def subtree_hidden(self, tag) -> bool:
+        """Hidden together with everything inside it, whatever the children say."""
         attrs = tag.attrs or {}
         if "hidden" in attrs or str(attrs.get("aria-hidden", "")).lower() == "true":
             return True
@@ -789,33 +890,49 @@ class _HtmlStyles:
         d = self.decls(tag)
         if not d:
             return False
-        if d.get("display") == "none" or d.get("visibility") in ("hidden", "collapse"):
+        if d.get("display") == "none":
             return True
         op = d.get("opacity")
-        if op and (_px(op) is not None and _px(op) <= 0.1):
-            return True
-        size = d.get("font-size")
-        if size and (_px(size) is not None and _px(size) <= (2 if not size.endswith(("em", "%")) else 0.1 * 16)):
-            return True
-        color = d.get("color", "")
-        if color == "transparent" or re.fullmatch(r"rgba\(\d+,\d+,\d+,0(?:\.0+)?\)", color):
+        if op and (_NUM_RE.fullmatch(op) and float(op) <= 0.1):
             return True
         if d.get("clip", "").startswith("rect(0") or "inset(100%)" in d.get("clip-path", "") or "circle(0" in d.get("clip-path", ""):
             return True
         indent = d.get("text-indent")
-        if indent and (_px(indent) or 0) <= -999:
+        if indent and (_css_length(indent) or 0) <= -999:
             return True
         if d.get("position") in ("absolute", "fixed"):
             for k in ("left", "top", "right", "bottom", "margin-left", "margin-top"):
                 v = d.get(k)
-                if v and (_px(v) or 0) <= -999:
+                if v and (_css_length(v) or 0) <= -999:
                     return True
         zero = lambda k: d.get(k) in ("0", "0px", "0pt")  # noqa: E731
         if (zero("height") or zero("max-height") or zero("width") or zero("max-width")) and d.get("overflow") in ("hidden", "clip"):
             return True
-        if color in _WHITE_VALUES and not self.dark_background(tag):
-            return True   # white text on a white (or unset) background; a heuristic, a background image is not modelled
         return False
+
+    def own_text_hidden(self, tag) -> bool:
+        """The element's OWN text cannot be seen (its children are judged on their own values)."""
+        px = self.font_px(tag)
+        if px is not None and px <= 2.0:
+            return True
+        if self._inherited(tag, "visibility") in ("hidden", "collapse"):
+            return True
+        color = self._inherited(tag, "color")
+        if color == "transparent" or re.fullmatch(r"rgba\(\d+,\d+,\d+,0(?:\.0+)?\)", color):
+            return True
+        return color in _WHITE_VALUES and not self.dark_background(tag)
+
+    def collapsed(self, tag, controlled_ids: set[str]) -> bool:
+        """A closed disclosure: a child of a closed <details>, a panel an aria-expanded=false control points at, a
+        Bootstrap `.collapse` panel, a hidden tab panel. Hidden the way an attacker would hide text, which is why it is
+        counted separately and a flag can keep it."""
+        attrs = tag.attrs or {}
+        parent = tag.parent
+        if parent is not None and getattr(parent, "name", None) == "details" and "open" not in (parent.attrs or {}):
+            return True
+        classes = attrs.get("class") or []
+        return (attrs.get("id") in controlled_ids) or ("collapse" in classes and "show" not in classes) \
+            or str(attrs.get("role", "")).lower() == "tabpanel"
 
 
 _HTML_TAG_RE = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9:-]*)([^>]*)>")
@@ -827,33 +944,82 @@ def _check_html_depth(html: str) -> None:
     """Reject absurd nesting before any tree is built: a 537 KB page of 50,000 nested divs holds the parser for the
     whole timeout, and a page nested deeper than the main parser allows must be refused, not handed to a weaker
     fallback that would index its hidden text. Browsers stop at 512."""
-    depth = elements = 0
+    stack: list[str] = []
+    open_counts: dict[str, int] = {}
+    elements = 0
     for m in _HTML_TAG_RE.finditer(html):
         elements += 1
         if elements > _LIMITS.max_elements:
             raise LimitExceeded(f"HTML has more than {_LIMITS.max_elements} elements")
         name = m.group(2).lower()
         if m.group(1):
-            depth = max(0, depth - 1)
+            # A close tag only closes an element that is actually open (and everything opened inside it). A stray </p>
+            # closes nothing: counting it as a close let `<div></p>` x 50,000 hide a 50,000-deep tree from this check.
+            if open_counts.get(name):
+                while stack:
+                    top = stack.pop()
+                    open_counts[top] -= 1
+                    if top == name:
+                        break
         elif name not in _HTML_VOID and name not in _OPTIONAL_END and not m.group(3).rstrip().endswith("/"):
-            depth += 1
-            if depth > MAX_HTML_DEPTH:
+            stack.append(name)
+            open_counts[name] = open_counts.get(name, 0) + 1
+            if len(stack) > MAX_HTML_DEPTH:
                 raise LimitExceeded(f"HTML is nested more than {MAX_HTML_DEPTH} levels deep")
 
 
 def _html_main(html: str) -> ParsedDocument:
-    from bs4 import BeautifulSoup
+    from bs4 import BeautifulSoup, Comment, NavigableString
     _check_html_depth(html)
 
     soup = BeautifulSoup(html, "lxml")
     hidden: Counter = Counter()
     styles = _HtmlStyles(soup)
+    controlled = {i for t in soup.find_all(attrs={"aria-expanded": "false"}) for i in str(t.get("aria-controls", "")).split()}
     # Decide everything against the untouched tree first (ancestors are consulted), then remove.
-    doomed = [tag for tag in soup.find_all(True) if styles.hidden(tag)]
-    for tag in doomed:
-        if not getattr(tag, "decomposed", False):
+    whole = [t for t in soup.find_all(True) if styles.subtree_hidden(t)]
+    own = [t for t in soup.find_all(True) if styles.own_text_hidden(t)]
+    # Closed disclosures that CSS alone does not hide in the markup: <details> without `open` (all but its summary) and
+    # Bootstrap-style `.collapse` panels without `.show`.
+    whole_ids = {id(t) for t in whole}
+    for d in soup.find_all("details"):
+        if "open" not in (d.attrs or {}):
+            for c in list(d.children):
+                if getattr(c, "name", None) == "summary":
+                    continue
+                if isinstance(c, Comment):
+                    continue
+                if isinstance(c, NavigableString):
+                    if c.strip():
+                        hidden["html_collapsed"] += 1
+                        if not _LIMITS.keep_collapsed:
+                            c.extract()
+                elif id(c) not in whole_ids:
+                    whole_ids.add(id(c))
+                    whole.append(c)
+    for t in soup.find_all(class_="collapse"):
+        classes = t.get("class") or []
+        if "show" not in classes and "in" not in classes and id(t) not in whole_ids:
+            whole_ids.add(id(t))
+            whole.append(t)
+    for tag in whole:
+        if getattr(tag, "decomposed", False):
+            continue
+        if styles.collapsed(tag, controlled):
+            hidden["html_collapsed"] += 1
+            if _LIMITS.keep_collapsed:
+                continue
+        else:
             hidden["html_hidden_elements"] += 1
-            tag.decompose()
+        tag.decompose()
+    for tag in own:
+        if getattr(tag, "decomposed", False):
+            continue
+        strings = [c for c in tag.children if isinstance(c, NavigableString) and not isinstance(c, Comment) and c.strip()]
+        if strings:
+            hidden["html_hidden_elements"] += 1
+            for c in strings:
+                c.extract()
     for tag in soup(list(_BOILERPLATE_TAGS)):
         tag.decompose()
     for tag in soup.find_all(attrs={"class": _BOILERPLATE_ATTR_RE}) + soup.find_all(attrs={"id": _BOILERPLATE_ATTR_RE}):
@@ -1077,10 +1243,20 @@ def _hidden_strings(content: bytes, off_layers: frozenset = frozenset()) -> list
     return out
 
 
-MAX_PDF_PAGE_CONTENT = 2 * 1024 * 1024     # decoded content stream of one page; pypdf interprets ~0.2 MB/s
 MAX_PDF_SHARED_REPEATS = 2                  # the same big stream used by more pages than this is a repeat bomb
-PDF_TEXT_BUDGET_S = 25.0                    # wall clock for text extraction across all pages
 _PDF_STATE: dict = {"seen": {}, "t0": 0.0}
+
+
+class _PageSkipped(Exception):
+    """One page is too heavy to interpret; the rest of the document still is."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _BudgetHit(Exception):
+    """The extraction time budget ran out; pages processed so far are kept."""
 
 
 def _pdf_page_text(page, hidden: Counter) -> str:
@@ -1091,15 +1267,16 @@ def _pdf_page_text(page, hidden: Counter) -> str:
         data = b""
     # Extracting a page interprets its content stream in pure Python, and pages may share one stream: 400 pages sharing a
     # 20 MB stream is hours of work from a 95 KB file. Bound one page, the repeats of a big stream, and the total time.
-    if len(data) > MAX_PDF_PAGE_CONTENT:
-        raise LimitExceeded("a PDF page has more content than can be processed safely")
+    # The offending page is skipped, not the document: the rest is kept and the result is marked degraded.
+    if len(data) > _LIMITS.pdf_page_bytes:
+        raise _PageSkipped("more content than can be processed safely (KB_PARSE_PDF_PAGE_BYTES)")
     if len(data) > 256 * 1024:
         key = hash(data)
         _PDF_STATE["seen"][key] = _PDF_STATE["seen"].get(key, 0) + 1
         if _PDF_STATE["seen"][key] > MAX_PDF_SHARED_REPEATS:
-            raise LimitExceeded("PDF pages share or repeat more content than can be processed safely")
-    if time.monotonic() - _PDF_STATE["t0"] > PDF_TEXT_BUDGET_S:
-        raise LimitExceeded("PDF text extraction exceeded its time budget")
+            raise _PageSkipped("shares or repeats a large content stream")
+    if time.monotonic() - _PDF_STATE["t0"] > _LIMITS.pdf_budget_s:
+        raise _BudgetHit()
     full = page.extract_text() or ""
     # Longest first, so a hidden string is never matched inside a longer one. Only strings that pypdf decoded the
     # same way (simple fonts) can be located; invisible text in CID-keyed fonts is a known gap.
@@ -1113,17 +1290,32 @@ def _pdf_page_text(page, hidden: Counter) -> str:
 def _pdf_pypdf(reader, state: dict) -> ParsedDocument:
     if reader is None:
         raise TierSkip
-    texts = []
+    texts: list[str] = []
     hidden: Counter = Counter()
-    for page in reader.pages:
+    skipped: Counter = Counter()
+    stopped_at: int | None = None
+    pages = list(reader.pages)
+    _PDF_STATE["t0"] = time.monotonic()
+    for i, page in enumerate(pages):
         try:
             texts.append(_pdf_page_text(page, hidden))
-        except LimitExceeded:
-            raise
+        except _PageSkipped as exc:
+            texts.append("")
+            skipped[exc.reason] += 1
+        except _BudgetHit:
+            texts.extend([""] * (len(pages) - i))
+            stopped_at = i
+            break
         except Exception:
             texts.append("")
     state["pypdf_had_text"] = any(t.strip() for t in texts)
-    return _pdf_pages_to_doc(texts, hidden=dict(hidden))
+    state["limit_hit"] = bool(skipped or stopped_at is not None)
+    warnings = [f"{n} page(s) skipped: {reason}" for reason, n in skipped.items()]
+    if stopped_at is not None:
+        warnings.append(f"text extraction stopped at its time budget after {stopped_at} of {len(pages)} pages")
+    if warnings and not state["pypdf_had_text"]:
+        raise LimitExceeded("no PDF page could be read: " + "; ".join(warnings))
+    return _pdf_pages_to_doc(texts, degraded=bool(warnings), warnings=warnings, hidden=dict(hidden))
 
 
 _ESCAPES = {b"n": b"\n", b"r": b"\r", b"t": b"\t", b"b": b"\b", b"f": b"\f", b"(": b"(", b")": b")", b"\\": b"\\"}
@@ -1265,7 +1457,7 @@ def _pdf_raw(raw: bytes, state: dict) -> ParsedDocument:
     """Text-layer rung for files pypdf cannot open or read nothing from: inflate content streams and read the
     show-text operators. Handles simple (non-CID) fonts only; the quality gate rejects what comes out garbled.
     Skipped when pypdf did read text: this rung has no page boundaries, so it would hide empty pages."""
-    if state.get("pypdf_had_text"):
+    if state.get("pypdf_had_text") or state.get("limit_hit"):
         raise TierSkip
     lines: list[str] = []
     hidden: Counter = Counter()
@@ -1294,17 +1486,15 @@ def _pdf_raw(raw: bytes, state: dict) -> ParsedDocument:
     return doc
 
 
-def _pdf_ocr(reader, language: str | None) -> ParsedDocument:
+def _pdf_ocr(reader, language: str | None, state: dict) -> ParsedDocument:
     """OCR the pages that have no text layer, using the images embedded in them (a scan is one image per page)."""
-    if reader is None:
-        raise TierSkip
+    if reader is None or state.get("limit_hit"):
+        raise TierSkip   # pages skipped for size are not scans: OCR would not help and would mislabel them
     texts: list[str] = []
     empty: list[int] = []
     for i, page in enumerate(reader.pages):
         try:
             t = _pdf_page_text(page, Counter())
-        except LimitExceeded:
-            raise
         except Exception:
             t = ""
         texts.append(t)
@@ -1342,21 +1532,21 @@ def parse_by_type(raw: bytes, content_type: str, limits: Limits, language: str |
         doc = run_ladder([
             ("pypdf", lambda: _pdf_pypdf(reader, state)),
             ("pdf-raw", lambda: _pdf_raw(raw, state)),
-            ("ocr", lambda: _pdf_ocr(reader, language)),
+            ("ocr", lambda: _pdf_ocr(reader, language, state)),
         ])
     elif ct == detect.DOCX:
         zf = guard_zip(raw, limits, "DOCX")
-        _count_all_elements(zf, limits.max_elements)
+        _count_all_elements(zf, limits.max_ooxml_elements)
         _count_elements(zf, r"word/document\.xml", _W + "p", limits.max_paragraphs, "paragraphs")
         doc = run_ladder([("python-docx", lambda: _docx_native(zf, raw)), ("docx-xml", lambda: _docx_xml(zf))])
     elif ct == detect.PPTX:
         zf = guard_zip(raw, limits, "PPTX")
-        _count_all_elements(zf, limits.max_elements)
+        _count_all_elements(zf, limits.max_ooxml_elements)
         _count_elements(zf, r"ppt/slides/slide\d+\.xml", "{*}p", limits.max_paragraphs, "paragraphs")
         doc = run_ladder([("python-pptx", lambda: _pptx_native(zf, raw, limits)), ("pptx-xml", lambda: _pptx_xml(zf, limits))])
     elif ct == detect.XLSX:
         zf = guard_zip(raw, limits, "XLSX")
-        _count_all_elements(zf, limits.max_elements)
+        _count_all_elements(zf, 3 * limits.max_cells)
         _count_elements(zf, r"xl/worksheets/sheet\d+\.xml", "{*}c", limits.max_cells, "cells")
         doc = run_ladder([("openpyxl", lambda: _xlsx_native(zf, raw, limits)), ("xlsx-xml", lambda: _xlsx_xml(zf, limits))])
     else:

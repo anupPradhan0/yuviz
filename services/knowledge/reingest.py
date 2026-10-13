@@ -25,9 +25,8 @@ from . import db
 log = logging.getLogger(__name__)
 
 DEFAULT_BATCH = 100
-# Marks the job as background work: _claim_next_job serves every other pending job first, so a tenant-wide
-# re-ingest never delays another tenant's (or the same tenant's) fresh uploads.
-REINGEST_STAGE = "reingest-queued"
+# Jobs are queued with background = true (a column that claim, retry and failure never clear): _claim_next_job serves
+# every other pending job first, so a tenant-wide re-ingest never delays fresh uploads, even after a retry.
 
 _DUE_SQL = """
     SELECT d.id, d.kb_id FROM kb_documents d
@@ -48,7 +47,7 @@ async def requeue_documents(
     """Document ids re-queued (or that would be, with dry_run). `except_version` skips documents already at that
     chunker_version, so switching to fixed windows does not redo documents that are already fixed-v1. At most `batch`
     documents per call (oldest-updated first; a re-queued document's updated_at moves it to the back, so repeated
-    calls walk through the whole set). The jobs run behind all normal ingestion work (REINGEST_STAGE)."""
+    calls walk through the whole set). The jobs run behind all normal ingestion work (kb_ingestion_jobs.background)."""
     limit = batch if batch and batch > 0 else 10**9
     async with tenant_conn(pool, explicit_tenant=str(tenant_id), reason="kb-ingestion-job") as conn:
         if dry_run:
@@ -65,9 +64,9 @@ async def requeue_documents(
                 UPDATE kb_documents d SET version = d.version + 1, updated_at = now()
                 FROM due WHERE d.id = due.id RETURNING d.id, d.kb_id
             )
-            INSERT INTO kb_ingestion_jobs (document_id, kb_id, stage) SELECT id, kb_id, $5 FROM bumped RETURNING document_id
+            INSERT INTO kb_ingestion_jobs (document_id, kb_id, background) SELECT id, kb_id, true FROM bumped RETURNING document_id
             """,
-            tenant_id, kb_id, except_version, limit, REINGEST_STAGE,
+            tenant_id, kb_id, except_version, limit,
         )
     queued = [str(r["document_id"]) for r in rows]
     log.info("re-queued %d document(s) tenant=%s kb=%s", len(queued), tenant_id, kb_id)

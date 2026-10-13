@@ -184,6 +184,9 @@ ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS next_attempt_at   TIMESTA
 ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS max_attempts      INT NOT NULL DEFAULT 5;
 ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS stage             TEXT;
 ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS error_class       TEXT;
+-- Background work (a re-ingest after a chunker change): claimed only after every normal job, and never cleared by
+-- claim, retry or failure, so a retried re-ingest still queues behind fresh uploads.
+ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS background        BOOLEAN NOT NULL DEFAULT false;
 -- Each pair is one DO block so the drop and the re-add commit together.
 DO $$ BEGIN
     ALTER TABLE kb_ingestion_jobs DROP CONSTRAINT IF EXISTS kb_ingestion_jobs_status_check;

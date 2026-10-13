@@ -390,26 +390,30 @@ export default function KnowledgeBasesPage() {
                     <td>
                       {canManage && (
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          {(s.status === "failed" || (s.error?.startsWith("re-index failed:") ?? false)) && (
+                          {(s.status === "failed" || s.retryable) && (
                             <>
-                              <button
-                                className="btn btn-ghost btn-sm"
-                                disabled={retryingSource === s.id || replacingSource === s.id}
-                                onClick={() => handleRetry(s)}
-                                title="Re-run ingestion without uploading again"
-                              >
-                                <RefreshCw size={12} />
-                                {retryingSource === s.id ? "Retrying…" : "Retry"}
-                              </button>
-                              <button
-                                className="btn btn-ghost btn-sm"
-                                disabled={retryingSource === s.id || replacingSource === s.id}
-                                onClick={() => handleReplaceClick(s)}
-                                title="Upload a different file to replace this one"
-                              >
-                                <Upload size={12} />
-                                {replacingSource === s.id ? "Replacing…" : "Replace"}
-                              </button>
+                              {s.retryable && (
+                                <button
+                                  className="btn btn-ghost btn-sm"
+                                  disabled={retryingSource === s.id || replacingSource === s.id}
+                                  onClick={() => handleRetry(s)}
+                                  title="Re-run ingestion without uploading again"
+                                >
+                                  <RefreshCw size={12} />
+                                  {retryingSource === s.id ? "Retrying…" : "Retry"}
+                                </button>
+                              )}
+                              {s.status === "failed" && (
+                                <button
+                                  className="btn btn-ghost btn-sm"
+                                  disabled={retryingSource === s.id || replacingSource === s.id}
+                                  onClick={() => handleReplaceClick(s)}
+                                  title="Upload a different file to replace this one"
+                                >
+                                  <Upload size={12} />
+                                  {replacingSource === s.id ? "Replacing…" : "Replace"}
+                                </button>
+                              )}
                             </>
                           )}
                           <button

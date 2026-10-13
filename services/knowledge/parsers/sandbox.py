@@ -46,7 +46,8 @@ log = logging.getLogger(__name__)
 _REPO_ROOT = str(Path(__file__).resolve().parents[3])
 _WORKER = str(Path(__file__).with_name("_worker.py"))
 _PS = shutil.which("ps")
-_RSS_POLL_S = 0.02
+_RSS_POLL_MIN_S = 0.02          # while memory is near the limit or growing quickly
+_RSS_POLL_MAX_S = 0.5           # when it is small and stable (spawning `ps` 50x a second cost ~35% of a core per parse)
 MIN_MEMORY_MB = 256            # below this the child cannot even import its libraries (every document would dead-letter)
 EXIT_MEMORY = 75               # the child's own memory guard exits with this
 _STDERR_TAIL = 4096
@@ -76,9 +77,34 @@ async def spawn(tail: list[str], cwd: str, nonce: str = "") -> asyncio.subproces
     )
 
 
+def _group_rss_proc(pgid: int) -> float:
+    """RSS of every process in the group straight from /proc (Linux): no process is spawned."""
+    page = os.sysconf("SC_PAGE_SIZE")
+    total = 0
+    with os.scandir("/proc") as it:
+        for e in it:
+            if not e.name.isdigit():
+                continue
+            try:
+                with open(f"/proc/{e.name}/stat", "rb") as f:
+                    data = f.read()
+            except OSError:
+                continue
+            # pid (comm) state ppid pgrp ... rss: comm may hold spaces and parentheses, so split after the last ')'
+            fields = data[data.rfind(b")") + 2:].split()
+            if len(fields) > 21 and int(fields[2]) == pgid:
+                total += int(fields[21]) * page
+    return total / (1024 * 1024)
+
+
 async def _group_rss_mb(pgid: int) -> float | None:
-    """Resident memory of the whole process group (the parser and anything it started), in MB. `ps -axo` works the
-    same on macOS and Linux, so this is the one memory cap that holds on both."""
+    """Resident memory of the whole process group (the parser and anything it started), in MB. /proc on Linux, otherwise
+    `ps -axo pgid=,rss=` (the same on macOS and Linux)."""
+    if sys.platform.startswith("linux") and os.path.isdir("/proc"):
+        try:
+            return await asyncio.to_thread(_group_rss_proc, pgid)
+        except (OSError, ValueError):
+            pass
     if _PS is None:
         return None
     try:
@@ -94,6 +120,14 @@ async def _group_rss_mb(pgid: int) -> float | None:
         return total / 1024
     except (OSError, ValueError):
         return None
+
+
+def _next_poll_interval(interval: float, rss: float, last: float, limit_mb: float) -> float:
+    """Poll fast while memory is large (over 40% of the limit) or growing quickly (over 5% of the limit since the last
+    poll); otherwise back off, doubling up to the maximum."""
+    if rss > 0.4 * limit_mb or rss - last > 0.05 * limit_mb:
+        return _RSS_POLL_MIN_S
+    return min(_RSS_POLL_MAX_S, interval * 2)
 
 
 async def _exited(proc: asyncio.subprocess.Process) -> None:
@@ -186,13 +220,21 @@ async def _supervise(proc: asyncio.subprocess.Process, raw: bytes, limits: Limit
     cap = limits.max_chars * 4 + (4 << 20)
 
     async def watchdog() -> None:
+        # Fast while memory is near the limit or growing quickly, slow while it is small and flat; the child's own guard
+        # (a few ms) is the fast backstop either way.
+        interval, last = _RSS_POLL_MIN_S, 0.0
         while True:
-            await asyncio.sleep(_RSS_POLL_S)
+            await asyncio.sleep(interval)
             rss = await _group_rss_mb(pid)
-            if rss is not None and rss > limits.memory_mb:
+            if rss is None:
+                interval = _RSS_POLL_MAX_S
+                continue
+            if rss > limits.memory_mb:
                 breach.append("memory")
                 _killpg(pid)
                 return
+            interval = _next_poll_interval(interval, rss, last, limits.memory_mb)
+            last = rss
 
     async def stdout() -> tuple[bytes, bool]:
         data, over = await _read_capped(proc.stdout, cap)

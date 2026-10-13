@@ -291,7 +291,7 @@ async def test_empty_paragraph_docx_is_rejected_by_the_streaming_paragraph_count
     assert len(raw) < 200_000
     t0 = time.time()
     reason = await _reason(raw)
-    assert "more than 200000 paragraphs" in reason or "XML elements" in reason
+    assert "more than 800000 paragraphs" in reason or "XML elements" in reason
     assert time.time() - t0 < 10 and _bounded_since(before)  # unfixed: python-docx builds ~1 GB
 
 
@@ -659,19 +659,59 @@ def _shared_stream_pdf(pages: int, repeats: int = 450_000) -> bytes:
     return bytes(out)
 
 
-async def test_400_pages_sharing_one_huge_content_stream_are_refused_fast():
+async def test_400_pages_sharing_one_huge_content_stream_with_no_other_text_fail_fast_with_the_reason():
     raw = _shared_stream_pdf(400)
     assert len(raw) < 200_000
     t0 = time.time()
-    assert "more content than can be processed" in await _reason(raw, limits=Limits(timeout_s=40))
+    reason = await _reason(raw, limits=Limits(timeout_s=40))
+    assert "no PDF page could be read" in reason and "more content than can be processed" in reason
     assert time.time() - t0 < 10
 
 
-async def test_400_pages_sharing_a_stream_under_the_per_page_cap_are_caught_by_the_repeat_check():
+async def test_400_pages_sharing_a_stream_under_the_per_page_cap_degrade_after_the_repeat_check():
     raw = _shared_stream_pdf(400, repeats=30_000)     # 1.4 MB per page, under the 2 MB cap, shared by every page
     t0 = time.time()
-    assert "share or repeat" in await _reason(raw, limits=Limits(timeout_s=55))
-    assert time.time() - t0 < 40
+    doc = await parse_document(raw, limits=Limits(timeout_s=55))
+    assert doc.degraded and any("shares or repeats" in w for w in doc.warnings)
+    assert "visible text on every page" in doc.text() and time.time() - t0 < 40
+
+
+def _pdf_with_a_heavy_page() -> bytes:
+    heavy = "0 0 m 10 10 l S\n" * 220_000                                  # ~3.5 MB of vector drawing, no text
+    return B.make_pdf([{"text": VISIBLE + ".\nFirst page text that is perfectly readable."},
+                       {"text": "Second page text that is also readable.", "ops": heavy},
+                       {"text": "Third page text after the heavy one."}])
+
+
+async def test_one_heavy_vector_page_degrades_the_document_instead_of_rejecting_it():
+    raw = _pdf_with_a_heavy_page()
+    doc = await _parse(raw)
+    assert doc.degraded and doc.parser_used == "pypdf"
+    assert any("1 page(s) skipped" in w and "KB_PARSE_PDF_PAGE_BYTES" in w for w in doc.warnings)
+    assert VISIBLE in doc.text() and "Third page text" in doc.text() and "Second page text" not in doc.text()
+
+
+async def test_the_page_size_limit_is_configurable():
+    doc = await parse_document(_pdf_with_a_heavy_page(), limits=Limits(pdf_page_bytes=8 * 1024 * 1024, timeout_s=55))
+    assert "Second page text" in doc.text() and not any("skipped" in w for w in doc.warnings)
+
+
+def test_the_extraction_time_budget_stops_early_and_keeps_what_was_read(monkeypatch):
+    import itertools
+    import types
+
+    raw = B.make_pdf([{"text": f"Page number {i} has plenty of readable text on it."} for i in range(8)])
+    ticks = itertools.count()
+    monkeypatch.setattr(formats, "time", types.SimpleNamespace(monotonic=lambda: next(ticks) * 2.0))   # a fake clock
+    doc = formats.parse_by_type(raw, detect.PDF, Limits(pdf_budget_s=5))
+    assert doc.degraded and any("stopped at its time budget after 2 of 8 pages" in w for w in doc.warnings)
+    assert "Page number 0" in doc.text() and "Page number 1" in doc.text() and "Page number 5" not in doc.text()
+
+
+async def test_a_zero_budget_with_nothing_read_is_a_clear_final_rejection():
+    raw = B.make_pdf([{"text": "Page with readable text here."}])
+    reason = await _reason(raw, limits=Limits(pdf_budget_s=0.0))
+    assert "no PDF page could be read" in reason and "time budget" in reason
 
 
 # ── S1 interim: kill switch ─────────────────────────────────────────────
@@ -793,14 +833,46 @@ def _bookmark_flood_docx() -> bytes:
     return B._zip({"[Content_Types].xml": b"<Types/>", "word/document.xml": head + b'<w:bookmarkStart w:id="1" w:name="a"/>' * 1_000_000 + b"</w:p></w:body></w:document>"})
 
 
-@pytest.mark.parametrize("raw_fn", [_tc_flood_docx, _bookmark_flood_docx])
-async def test_element_floods_are_rejected_by_the_general_element_bound(raw_fn):
+async def test_a_flood_of_table_cells_is_rejected_by_the_ooxml_element_bound():
     before = _children_maxrss_mb()
-    raw = raw_fn()
+    raw = _tc_flood_docx()
     assert len(raw) < 400_000
     t0 = time.time()
-    assert "XML elements" in await _reason(raw)
+    assert "more than 2500000 XML elements" in await _reason(raw)
     assert time.time() - t0 < 15 and _bounded_since(before)
+
+
+async def test_a_bookmark_flood_stays_under_the_documented_memory_bound():
+    """1M elements is below the element cap on purpose (a 1,000-page document is ~220k, a heavy one ~1.4M); the memory
+    watchdog and the child's self-exit are the backstop. Documented bound: memory_mb (1024) plus a little overshoot."""
+    before = _children_maxrss_mb()
+    raw = _bookmark_flood_docx()
+    t0 = time.time()
+    with pytest.raises(ParseRejected):
+        await parse_document(raw)
+    assert time.time() - t0 < 30 and _bounded_since(before, ceiling=1100)
+
+
+async def test_ordinary_large_files_still_ingest_with_bounded_memory():
+    """Both sides of the element cap: these were rejected by the 500k cap in 5540518. Measured here (idle host): 30k-row
+    XLSX ~150 MB peak / 2.2 s, 1,000-page DOCX ~140 MB / 3.5 s. Timing is generous because CI hosts are shared."""
+    xlsx_raw, docx_raw = B.big_xlsx(30_000), B.big_docx(1000)
+    before = _children_maxrss_mb()
+    t0 = time.time()
+    xlsx = await parse_document(xlsx_raw)
+    assert xlsx.parser_used == "openpyxl" and len(xlsx.text()) > 3_000_000
+    docx = await parse_document(docx_raw)
+    assert docx.parser_used == "python-docx" and "Section 999" in docx.text()
+    assert time.time() - t0 < 120 and _bounded_since(before, ceiling=400)
+
+
+async def test_a_heavy_docx_of_about_a_million_elements_still_parses():
+    head = b'<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+    body = b"<w:p><w:r><w:t>Ordinary paragraph.</w:t></w:r></w:p>" * 200_000   # 600k elements
+    raw = B._zip({"[Content_Types].xml": b"<Types/>", "word/document.xml": head + body + b"</w:body></w:document>"})
+    before = _children_maxrss_mb()
+    doc = await parse_document(raw)
+    assert "Ordinary paragraph" in doc.text() and _bounded_since(before, ceiling=700)
 
 
 async def test_a_flood_of_html_elements_is_rejected_before_a_tree_is_built():
@@ -965,3 +1037,159 @@ async def test_pdf_text_in_an_optional_content_layer_that_is_off_by_default_is_r
     doc = await _parse(out.getvalue())
     assert PAYLOAD not in doc.text() and VISIBLE in doc.text() and "Layer on text stays" in doc.text()
     assert doc.hidden_removed.get("pdf_invisible_text", 0) >= 1
+
+
+# ── S3 round 3: HTML stylesheet engine is linear, depth is real, false positives are gone ──
+
+async def test_a_stylesheet_with_no_braces_does_not_stall_the_parser(hang_guard):
+    raw = f"<html><head><style>{'a' * 196_000}</style></head><body><p>{VISIBLE}.</p></body></html>".encode()
+    signal.alarm(10)
+    t0 = time.time()
+    doc = await _parse(raw)
+    signal.alarm(0)
+    assert VISIBLE in doc.text() and time.time() - t0 < 10     # the regex version ran to the 60 s timeout
+
+
+@pytest.mark.parametrize("css,expect", [
+    (",".join(f".a{i}" for i in range(60_000)) + "{display:none}", "too many selectors"),       # ~850 KB, one rule
+    ("".join(f".c{i}{{display:none}}" for i in range(6_000)), "too many rules"),
+    ("/*" + "x" * 1_100_000 + "*/.a{display:none}", "too large to evaluate"),
+])
+async def test_stylesheet_floods_end_quickly_as_final_rejections(css, expect):
+    raw = f"<html><head><style>{css}</style></head><body><p class='a0'>{VISIBLE}.</p></body></html>".encode()
+    t0 = time.time()
+    assert expect in await _reason(raw)
+    assert time.time() - t0 < 10
+
+
+async def test_stray_close_tags_cannot_hide_deep_nesting():
+    raw = b"<html><body>" + b"<div></p>" * 50_000 + b"<p>text</p></body></html>"
+    t0 = time.time()
+    assert "nested more than 400 levels" in await _reason(raw)
+    assert time.time() - t0 < 3                                   # was 16.8 s of tree building
+
+
+def _page(body: str, css: str = "") -> bytes:
+    return f"<html><head><style>{css}</style></head><body><main>{body}</main></body></html>".encode()
+
+
+async def test_a_zero_size_container_hides_only_its_own_text_not_its_sized_children():
+    doc = await _parse(_page(f'<div style="font-size:0">{PAYLOAD}<span style="font-size:16px">Visible column one</span>'
+                             f'<span style="font-size:16px">Visible column two</span></div><p>{VISIBLE}.</p>'))
+    assert PAYLOAD not in doc.text() and "Visible column one" in doc.text() and "Visible column two" in doc.text()
+
+
+async def test_children_inheriting_a_zero_size_are_hidden_too():
+    doc = await _parse(_page(f'<div style="font-size:0"><span>{PAYLOAD}-inherits</span></div><p>{VISIBLE}.</p>'))
+    assert PAYLOAD not in doc.text() and VISIBLE in doc.text()
+
+
+@pytest.mark.parametrize("size", ["2vw", "1in", "5vh", "calc(1px)", "large", "1rem", "3px", "50%", "0.5em"])
+async def test_sizes_that_are_not_tiny_or_not_knowable_keep_the_text(size):
+    doc = await _parse(_page(f'<p style="font-size:{size}">Sized text {size.replace("(", "").replace(")", "")}</p>'))
+    assert "Sized text" in doc.text()
+
+
+@pytest.mark.parametrize("size", ["0", "1px", "2px", "1pt", "0.1em", "10%", "0.01in"])
+async def test_tiny_sizes_are_hidden(size):
+    doc = await _parse(_page(f'<p style="font-size:{size}">{PAYLOAD}</p><p>{VISIBLE}.</p>'))
+    assert PAYLOAD not in doc.text() and VISIBLE in doc.text()
+
+
+async def test_unknown_offsets_and_indents_do_not_hide_but_real_ones_do():
+    doc = await _parse(_page(f'<p style="text-indent:-9999vw">Viewport indent kept</p>'
+                             f'<p style="position:absolute;left:-9999px">{PAYLOAD}</p><p>{VISIBLE}.</p>'))
+    assert "Viewport indent kept" in doc.text() and PAYLOAD not in doc.text()
+
+
+@pytest.mark.parametrize("css", [
+    ".hero{background:url(banner.png) center;color:#fff}",
+    ".hero{background-image:linear-gradient(#000,#333);color:#fff}",
+    ".hero{background:radial-gradient(circle,#123,#456);color:#ffffff}",
+])
+async def test_white_text_over_an_image_or_gradient_is_kept(css):
+    doc = await _parse(_page('<div class="hero"><h2>Welcome banner text</h2></div>', css))
+    assert "Welcome banner text" in doc.text()
+
+
+async def test_white_text_with_no_background_at_all_is_still_removed():
+    doc = await _parse(_page(f'<p style="color:white">{PAYLOAD}</p><p>{VISIBLE}.</p>'))
+    assert PAYLOAD not in doc.text() and VISIBLE in doc.text()
+
+
+_COLLAPSED = (f'<details><summary>How long do refunds take?</summary>{PAYLOAD}-details answer</details>'
+              '<button aria-expanded="false" aria-controls="p1">Shipping?</button>'
+              f'<div id="p1" hidden>{PAYLOAD}-panel answer</div>'
+              f'<div class="collapse">{PAYLOAD}-bootstrap answer</div>'
+              f'<details open><summary>Open one</summary>Open details answer is visible</details>')
+
+
+async def test_collapsed_content_is_stripped_by_default_and_counted_separately():
+    doc = await _parse(_page(_COLLAPSED + f'<div style="display:none">{PAYLOAD}-attack</div><p>{VISIBLE}.</p>'))
+    assert PAYLOAD not in doc.text() and "Open details answer is visible" in doc.text() and "How long do refunds take?" in doc.text()
+    assert doc.hidden_removed.get("html_collapsed") == 3 and doc.hidden_removed.get("html_hidden_elements") == 1
+
+
+async def test_keep_collapsed_flag_indexes_closed_disclosures_but_never_plain_hidden_text(monkeypatch):
+    monkeypatch.setenv("KNOWLEDGE_KEEP_COLLAPSED_CONTENT", "1")
+    doc = await parse_document(_page(_COLLAPSED + f'<div style="display:none">{PAYLOAD}-attack</div>'), limits=Limits.from_env())
+    assert f"{PAYLOAD}-details answer" in doc.text() and f"{PAYLOAD}-panel answer" in doc.text()
+    assert f"{PAYLOAD}-attack" not in doc.text()
+
+
+# ── watchdog cost: adaptive polling, /proc on Linux ─────────────────────
+
+async def test_the_watchdog_polls_slowly_while_memory_is_small_and_flat(monkeypatch):
+    calls = []
+    real = sandbox._group_rss_mb
+
+    async def counted(pgid):
+        calls.append(time.monotonic())
+        return await real(pgid)
+
+    monkeypatch.setattr(sandbox, "_group_rss_mb", counted)
+    t0 = time.monotonic()
+    with pytest.raises(ParseRejected):
+        await _probe("import time, json, sys\ntime.sleep(3)\nsys.stdout.write(json.dumps({'ok': False, 'reason': 'x'}))", Limits(memory_mb=4096))
+    elapsed = time.monotonic() - t0
+    assert len(calls) < elapsed / sandbox._RSS_POLL_MIN_S / 3, (len(calls), elapsed)   # fixed 20 ms polling would be ~150
+    gaps = [b - a for a, b in zip(calls, calls[1:])]
+    assert max(gaps) > 0.2                                                           # it backed off
+
+
+async def test_the_watchdog_still_reacts_fast_when_memory_grows():
+    """Memory grows ~2 GB/s: the child must be killed within a few polls of crossing the limit, not allowed to run on to
+    its full size. (Slow polling would let it reach ~1 GB before the first check after it starts growing.)"""
+    before = _children_maxrss_mb()
+    code = ("import time\nchunks = []\nfor _ in range(60):\n    chunks.append(b'x' * (20 << 20)); time.sleep(0.01)\ntime.sleep(30)")
+    t0 = time.time()
+    with pytest.raises(ParseRejected, match="more memory"):
+        await _probe(code, Limits(memory_mb=300, timeout_s=60))
+    assert time.time() - t0 < 10 and _bounded_since(before, ceiling=700)
+
+
+def test_poll_interval_policy_backs_off_when_flat_and_snaps_back_when_memory_moves():
+    f = sandbox._next_poll_interval
+    lo, hi = sandbox._RSS_POLL_MIN_S, sandbox._RSS_POLL_MAX_S
+    interval = lo
+    for _ in range(10):                                            # small and flat: doubles up to the maximum
+        interval = f(interval, 50.0, 50.0, 1024)
+    assert interval == hi
+    assert f(hi, 120.0, 50.0, 1024) == lo                          # grew 70 MB (> 5% of 1 GB) since the last poll
+    assert f(hi, 500.0, 500.0, 1024) == lo                         # flat but over 40% of the limit
+    assert f(lo, 50.0, 50.0, 1024) == lo * 2
+
+
+@pytest.mark.skipif(not LINUX, reason="/proc is Linux-only (UNVERIFIED on macOS)")
+def test_linux_group_rss_comes_from_proc_without_spawning_ps():
+    import os as _os
+    assert sandbox._group_rss_proc(_os.getpgrp()) > 5
+
+
+def test_after_pages_were_skipped_for_size_neither_the_raw_rung_nor_ocr_second_guesses_it():
+    raw = B.text_pdf()
+    with pytest.raises(formats.TierSkip):
+        formats._pdf_raw(raw, {"limit_hit": True})
+    with pytest.raises(formats.TierSkip):
+        formats._pdf_ocr(object(), None, {"limit_hit": True})
+    assert formats._pdf_raw(raw, {}).text()          # without the flag the raw rung does read it
