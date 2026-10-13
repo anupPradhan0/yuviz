@@ -936,7 +936,7 @@ async def test_xlsx_white_font_and_semicolon_number_format_cells_are_removed_by_
     ("scn-white", "/DeviceRGB cs 1 1 1 scn /F1 3 Tf ({p}) Tj 0 g /F1 12 Tf"),
     ("sc-gray-white", "/DeviceGray cs 1 sc /F1 3 Tf ({p}) Tj 0 g /F1 12 Tf"),
     ("zero-tz", "0 Tz ({p}) Tj 100 Tz"),
-    ("matrix-tiny", "/F1 1 Tf 0.5 0 0 0.5 72 100 Tm ({p}) Tj /F1 12 Tf 1 0 0 1 72 500 Tm"),
+    ("matrix-tiny", "/F1 10 Tf 0.1 0 0 0.1 72 100 Tm ({p}) Tj /F1 12 Tf 1 0 0 1 72 500 Tm"),
     ("mode-7", "7 Tr ({p}) Tj 0 Tr"),
 ])
 async def test_pdf_hiding_through_colour_operators_scaling_and_text_matrix_is_removed(tag, ops):
