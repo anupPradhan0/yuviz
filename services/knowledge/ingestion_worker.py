@@ -286,7 +286,8 @@ async def process_one_job(
             embed_stats: dict[str, int] = {}
             # Optional contextual enrichment (off by default): only the EMBEDDED text changes, never the stored chunk.
             embed_texts, enrich_detail = await enrich_texts(
-                pool, tenant_id, doc_row["title"], new_chunks, embed_max_tokens=embedding_cfg.extra.get("max_tokens"))
+                pool, tenant_id, doc_row["title"], new_chunks, embed_max_tokens=embedding_cfg.extra.get("max_tokens"),
+                attempt=job["attempts"])
             vectors = await embed_in_batches(provider, embed_texts, stats=embed_stats)
             embedding_model = effective_model(embedding_cfg)
             # Preserve an admin's manual usage_mode across re-ingestion.

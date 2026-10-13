@@ -1,11 +1,15 @@
 """Contextual enrichment: an LLM writes one short sentence that situates a chunk in its document, and that sentence
 is put in front of the text that is EMBEDDED (only that: stored content, the tsv column and citations stay the
-original chunk). OFF unless KNOWLEDGE_ENRICH_CHUNKS=1.
+original chunk). OFF unless the operator sets BOTH KNOWLEDGE_ENRICH_CHUNKS=1 AND lists the tenant in KNOWLEDGE_ENRICH_TENANTS
+(tenant ids or slugs, comma separated; empty means nobody, there is no wildcard), so turning the platform switch on
+enables no tenant by accident. Only the first attempt of an ingestion job enriches: a retry embeds without context,
+so a flaky embedder cannot multiply LLM cost.
 
 Privacy. When on, for each enriched chunk the tenant's OWN LLM provider (the tenant's default 'llm' provider_config,
 the same key its conversations use; never a platform key, never a local Ollama model) receives: the document title,
 the chunk's section heading, the chunk text and a short excerpt of its two neighbouring chunks. Nothing else, and
-none of it is logged. A tenant with no usable LLM config, or an engine that is not OpenAI-compatible, is skipped.
+none of it is logged. Cost is capped per tenant per UTC day (KNOWLEDGE_ENRICH_MAX_CALLS_PER_TENANT_DAY, in-process:
+each worker process keeps its own count and a restart resets it, so the real ceiling is the cap times the processes). A tenant with no usable LLM config, or an engine that is not OpenAI-compatible, is skipped.
 
 Fail-open at every level. Any failure (no config, timeout, HTTP error, garbage output, a cap hit) means that chunk is
 embedded WITHOUT context, and the counts land in the embed event's detail; the document is never failed by this.
@@ -19,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import datetime
 import os
 import re
 import time
@@ -30,6 +35,7 @@ import httpx
 from libs.tenancy import tenant_conn
 
 from .chunking import Chunk
+from .envparse import env_flag, env_float, env_int
 from .secret_resolver import CompositeSecretResolver, SecretResolver
 
 log = logging.getLogger(__name__)
@@ -56,13 +62,6 @@ _SYSTEM = (
 )
 
 
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name) or default)
-    except ValueError:
-        return default
-
-
 @dataclass(frozen=True)
 class EnrichConfig:
     enabled: bool = False
@@ -76,18 +75,45 @@ class EnrichConfig:
     chunk_chars: int = 2000         # chunk text shown to the LLM
     doc_deadline_s: float = 90.0    # all enrichment of one document
     abort_after_failures: int = 5   # consecutive failures: stop calling for this document
+    tenants: frozenset[str] = frozenset()  # tenant ids or slugs that opted in; empty = nobody
+    max_calls_per_tenant_day: int = 2000
 
     @classmethod
     def from_env(cls) -> "EnrichConfig":
         d = cls()
         return cls(
-            enabled=(os.environ.get("KNOWLEDGE_ENRICH_CHUNKS") or "0").strip().lower() in ("1", "true", "yes", "on"),
-            timeout_s=_env_float("KNOWLEDGE_ENRICH_TIMEOUT_S", d.timeout_s),
-            concurrency=max(1, int(_env_float("KNOWLEDGE_ENRICH_CONCURRENCY", d.concurrency))),
-            max_chunks_per_doc=max(0, int(_env_float("KNOWLEDGE_ENRICH_MAX_CHUNKS_PER_DOC", d.max_chunks_per_doc))),
-            max_tokens_per_doc=max(0, int(_env_float("KNOWLEDGE_ENRICH_MAX_TOKENS_PER_DOC", d.max_tokens_per_doc))),
-            doc_deadline_s=_env_float("KNOWLEDGE_ENRICH_DOC_DEADLINE_S", d.doc_deadline_s),
+            enabled=env_flag("KNOWLEDGE_ENRICH_CHUNKS"),
+            timeout_s=env_float("KNOWLEDGE_ENRICH_TIMEOUT_S", d.timeout_s, lo=0.5, hi=60),
+            concurrency=env_int("KNOWLEDGE_ENRICH_CONCURRENCY", d.concurrency, lo=1, hi=32),
+            max_chunks_per_doc=env_int("KNOWLEDGE_ENRICH_MAX_CHUNKS_PER_DOC", d.max_chunks_per_doc, lo=0, hi=5000),
+            max_tokens_per_doc=env_int("KNOWLEDGE_ENRICH_MAX_TOKENS_PER_DOC", d.max_tokens_per_doc, lo=0, hi=5_000_000),
+            doc_deadline_s=env_float("KNOWLEDGE_ENRICH_DOC_DEADLINE_S", d.doc_deadline_s, lo=1, hi=600),
+            tenants=frozenset(t.strip().lower() for t in (os.environ.get("KNOWLEDGE_ENRICH_TENANTS") or "").split(",")
+                              if t.strip()),
+            max_calls_per_tenant_day=env_int(
+                "KNOWLEDGE_ENRICH_MAX_CALLS_PER_TENANT_DAY", d.max_calls_per_tenant_day, lo=0, hi=10_000_000),
         )
+
+
+class DailyCalls:
+    """Per-tenant LLM calls per UTC day. In-process (see the module docstring for what that does and does not bound)."""
+
+    def __init__(self, today=lambda: datetime.datetime.now(datetime.timezone.utc).date()) -> None:
+        self._today = today
+        self._day = None
+        self._counts: dict[str, int] = {}
+
+    def take(self, tenant_id: str, cap: int) -> bool:
+        day = self._today()
+        if day != self._day:
+            self._day, self._counts = day, {}
+        if self._counts.get(tenant_id, 0) >= cap:
+            return False
+        self._counts[tenant_id] = self._counts.get(tenant_id, 0) + 1
+        return True
+
+
+_DAILY = DailyCalls()
 
 
 # --- output sanitising -------------------------------------------------------------------------------------------
@@ -156,14 +182,18 @@ class OpenAICompatChat:
 async def _tenant_llm(
     pool: Any, tenant_id: str, cfg: EnrichConfig, resolver: SecretResolver, transport: httpx.AsyncBaseTransport | None,
 ) -> tuple[OpenAICompatChat | None, str]:
-    """The tenant's default LLM provider as a chat client, or (None, why not)."""
+    """The tenant's default LLM provider as a chat client, or (None, why not). The config must belong to THIS tenant
+    (explicit predicate: tenants.default_llm_config_id's foreign key does not check ownership, and a live database
+    may lack even that), and the tenant must be on the opt-in list."""
     async with tenant_conn(pool, explicit_tenant=tenant_id, reason=_REASON) as conn:
         row = await conn.fetchrow(
-            "SELECT pc.engine, pc.model, pc.api_key_ref FROM tenants t "
-            "JOIN provider_configs pc ON pc.id = t.default_llm_config_id "
+            "SELECT t.slug, pc.engine, pc.model, pc.api_key_ref FROM tenants t "
+            "JOIN provider_configs pc ON pc.id = t.default_llm_config_id AND pc.tenant_id = t.id "
             "WHERE t.id = $1 AND pc.role = 'llm' AND pc.deleted_at IS NULL", tenant_id)
-    if row is None:
-        return None, "no_llm_config"
+        if row is None:
+            return None, "no_llm_config"
+    if not ({str(tenant_id).lower(), (row["slug"] or "").lower()} & {t.lower() for t in cfg.tenants}):
+        return None, "tenant_not_enabled"
     base_url = _ENGINE_BASE_URLS.get(row["engine"])
     if base_url is None:
         return None, "engine_unsupported"
@@ -196,10 +226,12 @@ def _prompt(title: str, chunks: list[Chunk], i: int, cfg: EnrichConfig) -> str:
 
 async def contextualise(
     chat: Any, title: str, chunks: list[Chunk], cfg: EnrichConfig, *, embed_max_tokens: int | None = None,
+    tenant_id: str | None = None, daily: DailyCalls | None = None,
 ) -> tuple[list[str], dict[str, int]]:
     """(texts to embed, counts). texts[i] is the chunk with its sentence in front, or the plain chunk."""
     texts = [c.content for c in chunks]
-    stats = {"enriched": 0, "failed": 0, "skipped_cap": 0, "skipped_too_long": 0}
+    stats = {"enriched": 0, "failed": 0, "skipped_cap": 0, "skipped_too_long": 0,
+             "skipped_daily_cap": 0}
     sem = asyncio.Semaphore(cfg.concurrency)
     started = time.monotonic()
     budget = {"tokens": 0, "consecutive": 0, "calls": 0}
@@ -216,6 +248,9 @@ async def contextualise(
             cost = _estimate_tokens(_SYSTEM, prompt) + cfg.max_output_tokens
             if budget["tokens"] + cost > cfg.max_tokens_per_doc or budget["consecutive"] >= cfg.abort_after_failures:
                 stats["skipped_cap"] += 1
+                return
+            if tenant_id is not None and not (daily or _DAILY).take(tenant_id, cfg.max_calls_per_tenant_day):
+                stats["skipped_daily_cap"] += 1
                 return
             budget["tokens"] += cost  # reserved before the call, so concurrent calls cannot overshoot
             try:
@@ -241,7 +276,8 @@ async def contextualise(
 
 async def enrich_texts(
     pool: Any, tenant_id: str, title: str, chunks: list[Chunk], *, embed_max_tokens: int | None = None,
-    config: EnrichConfig | None = None, resolver: SecretResolver | None = None,
+    config: EnrichConfig | None = None, resolver: SecretResolver | None = None, attempt: int = 1,
+    daily: DailyCalls | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
     """What the ingestion worker embeds for `chunks`, plus detail for the embed event. Never raises: with the feature
     off (the default) it returns the chunk texts at once, touching neither the database nor the network."""
@@ -249,12 +285,17 @@ async def enrich_texts(
     cfg = config or EnrichConfig.from_env()
     if not cfg.enabled or not chunks:
         return texts, {}
+    if not cfg.tenants:
+        return texts, {"enrichment": "skipped", "enrich_reason": "no_tenants_enabled"}
+    if attempt > 1:  # a retry (the embedder failed once already) must not multiply LLM cost
+        return texts, {"enrichment": "skipped", "enrich_reason": "retry"}
     chat = None
     try:
         chat, why = await _tenant_llm(pool, tenant_id, cfg, resolver or CompositeSecretResolver(), _test_transport)
         if chat is None:
             return texts, {"enrichment": "skipped", "enrich_reason": why}
-        texts, stats = await contextualise(chat, title, chunks, cfg, embed_max_tokens=embed_max_tokens)
+        texts, stats = await contextualise(
+            chat, title, chunks, cfg, embed_max_tokens=embed_max_tokens, tenant_id=str(tenant_id), daily=daily)
         return texts, {"enrichment": "on", **stats}
     except asyncio.CancelledError:
         raise
