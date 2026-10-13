@@ -11,6 +11,7 @@ import pytest
 
 from services.knowledge.parsers import Limits, ParseRejected, detect_content_type, parse_document
 from services.knowledge.parsers import detect, ocr
+from services.knowledge.parsers import formats
 from services.knowledge.parsers.formats import TierSkip, run_ladder
 from services.knowledge.parsers.model import PARAGRAPH, Block, ParsedDocument
 from services.knowledge.parsers.quality import assess, garbage_ratio
@@ -134,10 +135,9 @@ async def test_html_extracts_main_content_without_boilerplate():
         assert noise not in text
 
 
-def test_html_tag_strip_fallback():
-    from services.knowledge.parsers.formats import _html_strip
-    doc = _html_strip(B.HTML_PAGE.decode())
-    assert "30 days of delivery" in doc.text() and "DO-NOT-INDEX-TRACKER" not in doc.text()
+async def test_html_has_no_tag_stripping_fallback_that_would_leak_hidden_text():
+    # one rung only: a page the main parser rejects is rejected, never downgraded to a CSS-blind parser
+    assert not hasattr(formats, "_html_strip")
 
 
 async def test_csv_becomes_one_table_with_header_first():

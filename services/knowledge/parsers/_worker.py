@@ -18,7 +18,8 @@ import sys
 
 
 def _note(msg: str) -> None:
-    sys.stderr.write(f"hardening: {msg}\n")
+    # Tagged with the parent's per-run nonce so the parent can tell these from document text on stderr.
+    sys.stderr.write(f"hardening[{os.environ.get('KB_PARSE_NONCE', '')}]: {msg}\n")
     sys.stderr.flush()
 
 
@@ -66,15 +67,45 @@ def harden(memory_mb: int, cpu_s: int, nproc_limit: int) -> None:
             _note("PR_SET_NO_NEW_PRIVS failed")
         if libc.prctl(4, 0, 0, 0, 0) != 0:          # PR_SET_DUMPABLE = 0: same-uid processes cannot read /proc/<pid>
             _note("PR_SET_DUMPABLE failed")
-        if libc.unshare(0x40000000) != 0:           # CLONE_NEWNET: no network at all when permitted
-            import ctypes
-            _note(f"network namespace unavailable (errno {ctypes.get_errno()}); child keeps network access")
+        import ctypes
+        # An unprivileged user namespace first (CLONE_NEWUSER|CLONE_NEWNET needs no capability where the kernel allows
+        # it); then plain CLONE_NEWNET (needs CAP_SYS_ADMIN, so it mostly fails); else the child keeps the network.
+        if libc.unshare(0x10000000 | 0x40000000) != 0:
+            first = ctypes.get_errno()
+            if libc.unshare(0x40000000) != 0:
+                _note(f"network namespace unavailable (errno {first} with a user namespace, {ctypes.get_errno()} without); "
+                      "child keeps network access")
     except Exception as exc:  # no libc, ctypes blocked, seccomp
         _note(f"prctl/unshare not applied: {type(exc).__name__}")
 
 
+EXIT_MEMORY = 75
+
+
+def _start_memory_guard(limit_mb: int) -> None:
+    """Exit the moment this process's peak RSS passes the limit. The parent's watchdog polls too, but this reacts in
+    milliseconds and cannot be outrun by a fast allocator. (A long C call that holds the GIL delays it; the parent's
+    group-wide watchdog still covers that.)"""
+    import threading
+    import time
+    try:
+        import resource
+    except ImportError:
+        return
+    scale = 1024 * 1024 if sys.platform == "darwin" else 1024     # ru_maxrss is bytes on macOS, KB on Linux
+
+    def watch() -> None:
+        while True:
+            time.sleep(0.005)
+            if resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / scale > limit_mb:
+                os._exit(EXIT_MEMORY)
+
+    threading.Thread(target=watch, daemon=True).start()
+
+
 def main() -> int:
     args = json.loads(sys.argv[1])
+    _start_memory_guard(args["limits"]["memory_mb"])   # before harden(): RLIMIT_NPROC would forbid starting a thread
     harden(args["limits"]["memory_mb"], int(args["limits"]["timeout_s"]) + 1, int(args.get("nproc_limit", 1)))
     raw = sys.stdin.buffer.read()
     sys.path.append(args["root"])

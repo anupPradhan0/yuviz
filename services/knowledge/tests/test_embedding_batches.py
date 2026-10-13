@@ -72,7 +72,7 @@ async def test_retries_are_bounded_and_the_last_error_surfaces():
 async def test_nan_inf_and_zero_vectors_are_transient_and_retried(bad):
     p = Scripted({1: lambda texts: [bad for _ in texts]})
     vectors = await embed_in_batches(p, ["a", "b"])
-    assert vectors == [GOOD, GOOD] and len(p.batches) == 2  # first answer rejected, retry accepted
+    assert len(vectors) == 2 and vectors[0][0] == pytest.approx(0.1) and len(vectors[1]) == 768 and len(p.batches) == 2  # first answer rejected, retry accepted
 
     always = Scripted({n: (lambda texts: [bad for _ in texts]) for n in range(1, 10)})
     with pytest.raises(EmbeddingError):

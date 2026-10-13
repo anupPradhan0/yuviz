@@ -27,11 +27,11 @@ async def get_document(document_id: Any, *, platform_scoped: bool = False) -> di
 async def list_documents(kb_id: Any) -> list[dict[str, Any]]:
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
-        # Count only current-version chunks (older versions are stale leftovers) and not parent rows, which hold no
-        # embedding of their own: the count is the number of retrievable chunks.
+        # Not parent rows (no embedding of their own), and regardless of version: during a re-ingest the document keeps
+        # serving its old chunks, so the count stays what is searchable.
         rows = await conn.fetch(
             "SELECT d.*, "
-            "(SELECT COUNT(*) FROM kb_chunks c WHERE c.document_id = d.id AND c.version = d.version AND NOT c.is_parent) AS chunk_count "
+            "(SELECT COUNT(*) FROM kb_chunks c WHERE c.document_id = d.id AND NOT c.is_parent) AS chunk_count "
             "FROM kb_documents d WHERE d.kb_id = $1 AND d.deleted_at IS NULL ORDER BY d.created_at DESC",
             kb_id,
         )
@@ -137,7 +137,8 @@ async def retry_document(
     user_id: Any | None = None,
     user_email: str | None = None,
 ) -> dict[str, Any] | None:
-    """Re-queue a failed document's stored file. None when it isn't failed (or already re-queued)."""
+    """Re-queue a failed document's stored file, or a ready one whose last RE-ingest failed (it still serves its old
+    chunks and carries the reason in `error`, prefixed 're-index failed: '). None otherwise (or already re-queued)."""
     pool = await db.get_pool()
     conn_cm = (
         platform_conn(pool, reason="document-admin-by-id", stamp_tenant=stamp_tenant)
@@ -145,8 +146,12 @@ async def retry_document(
     )
     async with conn_cm as conn:
         row = await conn.fetchrow(
-            "UPDATE kb_documents SET status = 'pending', error = NULL, version = version + 1, updated_at = now() "
-            "WHERE id = $1 AND tenant_id = $2 AND status = 'failed' AND deleted_at IS NULL RETURNING *",
+            "UPDATE kb_documents SET status = CASE WHEN status = 'failed' THEN 'pending' ELSE status END, "
+            "error = CASE WHEN status = 'failed' THEN NULL ELSE error END, version = version + 1, updated_at = now() "
+            "WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL "
+            "AND (status = 'failed' OR (status IN ('ready', 'ready_degraded') AND error LIKE 're-index failed:%' "
+            "     AND NOT EXISTS (SELECT 1 FROM kb_ingestion_jobs j WHERE j.document_id = kb_documents.id "
+            "                     AND j.status IN ('pending', 'running')))) RETURNING *",
             document_id, tenant_id,
         )
         if row is None:

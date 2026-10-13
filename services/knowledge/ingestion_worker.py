@@ -53,6 +53,17 @@ PER_TENANT_RUNNING_CAP = int(os.environ.get("KB_INGEST_PER_TENANT_CAP", "2"))
 
 _PERMANENT_ERRORS = (ValueError, FileNotFoundError)
 
+# A ready document keeps its status (and its old chunks stay searchable) through a failed, retried, dead-lettered or
+# reaped RE-ingest; first-time ingests keep pending -> processing -> ready/failed.
+REINDEX_FAILED_PREFIX = "re-index failed: "
+
+
+FAILED_SQL, PENDING_SQL = "'failed'", "'pending'"
+
+
+def _keep_serving(new: str) -> str:
+    return f"CASE WHEN status IN ('ready', 'ready_degraded') THEN status ELSE {new} END"
+
 
 def classify_error(exc: BaseException) -> str:
     """'permanent' = retrying cannot help (bad type, empty doc, missing config/file); else 'transient'."""
@@ -205,7 +216,12 @@ async def process_one_job(
             job = dict(await conn.fetchrow(_MARK_RUNNING_SQL, job["id"], lease_s))
         doc_row = await conn.fetchrow("SELECT * FROM kb_documents WHERE id = $1", document_id)
         if doc_row is not None:
-            await conn.execute("UPDATE kb_documents SET status = 'processing' WHERE id = $1", document_id)
+            # A document that is already ready keeps serving its old chunks while it re-ingests: only a first-time
+            # (or retried-after-failure) ingest shows as 'processing'.
+            await conn.execute(
+                "UPDATE kb_documents SET status = 'processing' WHERE id = $1 AND status NOT IN ('ready', 'ready_degraded')",
+                document_id,
+            )
         else:
             await conn.execute(
                 "UPDATE kb_ingestion_jobs SET status = 'failed', error_class = 'permanent', "
@@ -249,7 +265,12 @@ async def process_one_job(
             except ValueError:
                 embedding_cfg = None
             max_tokens = embedding_cfg.extra.get("max_tokens") if embedding_cfg else None
-            result = chunk_document(parsed.blocks, doc_row["language"], config=ChunkConfig.for_embedder(max_tokens))
+            # Off the event loop: chunking is CPU work, and the heartbeat must keep running while it does. It carries its
+            # own wall-clock budget and chunk ceiling (KNOWLEDGE_CHUNK_BUDGET_S, KNOWLEDGE_MAX_CHUNKS_PER_DOC) and
+            # raises a permanent error when either is hit, before anything is embedded.
+            result = await asyncio.to_thread(
+                chunk_document, parsed.blocks, doc_row["language"], config=ChunkConfig.for_embedder(max_tokens),
+            )
             new_chunks, parents, strategy = result.children, result.parents, result.strategy
             if not new_chunks:
                 raise ValueError("document produced zero chunks (empty or unextractable content)")
@@ -347,8 +368,12 @@ async def _record_failure(
             log.warning("Ingestion job=%s attempt=%s lost its lease; dropping failure", job["id"], job["attempts"])
             return
         await _write_events(conn, job, doc_row["tenant_id"], stages.events)
+        # A failed RE-ingest must not take a ready document offline: it keeps its status and old chunks, and the
+        # reason is recorded on the document (the console shows it) and in the job and its events.
         await conn.execute(
-            "UPDATE kb_documents SET status = $2, error = $3 WHERE id = $1", doc_row["id"], doc_status, error,
+            f"UPDATE kb_documents SET status = {_keep_serving('$2')}, "
+            f"error = CASE WHEN status IN ('ready', 'ready_degraded') THEN $4 || $3 ELSE $3 END WHERE id = $1",
+            doc_row["id"], doc_status, error, REINDEX_FAILED_PREFIX,
         )
         await conn.execute(
             "UPDATE kb_ingestion_jobs SET status = $2, error = $3, error_class = $4, stage = $5, "
@@ -383,7 +408,7 @@ async def _claim_next_job(
                  LEFT JOIN running ru ON ru.tenant_id = d.tenant_id
                  WHERE c.status = 'pending' AND c.next_attempt_at <= now()
                    AND COALESCE(ru.n, 0) < $2
-                 ORDER BY c.next_attempt_at, c.created_at
+                 ORDER BY (COALESCE(c.stage, '') = 'reingest-queued'), c.next_attempt_at, c.created_at
                  FOR UPDATE OF c SKIP LOCKED
                  LIMIT 1)
             RETURNING j.*
@@ -417,7 +442,9 @@ async def reap_expired_leases(pool: asyncpg.Pool) -> int:
                     row["id"], message,
                 )
                 await conn.execute(
-                    "UPDATE kb_documents SET status = 'failed', error = $2 WHERE id = $1", row["document_id"], message,
+                    f"UPDATE kb_documents SET status = {_keep_serving(FAILED_SQL)}, "
+                    "error = CASE WHEN status IN ('ready', 'ready_degraded') THEN $3 || $2 ELSE $2 END WHERE id = $1",
+                    row["document_id"], message, REINDEX_FAILED_PREFIX,
                 )
                 event_status = "dead_letter"
             else:
@@ -429,7 +456,9 @@ async def reap_expired_leases(pool: asyncpg.Pool) -> int:
                     row["id"], message, delay,
                 )
                 await conn.execute(
-                    "UPDATE kb_documents SET status = 'pending', error = $2 WHERE id = $1", row["document_id"], message,
+                    f"UPDATE kb_documents SET status = {_keep_serving(PENDING_SQL)}, "
+                    "error = CASE WHEN status IN ('ready', 'ready_degraded') THEN $3 || $2 ELSE $2 END WHERE id = $1",
+                    row["document_id"], message, REINDEX_FAILED_PREFIX,
                 )
                 event_status = "lease_expired"
             await conn.execute(
