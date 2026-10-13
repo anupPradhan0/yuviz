@@ -84,7 +84,9 @@ jobs:
           for f in schema knowledge_schema telephony_schema; do
             psql -d yuviz -q -v ON_ERROR_STOP=1 -f "database/$f.sql"
           done
-          psql -d yuviz -q -v ON_ERROR_STOP=1 -v yuviz_app_password=ci-app-password -f database/rls.sql
+          # The knowledge tests connect as yuviz_app:testpw on localhost (test_retrieval_hotpath.py, test_reembed.py), so CI uses that
+          # password; a different one would make those RLS-isolation fixtures skip silently.
+          psql -d yuviz -q -v ON_ERROR_STOP=1 -v yuviz_app_password=testpw -f database/rls.sql
 
       - name: Knowledge, conversation, toolexec and SDK tests, RLS coverage
         run: |
