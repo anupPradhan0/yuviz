@@ -12,7 +12,9 @@ from services.config.deps import assert_tenant_access, get_current_user, is_plat
 
 from .. import documents as documents_service
 from .. import knowledge_bases as kb_service
-from ..parsers import SUPPORTED_CONTENT_TYPES, detect_content_type, unsupported_reason
+from ..parsers import (
+    BINARY_DISABLED_REASON, BINARY_TYPES, SUPPORTED_CONTENT_TYPES, binary_parsers_enabled, detect_content_type, unsupported_reason,
+)
 from ..schemas import DocumentUpdate
 from ..storage import LocalStorageProvider
 
@@ -92,6 +94,8 @@ async def upload_document(
     content_type = await asyncio.to_thread(detect_content_type, content, declared)
     if content_type not in SUPPORTED_CONTENT_TYPES:
         raise HTTPException(status_code=415, detail=unsupported_reason(content_type))
+    if content_type in BINARY_TYPES and not binary_parsers_enabled():
+        raise HTTPException(status_code=415, detail=BINARY_DISABLED_REASON)
     return await documents_service.upload_document(
         tenant_id=kb["tenant_id"],
         kb_id=kb_id,

@@ -56,7 +56,7 @@ async def test_child_sees_no_service_secrets_and_a_stripped_environment(monkeypa
     for k in ("POSTGRES_DSN", "JWT_SECRET", "SECRET_TOKEN"):
         monkeypatch.setenv(k, "must-not-leak")
     keys = await _child_says("sorted(os.environ)")
-    assert set(keys) <= {"PATH", "LANG", "LC_CTYPE", "__CF_USER_TEXT_ENCODING"}, keys  # the last two are added by the interpreter/macOS
+    assert set(keys) <= {"PATH", "LANG", "KB_PARSE_NONCE", "LC_CTYPE", "__CF_USER_TEXT_ENCODING"}, keys  # the last two are added by the interpreter/macOS
 
 
 async def test_child_runs_isolated_in_an_empty_temp_cwd_that_is_removed_afterwards():
@@ -121,7 +121,7 @@ def test_hardening_failures_are_reported_not_swallowed(tmp_path):
 
 async def test_hardening_notes_from_the_child_reach_the_log(caplog):
     caplog.set_level(logging.WARNING)
-    code = ("import sys, json\nsys.stderr.write('hardening: network namespace unavailable (errno 1)\\n')\n"
+    code = ("import sys, json, os\nsys.stderr.write('hardening[' + os.environ['KB_PARSE_NONCE'] + ']: network namespace unavailable (errno 1)\\n')\n"
             "sys.stdout.write(json.dumps({'ok': False, 'reason': 'x'}))")
     with pytest.raises(ParseRejected):
         await _probe(code)
@@ -261,28 +261,38 @@ def _children_maxrss_mb() -> float:
     return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
 
 
+def _bounded_since(before: float, ceiling: float = 400) -> bool:
+    """ru_maxrss of children is a high-water mark over every child this process has waited for, so another test's
+    big child must not fail this one: the peak may not have grown past the ceiling because of THIS test."""
+    return _children_maxrss_mb() <= max(before, ceiling)
+
+
 async def test_declared_huge_xlsx_is_rejected_fast_and_cheaply():
+    before = _children_maxrss_mb()
     t0 = time.time()
     reason = await _reason(B.huge_dimension_xlsx())
     assert "too many cells" in reason and time.time() - t0 < 10
-    assert _children_maxrss_mb() < 400  # unfixed, openpyxl pads to A1:XFD1048576 (~1 GB)
+    assert _bounded_since(before)  # unfixed, openpyxl pads to A1:XFD1048576 (~1 GB)
 
 
 async def test_wide_csv_is_rejected_before_padding_every_row():
+    before = _children_maxrss_mb()
     raw = B.wide_csv()
     assert len(raw) < 100_000 and detect_content_type(raw) == detect.CSV
     t0 = time.time()
     assert "more than 2000 columns" in await _reason(raw)
     assert "too many cells" in await _reason(raw, limits=Limits(max_columns=10**6))
-    assert time.time() - t0 < 10 and _children_maxrss_mb() < 400
+    assert time.time() - t0 < 10 and _bounded_since(before)
 
 
 async def test_empty_paragraph_docx_is_rejected_by_the_streaming_paragraph_count():
+    before = _children_maxrss_mb()
     raw = B.empty_paragraph_docx()
     assert len(raw) < 200_000
     t0 = time.time()
-    assert "more than 200000 paragraphs" in await _reason(raw)
-    assert time.time() - t0 < 10 and _children_maxrss_mb() < 400  # unfixed: python-docx builds ~1 GB
+    reason = await _reason(raw)
+    assert "more than 200000 paragraphs" in reason or "XML elements" in reason
+    assert time.time() - t0 < 10 and _bounded_since(before)  # unfixed: python-docx builds ~1 GB
 
 
 def test_max_chars_is_enforced_while_building_not_after():
@@ -628,9 +638,9 @@ def test_pdf_stream_iterator_returns_every_terminated_stream():
     assert list(formats._pdf_streams(raw)) == [b"AAA\n", b"BBB\n"]
 
 
-def _shared_stream_pdf(pages: int) -> bytes:
+def _shared_stream_pdf(pages: int, repeats: int = 450_000) -> bytes:
     import zlib
-    content = b"BT /F1 12 Tf (visible text on every page) Tj ET\n" * 450_000        # ~21 MB decoded, ~100 KB encoded
+    content = b"BT /F1 12 Tf (visible text on every page) Tj ET\n" * repeats        # 450,000 = ~21 MB decoded, ~100 KB encoded
     stream = zlib.compress(content, 9)
     kids = " ".join(f"{4 + i} 0 R" for i in range(pages))
     objs = [b"<< /Type /Catalog /Pages 2 0 R >>", f"<< /Type /Pages /Kids [{kids}] /Count {pages} >>".encode(),
@@ -653,5 +663,149 @@ async def test_400_pages_sharing_one_huge_content_stream_are_refused_fast():
     raw = _shared_stream_pdf(400)
     assert len(raw) < 200_000
     t0 = time.time()
-    reason = await _reason(raw, limits=Limits(timeout_s=40))
-    assert "share or repeat more content" in reason and time.time() - t0 < 30
+    assert "more content than can be processed" in await _reason(raw, limits=Limits(timeout_s=40))
+    assert time.time() - t0 < 10
+
+
+async def test_400_pages_sharing_a_stream_under_the_per_page_cap_are_caught_by_the_repeat_check():
+    raw = _shared_stream_pdf(400, repeats=30_000)     # 1.4 MB per page, under the 2 MB cap, shared by every page
+    t0 = time.time()
+    assert "share or repeat" in await _reason(raw, limits=Limits(timeout_s=55))
+    assert time.time() - t0 < 40
+
+
+# ── S1 interim: kill switch ─────────────────────────────────────────────
+
+@pytest.mark.parametrize("flag", ["0", "false", "off", "No"])
+async def test_binary_parsers_kill_switch_refuses_pdf_and_office_but_keeps_text_formats(monkeypatch, flag):
+    from services.knowledge.parsers import BINARY_DISABLED_REASON
+    monkeypatch.setenv("KNOWLEDGE_BINARY_PARSERS", flag)
+    for raw in (B.text_pdf(), B.docx_with_tables(), B.pptx_deck(), B.xlsx_sheet()):
+        assert await _reason(raw) == BINARY_DISABLED_REASON
+    assert "Refund" in (await _parse(b"# Policy\n\nRefunds are fine here.\n")).text()
+    assert "30 days" in (await _parse(B.HTML_PAGE)).text()
+    assert (await _parse(B.CSV_DATA)).parser_used == "csv"
+
+
+async def test_binary_parsers_are_on_by_default(monkeypatch):
+    monkeypatch.delenv("KNOWLEDGE_BINARY_PARSERS", raising=False)
+    assert (await _parse(B.docx_with_tables())).parser_used == "python-docx"
+    monkeypatch.setenv("KNOWLEDGE_BINARY_PARSERS", "1")
+    assert (await _parse(B.text_pdf())).parser_used == "pypdf"
+
+
+async def test_upload_route_refuses_binary_types_when_the_kill_switch_is_off(test_tenant, test_admin, pool, monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+
+    from libs.tenancy import set_caller_tenant
+    from services.knowledge import knowledge_bases as kb_service
+    from services.knowledge.app import app
+    monkeypatch.setenv("KNOWLEDGE_BINARY_PARSERS", "0")
+    set_caller_tenant(str(test_tenant["id"]))
+    kb = await kb_service.create_knowledge_base(tenant_id=test_tenant["id"], slug="killsw-kb", name="K")
+    headers = {"Authorization": f"Bearer {test_admin['token']}"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.post(f"/knowledge-bases/{kb['id']}/documents", files={"file": ("a.pdf", B.text_pdf(), "application/pdf")},
+                         data={"title": "a"}, headers=headers)
+        assert r.status_code == 415 and "not enabled on this deployment" in r.json()["detail"]
+        ok = await c.post(f"/knowledge-bases/{kb['id']}/documents", files={"file": ("a.txt", b"Plain text is fine.", "text/plain")},
+                          data={"title": "b"}, headers=headers)
+        assert ok.status_code == 201
+    await pool.execute("DELETE FROM kb_ingestion_jobs WHERE kb_id = $1", kb["id"])
+    await pool.execute("DELETE FROM audit_log WHERE tenant_id = $1", test_tenant["id"])
+    await pool.execute("DELETE FROM kb_documents WHERE kb_id = $1", kb["id"])
+
+
+# ── log hygiene ─────────────────────────────────────────────────────────
+
+async def test_child_stderr_is_never_logged_as_a_sandbox_note_and_is_escaped(caplog):
+    caplog.set_level(logging.DEBUG)
+    code = ("import sys\n"
+            "sys.stderr.write('hardening: FORGED-NOTE\\n')\n"
+            "sys.stderr.write('/Name#0Ahardening: font encoding FORGED2\\n')\n"
+            "sys.stderr.write('hardening[wrong]: FORGED3\\n')\n"
+            "sys.stderr.write('Err\\x1b[31m: customer text FORGED4\\n')\n"
+            "sys.exit(3)")
+    with pytest.raises(ParseInfrastructureError):
+        await _probe(code)
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "FORGED" not in text and "\x1b" not in text and "\n" not in text
+    assert "last_error_class=?" in text
+
+
+async def test_real_hardening_notes_are_logged_escaped_and_capped(caplog):
+    caplog.set_level(logging.WARNING)
+    code = ("import sys, json, os\nn = os.environ['KB_PARSE_NONCE']\n"
+            "sys.stderr.write('hardening[' + n + ']: ' + 'x' * 500 + '\\x1b[31m\\n')\n"
+            "sys.stdout.write(json.dumps({'ok': False, 'reason': 'x'}))")
+    with pytest.raises(ParseRejected):
+        await _probe(code)
+    notes = [r.getMessage() for r in caplog.records if "sandbox note" in r.getMessage()]
+    assert len(notes) == 1 and len(notes[0]) < 260 and "\x1b" not in notes[0]
+
+
+# ── memory: floor, fast watchdog, whole process group, element budget ───
+
+def test_memory_limit_has_a_floor_and_warns(caplog):
+    caplog.set_level(logging.WARNING)
+    assert sandbox.effective_limits(Limits(memory_mb=128)).memory_mb == sandbox.MIN_MEMORY_MB == 256
+    assert any("KB_PARSE_MEMORY_MB" in r.getMessage() for r in caplog.records)
+    assert sandbox.effective_limits(Limits(memory_mb=1024)).memory_mb == 1024
+
+
+async def test_a_too_small_memory_setting_still_parses_documents(monkeypatch):
+    monkeypatch.setenv("KB_PARSE_MEMORY_MB", "64")
+    doc = await parse_document(B.docx_with_tables(), limits=Limits.from_env())
+    assert doc.parser_used == "python-docx"
+
+
+async def test_the_watchdog_meters_the_whole_process_group_not_just_the_direct_child():
+    code = ("import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', 'x = b\"x\" * (500 << 20)\\nimport time; time.sleep(60)'])\n"
+            "time.sleep(60)")
+    t0 = time.time()
+    with pytest.raises(ParseRejected, match="more memory"):
+        await _probe(code, Limits(memory_mb=256, timeout_s=60))
+    assert time.time() - t0 < 15
+
+
+def test_the_childs_own_memory_guard_exits_within_milliseconds(tmp_path):
+    code = ("import sys, time\n" f"sys.path.insert(0, {sandbox._REPO_ROOT!r})\n"
+            "from services.knowledge.parsers import _worker\n_worker._start_memory_guard(150)\n"
+            "chunks = []\nfor _ in range(200):\n    chunks.append(b'x' * (10 << 20)); time.sleep(0.001)\n")
+    t0 = time.time()
+    r = subprocess.run([sys.executable, "-I", "-c", code], cwd=tmp_path, capture_output=True, timeout=30)
+    assert r.returncode == 75 and time.time() - t0 < 10
+
+
+async def test_exit_code_75_is_reported_as_a_memory_rejection():
+    with pytest.raises(ParseRejected, match="more memory"):
+        await _probe("import os\nos._exit(75)")
+
+
+def _tc_flood_docx() -> bytes:
+    head = b'<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr>'
+    return B._zip({"[Content_Types].xml": b"<Types/>", "word/document.xml": head + b"<w:tc/>" * 3_000_000 + b"</w:tr></w:tbl></w:body></w:document>"})
+
+
+def _bookmark_flood_docx() -> bytes:
+    head = b'<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>'
+    return B._zip({"[Content_Types].xml": b"<Types/>", "word/document.xml": head + b'<w:bookmarkStart w:id="1" w:name="a"/>' * 1_000_000 + b"</w:p></w:body></w:document>"})
+
+
+@pytest.mark.parametrize("raw_fn", [_tc_flood_docx, _bookmark_flood_docx])
+async def test_element_floods_are_rejected_by_the_general_element_bound(raw_fn):
+    before = _children_maxrss_mb()
+    raw = raw_fn()
+    assert len(raw) < 400_000
+    t0 = time.time()
+    assert "XML elements" in await _reason(raw)
+    assert time.time() - t0 < 15 and _bounded_since(before)
+
+
+async def test_a_flood_of_html_elements_is_rejected_before_a_tree_is_built():
+    before = _children_maxrss_mb()
+    raw = b"<html><body>" + b"<b></b>" * 800_000 + b"</body></html>"
+    t0 = time.time()
+    assert "more than 500000 elements" in await _reason(raw)
+    assert time.time() - t0 < 15 and _bounded_since(before)

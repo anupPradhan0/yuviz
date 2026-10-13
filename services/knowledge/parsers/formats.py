@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+import time
 import zipfile
 import zlib
 from collections import Counter
@@ -144,6 +145,29 @@ def _count_elements(zf: zipfile.ZipFile, member_re: str, tag: str, limit: int, w
                     el.clear()
             except etree.XMLSyntaxError as exc:
                 raise ParseRejected(_CORRUPT.format(kind="Office document")) from exc
+    return total
+
+
+def _count_all_elements(zf: zipfile.ZipFile, limit: int) -> int:
+    """Total XML elements across every part of the package, counted while streaming (nothing is kept). The tag-specific
+    counts below miss floods of other elements (<w:tc/>, bookmarks, runs): a 299 KB DOCX of table cells reached 1 GB."""
+    total = 0
+    for name in zf.namelist():
+        if not name.endswith((".xml", ".rels")):
+            continue
+        with zf.open(name) as f:
+            try:
+                for _, el in etree.iterparse(f, events=("end",), resolve_entities=False, no_network=True,
+                                             load_dtd=False, huge_tree=False):
+                    total += 1
+                    if total > limit:
+                        raise LimitExceeded(f"document has more than {limit} XML elements")
+                    el.clear()
+                    parent = el.getparent()
+                    while parent is not None and el.getprevious() is not None:
+                        del parent[0]
+            except etree.XMLSyntaxError:
+                continue  # a malformed part is the parsers' problem; this pass only bounds size
     return total
 
 
@@ -600,8 +624,11 @@ def _check_html_depth(html: str) -> None:
     """Reject absurd nesting before any tree is built: a 537 KB page of 50,000 nested divs holds the parser for the
     whole timeout, and a page nested deeper than the main parser allows must be refused, not handed to a weaker
     fallback that would index its hidden text. Browsers stop at 512."""
-    depth = 0
+    depth = elements = 0
     for m in _HTML_TAG_RE.finditer(html):
+        elements += 1
+        if elements > _LIMITS.max_elements:
+            raise LimitExceeded(f"HTML has more than {_LIMITS.max_elements} elements")
         name = m.group(2).lower()
         if m.group(1):
             depth = max(0, depth - 1)
@@ -809,8 +836,10 @@ def _hidden_strings(content: bytes) -> list[str]:
     return out
 
 
-_PDF_CONTENT_BUDGET = [0]
-MAX_PDF_CONTENT_BYTES = 128 * 1024 * 1024
+MAX_PDF_PAGE_CONTENT = 2 * 1024 * 1024     # decoded content stream of one page; pypdf interprets ~0.2 MB/s
+MAX_PDF_SHARED_REPEATS = 2                  # the same big stream used by more pages than this is a repeat bomb
+PDF_TEXT_BUDGET_S = 25.0                    # wall clock for text extraction across all pages
+_PDF_STATE: dict = {"seen": {}, "t0": 0.0}
 
 
 def _pdf_page_text(page, hidden: Counter) -> str:
@@ -819,11 +848,17 @@ def _pdf_page_text(page, hidden: Counter) -> str:
         data = contents.get_data() if contents is not None else b""
     except Exception:
         data = b""
-    # Pages may share one content stream, and extracting each page decodes and interprets it again: 400 pages sharing
-    # a 20 MB stream is 8 GB of work from a 95 KB file. Bound the total content decoded for the document.
-    _PDF_CONTENT_BUDGET[0] += len(data)
-    if _PDF_CONTENT_BUDGET[0] > MAX_PDF_CONTENT_BYTES:
-        raise LimitExceeded("PDF pages share or repeat more content than can be processed safely")
+    # Extracting a page interprets its content stream in pure Python, and pages may share one stream: 400 pages sharing a
+    # 20 MB stream is hours of work from a 95 KB file. Bound one page, the repeats of a big stream, and the total time.
+    if len(data) > MAX_PDF_PAGE_CONTENT:
+        raise LimitExceeded("a PDF page has more content than can be processed safely")
+    if len(data) > 256 * 1024:
+        key = hash(data)
+        _PDF_STATE["seen"][key] = _PDF_STATE["seen"].get(key, 0) + 1
+        if _PDF_STATE["seen"][key] > MAX_PDF_SHARED_REPEATS:
+            raise LimitExceeded("PDF pages share or repeat more content than can be processed safely")
+    if time.monotonic() - _PDF_STATE["t0"] > PDF_TEXT_BUDGET_S:
+        raise LimitExceeded("PDF text extraction exceeded its time budget")
     full = page.extract_text() or ""
     # Longest first, so a hidden string is never matched inside a longer one. Only strings that pypdf decoded the
     # same way (simple fonts) can be located; invisible text in CID-keyed fonts is a known gap.
@@ -1058,7 +1093,7 @@ def _pdf_ocr(reader, language: str | None) -> ParsedDocument:
 def parse_by_type(raw: bytes, content_type: str, limits: Limits, language: str | None = None) -> ParsedDocument:
     global _LIMITS
     _LIMITS = limits
-    _PDF_CONTENT_BUDGET[0] = 0
+    _PDF_STATE.update(seen={}, t0=time.monotonic())
     ct = content_type
     if ct == detect.PDF:
         reader = _open_pdf(raw, limits)
@@ -1070,14 +1105,17 @@ def parse_by_type(raw: bytes, content_type: str, limits: Limits, language: str |
         ])
     elif ct == detect.DOCX:
         zf = guard_zip(raw, limits, "DOCX")
+        _count_all_elements(zf, limits.max_elements)
         _count_elements(zf, r"word/document\.xml", _W + "p", limits.max_paragraphs, "paragraphs")
         doc = run_ladder([("python-docx", lambda: _docx_native(zf, raw)), ("docx-xml", lambda: _docx_xml(zf))])
     elif ct == detect.PPTX:
         zf = guard_zip(raw, limits, "PPTX")
+        _count_all_elements(zf, limits.max_elements)
         _count_elements(zf, r"ppt/slides/slide\d+\.xml", "{*}p", limits.max_paragraphs, "paragraphs")
         doc = run_ladder([("python-pptx", lambda: _pptx_native(zf, raw, limits)), ("pptx-xml", lambda: _pptx_xml(zf, limits))])
     elif ct == detect.XLSX:
         zf = guard_zip(raw, limits, "XLSX")
+        _count_all_elements(zf, limits.max_elements)
         _count_elements(zf, r"xl/worksheets/sheet\d+\.xml", "{*}c", limits.max_cells, "cells")
         doc = run_ladder([("openpyxl", lambda: _xlsx_native(zf, raw, limits)), ("xlsx-xml", lambda: _xlsx_xml(zf, limits))])
     else:

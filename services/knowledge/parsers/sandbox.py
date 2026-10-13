@@ -26,6 +26,8 @@ import dataclasses
 import json
 import logging
 import os
+import re
+import secrets
 import shutil
 import signal
 import sys
@@ -41,34 +43,53 @@ log = logging.getLogger(__name__)
 _REPO_ROOT = str(Path(__file__).resolve().parents[3])
 _WORKER = str(Path(__file__).with_name("_worker.py"))
 _PS = shutil.which("ps")
-_RSS_POLL_S = 0.1
+_RSS_POLL_S = 0.02
+MIN_MEMORY_MB = 256            # below this the child cannot even import its libraries (every document would dead-letter)
+EXIT_MEMORY = 75               # the child's own memory guard exits with this
 _STDERR_TAIL = 4096
 _CPU_SIGNALS = {signal.SIGXCPU}
 
 
-def _child_env() -> dict[str, str]:
-    return {"PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8"}
+def effective_limits(limits: Limits) -> Limits:
+    """A memory limit below MIN_MEMORY_MB is raised to it, with a warning: set too low, the child's address-space limit
+    makes its imports fail and every document is retried and dead-lettered."""
+    if limits.memory_mb < MIN_MEMORY_MB:
+        log.warning("KB_PARSE_MEMORY_MB=%s is below the minimum workable %s; using %s", limits.memory_mb, MIN_MEMORY_MB, MIN_MEMORY_MB)
+        return dataclasses.replace(limits, memory_mb=MIN_MEMORY_MB)
+    return limits
 
 
-async def spawn(tail: list[str], cwd: str) -> asyncio.subprocess.Process:
+def _child_env(nonce: str) -> dict[str, str]:
+    # KB_PARSE_NONCE is not a secret: it lets the parent tell its own child's hardening notes from document text.
+    return {"PATH": os.environ.get("PATH", ""), "LANG": "C.UTF-8", "KB_PARSE_NONCE": nonce}
+
+
+async def spawn(tail: list[str], cwd: str, nonce: str = "") -> asyncio.subprocess.Process:
     """The one place the child is started, so tests exercise exactly the production isolation settings."""
     return await asyncio.create_subprocess_exec(
         sys.executable, "-I", "-X", "utf8", *tail,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        cwd=cwd, env=_child_env(), close_fds=True, start_new_session=True,
+        cwd=cwd, env=_child_env(nonce), close_fds=True, start_new_session=True,
     )
 
 
-async def _rss_mb(pid: int) -> float | None:
+async def _group_rss_mb(pgid: int) -> float | None:
+    """Resident memory of the whole process group (the parser and anything it started), in MB. `ps -axo` works the
+    same on macOS and Linux, so this is the one memory cap that holds on both."""
     if _PS is None:
         return None
     try:
         p = await asyncio.create_subprocess_exec(
-            _PS, "-o", "rss=", "-p", str(pid), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            _PS, "-axo", "pgid=,rss=", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
         out, _ = await p.communicate()
-        return int(out.split()[0]) / 1024 if out.strip() else None
-    except (OSError, ValueError, IndexError):
+        total = 0
+        for line in out.decode("ascii", "replace").splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0] == str(pgid):
+                total += int(parts[1])
+        return total / 1024
+    except (OSError, ValueError):
         return None
 
 
@@ -110,16 +131,26 @@ async def _feed(proc: asyncio.subprocess.Process, raw: bytes) -> None:
         proc.stdin.close()
 
 
-def _log_stderr(rc: int | None, tail: bytes, failed: bool) -> None:
-    """Logs the child's `hardening:` notes, and on failure the return code or signal plus the final exception CLASS
-    only (the message can carry document content)."""
+_SAFE_CLASS = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,59}")
+
+
+def _printable(text: str, limit: int = 160) -> str:
+    return "".join(c if 32 <= ord(c) < 127 else "?" for c in text)[:limit]
+
+
+def _log_stderr(rc: int | None, tail: bytes, failed: bool, nonce: str) -> None:
+    """Child stderr is partly document text, so none of it is logged as itself. Only lines carrying this run's nonce
+    (written by our own _worker.harden) are logged, escaped and capped; on failure the return code or signal and the
+    final exception CLASS (validated as an identifier) are logged. Everything else is dropped."""
+    marker = f"hardening[{nonce}]: "
     lines = tail.decode("utf-8", "replace").splitlines()
     for ln in lines:
-        if ln.startswith("hardening:"):
-            log.warning("parse sandbox %s", ln[:200])
+        if nonce and ln.startswith(marker):
+            log.warning("parse sandbox note (from the parser process): %s", _printable(ln[len(marker):]))
     if failed:
         last = next((ln for ln in reversed(lines) if ln.strip()), "")
-        cls = last.split(":", 1)[0][:60] if ":" in last else ""
+        cls = last.split(":", 1)[0] if ":" in last else ""
+        cls = cls if _SAFE_CLASS.fullmatch(cls) else "?"
         sig = signal.Signals(-rc).name if rc is not None and rc < 0 else None
         log.error("parse subprocess failed rc=%s signal=%s last_error_class=%s", rc, sig, cls)
 
@@ -130,6 +161,8 @@ async def run_parse(
 ) -> ParsedDocument:
     """`_child_tail` / `_prepare` exist for tests: run other child code under the same supervision, and plant files
     in the child's cwd before it starts."""
+    limits = effective_limits(limits)
+    nonce = secrets.token_hex(8)
     args = json.dumps({
         "content_type": content_type, "language": language, "limits": dataclasses.asdict(limits),
         "root": _REPO_ROOT, "nproc_limit": int(os.environ.get("KB_PARSE_NPROC_LIMIT", "1")),
@@ -138,13 +171,13 @@ async def run_parse(
     try:
         if _prepare:
             _prepare(cwd)
-        proc = await spawn(_child_tail or [_WORKER, args], cwd)
-        return await _supervise(proc, raw, limits)
+        proc = await spawn(_child_tail or [_WORKER, args], cwd, nonce)
+        return await _supervise(proc, raw, limits, nonce)
     finally:
         shutil.rmtree(cwd, ignore_errors=True)
 
 
-async def _supervise(proc: asyncio.subprocess.Process, raw: bytes, limits: Limits) -> ParsedDocument:
+async def _supervise(proc: asyncio.subprocess.Process, raw: bytes, limits: Limits, nonce: str) -> ParsedDocument:
     pid = proc.pid
     breach: list[str] = []
     cap = limits.max_chars * 4 + (4 << 20)
@@ -152,7 +185,7 @@ async def _supervise(proc: asyncio.subprocess.Process, raw: bytes, limits: Limit
     async def watchdog() -> None:
         while True:
             await asyncio.sleep(_RSS_POLL_S)
-            rss = await _rss_mb(pid)
+            rss = await _group_rss_mb(pid)
             if rss is not None and rss > limits.memory_mb:
                 breach.append("memory")
                 _killpg(pid)
@@ -193,7 +226,7 @@ async def _supervise(proc: asyncio.subprocess.Process, raw: bytes, limits: Limit
     await proc.wait()
     rc = proc.returncode
     if breach:
-        _log_stderr(rc, tail, failed=False)
+        _log_stderr(rc, tail, False, nonce)
         raise ParseRejected({
             "timeout": f"parsing timed out after {limits.timeout_s:g}s (file too large or complex)",
             "memory": "parsing used more memory than allowed (file too large or complex)",
@@ -203,8 +236,10 @@ async def _supervise(proc: asyncio.subprocess.Process, raw: bytes, limits: Limit
         result = json.loads(out)
     except ValueError:
         result = None
-    _log_stderr(rc, tail, failed=result is None)
+    _log_stderr(rc, tail, result is None, nonce)
     if result is None:
+        if rc == EXIT_MEMORY:
+            raise ParseRejected("parsing used more memory than allowed (file too large or complex)")
         if rc is not None and rc < 0 and signal.Signals(-rc) in _CPU_SIGNALS:
             raise ParseRejected("parsing used more CPU time than allowed (file too large or complex)")
         # Killed by something else, import failure, host OOM: not the document's fault, so retryable.

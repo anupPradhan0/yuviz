@@ -3,7 +3,9 @@ gate on quality. parse_document() either returns a ParsedDocument or raises Pars
 
 from __future__ import annotations
 
-from .detect import EMPTY, SUPPORTED_CONTENT_TYPES, detect_content_type
+import os
+
+from .detect import DOCX, EMPTY, PDF, PPTX, SUPPORTED_CONTENT_TYPES, XLSX, detect_content_type
 from .limits import Limits
 from .model import Block, ParsedDocument, ParseRejected
 from .sandbox import run_parse
@@ -12,6 +14,16 @@ _UNSUPPORTED_REASONS = {
     "application/x-ole-storage": "legacy or password-protected Office file; save it as an unprotected DOCX, XLSX or PPTX",
     "application/zip": "archive is not a DOCX, XLSX or PPTX file (or it is corrupt)",
 }
+
+
+# PDF and Office parsing is where the complex, exploitable libraries are. KNOWLEDGE_BINARY_PARSERS=0 turns it off (text,
+# markdown, HTML and CSV keep working) until parsing runs in a separate, contained service (docs/knowledge-parser-sandbox.md).
+BINARY_TYPES = frozenset({PDF, DOCX, PPTX, XLSX})
+BINARY_DISABLED_REASON = "PDF and Office documents are not enabled on this deployment; upload text, markdown, HTML or CSV instead"
+
+
+def binary_parsers_enabled() -> bool:
+    return os.environ.get("KNOWLEDGE_BINARY_PARSERS", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
 def unsupported_reason(detected: str) -> str:
@@ -31,8 +43,10 @@ async def parse_document(
     detected = detect_content_type(raw, hint)
     if detected not in SUPPORTED_CONTENT_TYPES:
         raise ParseRejected(unsupported_reason(detected))
+    if detected in BINARY_TYPES and not binary_parsers_enabled():
+        raise ParseRejected(BINARY_DISABLED_REASON)
     return await run_parse(raw, detected, limits, language)
 
 
-__all__ = ["Block", "EMPTY", "Limits", "ParsedDocument", "ParseRejected", "SUPPORTED_CONTENT_TYPES",
+__all__ = ["BINARY_DISABLED_REASON", "BINARY_TYPES", "Block", "binary_parsers_enabled", "EMPTY", "Limits", "ParsedDocument", "ParseRejected", "SUPPORTED_CONTENT_TYPES",
            "detect_content_type", "parse_document", "unsupported_reason"]
