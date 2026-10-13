@@ -82,6 +82,13 @@ def harden(memory_mb: int, cpu_s: int, nproc_limit: int) -> None:
 EXIT_MEMORY = 75
 
 
+def block_native_xml() -> None:
+    """No native XML library at all with KNOWLEDGE_BINARY_PARSERS=0: bs4 imports lxml at import time unless the import
+    is refused, so refuse it (a None entry makes `import lxml` raise ImportError, which bs4 already tolerates)."""
+    for name in ("lxml", "lxml.etree", "lxml.html", "lxml.objectify"):
+        sys.modules[name] = None
+
+
 def _start_memory_guard(limit_mb: int) -> None:
     """Exit the moment this process's peak RSS passes the limit. The parent's watchdog polls too, but this reacts in
     milliseconds and cannot be outrun by a fast allocator. (A long C call that holds the GIL delays it; the parent's
@@ -109,6 +116,8 @@ def main() -> int:
     harden(args["limits"]["memory_mb"], int(args["limits"]["timeout_s"]) + 1, int(args.get("nproc_limit", 1)))
     raw = sys.stdin.buffer.read()
     sys.path.append(args["root"])
+    if not args["limits"].get("binary_parsers", True):
+        block_native_xml()
     try:
         from services.knowledge.parsers.formats import parse_by_type
         from services.knowledge.parsers.limits import Limits

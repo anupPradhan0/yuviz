@@ -1,9 +1,19 @@
 # Knowledge document parsing: what the sandbox is and is not
 
 > **Do not enable PDF or Office parsing (PDF, DOCX, PPTX, XLSX) for untrusted tenants in production until parsing runs in
-> the contained service described under "Real containment" below.** Set `KNOWLEDGE_BINARY_PARSERS=0` to turn those
-> parsers off (text, markdown, HTML and CSV keep working; a PDF/Office upload is refused with "PDF and Office documents
-> are not enabled on this deployment"). Default is on, which is acceptable for a trusted single-tenant or dev setup only.
+> the contained service described under "Real containment" below.** Set `KNOWLEDGE_BINARY_PARSERS=0` to turn it off. The
+> default is on, which is acceptable for a trusted single-tenant or dev setup only.
+>
+> | | `KNOWLEDGE_BINARY_PARSERS=1` (default) | `=0` |
+> |---|---|---|
+> | PDF, DOCX, PPTX, XLSX | parsed (pypdf, python-docx, python-pptx, openpyxl, Pillow, optional `tesseract`) | refused with "PDF and Office documents are not enabled on this deployment" |
+> | HTML | BeautifulSoup on **lxml/libxml2** | BeautifulSoup on the pure-Python `html.parser`; same hidden-content stripping and limits |
+> | CSV, TSV, markdown, text | pure Python | pure Python |
+> | Native code reachable from a hostile file | libxml2 (lxml), Pillow, the OCR binary, plus the interpreter | the Python interpreter and its standard library only |
+>
+> With the switch at 0 the child blocks `import lxml` outright (a test proves lxml is never loaded), pypdf and the Office
+> libraries are never imported, and no XML library is used. The parsers are still in the same uncontained child process
+> (see below), so this lowers the attack surface; it does not contain it.
 
 Uploaded documents are parsed by `services/knowledge/parsers/` in a child process. **This is resource isolation, not a
 security sandbox.** A document that exploits a parser library (lxml, Pillow, pypdf, python-docx, openpyxl, BeautifulSoup)

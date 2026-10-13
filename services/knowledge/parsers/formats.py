@@ -21,7 +21,6 @@ import zlib
 from collections import Counter
 from typing import Callable, Iterator
 
-from lxml import etree
 
 from . import detect, ocr
 from .limits import Limits
@@ -29,7 +28,27 @@ from .model import CODE, HEADING, LIST, PARAGRAPH, TABLE, Block, LimitExceeded, 
 from .quality import MIN_CHARS_PER_PAGE, assess
 from .textblocks import blocks_from_text
 
-_XML = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False)
+
+
+class _LazyEtree:
+    """lxml is imported on first use, never at import time: with KNOWLEDGE_BINARY_PARSERS=0 nothing here touches
+    lxml/libxml2 (HTML uses html.parser, and the XML paths are refused), and the child blocks the import outright."""
+
+    def __getattr__(self, name):
+        from lxml import etree as real
+        return getattr(real, name)
+
+
+etree = _LazyEtree()
+_XML_PARSER = None
+
+
+def _xml_parser():
+    global _XML_PARSER
+    if _XML_PARSER is None:
+        _XML_PARSER = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False)
+    return _XML_PARSER
+BINARY_DISABLED_REASON = "PDF and Office documents are not enabled on this deployment; upload text, markdown, HTML or CSV instead"
 _CORRUPT = "file is corrupt or not a valid {kind}"
 _BOMB = "file expands beyond the allowed size (possible decompression bomb)"
 _TOO_BIG_TEXT = "extracted text exceeds the allowed size"
@@ -235,7 +254,7 @@ def _load_docx_styles(zf: zipfile.ZipFile) -> None:
     if "word/styles.xml" not in zf.namelist():
         return
     try:
-        root = etree.fromstring(zf.read("word/styles.xml"), _XML)
+        root = etree.fromstring(zf.read("word/styles.xml"), _xml_parser())
     except etree.XMLSyntaxError:
         return
     for st in root.iter(_W + "style"):
@@ -382,7 +401,7 @@ def _docx_native(zf: zipfile.ZipFile, raw: bytes) -> ParsedDocument:
 
 def _docx_xml(zf: zipfile.ZipFile) -> ParsedDocument:
     _load_docx_styles(zf)
-    root = etree.fromstring(zf.read("word/document.xml"), _XML)
+    root = etree.fromstring(zf.read("word/document.xml"), _xml_parser())
 
     def style_of(p_el) -> str:
         st = p_el.find(f"{_W}pPr/{_W}pStyle")
@@ -482,13 +501,13 @@ def _pptx_xml(zf: zipfile.ZipFile, limits: Limits) -> ParsedDocument:
     )
     sw = sh = 0
     if "ppt/presentation.xml" in zf.namelist():
-        sz = next(etree.fromstring(zf.read("ppt/presentation.xml"), _XML).iter("{*}sldSz"), None)
+        sz = next(etree.fromstring(zf.read("ppt/presentation.xml"), _xml_parser()).iter("{*}sldSz"), None)
         if sz is not None:
             sw, sh = int(sz.get("cx") or 0), int(sz.get("cy") or 0)
     blocks = _Blocks()
     hidden: Counter = Counter()
     for i, name in enumerate(slides[: limits.max_pages], start=1):
-        root = etree.fromstring(zf.read(name), _XML)
+        root = etree.fromstring(zf.read(name), _xml_parser())
         if root.get("show") == "0":
             hidden["pptx_hidden_slides"] += 1
             continue
@@ -541,8 +560,8 @@ def _sheet_members(zf: zipfile.ZipFile) -> list[tuple[str, str, str]]:
     names = set(zf.namelist())
     out: list[tuple[str, str, str]] = []
     try:
-        wb = etree.fromstring(zf.read("xl/workbook.xml"), _XML)
-        rels = etree.fromstring(zf.read("xl/_rels/workbook.xml.rels"), _XML)
+        wb = etree.fromstring(zf.read("xl/workbook.xml"), _xml_parser())
+        rels = etree.fromstring(zf.read("xl/_rels/workbook.xml.rels"), _xml_parser())
         targets = {r.get("Id"): r.get("Target") for r in rels}
         rid_attr = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
         for sh in wb.iter("{*}sheet"):
@@ -567,7 +586,7 @@ def _xlsx_hidden_styles(zf: zipfile.ZipFile) -> set[int]:
     if "xl/styles.xml" not in zf.namelist():
         return set()
     try:
-        root = etree.fromstring(zf.read("xl/styles.xml"), _XML)
+        root = etree.fromstring(zf.read("xl/styles.xml"), _xml_parser())
     except etree.XMLSyntaxError:
         return set()
     codes = {n.get("numFmtId"): (n.get("formatCode") or "") for n in root.iter("{*}numFmt")}
@@ -656,7 +675,7 @@ def _xlsx_native(zf: zipfile.ZipFile, raw: bytes, limits: Limits) -> ParsedDocum
 def _xlsx_xml(zf: zipfile.ZipFile, limits: Limits) -> ParsedDocument:
     shared: list[str] = []
     if "xl/sharedStrings.xml" in zf.namelist():
-        root = etree.fromstring(zf.read("xl/sharedStrings.xml"), _XML)
+        root = etree.fromstring(zf.read("xl/sharedStrings.xml"), _xml_parser())
         shared = [_xml_text(si) for si in root.iter("{*}si")]
     blocks = _Blocks()
     hidden: Counter = Counter()
@@ -666,7 +685,7 @@ def _xlsx_xml(zf: zipfile.ZipFile, limits: Limits) -> ParsedDocument:
         if state != "visible":
             hidden["xlsx_hidden_sheets"] += 1
             continue
-        root = etree.fromstring(zf.read(member), _XML)
+        root = etree.fromstring(zf.read(member), _xml_parser())
         rows = []
         for r in root.iter("{*}row"):
             vals = []
@@ -972,7 +991,8 @@ def _html_main(html: str) -> ParsedDocument:
     from bs4 import BeautifulSoup, Comment, NavigableString
     _check_html_depth(html)
 
-    soup = BeautifulSoup(html, "lxml")
+    # lxml (libxml2) only with binary parsers on; otherwise the pure-Python parser, with the same stripping and limits.
+    soup = BeautifulSoup(html, "lxml" if _LIMITS.binary_parsers else "html.parser")
     hidden: Counter = Counter()
     styles = _HtmlStyles(soup)
     controlled = {i for t in soup.find_all(attrs={"aria-expanded": "false"}) for i in str(t.get("aria-controls", "")).split()}
@@ -1526,6 +1546,8 @@ def parse_by_type(raw: bytes, content_type: str, limits: Limits, language: str |
     _LIMITS = limits
     _PDF_STATE.update(seen={}, t0=time.monotonic())
     ct = content_type
+    if not limits.binary_parsers and ct in (detect.PDF, detect.DOCX, detect.PPTX, detect.XLSX):
+        raise ParseRejected(BINARY_DISABLED_REASON)   # also enforced by parse_document; belt and braces in the child
     if ct == detect.PDF:
         reader = _open_pdf(raw, limits)
         state: dict = {}
