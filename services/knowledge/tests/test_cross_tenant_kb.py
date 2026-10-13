@@ -17,7 +17,7 @@ from libs.tenancy import set_caller_tenant
 from services.config import auth as config_auth
 from services.config import users as users_service
 from services.knowledge import agent_kb as agent_kb_service
-from services.knowledge import retrieval
+from services.knowledge import retrieval_plan
 from services.knowledge.app import app
 from services.knowledge.routers import documents as documents_router
 
@@ -163,8 +163,10 @@ async def test_a_stray_cross_tenant_row_is_invisible_to_retrieval_and_listing(po
     set_caller_tenant(str(tenant["id"]))
 
     async with pool.acquire() as conn:
-        assert await retrieval._agent_enabled_kb_ids(conn, tenant["slug"], agent["slug"]) == []
-        assert await retrieval._agent_kb_groups(conn, tenant["slug"], agent["slug"]) == {}
+        plan = await retrieval_plan.load_plan(conn, tenant["slug"], agent["slug"])
+    assert plan is not None
+    assert plan.kb_ids == []
+    assert plan.groups == {}
     assert await agent_kb_service.has_enabled_kb(tenant["slug"], agent["slug"]) is False
     assert await agent_kb_service.list_for_agent(agent["id"]) == []
     assert await agent_kb_service.list_for_kb(foreign["kb"]["id"]) == []
@@ -272,12 +274,17 @@ async def test_retry_is_admin_only(client, pool, caller, test_viewer, doc_cleanu
     assert await pool.fetchval("SELECT status FROM kb_documents WHERE id = $1", doc["id"]) == "failed"
 
 
-@pytest.mark.parametrize("content_type, status", [
-    ("text/plain", 201),
-    ("text/markdown", 201),
-    ("Text/Plain; charset=utf-8", 201),
-    ("application/pdf", 415),
-    ("application/octet-stream", 415),
+# The declared type is only a hint; the bytes decide (parsers/detect.py), so plain text is accepted under any label
+# and unsupported bytes are refused under any label.
+@pytest.mark.parametrize("content, content_type, status", [
+    (b"hello", "text/plain", 201),
+    (b"hello", "text/markdown", 201),
+    (b"hello", "Text/Plain; charset=utf-8", 201),
+    (b"hello", "application/pdf", 201),
+    (b"hello", "application/octet-stream", 201),
+    (b"\x89PNG\r\n\x1a\n" + bytes(64), "text/plain", 415),
+    (bytes(range(256)), "application/octet-stream", 415),
+    (b"", "text/plain", 400),
 ])
-async def test_upload_content_type_is_enforced(client, caller, doc_cleanup, content_type, status):
-    assert (await _upload(client, caller, b"hello", content_type)).status_code == status
+async def test_upload_content_type_is_enforced(client, caller, doc_cleanup, content, content_type, status):
+    assert (await _upload(client, caller, content, content_type)).status_code == status

@@ -8,6 +8,7 @@ from typing import Any
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import cache, db
+from . import retrieval_plan as plans
 
 
 async def get_agent_tenant_id(agent_id: Any, *, platform_scoped: bool = False) -> str | None:
@@ -37,6 +38,7 @@ async def _refresh_flag(agent_id: Any) -> None:
     if slugs is None:
         return
     tenant_slug, agent_slug = slugs
+    plans.invalidate_agent(tenant_slug, agent_slug)
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         row = await conn.fetchrow(
@@ -143,4 +145,6 @@ async def has_enabled_kb(tenant_slug: str, agent_slug: str) -> bool:
             ") AS has_kb",
             tenant_slug, agent_slug,
         )
+    # Refill with SET NX: this value predates any writer that committed while we were reading (see cache.fill_...).
+    await cache.fill_has_enabled_kb(tenant_slug, agent_slug, bool(row["has_kb"]))
     return bool(row["has_kb"])

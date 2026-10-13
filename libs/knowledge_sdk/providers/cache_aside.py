@@ -14,6 +14,8 @@ from ..models import ChunkSource, RetrievalPolicy, RetrievedChunk, RetrievedCont
 
 log = logging.getLogger(__name__)
 
+_STATUSES = frozenset({"ok", "no_match", "partial", "unavailable"})
+
 
 class CacheAsideKnowledgeProvider:
     def __init__(
@@ -27,6 +29,18 @@ class CacheAsideKnowledgeProvider:
     async def close(self) -> None:
         await self._availability_repo.close()
         await self._retrieval_repo.close()
+
+    async def prewarm(self, tenant_slug: str, agent_slug: str) -> None:
+        """Best effort, at call start: lets the Knowledge Service cache the agent's plan before the first
+        search. Skipped for agents with no KB; never raises."""
+        try:
+            enabled = await self._availability_repo.has_enabled_kb(tenant_slug, agent_slug)
+            if enabled is None:
+                enabled = await self._retrieval_repo.has_enabled_kb(tenant_slug, agent_slug)
+            if enabled:
+                await self._retrieval_repo.prewarm(tenant_slug, agent_slug)
+        except Exception:
+            log.warning("CacheAsideKnowledgeProvider: prewarm skipped tenant=%s agent=%s", tenant_slug, agent_slug)
 
     async def retrieve(
         self,
@@ -50,11 +64,14 @@ class CacheAsideKnowledgeProvider:
         except RepositoryUnavailableError:
             log.warning(
                 "CacheAsideKnowledgeProvider: retrieval plane unavailable, "
-                "degrading to no context tenant=%s agent=%s", tenant_slug, agent_slug,
+                "returning status=unavailable tenant=%s agent=%s", tenant_slug, agent_slug,
             )
-            return None
+            return RetrievedContext(
+                chunks=[], sources=[], confidence=0.0, latency_ms=(time.monotonic() - start) * 1000,
+                token_count=0, status="unavailable", degraded=["retrieval_unavailable"],
+            )
 
-        if raw is None:
+        if raw is None:  # old-shape "no context" (404)
             return None
 
         chunks = [
@@ -73,15 +90,24 @@ class CacheAsideKnowledgeProvider:
                     version=c["source"].get("version", 1),
                 ),
             )
-            for c in raw["chunks"]
+            for c in raw.get("chunks") or []
         ]
+
+        # Old servers send no status (404 = no context, 200 = chunks); new ones always do.
+        status = raw.get("status")
+        if status not in _STATUSES:
+            status = "ok" if chunks else "no_match"
 
         return RetrievedContext(
             chunks=chunks,
-            sources=raw["sources"],
+            sources=raw.get("sources") or [],
             confidence=chunks[0].score if chunks else 0.0,
             latency_ms=(time.monotonic() - start) * 1000,
-            token_count=raw["token_count"],
+            token_count=raw.get("token_count", 0),
             include_citations=raw.get("include_citations", True),
             retrieval_metadata=raw.get("retrieval_metadata", {}),
+            status=status,
+            degraded=list(raw.get("degraded") or []),
+            trace_id=raw.get("trace_id"),
+            low_confidence=bool(raw.get("low_confidence", False)),
         )

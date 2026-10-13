@@ -6,13 +6,40 @@ import uuid
 os.environ.setdefault("POSTGRES_DSN", "postgresql://satish@localhost:5432/voiceai")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("JWT_SECRET", "dev-only-insecure-secret-do-not-deploy-" * 2)
+# The shipped default is OFF (parsers/limits.py); the suite parses PDF/Office, so it opts in for the test session.
+os.environ.setdefault("KNOWLEDGE_BINARY_PARSERS", "1")
 os.environ.setdefault("KNOWLEDGE_STORAGE_ROOT", "/tmp/voiceai-knowledge-test-storage")
 
+import pytest
 import pytest_asyncio
 
 from services.config import auth as config_auth  # noqa: E402
 from services.config import users as users_service  # noqa: E402
 from services.knowledge import db  # noqa: E402
+from services.knowledge import retrieval  # noqa: E402
+from services.knowledge import retrieval_log  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fresh_retrieval_caches():
+    """Plan/embedding caches and breakers are process-wide; no test may inherit another's."""
+    retrieval.clear_caches()
+    yield
+
+
+# Dead HNSW entries (rows earlier tests deleted, not yet vacuumed) count against hnsw.max_scan_tuples (default 20000),
+# and a filtered dense search that exhausts it returns NOTHING even though a matching row exists. All tests share one
+# database, so before each test vacuum kb_chunks once the dead-tuple count nears that budget. (On the CI runner the
+# count reached 36,541 and test_vector_search_ignores_parent_rows and a hosted-embedder dense-hit test found no rows.)
+_DEAD_TUPLE_LIMIT = 5000
+
+
+@pytest_asyncio.fixture(autouse=True, loop_scope="session")
+async def _keep_the_hnsw_index_vacuumed(pool):
+    dead = await pool.fetchval("SELECT n_dead_tup FROM pg_stat_user_tables WHERE relname = 'kb_chunks'")
+    if dead and dead > _DEAD_TUPLE_LIMIT:
+        await pool.execute("VACUUM kb_chunks")
+    yield
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -29,6 +56,8 @@ async def test_tenant(pool):
     )
     tenant = dict(row)
     yield tenant
+    await retrieval_log.flush()
+    await pool.execute("DELETE FROM retrieval_logs WHERE tenant_id = $1", tenant["id"])
     await pool.execute(
         "DELETE FROM agent_knowledge_bases WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = $1)",
         tenant["id"],
@@ -88,6 +117,8 @@ async def other_tenant_admin(pool):
     token = config_auth.create_access_token(user)
     yield {"user": user, "token": token, "tenant": tenant}
     await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])
+    await retrieval_log.flush()
+    await pool.execute("DELETE FROM retrieval_logs WHERE tenant_id = $1", tenant["id"])
     await pool.execute("UPDATE users SET tenant_id = NULL WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM tenants WHERE id = $1", tenant["id"])
 
@@ -102,6 +133,8 @@ async def tenant_agent(pool):
         "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, 'sup', 'Support') RETURNING *", tenant["id"],
     ))
     yield tenant, agent
+    await retrieval_log.flush()
+    await pool.execute("DELETE FROM retrieval_logs WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM agent_retrieval_policies WHERE agent_id = $1", agent["id"])
     await pool.execute("DELETE FROM agent_knowledge_bases WHERE agent_id = $1", agent["id"])
     await pool.execute("DELETE FROM kb_chunks WHERE tenant_id = $1", tenant["id"])

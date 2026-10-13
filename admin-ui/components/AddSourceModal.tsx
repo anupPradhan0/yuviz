@@ -7,27 +7,23 @@ import { Modal } from "@/components/Modal";
 
 // Only "Upload files" is wired up; the other cards are placeholders.
 const SOURCE_CARDS = [
-  { key: "upload", label: "Upload files", hint: ".txt or .md", enabled: true },
+  { key: "upload", label: "Upload files", hint: "text, Markdown, HTML, CSV (PDF and Office only if enabled)", enabled: true },
   { key: "website", label: "Sync a website", hint: "coming soon", enabled: false },
   { key: "text", label: "Write text", hint: "coming soon", enabled: false },
   { key: "integration", label: "Connect an integration", hint: "coming soon", enabled: false },
 ] as const;
 
-export const ACCEPTED_DOC_EXTENSIONS = [".txt", ".md"];
-export const ACCEPTED_DOC_ACCEPT = ".txt,.md,text/plain,text/markdown";
+export const ACCEPTED_DOC_EXTENSIONS = [".txt", ".md", ".pdf", ".docx", ".pptx", ".xlsx", ".html", ".htm", ".csv", ".tsv"];
+export const ACCEPTED_DOC_ACCEPT = ACCEPTED_DOC_EXTENSIONS.join(",");
 
-// Must match _SUPPORTED_CONTENT_TYPES in services/knowledge/ingestion_worker.py.
-// Needed because drag-and-drop bypasses <input accept>.
-const ACCEPTED_MIME_TYPES = ["text/plain", "text/markdown"];
+// A cheap first filter only (drag-and-drop bypasses <input accept>): the server detects the real type from the
+// file's bytes, so the browser-declared MIME type is not checked here.
 
 export function rejectionReasonFor(file: File): string | null {
   const name = file.name.toLowerCase();
   const hasAcceptedExtension = ACCEPTED_DOC_EXTENSIONS.some((ext) => name.endsWith(ext));
   if (!hasAcceptedExtension) {
-    return `"${file.name}" isn't a .txt or .md file.`;
-  }
-  if (file.type && !ACCEPTED_MIME_TYPES.includes(file.type)) {
-    return `"${file.name}" isn't a .txt or .md file.`;
+    return `"${file.name}" isn't a supported file type (text, Markdown, HTML or CSV; PDF, Word, Excel and PowerPoint only if your administrator has turned on document parsing).`;
   }
   return null;
 }
@@ -220,7 +216,7 @@ export function AddSourceModal({
 
       <div className="form-group">
         <label className="form-label">
-          File <span className="hint">.txt or .md only, for now</span>
+          File <span className="hint">text, Markdown, HTML or CSV; PDF and Office files only if enabled</span>
         </label>
         <input
           className="form-input"

@@ -163,13 +163,19 @@ export default function KnowledgeBaseDetailPage() {
   };
 
   const statusBadge = (status: KbDocument["status"]) => {
-    const cls = status === "ready" ? "green" : status === "failed" ? "red" : status === "processing" ? "amber" : "gray";
+    const cls = status === "ready" ? "green" : status === "ready_degraded" ? "amber" : status === "failed" ? "red" : status === "processing" ? "amber" : "gray";
     return <span className={`badge ${cls}`}>{status}</span>;
   };
 
   const docTypeLabel = (contentType: string) => {
     if (contentType === "text/markdown") return "Markdown";
     if (contentType === "text/plain") return "Text";
+    if (contentType === "application/pdf") return "PDF";
+    if (contentType.endsWith("wordprocessingml.document")) return "Word";
+    if (contentType.endsWith("presentationml.presentation")) return "PowerPoint";
+    if (contentType.endsWith("spreadsheetml.sheet")) return "Excel";
+    if (contentType === "text/html") return "HTML";
+    if (contentType === "text/csv" || contentType === "text/tab-separated-values") return "CSV";
     return contentType || "Unknown";
   };
 
@@ -269,7 +275,7 @@ export default function KnowledgeBaseDetailPage() {
                               type="checkbox"
                               checked={doc.usage_mode === "prompt"}
                               onChange={() => handleUsageModeToggle(doc)}
-                              disabled={doc.status !== "ready"}
+                              disabled={doc.status !== "ready" && doc.status !== "ready_degraded"}
                             />
                             Always include in prompt
                           </label>

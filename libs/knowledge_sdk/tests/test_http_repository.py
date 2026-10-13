@@ -15,6 +15,7 @@ from libs.tenancy import set_target_tenant
 from services.config import agents, provider_configs, tenants, users
 from services.config import db as config_db
 from services.config.app import app as config_app
+from services.knowledge import retrieval_log
 from services.knowledge.app import app as knowledge_app
 
 
@@ -60,6 +61,8 @@ async def tenant_agent(pool):
     with _seeding_as(tenant["id"]):
         agent = await agents.create_agent(tenant_id=tenant["id"], slug="sup", name="Support", tenant_slug=slug)
     yield tenant, agent
+    await retrieval_log.flush()  # the retrieve calls above queue a log row; it must land before the delete
+    await pool.execute("DELETE FROM retrieval_logs WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM agent_knowledge_bases WHERE agent_id = $1", agent["id"])
     await pool.execute("DELETE FROM kb_chunks WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM kb_documents WHERE tenant_id = $1", tenant["id"])
@@ -98,12 +101,100 @@ async def test_has_enabled_kb_true_after_assignment(service_account, tenant_agen
     await repo.close()
 
 
-async def test_retrieve_returns_none_when_404(service_account, tenant_agent):
+async def test_retrieve_with_nothing_relevant_is_200_no_match_not_404(service_account, tenant_agent):
     tenant, agent = tenant_agent
     repo = _repo(service_account)
     result = await repo.retrieve(tenant["slug"], agent["slug"], "anything", RetrievalPolicy())
-    assert result is None
+    assert result["status"] == "no_match"
+    assert result["chunks"] == [] and result["trace_id"]
     await repo.close()
+
+
+def _stub_retrieve(monkeypatch, impl):
+    from services.knowledge.routers import retrieve as router_module
+    monkeypatch.setattr(router_module.retrieval_service, "retrieve", impl)
+
+
+async def test_router_passes_through_a_result_that_already_has_a_status(service_account, tenant_agent, monkeypatch):
+    async def partial(conn, *a, **kw):
+        return {"status": "partial", "chunks": [{"content": "x"}], "degraded": ["rerank_timeout"], "trace_id": "abc"}
+    _stub_retrieve(monkeypatch, partial)
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    result = await repo.retrieve(tenant["slug"], agent["slug"], "q", RetrievalPolicy())
+    assert (result["status"], result["degraded"], result["trace_id"]) == ("partial", ["rerank_timeout"], "abc")
+    await repo.close()
+
+
+async def test_router_adds_status_ok_to_a_result_from_before_the_status_contract(service_account, tenant_agent, monkeypatch):
+    async def old_shape(conn, *a, **kw):
+        return {"chunks": [{"content": "x"}], "sources": [], "token_count": 1}
+    _stub_retrieve(monkeypatch, old_shape)
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    result = await repo.retrieve(tenant["slug"], agent["slug"], "q", RetrievalPolicy())
+    assert result["status"] == "ok" and result["trace_id"]
+    await repo.close()
+
+
+async def test_router_turns_a_none_result_into_no_match(service_account, tenant_agent, monkeypatch):
+    async def nothing(conn, *a, **kw):
+        return None
+    _stub_retrieve(monkeypatch, nothing)
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    result = await repo.retrieve(tenant["slug"], agent["slug"], "q", RetrievalPolicy())
+    assert result["status"] == "no_match" and result["chunks"] == []
+    await repo.close()
+
+
+async def test_router_turns_an_exception_into_unavailable_without_leaking_its_text(
+    service_account, tenant_agent, monkeypatch,
+):
+    async def boom(conn, *a, **kw):
+        raise RuntimeError("connect failed postgres://svc:hunter2@db.internal/knowledge")
+    _stub_retrieve(monkeypatch, boom)
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    result = await repo.retrieve(tenant["slug"], agent["slug"], "q", RetrievalPolicy())
+    assert result["status"] == "unavailable" and result["chunks"] == []
+    assert result["degraded"] == ["retrieval_error"]
+    assert "hunter2" not in str(result)
+    await repo.close()
+
+
+async def test_router_turns_a_slow_retrieval_into_unavailable_timeout(service_account, tenant_agent, monkeypatch):
+    import asyncio
+
+    async def slow(conn, *a, **kw):
+        await asyncio.sleep(5)
+    _stub_retrieve(monkeypatch, slow)
+    monkeypatch.setenv("KNOWLEDGE_RETRIEVE_TIMEOUT_S", "0.05")
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    result = await repo.retrieve(tenant["slug"], agent["slug"], "q", RetrievalPolicy())
+    assert result["status"] == "unavailable" and result["degraded"] == ["timeout"]
+    await repo.close()
+
+
+async def test_client_still_reads_the_old_404_as_no_context_and_an_old_200_without_status_as_a_dict():
+    import httpx
+
+    def _repo_answering(response: httpx.Response) -> HttpKnowledgeRepository:
+        return HttpKnowledgeRepository(
+            base_url="http://k", auth_base_url="http://c", service_email="e", service_password="p",
+            transport=httpx.MockTransport(lambda request: response),
+            auth_transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"access_token": "t"})),
+        )
+
+    old_404 = _repo_answering(httpx.Response(404, json={"detail": "no eligible context"}))
+    assert await old_404.retrieve("acme", "sup", "q", RetrievalPolicy()) is None
+    await old_404.close()
+
+    old_200 = _repo_answering(httpx.Response(200, json={"chunks": [{"content": "x"}], "sources": [], "token_count": 1}))
+    result = await old_200.retrieve("acme", "sup", "q", RetrievalPolicy())
+    assert result == {"chunks": [{"content": "x"}], "sources": [], "token_count": 1} and "status" not in result
+    await old_200.close()
 
 
 async def test_wrong_service_password_raises_unavailable(pool):
@@ -120,3 +211,48 @@ async def test_wrong_service_password_raises_unavailable(pool):
 
     await repo.close()
     await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])
+
+
+# ── integration: the router holds no connection and maps overload ───────────
+
+async def test_router_calls_retrieve_without_holding_a_pool_connection(service_account, tenant_agent, monkeypatch):
+    seen = {}
+
+    async def spy(conn, *a, **kw):
+        seen["conn"] = conn
+        seen["trace_id"] = kw.get("trace_id")
+        return {"status": "no_match", "chunks": [], "trace_id": kw.get("trace_id")}
+    _stub_retrieve(monkeypatch, spy)
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    result = await repo.retrieve(tenant["slug"], agent["slug"], "q", RetrievalPolicy())
+    assert seen["conn"] is None            # retrieve() takes its own connections through its limiter
+    assert result["trace_id"] == seen["trace_id"]
+    await repo.close()
+
+
+async def test_router_maps_overload_to_unavailable_with_a_warning_and_no_traceback(
+    service_account, tenant_agent, monkeypatch, caplog,
+):
+    from services.knowledge.resilience import RetrievalUnavailable
+
+    async def overloaded(conn, *a, **kw):
+        raise RetrievalUnavailable("retrieval overloaded", degraded=["overloaded"], trace_id="trace-overload")
+    _stub_retrieve(monkeypatch, overloaded)
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    with caplog.at_level("WARNING", logger="services.knowledge.routers.retrieve"):
+        result = await repo.retrieve(tenant["slug"], agent["slug"], "q", RetrievalPolicy())
+    assert result["status"] == "unavailable" and result["degraded"] == ["overloaded"]
+    assert result["trace_id"] == "trace-overload" and result["chunks"] == []
+    records = [r for r in caplog.records if r.name == "services.knowledge.routers.retrieve"]
+    assert records and all(r.exc_info is None for r in records)   # expected outcome: no stack trace per refusal
+    await repo.close()
+
+
+async def test_sdk_prewarm_is_best_effort_and_never_raises(service_account, tenant_agent):
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    assert isinstance(await repo.prewarm(tenant["slug"], agent["slug"]), bool)
+    assert await repo.prewarm("no-such-tenant-slug", agent["slug"]) is False   # 404 is False, not an error
+    await repo.close()

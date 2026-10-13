@@ -235,6 +235,9 @@ _EXPLICIT_OVERRIDE_REASONS = {
     "conversation-session-write",
     "conversation-tool-policy",
     "kb-ingestion-job",
+    # Retrieval hot path: parallel search branches and the post-response log writer have no request context
+    # of their own (separate tasks), so they name the tenant the resolved plan belongs to.
+    "retrieval-search", "retrieval-log",
 }
 
 # Every platform_conn(reason=...) literal; a new bypass must be added here.
@@ -247,8 +250,17 @@ _BYPASS_REASONS = {
     "agents-by-id", "call-flow-by-id", "carriers-by-id", "phone-numbers-by-id", "phone-numbers-did-lookup",
     "provider-configs-by-id", "telephony-configs-by-id", "tool-provider-configs-by-id",
     "calls-platform-read", "audit-log-platform-read",
+    # Platform-scoped, read-only export of calls (services/config/calls.py export_calls with tenant_slug=None);
+    # added by the call-export change on redesign, registered here so the walker matches the code.
+    "calls-platform-export",
     "campaign-by-id", "dnc-by-id", "campaign-worker-scan",
     "kb-by-id", "kb-admin-by-id", "agent-kb-by-id", "kb-ingestion-job-claim",
+    # Retention purge of retrieval_logs: deletes rows older than N days across every tenant, in small batches,
+    # by age only (no tenant-supplied input). Mutation without a single tenant to stamp.
+    "retrieval-logs-purge",
+    # Requeues running ingestion jobs whose worker died, across every tenant; each event row it
+    # writes carries the document's own tenant_id.
+    "kb-ingestion-lease-reaper",
     "document-by-id", "document-admin-by-id",
     "custom-apis-admin-by-id", "custom-apis-admin-mutation",
     "agent-apis-admin-by-id", "agent-apis-admin-mutation", "agent-apis-chain-runs",
@@ -278,7 +290,7 @@ _UNSTAMPED_MUTATION_EXEMPT_REASONS = {
     "invites-create-null-tenant", "invites-null-tenant-listing",
     "tenants-out-of-rls-scope", "phone-numbers-prewarm",
     "campaign-worker-scan", "conversation-reconcile-sweep",
-    "kb-ingestion-job-claim", "agent-apis-chain-runs",
+    "kb-ingestion-job-claim", "kb-ingestion-lease-reaper", "agent-apis-chain-runs", "retrieval-logs-purge",
     "calls-platform-read", "audit-log-platform-read",
 }
 
@@ -302,10 +314,31 @@ def _call_name(call: ast.Call) -> str | None:
     return None
 
 
-def _reason_literal(call: ast.Call) -> object:
+NON_LITERAL_REASON = "<non-literal reason: use a string literal or a module-level string constant>"
+
+
+def _module_string_constants(tree: ast.Module) -> dict[str, str]:
+    """Module-level `NAME = "literal"` assignments, so `reason=_REASON` is checked like a literal."""
+    out: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    out[target.id] = node.value.value
+    return out
+
+
+def _reason_literal(call: ast.Call, consts: dict[str, str] | None = None) -> object:
+    """The reason string, resolving module-level string constants. Anything else that is passed as reason= (a call, an
+    f-string, an unresolvable name) is reported as NON_LITERAL_REASON so the enumeration test fails loudly instead of
+    silently skipping the call site."""
     for kw in call.keywords:
-        if kw.arg == "reason" and isinstance(kw.value, ast.Constant):
-            return kw.value.value
+        if kw.arg == "reason":
+            if isinstance(kw.value, ast.Constant):
+                return kw.value.value
+            if isinstance(kw.value, ast.Name) and kw.value.id in (consts or {}):
+                return consts[kw.value.id]
+            return NON_LITERAL_REASON
     return None
 
 
@@ -324,6 +357,7 @@ def _collect_tenant_conn_calls():
             tree = ast.parse(path.read_text())
         except SyntaxError:
             continue
+        consts = _module_string_constants(tree)
         for func in ast.walk(tree):
             if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -333,7 +367,7 @@ def _collect_tenant_conn_calls():
                 if isinstance(node, ast.Call) and _call_name(node) in _TENANT_CONN_CALL_NAMES:
                     findings.append((
                         str(path), func.name, _call_name(node),
-                        _reason_literal(node), _has_stamp_tenant(node), is_mutation,
+                        _reason_literal(node, consts), _has_stamp_tenant(node), is_mutation,
                     ))
     return findings
 
@@ -403,3 +437,11 @@ def test_phone_number_cache_key_is_globally_unique_by_construction():
 
 def test_a_bare_slug_keyed_cache_key_fails_the_classifier():
     assert not _is_tenant_safe_cache_key("kb:acme-docs")
+
+
+def test_a_non_literal_reason_is_reported_and_a_module_constant_is_resolved():
+    tree = ast.parse('_R = "kb-ingestion-job"\nasync def f(pool):\n    tenant_conn(pool, reason=_R)\n    tenant_conn(pool, reason=compute())\n'
+                     '    tenant_conn(pool, reason=f"x{y}")\n    tenant_conn(pool)\n')
+    consts = _module_string_constants(tree)
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and _call_name(n) == "tenant_conn"]
+    assert [_reason_literal(c, consts) for c in calls] == ["kb-ingestion-job", NON_LITERAL_REASON, NON_LITERAL_REASON, None]

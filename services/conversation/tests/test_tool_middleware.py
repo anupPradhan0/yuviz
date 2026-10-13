@@ -63,7 +63,7 @@ async def test_timeout_middleware_returns_timeout_status_not_exception():
 
 
 async def test_circuit_breaker_opens_after_consecutive_failures():
-    executor = _FixedExecutor(ToolResult(status=ToolStatus.FAILED, error="down"))
+    executor = _FixedExecutor(ToolResult(status=ToolStatus.FAILED, error="toolexec_unavailable"))
     breaker = CircuitBreakerMiddleware(fails_before_open=3, cooldown_s=60.0)
     chain = MiddlewareChain(executor, [breaker])
 
@@ -77,7 +77,7 @@ async def test_circuit_breaker_opens_after_consecutive_failures():
 
 
 async def test_circuit_breaker_resets_on_success():
-    executor = _FixedExecutor(ToolResult(status=ToolStatus.FAILED, error="down"))
+    executor = _FixedExecutor(ToolResult(status=ToolStatus.FAILED, error="toolexec_unavailable"))
     breaker = CircuitBreakerMiddleware(fails_before_open=3, cooldown_s=60.0)
     chain = MiddlewareChain(executor, [breaker])
 
@@ -85,7 +85,7 @@ async def test_circuit_breaker_resets_on_success():
     await chain.execute(_request())
     executor._result = ToolResult(status=ToolStatus.SUCCESS, payload={})
     await chain.execute(_request())  # resets the consecutive-failure count
-    executor._result = ToolResult(status=ToolStatus.FAILED, error="down")
+    executor._result = ToolResult(status=ToolStatus.FAILED, error="toolexec_unavailable")
     result = await chain.execute(_request())
 
     # Only 1 consecutive failure since the reset — breaker still closed.

@@ -48,6 +48,13 @@ _DYNAMIC_READS = {
     ("services/conversation/language.py", "name"): set(),
     # env:NAME secret refs: the name comes from a provider config, not code.
     ("libs/config_sdk/secret_resolver.py", "key"): set(),
+    # Bodies of the knowledge service's env helpers (envparse.env_int/env_float/..., limits/resilience config readers) and
+    # the parse child's thread-pool loop; their callers pass literal names and are listed in docs/knowledge-env-vars.md.
+    ("services/knowledge/chunker.py", "name"): set(),
+    ("services/knowledge/envparse.py", "name"): set(),
+    ("services/knowledge/parsers/_worker.py", "name"): set(),
+    ("services/knowledge/parsers/limits.py", "name"): set(),
+    ("services/knowledge/resilience.py", "name"): set(),
     # services/toolexec/oauth.py: per-provider connector config, keyed by OAuthProvider.key.
     ("services/toolexec/oauth.py", "_REDIRECT_URI_ENV"): {"TOOLEXEC_OAUTH_REDIRECT_URI"},
     ("services/toolexec/oauth.py", "f'TOOLEXEC_OAUTH_{provider.key.upper()}_CLIENT_ID'"):
@@ -69,6 +76,18 @@ def _tracked(*patterns: str) -> list[Path]:
 def _is_test(path: Path) -> bool:
     rel = path.relative_to(_REPO).parts
     return "tests" in rel or rel[0] == "tests" or path.name.endswith("_test.cpp")
+
+
+# The knowledge/RAG service has ~130 tuning knobs (deadlines, caps, limits) whose safe default is "unset". Listing them all
+# in .env.example would mean blank values, and a blank is not "unset" for every reader (an empty provider allow-list means
+# "allow nothing"), so they are catalogued in docs/knowledge-env-vars.md instead: generated from the code by
+# scripts/gen_knowledge_env_doc.py and drift-gated by services/knowledge/tests/test_env_doc.py. A variable must be in
+# .env.example or in that document; the operator-facing switches (KNOWLEDGE_BINARY_PARSERS) are in both.
+_KNOWLEDGE_DOC = _REPO / "docs" / "knowledge-env-vars.md"
+
+
+def _knowledge_doc_names() -> set[str]:
+    return set(re.findall(r"^\| `([A-Z][A-Z0-9_]+)` \|", _KNOWLEDGE_DOC.read_text(), flags=re.M)) if _KNOWLEDGE_DOC.exists() else set()
 
 
 def _catalogue() -> dict[str, str]:
@@ -120,8 +139,8 @@ def test_every_env_var_the_services_read_is_in_env_example():
     )
     assert known <= unresolved, f"stale _DYNAMIC_READS entries: {sorted(known - unresolved)}"
     read |= {name for names in _DYNAMIC_READS.values() for name in names}
-    missing = read - set(_catalogue()) - _NOT_IN_CATALOGUE
-    assert not missing, f"read by code but not listed in .env.example: {sorted(missing)}"
+    missing = read - set(_catalogue()) - _NOT_IN_CATALOGUE - _knowledge_doc_names()
+    assert not missing, f"read by code but not listed in .env.example or docs/knowledge-env-vars.md: {sorted(missing)}"
 
 
 def test_env_example_has_no_secret_values():

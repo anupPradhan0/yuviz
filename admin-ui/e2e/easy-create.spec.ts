@@ -757,13 +757,13 @@ test("uploaded files create a collection, are uploaded one by one, then attached
   await expect(page.getByText(`${easyCopy.documentsAttachedLabel}: 1 (Acme Dental documents)`)).toBeVisible();
 });
 
-test("a file that is not .txt or .md shows a plain message and nothing is uploaded", async ({ page }) => {
+test("a file type that is not supported shows a plain message and nothing is uploaded", async ({ page }) => {
   const stub = await stubKnowledge(page, []);
   await openEasy(page, tenantDocs);
   await toBusinessStep(page, uniqueName("Wrong"));
   await page
     .getByLabel(easyCopy.uploadFilesLabel)
-    .setInputFiles({ name: "brochure.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF") });
+    .setInputFiles({ name: "brochure.exe", mimeType: "application/octet-stream", buffer: Buffer.from("MZ") });
   await expect(page.getByText(easyCopy.wrongFileType)).toBeVisible();
   await expect(page.getByRole("list", { name: easyCopy.filesChosenLabel })).toHaveCount(0);
   await scan(page, "wrong file type");

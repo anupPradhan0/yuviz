@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any, Awaitable, Callable
 
@@ -84,40 +85,108 @@ class LatencyRecorderMiddleware:
         return result
 
 
-class CircuitBreakerMiddleware:
-    """Consecutive-failure counting, not a rolling time window."""
+class BreakerBoard:
+    """Consecutive-failure counting per key, not a rolling time window. Must outlive a single call:
+    the orchestrator owns one so failures accumulate across calls (a chain built per call would never open)."""
 
     def __init__(self, fails_before_open: int = 5, cooldown_s: float = 30.0) -> None:
         self._fails_before_open = fails_before_open
         self._cooldown_s = cooldown_s
-        self._consecutive_failures: dict[str, int] = {}
-        self._opened_at: dict[str, float] = {}
+        self._consecutive_failures: dict[Any, int] = {}
+        self._opened_at: dict[Any, float] = {}
+        self._trial_started: dict[Any, float] = {}
 
-    def _breaker_key(self, request: ToolExecutionRequest) -> str:
-        return request.tool_name
-
-    async def __call__(self, request: ToolExecutionRequest, call_next: NextCall) -> ToolResult:
-        key = self._breaker_key(request)
+    def admit(self, key: Any) -> str | tuple[str, float] | None:
+        """"closed" = normal call, ("trial", token) = the single half-open probe, None = refuse (fail fast).
+        After the cooldown exactly one caller is admitted as the trial; the rest keep failing fast until
+        it resolves, so a still-broken service costs one step timeout per cycle, not one per caller."""
         opened_at = self._opened_at.get(key)
-        if opened_at is not None:
-            if time.monotonic() - opened_at < self._cooldown_s:
-                log.warning("tool_call circuit_breaker_open tool=%s", request.tool_name)
-                return ToolResult(status=ToolStatus.UNAVAILABLE, error="circuit_breaker_open")
-            # Cooldown elapsed — allow one attempt through ("half-open").
-            del self._opened_at[key]
+        if opened_at is None:
+            return "closed"
+        now = time.monotonic()
+        if now - opened_at < self._cooldown_s:
+            return None
+        started = self._trial_started.get(key)
+        if started is not None and now - started < self._cooldown_s:
+            return None  # a trial is in flight (and a lost one is replaced after one more cooldown)
+        self._trial_started[key] = now
+        return ("trial", now)
 
-        result = await call_next(request)
-        if result.status in (ToolStatus.FAILED, ToolStatus.TIMEOUT):
+    def _end_trial(self, key: Any, admission: Any) -> None:
+        # Only the trial that owns the marker clears it: a replaced (stale) trial finishing late must not
+        # clear the newer trial's marker and let a third caller in alongside it.
+        if self._trial_started.get(key) == admission[1]:
+            del self._trial_started[key]
+
+    def record(self, key: Any, result: ToolResult, admission: Any = "closed") -> None:
+        trial = isinstance(admission, tuple)
+        if trial:
+            self._end_trial(key, admission)
+        if is_infrastructure_failure(result):
             count = self._consecutive_failures.get(key, 0) + 1
             self._consecutive_failures[key] = count
-            if count >= self._fails_before_open:
-                self._opened_at[key] = time.monotonic()
-                log.warning(
-                    "tool_call circuit_breaker_opened tool=%s consecutive_failures=%d",
-                    request.tool_name, count,
-                )
-        else:
+            if count >= self._fails_before_open or trial:
+                self._opened_at[key] = time.monotonic()  # (re-)open, restarting the cooldown
+                log.warning("tool_call circuit_breaker_opened key=%s consecutive_failures=%d", key, count)
+        elif result.status is not ToolStatus.CANCELLED:
+            if key in self._opened_at and not trial:
+                return  # a straggler that started before the breaker opened says nothing about now
             self._consecutive_failures[key] = 0
+            self._opened_at.pop(key, None)  # the trial succeeded (or the service answered): close
+
+    def abandon(self, key: Any, admission: Any) -> None:
+        """A trial that never produced a result (cancelled, raised) must not wedge the breaker half-open."""
+        if isinstance(admission, tuple):
+            self._end_trial(key, admission)
+
+
+# Errors a caller can cause (a wrong order number is a customer-API 404): they must never count, or a few
+# callers could shut a tenant's API off for everyone.
+_INFRA_FAILED_ERRORS = frozenset({
+    "toolexec_unavailable", "provider_unavailable", "knowledge_unavailable", "local_tool_failed",
+})
+_CALLER_DRIVEN_UNAVAILABLE = frozenset({"send_cap_reached", "circuit_breaker_open"})
+_HTTP_5XX = re.compile(r"http_status_5\d\d")
+
+
+def is_infrastructure_failure(result: ToolResult) -> bool:
+    """Timeouts, 5xx/transport errors and unavailability count against a breaker; 4xx, validation and
+    business-rule failures mean the service answered."""
+    if result.status is ToolStatus.TIMEOUT:
+        return True
+    if result.status is ToolStatus.UNAVAILABLE:
+        return result.error not in _CALLER_DRIVEN_UNAVAILABLE
+    if result.status is ToolStatus.FAILED:
+        return bool(result.error) and (result.error in _INFRA_FAILED_ERRORS or bool(_HTTP_5XX.fullmatch(result.error)))
+    return False
+
+
+def breaker_key(request: ToolExecutionRequest) -> tuple[str, str, str]:
+    """Per tenant and, for execute_api, per API: one tenant's dead CRM must not open the breaker for
+    another tenant, nor for that tenant's other APIs."""
+    return (
+        request.context.tenant_id, request.tool_name, str(request.arguments.get("api_name") or ""),
+    )
+
+
+class CircuitBreakerMiddleware:
+    def __init__(
+        self, fails_before_open: int = 5, cooldown_s: float = 30.0, board: BreakerBoard | None = None,
+    ) -> None:
+        self._board = board if board is not None else BreakerBoard(fails_before_open, cooldown_s)
+
+    async def __call__(self, request: ToolExecutionRequest, call_next: NextCall) -> ToolResult:
+        key = breaker_key(request)
+        admission = self._board.admit(key)
+        if admission is None:
+            log.warning("tool_call circuit_breaker_open tool=%s", request.tool_name)
+            return ToolResult(status=ToolStatus.UNAVAILABLE, error="circuit_breaker_open")
+        try:
+            result = await call_next(request)
+        except BaseException:
+            self._board.abandon(key, admission)
+            raise
+        self._board.record(key, result, admission)
         return result
 
 
@@ -176,6 +245,7 @@ def build_default_chain(
     executor, timeout_ms: int = 6000, metrics: IMetrics | None = None,
     redact_arg_keys: frozenset[str] = frozenset(),
     latency_store: ToolLatencyStore | None = None,
+    breaker_board: BreakerBoard | None = None,
 ) -> MiddlewareChain:
     """Standard chain: Logging, Metrics, Latency (if a store is given), CircuitBreaker, Retry, Timeout."""
     middlewares = [
@@ -185,7 +255,7 @@ def build_default_chain(
     if latency_store is not None:
         middlewares.append(LatencyRecorderMiddleware(latency_store))
     middlewares += [
-        CircuitBreakerMiddleware(),
+        CircuitBreakerMiddleware(board=breaker_board),
         RetryMiddleware(),
         TimeoutMiddleware(timeout_ms=timeout_ms),
     ]

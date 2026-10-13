@@ -28,6 +28,9 @@ class ToolResult:
     deterministic_response: str | None = None
     # Business-local datetime the deterministic success confirmed; only set with deterministic_response.
     confirmed_datetime: str | None = None
+    # Envelope status for a SUCCESS that is not plainly "ok": "no_match" (a lookup that found nothing)
+    # or "partial" (degraded or truncated). None = derive from status.
+    outcome: str | None = None
 
 
 @dataclass(frozen=True)
@@ -39,6 +42,16 @@ class ToolDefinition:
     category:          str = ""
     # False = enabled per agent but never offered to the LLM.
     llm_visible:       bool = True
+    # Local tools only (remote tools take timeout_ms from their agent policy): per-attempt budget.
+    timeout_ms:        int | None = None
+    # True = no side effects, so a transient failure may be retried once and a last-good result served
+    # when the tool is down. Default False: a write is never retried or replayed from cache.
+    read_only:         bool = False
+    # Optional JSON schema for the payload a tool returns; a mismatch becomes an error, not LLM input.
+    output_schema:     dict[str, Any] | None = None
+    # True = the result carries text written by third parties (retrieved documents). Once such a result is
+    # in context, side-effecting calls are held for the caller's confirmation for the rest of the turn.
+    untrusted_output:  bool = False
 
     def to_generic_schema(self) -> dict[str, Any]:
         """Vendor-neutral {name, description, parameters}; each LLM provider wraps it in its wire format."""

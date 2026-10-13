@@ -1,0 +1,1595 @@
+"""Per-type fallback ladders. Runs inside the sandboxed subprocess (see sandbox.py), never in the worker itself.
+
+Each ladder is an ordered list of (parser_name, callable); run_ladder() takes the first result that passes the
+quality gate, else the best soft-failing one as degraded, else raises ParseRejected with the most specific reason.
+
+Two cross-cutting rules live here:
+  - resource pre-checks run BEFORE anything is built (cell/paragraph/column budgets counted by streaming), because
+    the libraries below allocate for what a file declares, not for what it contains;
+  - invisible content (hidden runs, display:none, hidden sheets/slides, tracked deletions, invisible PDF text) is
+    dropped by default and counted in ParsedDocument.hidden_removed, so it never reaches the index or the LLM."""
+
+from __future__ import annotations
+
+import csv
+import io
+import math
+import re
+import time
+import zipfile
+import zlib
+from collections import Counter
+from typing import Callable, Iterator
+
+
+from . import detect, ocr
+from .limits import Limits
+from .model import CODE, HEADING, LIST, PARAGRAPH, TABLE, Block, LimitExceeded, ParsedDocument, ParseRejected
+from .quality import MIN_CHARS_PER_PAGE, assess
+from .textblocks import blocks_from_text
+
+
+
+class _LazyEtree:
+    """lxml is imported on first use, never at import time: with KNOWLEDGE_BINARY_PARSERS=0 nothing here touches
+    lxml/libxml2 (HTML uses html.parser, and the XML paths are refused), and the child blocks the import outright."""
+
+    def __getattr__(self, name):
+        from lxml import etree as real
+        return getattr(real, name)
+
+
+etree = _LazyEtree()
+_XML_PARSER = None
+
+
+def _xml_parser():
+    global _XML_PARSER
+    if _XML_PARSER is None:
+        _XML_PARSER = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False)
+    return _XML_PARSER
+BINARY_DISABLED_REASON = "PDF and Office documents are not enabled on this deployment; upload text, markdown, HTML or CSV instead"
+_CORRUPT = "file is corrupt or not a valid {kind}"
+_BOMB = "file expands beyond the allowed size (possible decompression bomb)"
+_TOO_BIG_TEXT = "extracted text exceeds the allowed size"
+
+_LIMITS = Limits()  # set per parse by parse_by_type(); the child process parses one document
+
+
+class TierSkip(Exception):
+    """This fallback does not apply to the document (e.g. OCR when every page already has text)."""
+
+
+class _Blocks(list):
+    """Block list that enforces max_chars while it is being built, so a hostile file is refused early instead of
+    after it has been fully materialised."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.chars = 0
+
+    def append(self, b: Block) -> None:  # type: ignore[override]
+        self.chars += len(b.text) + sum(len(c) for r in b.rows for c in r)
+        if self.chars > _LIMITS.max_chars:
+            raise LimitExceeded(_TOO_BIG_TEXT)
+        super().append(b)
+
+    def extend(self, items) -> None:  # type: ignore[override]
+        for b in items:
+            self.append(b)
+
+
+def run_ladder(tiers: list[tuple[str, Callable[[], ParsedDocument]]]) -> ParsedDocument:
+    best: ParsedDocument | None = None
+    best_score = -1.0
+    last_reject: ParseRejected | None = None
+    last_hard: str | None = None
+    for name, fn in tiers:
+        try:
+            doc = fn()
+        except TierSkip:
+            continue
+        except LimitExceeded:
+            raise
+        except ParseRejected as exc:
+            last_reject = exc
+            continue
+        except MemoryError:
+            raise
+        except Exception:  # a parser crashing on odd input is exactly why there is a next rung
+            continue
+        doc.parser_used = name
+        q = assess(doc.text(), doc.page_texts)
+        doc.quality_score = q.score
+        if q.hard_fail:
+            last_hard = q.hard_fail
+            continue
+        if q.ok and not doc.degraded:
+            return doc
+        doc.degraded = True
+        doc.warnings = [*doc.warnings, *q.soft_issues]
+        if q.score > best_score:
+            best, best_score = doc, q.score
+    if best is not None:
+        if last_reject is not None and last_reject.reason == ocr.NEEDS_OCR:
+            best.warnings.append(ocr.NEEDS_OCR)
+        return best
+    if last_reject is not None:
+        raise last_reject
+    raise ParseRejected(f"{last_hard or 'no text could be extracted'}; the file may be empty, scanned or damaged")
+
+
+# ── zip-based Office files ──────────────────────────────────────────────
+
+def _inflate_bounded(zf, infos, limit: int) -> None:
+    """Inflate every member in 1 MB steps, counting what actually comes out. Python's zipfile stops at the declared
+    size, so with today's zipfile this cannot trip before the declared-size check does; it is defence in depth
+    against a zipfile that trusts the stream (and is unit-tested with a stub for exactly that reason)."""
+    total = 0
+    for info in infos:
+        with zf.open(info) as member:
+            while chunk := member.read(1 << 20):
+                total += len(chunk)
+                if total > limit:
+                    raise ParseRejected(_BOMB)
+
+
+def guard_zip(raw: bytes, limits: Limits, kind: str) -> zipfile.ZipFile:
+    """Open the archive and refuse bombs, encryption and corruption before any parser touches it."""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+        infos = zf.infolist()
+        if any(i.flag_bits & 0x1 for i in infos):
+            raise ParseRejected("document is password-protected")
+        if sum(i.file_size for i in infos) > limits.max_decompressed:
+            raise ParseRejected(_BOMB)
+        _inflate_bounded(zf, infos, limits.max_decompressed)
+    except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, OSError) as exc:
+        raise ParseRejected(_CORRUPT.format(kind=kind)) from exc
+    return zf
+
+
+def _count_elements(zf: zipfile.ZipFile, member_re: str, tag: str, limit: int, what: str) -> int:
+    """Stream-count `tag` elements across the matching members without building a tree; abort past `limit`."""
+    total = 0
+    for name in zf.namelist():
+        if not re.fullmatch(member_re, name):
+            continue
+        with zf.open(name) as f:
+            try:
+                for _, el in etree.iterparse(f, events=("end",), tag=tag, resolve_entities=False, no_network=True,
+                                             load_dtd=False, huge_tree=False):
+                    total += 1
+                    if total > limit:
+                        raise LimitExceeded(f"document has more than {limit} {what}")
+                    el.clear()
+            except etree.XMLSyntaxError as exc:
+                raise ParseRejected(_CORRUPT.format(kind="Office document")) from exc
+    return total
+
+
+def _count_all_elements(zf: zipfile.ZipFile, limit: int) -> int:
+    """Total XML elements across every part of the package, counted while streaming (nothing is kept). The tag-specific
+    counts below miss floods of other elements (<w:tc/>, bookmarks, runs): a 299 KB DOCX of table cells reached 1 GB."""
+    total = 0
+    for name in zf.namelist():
+        if not name.endswith((".xml", ".rels")):
+            continue
+        with zf.open(name) as f:
+            try:
+                for _, el in etree.iterparse(f, events=("end",), resolve_entities=False, no_network=True,
+                                             load_dtd=False, huge_tree=False):
+                    total += 1
+                    if total > limit:
+                        raise LimitExceeded(f"document has more than {limit} XML elements")
+                    el.clear()
+                    parent = el.getparent()
+                    while parent is not None and el.getprevious() is not None:
+                        del parent[0]
+            except etree.XMLSyntaxError:
+                continue  # a malformed part is the parsers' problem; this pass only bounds size
+    return total
+
+
+def _local(tag) -> str:
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _xml_text(el) -> str:
+    parts: list[str] = []
+    for node in el.iter():
+        name = _local(node.tag)
+        if name in ("t", "delText") and node.text:
+            parts.append(node.text)
+        elif name in ("tab",):
+            parts.append(" ")
+        elif name in ("br", "cr"):
+            parts.append("\n")
+    return "".join(parts).strip()
+
+
+# ── DOCX ────────────────────────────────────────────────────────────────
+
+_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_WHITE = {"FFFFFF", "FFF"}
+
+
+def _false_flag(el) -> bool:
+    return el.get(_W + "val", "true").lower() in ("0", "false", "off")
+
+
+def _has_fill(el) -> bool:
+    shd = el.find(_W + "shd") if el is not None else None
+    return shd is not None and (shd.get(_W + "fill") or "auto").upper() not in ("AUTO", "FFFFFF", "FFF")
+
+
+_STYLE_PROPS: dict[str, dict] = {}
+_STYLE_PARENT: dict[str, str] = {}
+_TINY_HALF_POINTS = 4   # w:sz is in half-points: 4 = 2 pt
+
+
+def _rpr_props(rpr) -> dict:
+    props: dict = {}
+    if rpr is None:
+        return props
+    v = rpr.find(_W + "vanish")
+    if v is not None:
+        props["vanish"] = not _false_flag(v)
+    c = rpr.find(_W + "color")
+    if c is not None and c.get(_W + "val"):
+        props["color"] = c.get(_W + "val").upper()
+    sz = rpr.find(_W + "sz")
+    if sz is not None and (sz.get(_W + "val") or "").isdigit():
+        props["sz"] = int(sz.get(_W + "val"))
+    if _has_fill(rpr):
+        props["fill"] = True
+    return props
+
+
+def _load_docx_styles(zf: zipfile.ZipFile) -> None:
+    """Character and paragraph styles can hide or whiten text for every run that uses them, so the effective run
+    properties are style chain + direct formatting, not direct formatting alone."""
+    _STYLE_PROPS.clear()
+    _STYLE_PARENT.clear()
+    if "word/styles.xml" not in zf.namelist():
+        return
+    try:
+        root = etree.fromstring(zf.read("word/styles.xml"), _xml_parser())
+    except etree.XMLSyntaxError:
+        return
+    for st in root.iter(_W + "style"):
+        sid = st.get(_W + "styleId")
+        if not sid:
+            continue
+        _STYLE_PROPS[sid] = _rpr_props(st.find(_W + "rPr"))
+        based = st.find(_W + "basedOn")
+        if based is not None and based.get(_W + "val"):
+            _STYLE_PARENT[sid] = based.get(_W + "val")
+
+
+def _style_chain(sid: str | None) -> list[str]:
+    chain: list[str] = []
+    while sid and sid not in chain and len(chain) < 12:
+        chain.append(sid)
+        sid = _STYLE_PARENT.get(sid)
+    return chain[::-1]   # base style first, so derived styles override
+
+
+def _effective_props(r) -> dict:
+    props: dict = {}
+    p = next((a for a in r.iterancestors() if _local(a.tag) == "p"), None)
+    ids: list[str] = []
+    if p is not None:
+        ps = p.find(f"{_W}pPr/{_W}pStyle")
+        if ps is not None:
+            ids += _style_chain(ps.get(_W + "val"))
+    rpr = r.find(_W + "rPr")
+    rs = rpr.find(_W + "rStyle") if rpr is not None else None
+    if rs is not None:
+        ids += _style_chain(rs.get(_W + "val"))
+    for sid in ids:
+        props.update(_STYLE_PROPS.get(sid, {}))
+    props.update(_rpr_props(rpr))
+    return props
+
+
+def _run_hidden_reason(r) -> str | None:
+    """Why a run is invisible, or None, from direct formatting AND its paragraph/character style. White text counts
+    only when nothing darker sits behind it (run, paragraph or table-cell shading), so white-on-dark headings survive;
+    white-on-white detection is a heuristic."""
+    props = _effective_props(r)
+    if props.get("vanish"):
+        return "docx_hidden_runs"
+    if props.get("sz") is not None and props["sz"] <= _TINY_HALF_POINTS:
+        return "docx_tiny_text"
+    if props.get("color") in _WHITE:
+        if props.get("fill"):
+            return None
+        for anc in r.iterancestors():
+            name = _local(anc.tag)
+            if name == "p" and _has_fill(anc.find(_W + "pPr")):
+                return None
+            if name == "tc" and _has_fill(anc.find(_W + "tcPr")):
+                return None
+            if name in ("tc", "body"):
+                break
+        return "docx_white_text"
+    return None
+
+
+def _par_text(p, hidden: Counter) -> str:
+    parts: list[str] = []
+    for r in p.iter(_W + "r"):
+        deleted = any(_local(a.tag) in ("del", "moveFrom") for a in r.iterancestors())
+        reason = None if deleted else _run_hidden_reason(r)
+        for child in r:
+            name = _local(child.tag)
+            if name == "delText" or deleted and name == "t":
+                hidden["docx_tracked_deletions"] += 1
+            elif reason:
+                if name == "t":
+                    hidden[reason] += 1
+            elif name == "t" and child.text:
+                parts.append(child.text)
+            elif name == "tab":
+                parts.append(" ")
+            elif name in ("br", "cr"):
+                parts.append("\n")
+    return "".join(parts).strip()
+
+
+def _docx_body(root, style_of: Callable[[object], str], hidden: Counter) -> _Blocks:
+    blocks = _Blocks()
+    items: list[str] = []
+
+    def flush() -> None:
+        if items:
+            blocks.append(Block(LIST, "\n".join(items)))
+            items.clear()
+
+    body = root.find(_W + "body")
+    for child in body if body is not None else []:
+        name = _local(child.tag)
+        if name == "p":
+            text = _par_text(child, hidden)
+            if not text:
+                continue
+            style = style_of(child)
+            m = re.match(r"Heading\s*(\d)", style)
+            if m or style == "Title":
+                flush()
+                blocks.append(Block(HEADING, text, level=int(m.group(1)) if m else 1))
+            elif style.startswith("List") or child.find(f".//{_W}numPr") is not None:
+                items.append(f"- {text}")
+            else:
+                flush()
+                blocks.append(Block(PARAGRAPH, text))
+        elif name == "tbl":
+            flush()
+            rows = tuple(
+                tuple("\n".join(t for t in (_par_text(p, hidden) for p in tc.findall(_W + "p")) if t)
+                      for tc in tr.findall(_W + "tc"))
+                for tr in child.iter(_W + "tr")
+            )
+            if any(any(c for c in r) for r in rows):
+                width = max(len(r) for r in rows)
+                if len(rows) * width > _LIMITS.max_cells:
+                    raise LimitExceeded("table is too large")
+                blocks.append(Block(TABLE, rows=rows))
+    flush()
+    return blocks
+
+
+def _docx_native(zf: zipfile.ZipFile, raw: bytes) -> ParsedDocument:
+    import docx
+    from docx.text.paragraph import Paragraph
+
+    d = docx.Document(io.BytesIO(raw))
+    _load_docx_styles(zf)
+
+    def style_of(p_el) -> str:
+        try:
+            s = Paragraph(p_el, d).style
+            return (s.name or "") if s is not None else ""
+        except Exception:
+            return ""
+
+    hidden: Counter = Counter()
+    blocks = _docx_body(d.element, style_of, hidden)
+    return ParsedDocument(blocks, detect.DOCX, hidden_removed=dict(hidden))
+
+
+def _docx_xml(zf: zipfile.ZipFile) -> ParsedDocument:
+    _load_docx_styles(zf)
+    root = etree.fromstring(zf.read("word/document.xml"), _xml_parser())
+
+    def style_of(p_el) -> str:
+        st = p_el.find(f"{_W}pPr/{_W}pStyle")
+        val = st.get(_W + "val") if st is not None else ""
+        return re.sub(r"^(Heading)(\d)$", r"\1 \2", val or "")
+
+    hidden: Counter = Counter()
+    return ParsedDocument(_docx_body(root, style_of, hidden), detect.DOCX, hidden_removed=dict(hidden))
+
+
+# ── PPTX ────────────────────────────────────────────────────────────────
+
+_TINY_PPTX = 200   # a:rPr sz is in hundredths of a point: 200 = 2 pt
+
+
+def _a_par_text(p, hidden: Counter) -> str:
+    parts: list[str] = []
+    for child in p:
+        name = _local(child.tag)
+        if name in ("r", "fld"):
+            rpr = child.find("{*}rPr")
+            sz = rpr.get("sz") if rpr is not None else None
+            if sz and sz.isdigit() and int(sz) <= _TINY_PPTX:
+                hidden["pptx_tiny_text"] += 1
+                continue
+            t = child.find("{*}t")
+            if t is not None and t.text:
+                parts.append(t.text)
+        elif name == "br":
+            parts.append("\n")
+    return "".join(parts).strip()
+
+
+def _pptx_shape_hidden(el, slide_w: int, slide_h: int) -> str | None:
+    """A shape hidden in the selection pane (cNvPr hidden=1) or placed entirely off the slide is not shown."""
+    c = el.find("{*}nvSpPr/{*}cNvPr")
+    if c is None:
+        c = next(el.iter("{*}cNvPr"), None)
+    if c is not None and c.get("hidden") in ("1", "true"):
+        return "pptx_hidden_shapes"
+    off, ext = el.find(".//{*}xfrm/{*}off"), el.find(".//{*}xfrm/{*}ext")
+    if off is not None and ext is not None and slide_w and slide_h:
+        try:
+            x, y, cx, cy = int(off.get("x")), int(off.get("y")), int(ext.get("cx")), int(ext.get("cy"))
+        except (TypeError, ValueError):
+            return None
+        if x + cx <= 0 or x >= slide_w or y + cy <= 0 or y >= slide_h:
+            return "pptx_offslide_shapes"
+    return None
+
+
+def _pptx_native(zf: zipfile.ZipFile, raw: bytes, limits: Limits) -> ParsedDocument:
+    from pptx import Presentation
+
+    prs = Presentation(io.BytesIO(raw))
+    if len(prs.slides) > limits.max_pages:
+        raise ParseRejected(f"presentation has more than {limits.max_pages} slides")
+    blocks = _Blocks()
+    hidden: Counter = Counter()
+    sw, sh = int(prs.slide_width or 0), int(prs.slide_height or 0)
+    for n, slide in enumerate(prs.slides, start=1):
+        if slide._element.get("show") == "0":
+            hidden["pptx_hidden_slides"] += 1
+            continue
+        title_shape = slide.shapes.title
+        title = ""
+        if title_shape is not None and title_shape.has_text_frame and not _pptx_shape_hidden(title_shape._element, sw, sh):
+            title = title_shape.text_frame.text.strip()
+        blocks.append(Block(HEADING, title or f"Slide {n}", level=1, page=n))
+        for shape in slide.shapes:
+            if shape is title_shape:
+                continue
+            reason = _pptx_shape_hidden(shape._element, sw, sh)
+            if reason:
+                hidden[reason] += 1
+                continue
+            if shape.has_text_frame:
+                lines = [t for t in (_a_par_text(p, hidden) for p in shape.text_frame._txBody.iter("{*}p")) if t]
+                if lines:
+                    blocks.append(Block(PARAGRAPH, "\n".join(lines), page=n))
+            elif getattr(shape, "has_table", False) and shape.has_table:
+                rows = tuple(tuple(c.text.strip() for c in r.cells) for r in shape.table.rows)
+                blocks.append(Block(TABLE, rows=rows, page=n))
+        if slide.has_notes_slide:
+            notes = slide.notes_slide.notes_text_frame.text.strip() if slide.notes_slide.notes_text_frame else ""
+            if notes and limits.index_speaker_notes:
+                blocks.append(Block(PARAGRAPH, f"Speaker notes: {notes}", page=n))
+            elif notes:
+                hidden["pptx_speaker_notes"] += 1
+    return ParsedDocument(blocks, detect.PPTX, pages=len(prs.slides), hidden_removed=dict(hidden))
+
+
+def _pptx_xml(zf: zipfile.ZipFile, limits: Limits) -> ParsedDocument:
+    slides = sorted(
+        (n for n in zf.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)),
+        key=lambda n: int(re.search(r"(\d+)\.xml", n).group(1)),
+    )
+    sw = sh = 0
+    if "ppt/presentation.xml" in zf.namelist():
+        sz = next(etree.fromstring(zf.read("ppt/presentation.xml"), _xml_parser()).iter("{*}sldSz"), None)
+        if sz is not None:
+            sw, sh = int(sz.get("cx") or 0), int(sz.get("cy") or 0)
+    blocks = _Blocks()
+    hidden: Counter = Counter()
+    for i, name in enumerate(slides[: limits.max_pages], start=1):
+        root = etree.fromstring(zf.read(name), _xml_parser())
+        if root.get("show") == "0":
+            hidden["pptx_hidden_slides"] += 1
+            continue
+        doomed: set = set()
+        for sp in root.iter("{*}sp", "{*}graphicFrame", "{*}pic", "{*}grpSp"):
+            reason = _pptx_shape_hidden(sp, sw, sh)
+            if reason:
+                hidden[reason] += 1
+                doomed.add(sp)
+        paras = []
+        for p in root.iter("{*}p"):
+            if doomed and any(a in doomed for a in p.iterancestors()):
+                continue
+            t = _a_par_text(p, hidden)
+            if t:
+                paras.append(t)
+        if paras:
+            blocks.append(Block(HEADING, f"Slide {i}", level=1, page=i))
+            blocks.append(Block(PARAGRAPH, "\n".join(paras), page=i))
+    return ParsedDocument(blocks, detect.PPTX, hidden_removed=dict(hidden))
+
+
+# ── XLSX ────────────────────────────────────────────────────────────────
+
+_DIM_RE = re.compile(rb'<(?:\w+:)?dimension\s+ref="([A-Z]+)?(\d+)?(?::([A-Z]+)(\d+))?"')
+
+
+def _col_index(letters: bytes) -> int:
+    n = 0
+    for ch in letters:
+        n = n * 26 + (ch - 64)
+    return n
+
+
+def _declared_cells(zf: zipfile.ZipFile, member: str) -> int:
+    """Rows x columns a sheet declares in its <dimension>; openpyxl pads every row to that width, so a 21 KB file
+    can ask for ~1 GB. Read from the head of the sheet only."""
+    with zf.open(member) as f:
+        head = f.read(8192)
+    m = _DIM_RE.search(head)
+    if not m or not m.group(3):
+        return 0
+    cols = _col_index(m.group(3)) - _col_index(m.group(1) or b"A") + 1
+    rows = int(m.group(4)) - int(m.group(2) or 1) + 1
+    return max(0, cols) * max(0, rows)
+
+
+def _sheet_members(zf: zipfile.ZipFile) -> list[tuple[str, str, str]]:
+    """(name, state, member path) per sheet in workbook order; falls back to the files on disk."""
+    names = set(zf.namelist())
+    out: list[tuple[str, str, str]] = []
+    try:
+        wb = etree.fromstring(zf.read("xl/workbook.xml"), _xml_parser())
+        rels = etree.fromstring(zf.read("xl/_rels/workbook.xml.rels"), _xml_parser())
+        targets = {r.get("Id"): r.get("Target") for r in rels}
+        rid_attr = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+        for sh in wb.iter("{*}sheet"):
+            target = targets.get(sh.get(rid_attr)) or ""
+            path = target.lstrip("/") if target.startswith("/") else "xl/" + target
+            if path in names:
+                out.append((sh.get("name") or path, sh.get("state") or "visible", path))
+    except Exception:
+        out = []
+    if not out:
+        out = [(n.rsplit("/", 1)[-1][:-4], "visible", n) for n in sorted(names)
+               if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n)]
+    return out
+
+
+_XLSX_WHITE = {"FFFFFFFF", "00FFFFFF", "FFFFFF"}
+
+
+def _xlsx_hidden_styles(zf: zipfile.ZipFile) -> set[int]:
+    """Cell style indices whose text cannot be seen: a number format of `;;;` (shows nothing) or a white font with
+    no fill behind it. (White font on a coloured fill is kept.)"""
+    if "xl/styles.xml" not in zf.namelist():
+        return set()
+    try:
+        root = etree.fromstring(zf.read("xl/styles.xml"), _xml_parser())
+    except etree.XMLSyntaxError:
+        return set()
+    codes = {n.get("numFmtId"): (n.get("formatCode") or "") for n in root.iter("{*}numFmt")}
+    fonts = []
+    for f in root.iter("{*}font"):
+        c = f.find("{*}color")
+        fonts.append(bool(c is not None and (c.get("rgb") or "").upper() in _XLSX_WHITE or (c is not None and c.get("theme") == "0")))
+    fills = []
+    for fl in root.iter("{*}fill"):
+        pf = fl.find("{*}patternFill")
+        solid = pf is not None and pf.get("patternType") == "solid"
+        fg = pf.find("{*}fgColor") if pf is not None else None
+        fills.append(solid and not (fg is not None and (fg.get("rgb") or "").upper() in _XLSX_WHITE))
+    xfs = root.find("{*}cellXfs")
+    out: set[int] = set()
+    for i, xf in enumerate(xfs if xfs is not None else []):
+        code = re.sub(r"\s+", "", codes.get(xf.get("numFmtId"), ""))
+        invisible_format = bool(code) and all(part == "" or part == "@" for part in code.split(";")) and ";" in code
+        font_id, fill_id = int(xf.get("fontId") or 0), int(xf.get("fillId") or 0)
+        white_font = font_id < len(fonts) and fonts[font_id]
+        coloured_fill = fill_id < len(fills) and fills[fill_id]
+        if invisible_format or (white_font and not coloured_fill):
+            out.add(i)
+    return out
+
+
+def _xlsx_hidden_refs(zf: zipfile.ZipFile, member: str, styles: set[int]) -> set[str]:
+    if not styles:
+        return set()
+    refs: set[str] = set()
+    with zf.open(member) as f:
+        try:
+            for _, el in etree.iterparse(f, events=("end",), tag="{*}c", resolve_entities=False, no_network=True,
+                                         load_dtd=False, huge_tree=False):
+                if (el.get("s") or "").isdigit() and int(el.get("s")) in styles and el.get("r"):
+                    refs.add(el.get("r"))
+                el.clear()
+        except etree.XMLSyntaxError:
+            pass
+    return refs
+
+
+def _xlsx_native(zf: zipfile.ZipFile, raw: bytes, limits: Limits) -> ParsedDocument:
+    for _, state, member in _sheet_members(zf):
+        if state == "visible" and _declared_cells(zf, member) > limits.max_cells:
+            raise LimitExceeded("spreadsheet declares too many cells")
+    import openpyxl
+
+    wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+    blocks = _Blocks()
+    hidden: Counter = Counter()
+    cells = 0
+    styles = _xlsx_hidden_styles(zf)
+    members = {name: path for name, _, path in _sheet_members(zf)}
+    try:
+        for ws in wb.worksheets:
+            if ws.sheet_state != "visible":
+                hidden["xlsx_hidden_sheets"] += 1
+                continue
+            refs = _xlsx_hidden_refs(zf, members[ws.title], styles) if ws.title in members else set()
+            rows: list[tuple[str, ...]] = []
+            for row in ws.iter_rows():
+                vals = []
+                for c in row:
+                    if getattr(c, "coordinate", None) in refs:
+                        hidden["xlsx_hidden_cells"] += 1
+                        vals.append("")
+                    else:
+                        v = getattr(c, "value", None)
+                        vals.append("" if v is None else str(v).strip())
+                vals = tuple(vals)
+                cells += len(vals)
+                if cells > limits.max_cells or len(rows) > limits.max_table_rows:
+                    raise LimitExceeded("spreadsheet has too many cells")
+                if any(vals):
+                    rows.append(vals)
+            if rows:
+                width = max(len(r) for r in rows)
+                blocks.append(Block(HEADING, ws.title, level=1))
+                blocks.append(Block(TABLE, rows=tuple(r + ("",) * (width - len(r)) for r in rows)))
+    finally:
+        wb.close()
+    return ParsedDocument(blocks, detect.XLSX, hidden_removed=dict(hidden))
+
+
+def _xlsx_xml(zf: zipfile.ZipFile, limits: Limits) -> ParsedDocument:
+    shared: list[str] = []
+    if "xl/sharedStrings.xml" in zf.namelist():
+        root = etree.fromstring(zf.read("xl/sharedStrings.xml"), _xml_parser())
+        shared = [_xml_text(si) for si in root.iter("{*}si")]
+    blocks = _Blocks()
+    hidden: Counter = Counter()
+    cells = 0
+    styles = _xlsx_hidden_styles(zf)
+    for name, state, member in _sheet_members(zf):
+        if state != "visible":
+            hidden["xlsx_hidden_sheets"] += 1
+            continue
+        root = etree.fromstring(zf.read(member), _xml_parser())
+        rows = []
+        for r in root.iter("{*}row"):
+            vals = []
+            for c in r.findall("{*}c"):
+                if (c.get("s") or "").isdigit() and int(c.get("s")) in styles:
+                    hidden["xlsx_hidden_cells"] += 1
+                    vals.append("")
+                    continue
+                v = c.find("{*}v")
+                val = "" if v is None or v.text is None else v.text
+                if c.get("t") == "s" and val.isdigit() and int(val) < len(shared):
+                    val = shared[int(val)]
+                elif c.get("t") == "inlineStr":
+                    val = _xml_text(c)
+                vals.append(val.strip())
+            cells += len(vals)
+            if cells > limits.max_cells or len(rows) > limits.max_table_rows:
+                raise LimitExceeded("spreadsheet has too many cells")
+            if any(vals):
+                rows.append(tuple(vals))
+        if rows:
+            width = max(len(r) for r in rows)
+            blocks.append(Block(HEADING, name, level=1))
+            blocks.append(Block(TABLE, rows=tuple(r + ("",) * (width - len(r)) for r in rows)))
+    return ParsedDocument(blocks, detect.XLSX, hidden_removed=dict(hidden))
+
+
+# ── HTML ────────────────────────────────────────────────────────────────
+
+_BOILERPLATE_TAGS = ("script", "style", "noscript", "template", "svg", "iframe", "form", "nav", "header", "footer",
+                     "aside", "button", "select", "dialog")
+_BOILERPLATE_ATTR_RE = re.compile(
+    r"(^|[\s_-])(nav|navbar|menu|footer|sidebar|cookie|consent|banner|advert|ads?|breadcrumb|share|social|popup|modal)([\s_-]|$)",
+    re.IGNORECASE,
+)
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_BRACE_RE = re.compile(r"[{}]")
+MAX_CSS_BYTES = 1_000_000
+MAX_CSS_RULES = 5_000
+MAX_SELECTORS_PER_RULE = 20
+MAX_SELECTOR_LEN = 300
+CSS_TIME_BUDGET_S = 10.0
+_WHITE_VALUES = frozenset({"#fff", "#ffffff", "white", "rgb(255,255,255)", "rgba(255,255,255,1)", "hsl(0,0%,100%)"})
+_NUM_RE = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)")
+_OPTIONAL_END = frozenset({"p", "li", "dt", "dd", "tr", "td", "th", "option", "thead", "tbody", "tfoot"})
+_HIDE_PROPS = frozenset({
+    "display", "visibility", "opacity", "font-size", "color", "clip", "clip-path", "text-indent", "position", "left", "top",
+    "right", "bottom", "margin-left", "margin-top", "height", "width", "max-height", "max-width", "overflow", "background",
+    "background-color", "background-image"})
+
+
+def _css_decls(text: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for part in text.split(";"):
+        if ":" in part:
+            k, v = part.split(":", 1)
+            out[k.strip().lower()] = re.sub(r"\s+", "", v.replace("!important", "")).lower()
+    return out
+
+
+def _css_rules(css: str) -> list[tuple[str, str]]:
+    """(selector list, declaration block) of the top-level rules, in one pass with str.find (a regex over
+    unterminated input is quadratic: a 196 KB <style> with no braces ran to the timeout). At-rules are skipped whole."""
+    if len(css) > MAX_CSS_BYTES:
+        raise LimitExceeded("stylesheet is too large to evaluate safely")
+    out: list[tuple[str, str]] = []
+    pos, n = 0, len(css)
+    while pos < n:
+        j = css.find("{", pos)
+        if j < 0:
+            break
+        head = css[pos:j]
+        head = head[head.rfind(";") + 1:].strip()
+        if head.startswith("@"):
+            depth, k = 1, j + 1
+            for m in _BRACE_RE.finditer(css, j + 1):
+                depth += 1 if m.group() == "{" else -1
+                k = m.end()
+                if depth == 0:
+                    break
+            pos = k if depth == 0 else n
+            continue
+        e = css.find("}", j + 1)
+        if e < 0:
+            break
+        out.append((head, css[j + 1:e]))
+        if len(out) > MAX_CSS_RULES:
+            raise LimitExceeded("stylesheet has too many rules to evaluate safely")
+        pos = e + 1
+    return out
+
+
+def _stylesheet_decls(soup) -> dict[int, dict[str, str]]:
+    """Declarations that <style> rules give each element, keyed by id(tag). Later rules override earlier ones;
+    specificity is not modelled and at-rules (@media, @font-face) are ignored. Selectors are matched with soupsieve,
+    under a time budget and with caps on rules, selectors per rule and selector length."""
+    css = "\n".join(st.get_text() for st in soup.find_all("style"))
+    if len(css) > MAX_CSS_BYTES:   # before the comment strip: a megabyte-long comment is as costly as a megabyte of rules
+        raise LimitExceeded("stylesheet is too large to evaluate safely")
+    css = _CSS_COMMENT_RE.sub(" ", css)
+    out: dict[int, dict[str, str]] = {}
+    deadline = time.monotonic() + CSS_TIME_BUDGET_S
+    for head, body in _css_rules(css):
+        decls = _css_decls(body)
+        if not (decls.keys() & _HIDE_PROPS):
+            continue
+        selectors = [x.strip() for x in head.split(",") if x.strip()]
+        if len(selectors) > MAX_SELECTORS_PER_RULE:
+            raise LimitExceeded("stylesheet rule has too many selectors to evaluate safely")
+        for sel in selectors:
+            if time.monotonic() > deadline:
+                raise LimitExceeded("stylesheet evaluation exceeded its time budget")
+            if len(sel) > MAX_SELECTOR_LEN:
+                continue
+            try:
+                matched = soup.select(sel)
+            except Exception:  # unsupported or malformed selector (pseudo-classes, etc.): skip the rule
+                continue
+            for tag in matched:
+                out.setdefault(id(tag), {}).update(decls)
+    return out
+
+
+_ABS_UNITS = {"px": 1.0, "pt": 96 / 72, "pc": 16.0, "in": 96.0, "cm": 96 / 2.54, "mm": 96 / 25.4, "q": 96 / 101.6}
+
+
+def _css_length(value: str, parent_px: float | None = 16.0) -> float | None:
+    """Length in px, or None when it cannot be known (viewport units, calc(), keywords): unknown is treated by every
+    caller as NOT hidden, so a relative unit never removes visible text."""
+    m = _NUM_RE.fullmatch(value) or _NUM_RE.match(value)
+    if not m:
+        return None
+    n, unit = float(m.group()), value[m.end():]
+    if unit == "" :
+        return 0.0 if n == 0 else None            # a bare non-zero number is not a length
+    if unit in _ABS_UNITS:
+        return n * _ABS_UNITS[unit]
+    if unit in ("em", "%") and parent_px is not None:
+        return n * parent_px * (0.01 if unit == "%" else 1.0)
+    if unit == "rem":
+        return n * 16.0
+    return None
+
+
+class _HtmlStyles:
+    """Evaluates what a browser would paint. Properties that children can override (font-size, visibility, colour) are
+    resolved per element through inheritance, so a zero-size container with normal-size children hides nothing but
+    its own text; properties no child can undo (display:none, opacity, clip, off-screen) hide the subtree."""
+
+    def __init__(self, soup) -> None:
+        self.rules = _stylesheet_decls(soup)
+        self._cache: dict[int, dict[str, str]] = {}
+        self._size: dict[int, float | None] = {}
+        self._inh: dict[tuple, str] = {}
+        self._dark: dict[int, bool] = {}
+
+    def decls(self, tag) -> dict[str, str]:
+        d = self._cache.get(id(tag))
+        if d is None:
+            d = {**self.rules.get(id(tag), {}), **_css_decls(str((tag.attrs or {}).get("style", "")))}
+            self._cache[id(tag)] = d
+        return d
+
+    def _inherited(self, tag, prop: str) -> str:
+        """Nearest declared value up the tree, memoised per element so a 400-deep chain is not walked per element."""
+        key = (id(tag), prop)
+        hit = self._inh.get(key)
+        if hit is not None:
+            return hit
+        v = self.decls(tag).get(prop)
+        if v and v not in ("inherit", "unset"):
+            out = v
+        else:
+            parent = tag.parent
+            out = "" if parent is None or getattr(parent, "name", None) == "[document]" else self._inherited(parent, prop)
+        self._inh[key] = out
+        return out
+
+    def font_px(self, tag) -> float | None:
+        key = id(tag)
+        if key in self._size:
+            return self._size[key]
+        parent = tag.parent
+        parent_px = 16.0 if parent is None or getattr(parent, "name", None) == "[document]" else self.font_px(parent)
+        raw = self.decls(tag).get("font-size")
+        if not raw or raw in ("inherit", "unset", "initial"):
+            px = parent_px
+        else:
+            px = _css_length(raw, parent_px)
+        self._size[key] = px
+        return px
+
+    def dark_background(self, tag) -> bool:
+        """True when this element or an ancestor paints anything that is not plain white: a colour, an image, a
+        gradient. Unknown means readable, so white text over any of those is kept."""
+        hit = self._dark.get(id(tag))
+        if hit is not None:
+            return hit
+        d = self.decls(tag)
+        out = False
+        for prop in ("background-color", "background", "background-image"):
+            bg = d.get(prop, "")
+            if bg and bg not in _WHITE_VALUES and bg not in ("none", "transparent", "inherit", "initial", "unset"):
+                out = True
+        bgcolor = str((getattr(tag, "attrs", None) or {}).get("bgcolor", "")).lower().replace(" ", "")
+        if bgcolor and bgcolor not in _WHITE_VALUES and bgcolor != "white":
+            out = True
+        parent = tag.parent
+        if not out and parent is not None and getattr(parent, "name", None) != "[document]":
+            out = self.dark_background(parent)
+        self._dark[id(tag)] = out
+        return out
+
+    def subtree_hidden(self, tag) -> bool:
+        """Hidden together with everything inside it, whatever the children say."""
+        attrs = tag.attrs or {}
+        if "hidden" in attrs or str(attrs.get("aria-hidden", "")).lower() == "true":
+            return True
+        if tag.name == "input" and str(attrs.get("type", "")).lower() == "hidden":
+            return True
+        d = self.decls(tag)
+        if not d:
+            return False
+        if d.get("display") == "none":
+            return True
+        op = d.get("opacity")
+        if op and (_NUM_RE.fullmatch(op) and float(op) <= 0.1):
+            return True
+        if d.get("clip", "").startswith("rect(0") or "inset(100%)" in d.get("clip-path", "") or "circle(0" in d.get("clip-path", ""):
+            return True
+        indent = d.get("text-indent")
+        if indent and (_css_length(indent) or 0) <= -999:
+            return True
+        if d.get("position") in ("absolute", "fixed"):
+            for k in ("left", "top", "right", "bottom", "margin-left", "margin-top"):
+                v = d.get(k)
+                if v and (_css_length(v) or 0) <= -999:
+                    return True
+        zero = lambda k: d.get(k) in ("0", "0px", "0pt")  # noqa: E731
+        if (zero("height") or zero("max-height") or zero("width") or zero("max-width")) and d.get("overflow") in ("hidden", "clip"):
+            return True
+        return False
+
+    def own_text_hidden(self, tag) -> bool:
+        """The element's OWN text cannot be seen (its children are judged on their own values)."""
+        px = self.font_px(tag)
+        if px is not None and px <= 2.0:
+            return True
+        if self._inherited(tag, "visibility") in ("hidden", "collapse"):
+            return True
+        color = self._inherited(tag, "color")
+        if color == "transparent" or re.fullmatch(r"rgba\(\d+,\d+,\d+,0(?:\.0+)?\)", color):
+            return True
+        return color in _WHITE_VALUES and not self.dark_background(tag)
+
+    def collapsed(self, tag, controlled_ids: set[str]) -> bool:
+        """A closed disclosure: a child of a closed <details>, a panel an aria-expanded=false control points at, a
+        Bootstrap `.collapse` panel, a hidden tab panel. Hidden the way an attacker would hide text, which is why it is
+        counted separately and a flag can keep it."""
+        attrs = tag.attrs or {}
+        parent = tag.parent
+        if parent is not None and getattr(parent, "name", None) == "details" and "open" not in (parent.attrs or {}):
+            return True
+        classes = attrs.get("class") or []
+        return (attrs.get("id") in controlled_ids) or ("collapse" in classes and "show" not in classes) \
+            or str(attrs.get("role", "")).lower() == "tabpanel"
+
+
+_HTML_TAG_RE = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9:-]*)([^>]*)>")
+_HTML_VOID = frozenset("area base br col embed hr img input link meta param source track wbr".split())
+MAX_HTML_DEPTH = 400
+
+
+def _check_html_depth(html: str) -> None:
+    """Reject absurd nesting before any tree is built: a 537 KB page of 50,000 nested divs holds the parser for the
+    whole timeout, and a page nested deeper than the main parser allows must be refused, not handed to a weaker
+    fallback that would index its hidden text. Browsers stop at 512."""
+    stack: list[str] = []
+    open_counts: dict[str, int] = {}
+    elements = 0
+    for m in _HTML_TAG_RE.finditer(html):
+        elements += 1
+        if elements > _LIMITS.max_elements:
+            raise LimitExceeded(f"HTML has more than {_LIMITS.max_elements} elements")
+        name = m.group(2).lower()
+        if m.group(1):
+            # A close tag only closes an element that is actually open (and everything opened inside it). A stray </p>
+            # closes nothing: counting it as a close let `<div></p>` x 50,000 hide a 50,000-deep tree from this check.
+            if open_counts.get(name):
+                while stack:
+                    top = stack.pop()
+                    open_counts[top] -= 1
+                    if top == name:
+                        break
+        elif name not in _HTML_VOID and name not in _OPTIONAL_END and not m.group(3).rstrip().endswith("/"):
+            stack.append(name)
+            open_counts[name] = open_counts.get(name, 0) + 1
+            if len(stack) > MAX_HTML_DEPTH:
+                raise LimitExceeded(f"HTML is nested more than {MAX_HTML_DEPTH} levels deep")
+
+
+def _html_main(html: str) -> ParsedDocument:
+    from bs4 import BeautifulSoup, Comment, NavigableString
+    _check_html_depth(html)
+
+    # lxml (libxml2) only with binary parsers on; otherwise the pure-Python parser, with the same stripping and limits.
+    soup = BeautifulSoup(html, "lxml" if _LIMITS.binary_parsers else "html.parser")
+    hidden: Counter = Counter()
+    styles = _HtmlStyles(soup)
+    controlled = {i for t in soup.find_all(attrs={"aria-expanded": "false"}) for i in str(t.get("aria-controls", "")).split()}
+    # Decide everything against the untouched tree first (ancestors are consulted), then remove.
+    whole = [t for t in soup.find_all(True) if styles.subtree_hidden(t)]
+    own = [t for t in soup.find_all(True) if styles.own_text_hidden(t)]
+    # Closed disclosures that CSS alone does not hide in the markup: <details> without `open` (all but its summary) and
+    # Bootstrap-style `.collapse` panels without `.show`.
+    whole_ids = {id(t) for t in whole}
+    for d in soup.find_all("details"):
+        if "open" not in (d.attrs or {}):
+            for c in list(d.children):
+                if getattr(c, "name", None) == "summary":
+                    continue
+                if isinstance(c, Comment):
+                    continue
+                if isinstance(c, NavigableString):
+                    if c.strip():
+                        hidden["html_collapsed"] += 1
+                        if not _LIMITS.keep_collapsed:
+                            c.extract()
+                elif id(c) not in whole_ids:
+                    whole_ids.add(id(c))
+                    whole.append(c)
+    for t in soup.find_all(class_="collapse"):
+        classes = t.get("class") or []
+        if "show" not in classes and "in" not in classes and id(t) not in whole_ids:
+            whole_ids.add(id(t))
+            whole.append(t)
+    for tag in whole:
+        if getattr(tag, "decomposed", False):
+            continue
+        if styles.collapsed(tag, controlled):
+            hidden["html_collapsed"] += 1
+            if _LIMITS.keep_collapsed:
+                continue
+        else:
+            hidden["html_hidden_elements"] += 1
+        tag.decompose()
+    for tag in own:
+        if getattr(tag, "decomposed", False):
+            continue
+        strings = [c for c in tag.children if isinstance(c, NavigableString) and not isinstance(c, Comment) and c.strip()]
+        if strings:
+            hidden["html_hidden_elements"] += 1
+            for c in strings:
+                c.extract()
+    for tag in soup(list(_BOILERPLATE_TAGS)):
+        tag.decompose()
+    for tag in soup.find_all(attrs={"class": _BOILERPLATE_ATTR_RE}) + soup.find_all(attrs={"id": _BOILERPLATE_ATTR_RE}):
+        if not getattr(tag, "decomposed", False):
+            tag.decompose()
+    root = soup.find("main") or soup.find("article") or soup.find(attrs={"role": "main"}) or soup.body or soup
+    blocks = _Blocks()
+    items: list[str] = []
+
+    def flush() -> None:
+        if items:
+            blocks.append(Block(LIST, "\n".join(items)))
+            items.clear()
+
+    def walk(node) -> None:
+        for child in node.children:
+            name = getattr(child, "name", None)
+            if name is None:
+                continue
+            if re.fullmatch(r"h[1-6]", name):
+                flush()
+                text = child.get_text(" ", strip=True)
+                if text:
+                    blocks.append(Block(HEADING, text, level=int(name[1])))
+            elif name in ("ul", "ol"):
+                flush()
+                lis = [f"- {li.get_text(' ', strip=True)}" for li in child.find_all("li") if li.get_text(strip=True)]
+                if lis:
+                    blocks.append(Block(LIST, "\n".join(lis)))
+            elif name == "table":
+                flush()
+                rows = tuple(
+                    tuple(c.get_text(" ", strip=True) for c in tr.find_all(["th", "td"]))
+                    for tr in child.find_all("tr")
+                )
+                rows = tuple(r for r in rows if any(r))
+                if rows:
+                    width = max(len(r) for r in rows)
+                    if len(rows) * width > _LIMITS.max_cells:
+                        raise LimitExceeded("table is too large")
+                    blocks.append(Block(TABLE, rows=tuple(r + ("",) * (width - len(r)) for r in rows)))
+            elif name == "pre":
+                flush()
+                blocks.append(Block(CODE, child.get_text()))
+            elif name in ("p", "blockquote", "figcaption", "dd", "dt", "summary"):
+                flush()
+                text = child.get_text(" ", strip=True)
+                if text:
+                    blocks.append(Block(PARAGRAPH, text))
+            elif name == "li":
+                items.append(f"- {child.get_text(' ', strip=True)}")
+            elif any(child.find(t) for t in ("p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "table", "pre")):
+                walk(child)
+            else:
+                text = child.get_text(" ", strip=True)
+                if text:
+                    flush()
+                    blocks.append(Block(PARAGRAPH, text))
+
+    walk(root)
+    flush()
+    return ParsedDocument(blocks, detect.HTML, hidden_removed=dict(hidden))
+
+
+# ── CSV / TSV, plain text ───────────────────────────────────────────────
+
+def _csv_rows(text: str, delimiter: str | None, limits: Limits) -> ParsedDocument:
+    sample = text[:50_000]
+    if delimiter is None:
+        try:
+            delimiter = csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+        except csv.Error:
+            delimiter = ","
+    csv.field_size_limit(1 << 24)
+    rows: list[tuple[str, ...]] = []
+    width = 0
+    for row in csv.reader(io.StringIO(text), delimiter=delimiter):
+        if len(row) > limits.max_columns:
+            raise LimitExceeded(f"table has a row with more than {limits.max_columns} columns")
+        cells = tuple(c.strip() for c in row)
+        if any(cells):
+            rows.append(cells)
+            width = max(width, len(cells))
+            # Rows are padded to the widest row below, so the padded size is what gets allocated.
+            if len(rows) > limits.max_table_rows or len(rows) * width > limits.max_cells:
+                raise LimitExceeded("table has too many cells")
+    if not rows:
+        raise ParseRejected("file is empty")
+    rows = [r + ("",) * (width - len(r)) for r in rows]
+    return ParsedDocument([Block(TABLE, rows=tuple(rows))], detect.CSV)
+
+
+def _text_blocks(text: str, kind: str, guess_headings: bool = False) -> ParsedDocument:
+    return ParsedDocument(blocks_from_text(text, guess_headings=guess_headings), kind)
+
+
+# ── PDF ─────────────────────────────────────────────────────────────────
+
+def _open_pdf(raw: bytes, limits: Limits):
+    """The reader, or None when pypdf cannot open it (the raw rung may still recover text).
+    Encryption and page-count rejections are definitive, so they are raised here and not retried."""
+    from pypdf import PdfReader
+
+    try:
+        reader = PdfReader(io.BytesIO(raw), strict=False)
+        if reader.is_encrypted:
+            try:
+                ok = reader.decrypt("")
+            except Exception:
+                ok = 0
+            if not ok:
+                raise ParseRejected("document is password-protected")
+        n = len(reader.pages)
+    except ParseRejected:
+        raise
+    except Exception:
+        if re.search(rb"/Encrypt\b", raw):
+            raise ParseRejected("document is password-protected")
+        return None
+    if n > limits.max_pages:
+        raise ParseRejected(f"document has more than {limits.max_pages} pages")
+    return reader
+
+
+def _pdf_pages_to_doc(page_texts: list[str], degraded: bool = False, warnings: list[str] | None = None,
+                      hidden: dict[str, int] | None = None) -> ParsedDocument:
+    blocks = _Blocks()
+    for n, text in enumerate(page_texts, start=1):
+        blocks.extend(blocks_from_text(text, page=n, guess_headings=True))
+    return ParsedDocument(blocks, detect.PDF, pages=len(page_texts), page_texts=page_texts,
+                          degraded=degraded, warnings=warnings or [], hidden_removed=hidden or {})
+
+
+_WHITE_GRAY = 0.95
+_TINY_PT = 3.0
+
+
+class _TextState:
+    """Graphics/text state that decides whether shown text is visible (shared by the pypdf and raw readers): render
+    mode, fill colour (g, rg, k, sc, scn), font size scaled by the text matrix and CTM, horizontal scaling (Tz) and
+    optional-content layers that are off by default (BDC /OC ... EMC)."""
+
+    def __init__(self, off_layers: frozenset = frozenset()) -> None:
+        self.mode, self.white, self.size = 0, False, 12.0
+        self.tscale, self.cscale, self.hscale = 1.0, 1.0, 100.0
+        self.stack: list[tuple] = []
+        self.layers: list[bool] = []
+        self.off_layers = off_layers
+
+    def _fill(self, args: list) -> None:
+        n = len(args)
+        if n == 1:
+            self.white = float(args[-1]) >= _WHITE_GRAY
+        elif n >= 4:
+            self.white = all(float(a) <= 0.05 for a in args[-4:])
+        elif n == 3:
+            self.white = all(float(a) >= _WHITE_GRAY for a in args[-3:])
+
+    def op(self, op: bytes, args: list) -> None:
+        nums = [a for a in args if isinstance(a, float)]
+        try:
+            if op == b"q":
+                self.stack.append((self.mode, self.white, self.size, self.cscale, self.hscale))
+            elif op == b"Q" and self.stack:
+                self.mode, self.white, self.size, self.cscale, self.hscale = self.stack.pop()
+            elif op == b"BT":
+                self.tscale = 1.0
+            elif op == b"Tr":
+                self.mode = int(nums[-1])
+            elif op == b"Tf":
+                self.size = abs(nums[-1])
+            elif op == b"Tz":
+                self.hscale = abs(nums[-1])
+            elif op == b"Tm" and len(nums) >= 6:
+                self.tscale = math.hypot(nums[2], nums[3])
+            elif op == b"cm" and len(nums) >= 6:
+                self.cscale *= math.hypot(nums[2], nums[3]) or 1.0
+            elif op in (b"g", b"rg", b"k"):
+                self._fill(nums)
+            elif op in (b"sc", b"scn"):
+                self._fill(nums)
+            elif op in (b"BDC", b"BMC"):
+                self.layers.append(op == b"BDC" and len(args) >= 2 and args[0] == b"/OC" and args[1] in self.off_layers)
+            elif op == b"EMC" and self.layers:
+                self.layers.pop()
+        except (ValueError, IndexError, TypeError):
+            pass
+
+    def hidden(self, size: float | None = None) -> bool:
+        sz = (self.size if size is None else size) * self.tscale * self.cscale
+        return (self.mode in (3, 7) or sz < 2 or self.hscale <= 1 or any(self.layers)
+                or (self.white and sz <= _TINY_PT))
+
+
+def _off_layer_names(page) -> frozenset:
+    """Names (as the content stream writes them, '/MC0') of optional-content layers that are off by default."""
+    try:
+        root = page.pdf.trailer["/Root"]
+        off_ids = {o.idnum for o in root["/OCProperties"]["/D"].get("/OFF", [])}
+        props = page["/Resources"]["/Properties"]
+        return frozenset(b"/" + str(k).lstrip("/").encode() for k, v in props.items()
+                         if getattr(v, "idnum", None) in off_ids)
+    except Exception:
+        return frozenset()
+
+
+def _hidden_strings(content: bytes, off_layers: frozenset = frozenset()) -> list[str]:
+    """Text shown while invisible (render mode 3/7, tiny, or white-and-small), read from the page's content stream
+    with the same linear scanner the raw rung uses. pypdf's own visitor callbacks run lazily, after later operators
+    have changed the state, so they cannot say what was invisible when a string was shown."""
+    st = _TextState(off_layers)
+    out: list[str] = []
+    for op, args in _scan_pdf_ops(content):
+        if op in (b"Tj", b"TJ", b"'", b'"'):
+            chunk = next((a for a in reversed(args) if isinstance(a, bytes) and not a.startswith(b"/")), b"")
+            text = chunk.decode("latin-1").strip()
+            if text and st.hidden():
+                out.append(text)
+        else:
+            st.op(op, args)
+    return out
+
+
+MAX_PDF_SHARED_REPEATS = 2                  # the same big stream used by more pages than this is a repeat bomb
+_PDF_STATE: dict = {"seen": {}, "t0": 0.0}
+
+
+class _PageSkipped(Exception):
+    """One page is too heavy to interpret; the rest of the document still is."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _BudgetHit(Exception):
+    """The extraction time budget ran out; pages processed so far are kept."""
+
+
+def _pdf_page_text(page, hidden: Counter) -> str:
+    try:
+        contents = page.get_contents()
+        data = contents.get_data() if contents is not None else b""
+    except Exception:
+        data = b""
+    # Extracting a page interprets its content stream in pure Python, and pages may share one stream: 400 pages sharing a
+    # 20 MB stream is hours of work from a 95 KB file. Bound one page, the repeats of a big stream, and the total time.
+    # The offending page is skipped, not the document: the rest is kept and the result is marked degraded.
+    if len(data) > _LIMITS.pdf_page_bytes:
+        raise _PageSkipped("more content than can be processed safely (KB_PARSE_PDF_PAGE_BYTES)")
+    if len(data) > 256 * 1024:
+        key = hash(data)
+        _PDF_STATE["seen"][key] = _PDF_STATE["seen"].get(key, 0) + 1
+        if _PDF_STATE["seen"][key] > MAX_PDF_SHARED_REPEATS:
+            raise _PageSkipped("shares or repeats a large content stream")
+    if time.monotonic() - _PDF_STATE["t0"] > _LIMITS.pdf_budget_s:
+        raise _BudgetHit()
+    full = page.extract_text() or ""
+    # Longest first, so a hidden string is never matched inside a longer one. Only strings that pypdf decoded the
+    # same way (simple fonts) can be located; invisible text in CID-keyed fonts is a known gap.
+    for t in sorted(_hidden_strings(data, _off_layer_names(page)), key=len, reverse=True):
+        if t in full:
+            full = full.replace(t, "", 1)
+            hidden["pdf_invisible_text"] += 1
+    return full
+
+
+def _pdf_pypdf(reader, state: dict) -> ParsedDocument:
+    if reader is None:
+        raise TierSkip
+    texts: list[str] = []
+    hidden: Counter = Counter()
+    skipped: Counter = Counter()
+    stopped_at: int | None = None
+    pages = list(reader.pages)
+    _PDF_STATE["t0"] = time.monotonic()
+    for i, page in enumerate(pages):
+        try:
+            texts.append(_pdf_page_text(page, hidden))
+        except _PageSkipped as exc:
+            texts.append("")
+            skipped[exc.reason] += 1
+        except _BudgetHit:
+            texts.extend([""] * (len(pages) - i))
+            stopped_at = i
+            break
+        except Exception:
+            texts.append("")
+    state["pypdf_had_text"] = any(t.strip() for t in texts)
+    state["limit_hit"] = bool(skipped or stopped_at is not None)
+    warnings = [f"{n} page(s) skipped: {reason}" for reason, n in skipped.items()]
+    if stopped_at is not None:
+        warnings.append(f"text extraction stopped at its time budget after {stopped_at} of {len(pages)} pages")
+    if warnings and not state["pypdf_had_text"]:
+        raise LimitExceeded("no PDF page could be read: " + "; ".join(warnings))
+    return _pdf_pages_to_doc(texts, degraded=bool(warnings), warnings=warnings, hidden=dict(hidden))
+
+
+_ESCAPES = {b"n": b"\n", b"r": b"\r", b"t": b"\t", b"b": b"\b", b"f": b"\f", b"(": b"(", b")": b")", b"\\": b"\\"}
+_MAX_STREAM = 20 * 1024 * 1024
+_PDF_WS = b" \t\r\n\x0c\x00"
+_PDF_DELIM = b"()<>[]{}/%"
+_OCT = b"01234567"
+
+
+def _unescape(s: bytes) -> bytes:
+    out = bytearray()
+    i = 0
+    while i < len(s):
+        if s[i:i + 1] == b"\\" and i + 1 < len(s):
+            nxt = s[i + 1:i + 2]
+            if nxt in _ESCAPES:
+                out += _ESCAPES[nxt]
+                i += 2
+                continue
+            j = i + 1
+            while j < len(s) and j < i + 4 and s[j:j + 1] in _OCT and s[j:j + 1]:
+                j += 1
+            if j > i + 1:
+                out.append(int(s[i + 1:j], 8) & 0xFF)
+                i = j
+                continue
+            i += 1
+            continue
+        out.append(s[i])
+        i += 1
+    return bytes(out)
+
+
+def _read_pdf_string(data: bytes, i: int) -> tuple[bytes, int]:
+    """data[i] == '('. Balanced parentheses and backslash escapes; one pass, no backtracking."""
+    depth, j, n = 0, i, len(data)
+    while j < n:
+        c = data[j]
+        if c == 0x5C:  # backslash: skip the escaped byte
+            j += 2
+            continue
+        if c == 0x28:
+            depth += 1
+        elif c == 0x29:
+            depth -= 1
+            if depth == 0:
+                return _unescape(data[i + 1:j]), j + 1
+        j += 1
+    return _unescape(data[i + 1:]), n
+
+
+def _scan_pdf_ops(data: bytes) -> Iterator[tuple[bytes, list]]:
+    """Linear tokenizer over a content stream: yields (operator, operands). Strings and TJ arrays are decoded as
+    they are read, so nothing here can backtrack however many escapes or brackets the stream holds."""
+    i, n = 0, len(data)
+    operands: list = []
+    while i < n:
+        c = data[i]
+        if c in _PDF_WS:
+            i += 1
+        elif c == 0x28:  # (
+            s, i = _read_pdf_string(data, i)
+            operands.append(s)
+        elif c == 0x5B:  # [
+            parts: list[bytes] = []
+            i += 1
+            while i < n and data[i] != 0x5D:
+                if data[i] == 0x28:
+                    s, i = _read_pdf_string(data, i)
+                    parts.append(s)
+                elif data[i] in b"-0123456789.":
+                    j = i
+                    while j < n and data[j] in b"-0123456789.":
+                        j += 1
+                    try:
+                        if float(data[i:j]) < -200:
+                            parts.append(b" ")
+                    except ValueError:
+                        pass
+                    i = j
+                else:
+                    i += 1
+            i += 1
+            operands.append(b"".join(parts))
+        elif c == 0x25:  # % comment
+            while i < n and data[i] not in b"\r\n":
+                i += 1
+        elif c == 0x3C:  # < hex string or << dict
+            j = data.find(b">", i + 1)
+            i = n if j < 0 else j + 1
+            operands.append(b"")
+        elif c in b">]{})":
+            i += 1
+        elif c == 0x2F:  # /Name
+            j = i + 1
+            while j < n and data[j] not in _PDF_WS and data[j] not in _PDF_DELIM:
+                j += 1
+            operands.append(data[i:j])
+            i = j
+        else:
+            j = i
+            while j < n and data[j] not in _PDF_WS and data[j] not in _PDF_DELIM:
+                j += 1
+            tok = data[i:j]
+            i = max(j, i + 1)
+            try:
+                operands.append(float(tok))
+            except ValueError:
+                yield tok, operands
+                operands = []
+            if len(operands) > 64:
+                operands = operands[-8:]
+
+
+def _pdf_streams(raw: bytes) -> Iterator[bytes]:
+    """Bodies of `stream ... endstream` pairs by plain searching. (A lazy regex re-scans to the end of the file from
+    every unterminated `stream` keyword: a 1 MB file of them held the worker for the whole timeout.)"""
+    pos, n = 0, len(raw)
+    while pos < n:
+        i = raw.find(b"stream", pos)
+        if i < 0:
+            return
+        start = i + 6
+        if raw[start:start + 2] == b"\r\n":
+            start += 2
+        elif raw[start:start + 1] == b"\n":
+            start += 1
+        else:
+            pos = start
+            continue
+        end = raw.find(b"endstream", start)
+        if end < 0:
+            return  # no terminated stream after this point, so none of the later keywords can start one either
+        yield raw[start:end]
+        pos = end + 9
+
+
+def _pdf_raw(raw: bytes, state: dict) -> ParsedDocument:
+    """Text-layer rung for files pypdf cannot open or read nothing from: inflate content streams and read the
+    show-text operators. Handles simple (non-CID) fonts only; the quality gate rejects what comes out garbled.
+    Skipped when pypdf did read text: this rung has no page boundaries, so it would hide empty pages."""
+    if state.get("pypdf_had_text") or state.get("limit_hit"):
+        raise TierSkip
+    lines: list[str] = []
+    hidden: Counter = Counter()
+    for data in _pdf_streams(raw):
+        try:
+            data = zlib.decompressobj().decompress(data, _MAX_STREAM)
+        except zlib.error:
+            pass
+        if b"Tj" not in data and b"TJ" not in data and b"'" not in data:
+            continue
+        st = _TextState()
+        for op, args in _scan_pdf_ops(data):
+            if op in (b"Tj", b"TJ", b"'", b'"'):
+                chunk = next((a for a in reversed(args) if isinstance(a, bytes) and not a.startswith(b"/")), b"")
+                text = chunk.decode("latin-1").strip()
+                if text and st.hidden():
+                    hidden["pdf_invisible_text"] += 1
+                elif text:
+                    lines.append(text)
+            else:
+                st.op(op, args)
+    if not lines:
+        raise TierSkip
+    doc = ParsedDocument(blocks_from_text("\n".join(lines), guess_headings=True), detect.PDF)
+    doc.hidden_removed = dict(hidden)
+    return doc
+
+
+def _pdf_ocr(reader, language: str | None, state: dict) -> ParsedDocument:
+    """OCR the pages that have no text layer, using the images embedded in them (a scan is one image per page)."""
+    if reader is None or state.get("limit_hit"):
+        raise TierSkip   # pages skipped for size are not scans: OCR would not help and would mislabel them
+    texts: list[str] = []
+    empty: list[int] = []
+    for i, page in enumerate(reader.pages):
+        try:
+            t = _pdf_page_text(page, Counter())
+        except Exception:
+            t = ""
+        texts.append(t)
+        if len(t.strip()) < MIN_CHARS_PER_PAGE:
+            empty.append(i)
+    if not empty:
+        raise TierSkip
+    if not ocr.ocr_available():
+        raise ParseRejected(ocr.NEEDS_OCR)
+    failed = 0
+    for i in empty:
+        try:
+            found = [ocr.ocr_image(img.data, language) for img in reader.pages[i].images]
+            text = "\n".join(t.strip() for t in found if t.strip())
+        except Exception:
+            text = ""
+        if text:
+            texts[i] = text
+        else:
+            failed += 1
+    warnings = [f"{failed} of {len(texts)} pages could not be read by OCR"] if failed else []
+    return _pdf_pages_to_doc(texts, degraded=bool(failed), warnings=warnings)
+
+
+# ── entry point ─────────────────────────────────────────────────────────
+
+def parse_by_type(raw: bytes, content_type: str, limits: Limits, language: str | None = None) -> ParsedDocument:
+    global _LIMITS
+    _LIMITS = limits
+    _PDF_STATE.update(seen={}, t0=time.monotonic())
+    ct = content_type
+    if not limits.binary_parsers and ct in (detect.PDF, detect.DOCX, detect.PPTX, detect.XLSX):
+        raise ParseRejected(BINARY_DISABLED_REASON)   # also enforced by parse_document; belt and braces in the child
+    if ct == detect.PDF:
+        reader = _open_pdf(raw, limits)
+        state: dict = {}
+        doc = run_ladder([
+            ("pypdf", lambda: _pdf_pypdf(reader, state)),
+            ("pdf-raw", lambda: _pdf_raw(raw, state)),
+            ("ocr", lambda: _pdf_ocr(reader, language, state)),
+        ])
+    elif ct == detect.DOCX:
+        zf = guard_zip(raw, limits, "DOCX")
+        _count_all_elements(zf, limits.max_ooxml_elements)
+        _count_elements(zf, r"word/document\.xml", _W + "p", limits.max_paragraphs, "paragraphs")
+        doc = run_ladder([("python-docx", lambda: _docx_native(zf, raw)), ("docx-xml", lambda: _docx_xml(zf))])
+    elif ct == detect.PPTX:
+        zf = guard_zip(raw, limits, "PPTX")
+        _count_all_elements(zf, limits.max_ooxml_elements)
+        _count_elements(zf, r"ppt/slides/slide\d+\.xml", "{*}p", limits.max_paragraphs, "paragraphs")
+        doc = run_ladder([("python-pptx", lambda: _pptx_native(zf, raw, limits)), ("pptx-xml", lambda: _pptx_xml(zf, limits))])
+    elif ct == detect.XLSX:
+        zf = guard_zip(raw, limits, "XLSX")
+        _count_all_elements(zf, 3 * limits.max_cells)
+        _count_elements(zf, r"xl/worksheets/sheet\d+\.xml", "{*}c", limits.max_cells, "cells")
+        doc = run_ladder([("openpyxl", lambda: _xlsx_native(zf, raw, limits)), ("xlsx-xml", lambda: _xlsx_xml(zf, limits))])
+    else:
+        decoded = detect.decode_text(raw)
+        if decoded is None:
+            raise ParseRejected("file is not readable text")
+        text, encoding = decoded
+        text = text.lstrip("﻿")
+        if ct == detect.HTML:
+            # One rung on purpose: a tag-stripping fallback cannot see CSS, so it would index exactly the hidden text this
+            # parser removes. A page the main parser cannot handle is rejected instead.
+            doc = run_ladder([("bs4-main", lambda: _html_main(text))])
+        elif ct in (detect.CSV, detect.TSV):
+            delim = "\t" if ct == detect.TSV else None
+            doc = run_ladder([("csv", lambda: _csv_rows(text, delim, limits)), ("text", lambda: _text_blocks(text, ct))])
+        else:
+            doc = run_ladder([("text", lambda: _text_blocks(text, ct))])
+        if encoding not in ("utf-8", "ascii"):
+            doc.warnings.append(f"decoded as {encoding}")
+    doc.detected_type = ct
+    doc.blocks = list(doc.blocks)  # plain list: dataclasses.asdict() cannot rebuild the _Blocks subclass
+    if len(doc.text()) > limits.max_chars:
+        raise LimitExceeded(_TOO_BIG_TEXT)
+    return doc

@@ -151,7 +151,10 @@ async def test_tool_call_executes_folds_result_and_continues_to_final_answer():
     # History was mutated in place with the tool call + result.
     assert history[1].role == "assistant" and history[1].tool_calls[0]["name"] == "execute_api"
     assert history[2].role == "tool"
-    assert json.loads(history[2].content) == {"status": "success", "booked": True, "booking_id": "b1"}
+    folded = json.loads(history[2].content)
+    assert folded["status"] == "ok"
+    assert folded["data"] == {"booked": True, "booking_id": "b1"}
+    assert folded["error"] is None and folded["trace_id"] and folded["latency_ms"] >= 0
 
     # Second generate_with_tools() call saw the folded-in history.
     assert len(llm.seen_messages[1]) == 3
@@ -299,8 +302,8 @@ async def test_unknown_tool_name_is_a_failed_result_not_a_crash():
         ToolCallStartedEvent(tool_name="send_email"),
         TokenEvent(text="I can't do that."),
     ]
-    assert json.loads(history[2].content)["status"] == "failed"
-    assert json.loads(history[2].content)["error"] == "unknown_tool"
+    assert json.loads(history[2].content)["status"] == "error"
+    assert json.loads(history[2].content)["error"]["code"] == "unknown_tool"
 
 
 class _SlowExecutor:
@@ -349,8 +352,8 @@ async def test_cancel_event_stops_waiting_on_an_in_flight_tool_call():
     events = await asyncio.wait_for(task, timeout=1.0)
 
     assert events == [ToolCallStartedEvent(tool_name="execute_api")]
-    assert json.loads(history[2].content)["status"] == "failed"
-    assert json.loads(history[2].content)["error"] == "cancelled"
+    assert json.loads(history[2].content)["status"] == "error"
+    assert json.loads(history[2].content)["error"]["code"] == "cancelled"
     assert llm.call_count == 1  # never asked the LLM what to do next — the turn is stale
 
     # Let the backgrounded call finish so nothing's left dangling for the
@@ -383,7 +386,7 @@ async def test_cancel_event_set_before_the_tool_call_even_starts_still_stops_the
     )]
 
     assert events == [ToolCallStartedEvent(tool_name="execute_api")]
-    assert json.loads(history[2].content)["error"] == "cancelled"
+    assert json.loads(history[2].content)["error"]["code"] == "cancelled"
 
     executor.release_event.set()
     await asyncio.sleep(0)
@@ -458,14 +461,14 @@ async def test_a_local_tool_executes_without_touching_policy_or_provider():
     assert TokenEvent(text="Thanks!") in events
     assert LocalToolCompletedEvent(tool_name="caller_verified") in events
     assert not any(isinstance(e, ToolCallStartedEvent) for e in events)
-    assert json.loads(history[-1].content)["status"] == "done"
+    assert json.loads(history[-1].content)["data"]["status"] == "done"
 
 
 async def test_a_local_tool_does_not_consume_a_tool_iteration():
     llm = _ScriptedLLM([
         [ToolCallEvent(tool_call_id="c1", tool_name="caller_verified", arguments={})],
         [ToolCallEvent(tool_call_id="c2", tool_name="execute_api",
-                       arguments={"requested_datetime": "2026-01-01T10:00:00Z"})],
+                       arguments={"api_name": "x", "inputs": {"requested_datetime": "2026-01-01T10:00:00Z"}})],
         [TokenEvent(text="Booked.")],
     ])
     local_tools, _ = _local()
@@ -552,7 +555,7 @@ async def test_past_local_cap_does_not_burn_a_remote_iteration():
         [[ToolCallEvent(tool_call_id=f"c{i}", tool_name="caller_verified", arguments={})]
          for i in range(4)]
         + [[ToolCallEvent(tool_call_id="book", tool_name="execute_api",
-                          arguments={"requested_datetime": "2026-01-01T10:00:00Z"})],
+                          arguments={"api_name": "x", "inputs": {"requested_datetime": "2026-01-01T10:00:00Z"}})],
            [TokenEvent(text="Booked.")]]
     )
     executor = _FixedExecutor(ToolResult(status=ToolStatus.SUCCESS, payload={"booked": True}))
@@ -584,7 +587,7 @@ async def test_past_local_cap_does_not_burn_a_remote_iteration():
         if m.role == "tool" and "local_tool_call_cap_exceeded" in (m.content or "")
     ]
     assert len(cap_payloads) == 1
-    assert cap_payloads[0]["error"] == "local_tool_call_cap_exceeded"
+    assert cap_payloads[0]["error"]["code"] == "local_tool_call_cap_exceeded"
 
 
 async def test_a_callable_tool_source_is_re_read_after_every_local_call():
@@ -648,8 +651,8 @@ async def test_a_local_tool_that_raises_soft_fails_instead_of_crashing_the_turn(
 
     assert LocalToolCompletedEvent(tool_name="caller_verified") in events
     assert TokenEvent(text="Still here.") in events
-    assert json.loads(history[-1].content)["status"] == "failed"
-    assert json.loads(history[-1].content)["error"] == "local_tool_failed"
+    assert json.loads(history[-1].content)["status"] == "error"
+    assert json.loads(history[-1].content)["error"]["code"] == "local_tool_failed"
 
 
 async def test_cancel_event_stops_waiting_on_an_in_flight_local_tool():
@@ -700,7 +703,7 @@ async def test_cancel_event_stops_waiting_on_an_in_flight_local_tool():
     events = await asyncio.wait_for(task, timeout=1.0)
 
     assert events == []
-    assert json.loads(history[-1].content)["error"] == "cancelled"
+    assert json.loads(history[-1].content)["error"]["code"] == "cancelled"
     assert llm.call_count == 1
 
     release.set()
@@ -774,9 +777,9 @@ async def test_past_remote_cap_hallucinated_remote_does_not_execute():
     local_tools, _ = _local()
     llm = _ScriptedLLM([
         [ToolCallEvent(tool_call_id="c1", tool_name="execute_api",
-                       arguments={"requested_datetime": "2026-01-01T10:00:00Z"})],
+                       arguments={"api_name": "x", "inputs": {"requested_datetime": "2026-01-01T10:00:00Z"}})],
         [ToolCallEvent(tool_call_id="c2", tool_name="execute_api",
-                       arguments={"requested_datetime": "2026-01-01T11:00:00Z"})],
+                       arguments={"api_name": "x", "inputs": {"requested_datetime": "2026-01-01T11:00:00Z"}})],
         [TokenEvent(text="ok")],
     ])
     executor = _FixedExecutor(ToolResult(status=ToolStatus.SUCCESS, payload={"booked": True}))
@@ -796,7 +799,7 @@ async def test_past_remote_cap_hallucinated_remote_does_not_execute():
     )]
 
     assert len(executor.calls) == 1
-    assert json.loads(history[-1].content)["error"] == "unknown_tool"
+    assert json.loads(history[-1].content)["error"]["code"] == "unknown_tool"
 
 
 async def test_local_tool_lookup_uses_definition_name_not_dict_key():
