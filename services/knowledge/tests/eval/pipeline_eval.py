@@ -6,6 +6,7 @@ model's scores."""
 
 from __future__ import annotations
 
+import os
 import uuid
 
 from libs.tenancy import set_caller_tenant, set_target_tenant
@@ -40,12 +41,16 @@ async def _purge(pool, tenant_id) -> None:
         await pool.execute(sql, tenant_id)
 
 
-async def run_pipeline_eval(pool, reranker=None, *, embedder=None, llm_config: dict | None = None) -> dict:
+async def run_pipeline_eval(
+    pool, chunker: str = "auto", reranker=None, *, embedder=None, llm_config: dict | None = None,
+) -> dict:
     """Index every golden document into one KB and ask every question. Returns recall@5, MRR and
     answer-in-context over the questions, plus the questions that missed (for the failure message). With a
     `reranker`, every question runs with rerank=True and the result also reports how many questions got a different
     chunk order and the rerank stage's latency. `embedder` replaces the deterministic fake (real_eval.py), and
     `llm_config` ({engine, model, api_key_ref}) gives the eval tenant an LLM provider for contextual enrichment."""
+    previous = os.environ.get("KNOWLEDGE_CHUNKER")
+    os.environ["KNOWLEDGE_CHUNKER"] = chunker  # read per call by the chunker
     slug = f"golden-{uuid.uuid4().hex[:8]}"
     tenant = dict(await pool.fetchrow("INSERT INTO tenants (name, slug) VALUES ($1, $1) RETURNING *", slug))
     try:
@@ -118,6 +123,10 @@ async def run_pipeline_eval(pool, reranker=None, *, embedder=None, llm_config: d
             **({"reordered": reordered, "rerank_ms": rerank_ms, "degraded": sorted(degraded_seen)} if reranker else {}),
         }
     finally:
+        if previous is None:
+            os.environ.pop("KNOWLEDGE_CHUNKER", None)
+        else:
+            os.environ["KNOWLEDGE_CHUNKER"] = previous
         set_caller_tenant(None)
         set_target_tenant(None)
         await _purge(pool, tenant["id"])

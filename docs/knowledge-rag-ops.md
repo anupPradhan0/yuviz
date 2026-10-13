@@ -197,8 +197,14 @@ SELECT pg_size_pretty(pg_total_relation_size('retrieval_logs')), (SELECT min(cre
   on a laptop is about 205 ms against the 400 ms deadline, and the failure it catches is a stage running for its full
   500 ms to 5 s.
 - `services/knowledge/tests/eval/test_golden_gates.py`: fails if recall@5, MRR or answer-in-context fall more than 0.05
-  (about two of the 39 golden questions) below `eval/baseline.json`. Baselines are what this code measured, with a
-  fake embedder, so they catch regressions rather than predict real-model scores.
+  (about two of the 39 golden questions) below `eval/baseline.json`. Two views: the chunking strategies in memory
+  (including `production (auto)`, the worker's default chunker), and the whole pipeline on Postgres once per chunker
+  mode: `auto` (the shipped default, fixed windows for headed prose) and `structure` (the opt-in parent/child path,
+  gated so it cannot rot). Baselines are what this code measured, with fake embedders, so they catch regressions rather
+  than predict real-model scores. The pipeline numbers move by one question (0.026) between identical runs, which the
+  tolerance absorbs; the baseline records the lower value. With the bag-of-words embedder the default `auto` scores
+  below `structure` through the pipeline (recall@5 0.77 vs 0.87), the opposite of Phase 4's hash-embedder sweep: neither
+  predicts the real model, which is why the choice is per-deployment (`KNOWLEDGE_CHUNKER`).
 - Refresh the baseline deliberately (a model change, a chunking change or a corpus change legitimately moves it):
 
   ```

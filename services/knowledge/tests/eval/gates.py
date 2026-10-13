@@ -2,7 +2,9 @@
 tolerance. Two views of the same golden set (see baseline.json):
 
   chunking  harness.py, in memory: each chunking strategy on one mixed KB (hash embedder). Fast, no database.
-  pipeline  pipeline_eval.py: upload, worker, retrieve() on Postgres (bag-of-words embedder).
+  pipeline  pipeline_eval.py: upload, worker, retrieve() on Postgres (bag-of-words embedder), once per chunker mode in
+            PIPELINE_MODES: "auto" is the shipped default (fixed windows for headed prose), "structure" is the opt-in
+            parent/child path, gated so it cannot rot.
 
 Baselines are numbers this code produced, not targets. A drop beyond `tolerance` fails the build; an improvement
 passes and should be locked in on purpose:
@@ -21,27 +23,21 @@ import os
 import sys
 from pathlib import Path
 
-from services.knowledge.chunker import ChunkConfig, chunk_document
+from services.knowledge.chunker import ChunkConfig
 from services.knowledge.tests.eval.golden import ALL_DOCS, QUESTIONS
-from services.knowledge.tests.eval.harness import STRATEGIES, IndexedChunk, _blocks, evaluate
+from services.knowledge.tests.eval.harness import STRATEGIES, evaluate, mode_strategy
 
 BASELINE_PATH = Path(__file__).with_name("baseline.json")
 METRICS = ("recall_at_5", "mrr", "answer_in_context")
 # One golden question is 1/39 = 0.026: 0.05 forgives a single flipped question and fails on two.
 DEFAULT_TOLERANCE = 0.05
-
-
-def production_parent_child(name: str, kind: str, text: str) -> list[IndexedChunk]:
-    """What the worker does today: ChunkConfig.for_embedder with the default token limit, parent text as context."""
-    r = chunk_document(_blocks(kind, text), config=ChunkConfig.for_embedder(None))
-    return [
-        IndexedChunk(name, c.content, r.parents[c.parent].content if c.parent is not None else c.content)
-        for c in r.children
-    ]
+PIPELINE_MODES = ("auto", "structure")
 
 
 def chunking_metrics() -> dict[str, dict[str, float]]:
-    report = evaluate(ALL_DOCS, QUESTIONS, strategies={**STRATEGIES, "production": production_parent_child})
+    # "production" is what the worker does by default: KNOWLEDGE_CHUNKER=auto with the default embedder limits.
+    report = evaluate(ALL_DOCS, QUESTIONS, strategies={
+        **STRATEGIES, "production (auto)": mode_strategy("auto", ChunkConfig.for_embedder(None))})
     return {s: {k: getattr(m, k) for k in METRICS} for s, m in report.by_strategy.items()}
 
 
@@ -62,7 +58,7 @@ async def update_baseline() -> dict:
 
     pool = await db.get_pool()
     try:
-        pipeline = await run_pipeline_eval(pool)
+        pipeline = {mode: await run_pipeline_eval(pool, mode) for mode in PIPELINE_MODES}
     finally:
         await db.close_pool()
     data = {
@@ -71,7 +67,7 @@ async def update_baseline() -> dict:
         "questions": len(QUESTIONS),
         "documents": len(ALL_DOCS),
         "chunking": {s: {k: round(v, 4) for k, v in m.items()} for s, m in chunking_metrics().items()},
-        "pipeline": {k: round(pipeline[k], 4) for k in METRICS},
+        "pipeline": {m: {k: round(r[k], 4) for k in METRICS} for m, r in pipeline.items()},
     }
     BASELINE_PATH.write_text(json.dumps(data, indent=2) + "\n")
     return data

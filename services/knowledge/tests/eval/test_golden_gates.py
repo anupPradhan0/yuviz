@@ -28,10 +28,16 @@ def test_chunking_strategies_do_not_regress_on_the_golden_set():
 
 async def test_the_whole_pipeline_does_not_regress_on_the_golden_set(pool):
     baseline = gates.load_baseline()
-    result = await run_pipeline_eval(pool)
-    assert result["documents_not_ready"] == 0, "a golden document failed to ingest"
-    failures = gates.regressions(result, baseline["pipeline"], baseline["tolerance"], "pipeline")
-    assert not failures, "\n".join(failures) + f"\nmissed: {result['missed']}"
+    assert set(baseline["pipeline"]) == set(gates.PIPELINE_MODES)
+    failures: list[str] = []
+    for mode in gates.PIPELINE_MODES:
+        result = await run_pipeline_eval(pool, mode)
+        assert result["documents_not_ready"] == 0, f"a golden document failed to ingest (KNOWLEDGE_CHUNKER={mode})"
+        failures += gates.regressions(
+            result, baseline["pipeline"][mode], baseline["tolerance"], f"pipeline/{mode}") + (
+            [f"  missed: {result['missed']}"] if gates.regressions(
+                result, baseline["pipeline"][mode], baseline["tolerance"], "") else [])
+    assert not failures, "\n".join(failures)
 
 
 def test_the_regression_check_itself_can_fail():
