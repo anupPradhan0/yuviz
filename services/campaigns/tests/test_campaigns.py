@@ -58,12 +58,12 @@ async def test_update_unknown_campaign_raises_lookup_error(scoped):
 async def test_caller_id_owned_by_tenant_true_for_provisioned_did(test_tenant, pool, scoped):
     await pool.execute(
         "INSERT INTO phone_numbers (did, tenant_id) VALUES ($1, $2)",
-        "+14155551234", test_tenant["id"],
+        "14155551234", test_tenant["id"],  # stored digits-only; looked up as typed
     )
     try:
         assert await campaigns.caller_id_owned_by_tenant(test_tenant["id"], "+14155551234") is True
     finally:
-        await pool.execute("DELETE FROM phone_numbers WHERE did = $1", "+14155551234")
+        await pool.execute("DELETE FROM phone_numbers WHERE did = $1", "14155551234")
 
 
 async def test_caller_id_owned_by_tenant_false_for_another_tenants_did(test_tenant, pool, scoped):
@@ -73,12 +73,12 @@ async def test_caller_id_owned_by_tenant_false_for_another_tenants_did(test_tena
     )
     await pool.execute(
         "INSERT INTO phone_numbers (did, tenant_id) VALUES ($1, $2)",
-        "+14155559999", other["id"],
+        "14155559999", other["id"],
     )
     try:
         assert await campaigns.caller_id_owned_by_tenant(test_tenant["id"], "+14155559999") is False
     finally:
-        await pool.execute("DELETE FROM phone_numbers WHERE did = $1", "+14155559999")
+        await pool.execute("DELETE FROM phone_numbers WHERE did = $1", "14155559999")
         await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
 
 

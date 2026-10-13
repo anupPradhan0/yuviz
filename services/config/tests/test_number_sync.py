@@ -51,7 +51,7 @@ async def cleanup(pool, test_tenant):
 
 
 def _did():
-    return f"+1555{uuid.uuid4().int % 10**7:07d}"
+    return f"1555{uuid.uuid4().int % 10**7:07d}"  # stored digits-only; Vobiz adds its "+"
 
 
 async def _add(client, tenant, config_id, did):

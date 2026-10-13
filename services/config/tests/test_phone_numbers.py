@@ -12,7 +12,7 @@ async def test_create_and_get_by_did_resolves_tenant_and_agent(test_tenant, scop
     agent = await agents.create_agent(
         tenant_id=test_tenant["id"], slug="support", name="Support Agent",
     )
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(
         tenant_id=test_tenant["id"], did=did, agent_id=agent["id"],
     )
@@ -26,7 +26,7 @@ async def test_create_and_get_by_did_resolves_tenant_and_agent(test_tenant, scop
 
 
 async def test_get_by_did_with_no_agent_resolves_to_default_agent_slug(test_tenant, scoped, pool):
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did, agent_id=None)
 
     resolved = await phone_numbers.get_by_did(did)
@@ -41,7 +41,7 @@ async def test_get_by_did_returns_agent_config_version(test_tenant, scoped, pool
     agent = await agents.create_agent(
         tenant_id=test_tenant["id"], slug="sales", name="Sales Agent",
     )
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(
         tenant_id=test_tenant["id"], did=did, agent_id=agent["id"],
     )
@@ -63,7 +63,7 @@ async def test_get_by_did_unknown_number_returns_none(test_tenant, scoped):
 
 async def test_create_phone_number_warms_cache_immediately(test_tenant, scoped, pool):
     # A new DID must be routable before any read populates the cache.
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
 
     assert await cache.get_json(f"did:{did}") is not None
@@ -72,7 +72,7 @@ async def test_create_phone_number_warms_cache_immediately(test_tenant, scoped, 
 
 
 async def test_get_by_did_populates_cache_on_miss(test_tenant, scoped, pool):
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
     await cache.invalidate(f"did:{did}")  # force a miss, independent of create's own warming
 
@@ -85,8 +85,8 @@ async def test_get_by_did_populates_cache_on_miss(test_tenant, scoped, pool):
 
 async def test_update_phone_number_rename_updates_did_and_clears_old_row(test_tenant, scoped, pool):
     """Row-level rename; cache behavior is covered by the write-through test below."""
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
-    new_did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
+    new_did = f"9{uuid.uuid4().int % 10**10:010d}"
     created = await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
 
     updated = await phone_numbers.update_phone_number(created["id"], did=new_did)
@@ -96,7 +96,7 @@ async def test_update_phone_number_rename_updates_did_and_clears_old_row(test_te
 
 
 async def test_soft_delete_phone_number_invalidates_cache_and_hides_from_get_by_did(test_tenant, scoped, pool):
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     created = await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
     await phone_numbers.get_by_did(did)  # warm cache
 
@@ -108,7 +108,7 @@ async def test_soft_delete_phone_number_invalidates_cache_and_hides_from_get_by_
 
 
 async def test_did_unique_constraint_rejects_duplicate(test_tenant, scoped, pool):
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
     with pytest.raises(Exception):
         await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
@@ -117,7 +117,7 @@ async def test_did_unique_constraint_rejects_duplicate(test_tenant, scoped, pool
 
 
 async def test_list_phone_numbers_scoped_to_tenant(test_tenant, scoped, pool):
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
 
     listed = await phone_numbers.list_phone_numbers(test_tenant["id"])
@@ -131,7 +131,7 @@ async def test_inactive_status_resolves_to_none_not_normal_agent(test_tenant, sc
     agent = await agents.create_agent(
         tenant_id=test_tenant["id"], slug="support", name="Support Agent",
     )
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(
         tenant_id=test_tenant["id"], did=did, agent_id=agent["id"], status="suspended",
     )
@@ -148,7 +148,7 @@ async def test_fallback_agent_used_when_primary_agent_deleted(test_tenant, scope
     fallback = await agents.create_agent(
         tenant_id=test_tenant["id"], slug="receptionist", name="Receptionist Agent",
     )
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(
         tenant_id=test_tenant["id"], did=did,
         agent_id=primary["id"], fallback_agent_id=fallback["id"],
@@ -175,7 +175,7 @@ async def test_fallback_agent_used_when_primary_agent_deactivated(test_tenant, s
     fallback = await agents.create_agent(
         tenant_id=test_tenant["id"], slug="receptionist2", name="Receptionist Agent 2",
     )
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(
         tenant_id=test_tenant["id"], did=did,
         agent_id=primary["id"], fallback_agent_id=fallback["id"],
@@ -194,7 +194,7 @@ async def test_fallback_agent_used_when_primary_agent_deactivated(test_tenant, s
 
 
 async def test_status_check_constraint_rejects_invalid_value(test_tenant, scoped, pool):
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     with pytest.raises(Exception):
         await phone_numbers.create_phone_number(
             tenant_id=test_tenant["id"], did=did, status="not-a-real-status",
@@ -202,8 +202,8 @@ async def test_status_check_constraint_rejects_invalid_value(test_tenant, scoped
 
 
 async def test_prewarm_populates_cache_for_active_dids_only(test_tenant, scoped, pool):
-    active_did = f"test-did-{uuid.uuid4().hex[:8]}"
-    inactive_did = f"test-did-{uuid.uuid4().hex[:8]}"
+    active_did = f"9{uuid.uuid4().int % 10**10:010d}"
+    inactive_did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=active_did, status="active")
     await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=inactive_did, status="inactive")
 
@@ -220,7 +220,7 @@ async def test_prewarm_populates_cache_for_active_dids_only(test_tenant, scoped,
 
 async def test_did_cache_has_no_ttl(test_tenant, scoped, pool):
     """DID entries never expire: the Gateway reads Redis only, with no fallback query."""
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
 
     client = cache.get_client()
@@ -234,7 +234,7 @@ async def test_update_phone_number_writes_through_new_did_immediately(test_tenan
     agent = await agents.create_agent(
         tenant_id=test_tenant["id"], slug="write-through-agent", name="Write Through",
     )
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     created = await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
 
     await phone_numbers.update_phone_number(created["id"], agent_id=agent["id"])
@@ -247,8 +247,8 @@ async def test_update_phone_number_writes_through_new_did_immediately(test_tenan
 
 
 async def test_update_phone_number_rename_writes_through_new_and_clears_old(test_tenant, scoped, pool):
-    old_did = f"test-did-{uuid.uuid4().hex[:8]}"
-    new_did = f"test-did-{uuid.uuid4().hex[:8]}"
+    old_did = f"9{uuid.uuid4().int % 10**10:010d}"
+    new_did = f"9{uuid.uuid4().int % 10**10:010d}"
     created = await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=old_did)
 
     await phone_numbers.update_phone_number(created["id"], did=new_did)
@@ -262,7 +262,7 @@ async def test_update_phone_number_rename_writes_through_new_and_clears_old(test
 async def test_pausing_an_agent_moves_its_numbers_to_the_fallback_and_back(test_tenant, scoped, pool):
     primary = await agents.create_agent(tenant_id=test_tenant["id"], slug="primary", name="Primary")
     backup = await agents.create_agent(tenant_id=test_tenant["id"], slug="backup", name="Backup")
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(
         tenant_id=test_tenant["id"], did=did, agent_id=primary["id"], fallback_agent_id=backup["id"],
     )
@@ -287,7 +287,7 @@ async def test_pausing_an_agent_moves_its_numbers_to_the_fallback_and_back(test_
 
 async def test_prewarm_never_overwrites_a_route_written_by_the_api(test_tenant, scoped, pool):
     # The API writes routes while a reload runs; the reload's older read must not win.
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
     newer = {"tenant_slug": "written-by-api", "agent_slug": "x", "version": 9}
     await cache.set_json(f"did:{did}", newer, ttl=None)
@@ -301,7 +301,7 @@ async def test_prewarm_never_overwrites_a_route_written_by_the_api(test_tenant, 
 
 async def test_deleting_an_agent_stops_routing_its_numbers_to_it(test_tenant, scoped, pool):
     agent = await agents.create_agent(tenant_id=test_tenant["id"], slug="leaving", name="Leaving")
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did, agent_id=agent["id"])
 
     await agents.soft_delete_agent(agent["id"], tenant_slug=test_tenant["slug"])
@@ -328,7 +328,7 @@ async def test_route_reload_survives_non_redis_failures(monkeypatch):
 
 async def test_startup_prewarm_repairs_a_stale_route(test_tenant, scoped, pool):
     # A failed write during a reassignment leaves the old tenant's route; the startup load fixes it.
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
     await cache.set_json(f"did:{did}", {"tenant_slug": "previous-owner", "agent_slug": "x", "version": 1}, ttl=None)
 
@@ -341,7 +341,7 @@ async def test_startup_prewarm_repairs_a_stale_route(test_tenant, scoped, pool):
 
 async def test_agent_update_refreshes_cached_route_version(test_tenant, scoped, pool):
     agent = await agents.create_agent(tenant_id=test_tenant["id"], slug="versioned", name="Versioned")
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did, agent_id=agent["id"])
 
     await agents.update_agent(agent["id"], tenant_slug=test_tenant["slug"], greeting="Hello again")
@@ -381,7 +381,7 @@ async def test_update_writes_redis_while_the_rows_lock_is_still_held(test_tenant
     inside the patched _store_route — it must fail, meaning the main transaction (and
     its lock) are still open at write time."""
     agent = await agents.create_agent(tenant_id=test_tenant["id"], slug="lock-check", name="Lock check")
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     number = await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did, agent_id=agent["id"])
 
     original_store = phone_numbers._store_route
@@ -407,3 +407,54 @@ async def test_update_writes_redis_while_the_rows_lock_is_still_held(test_tenant
     assert observations == [True]
 
     await pool.execute("DELETE FROM phone_numbers WHERE did = $1", did)
+
+
+async def test_did_is_stored_digits_only_and_routes_under_that_key(test_tenant, scoped, pool):
+    # A carrier's "+91..." form and the admin's typed form must end up as one key.
+    agent = await agents.create_agent(tenant_id=test_tenant["id"], slug="intl", name="Intl")
+    digits = f"91{uuid.uuid4().int % 10**10:010d}"
+    typed = f"+{digits[:2]} {digits[2:6]}-{digits[6:]}"
+
+    number = await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=typed, agent_id=agent["id"])
+
+    assert number["did"] == digits
+    assert (await cache.get_json(f"did:{digits}"))["agent_slug"] == "intl"
+    await pool.execute("DELETE FROM phone_numbers WHERE did = $1", digits)
+
+
+async def test_the_same_number_in_another_format_is_already_assigned(test_tenant, scoped, pool):
+    digits = f"1{uuid.uuid4().int % 10**10:010d}"
+    await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=digits)
+
+    with pytest.raises(phone_numbers.DidAlreadyAssigned):
+        await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=f"+{digits}")
+
+    await pool.execute("DELETE FROM phone_numbers WHERE did = $1", digits)
+
+
+async def test_update_normalizes_the_did(test_tenant, scoped, pool):
+    old, new = (f"1{uuid.uuid4().int % 10**10:010d}" for _ in range(2))
+    number = await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=old)
+
+    updated = await phone_numbers.update_phone_number(number["id"], did=f"+{new[0]} {new[1:]}")
+
+    assert updated["did"] == new
+    assert await cache.get_json(f"did:{new}") is not None
+    await pool.execute("DELETE FROM phone_numbers WHERE did = $1", new)
+
+
+@pytest.mark.parametrize("did", ["", "   "])
+async def test_an_empty_did_is_rejected(test_tenant, scoped, did):
+    with pytest.raises(ValueError):
+        await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
+
+
+async def test_a_sip_uri_did_is_stored_as_typed(test_tenant, scoped, pool):
+    agent = await agents.create_agent(tenant_id=test_tenant["id"], slug="pbx", name="PBX")
+    uri = f"sip:{uuid.uuid4().hex[:6]}@pbx.example.com"
+
+    number = await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=uri, agent_id=agent["id"])
+
+    assert number["did"] == uri
+    assert (await cache.get_json(f"did:{uri}"))["agent_slug"] == "pbx"
+    await pool.execute("DELETE FROM phone_numbers WHERE did = $1", uri)

@@ -462,6 +462,27 @@ BEGIN
   EXECUTE 'ALTER TABLE phone_numbers DROP CONSTRAINT IF EXISTS phone_numbers_did_key';
 END $$;
 
+-- Live phone-number DIDs ("+91 80-6535 4620") are stored digits-only, the form every did:{did}
+-- reader looks up; SIP URIs and other values are left as typed (libs/telephony_sdk/did_format.py).
+-- Normalising can merge two live rows ("+9180..." and "9180..."), which the live unique index
+-- would reject mid-apply, so refuse with the offending numbers instead.
+DO $$
+DECLARE clashes TEXT;
+BEGIN
+  SELECT string_agg(canon, ', ') INTO clashes FROM (
+    SELECT CASE WHEN btrim(did, E' \t\n\r\f\v') ~ '^\+?[0-9 ().-]*[0-9][0-9 ().-]*$'
+                THEN regexp_replace(did, '[^0-9]', '', 'g') ELSE did END AS canon
+    FROM phone_numbers WHERE deleted_at IS NULL GROUP BY 1 HAVING count(*) > 1
+  ) c;
+  IF clashes IS NOT NULL THEN
+    RAISE EXCEPTION 'phone_numbers: these numbers have more than one live row once normalised to digits: %; delete the duplicates before applying schema.sql', clashes;
+  END IF;
+  UPDATE phone_numbers SET did = regexp_replace(did, '[^0-9]', '', 'g')
+  WHERE deleted_at IS NULL
+    AND btrim(did, E' \t\n\r\f\v') ~ '^\+?[0-9 ().-]*[0-9][0-9 ().-]*$'
+    AND did ~ '[^0-9]';
+END $$;
+
 -- Carrier REST account id (e.g. Twilio Account SID); auth_id is SIP trunk auth, not this.
 ALTER TABLE carriers ADD COLUMN IF NOT EXISTS carrier_account_ref TEXT;
 

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
 from libs.config_sdk.dial_targets import is_dial_number, is_transfer_destination
+from libs.telephony_sdk.did_format import is_routable_did, normalize_did
 
 MAX_WORKFLOW_NODES = 50
 MAX_WORKFLOW_EDGES = 120
@@ -246,33 +246,6 @@ class VoicePreview(BaseModel):
     text: str = Field(min_length=1, max_length=600)
 
 
-CallExportColumn = Literal[
-    "session_id", "started_at", "ended_at", "account", "direction", "caller_number", "called_number",
-    "agent", "duration", "status", "outcome", "close_reason", "sentiment", "sentiment_reason",
-    "turns", "disposition", "languages",
-]
-
-
-class CallExport(BaseModel):
-    """Calls page export; filter values mirror the page's column filters."""
-    tenant_slugs: list[str] = Field(min_length=1, max_length=500)
-    format: Literal["csv", "xlsx"] = "csv"
-    columns: list[CallExportColumn] = Field(min_length=1)
-    # Set = export exactly these calls and ignore the filters below.
-    session_ids: list[str] | None = Field(default=None, max_length=10_000)
-    timezone: str = "UTC"
-    started_after: datetime | None = None
-    started_before: datetime | None = None
-    q: str | None = Field(default=None, max_length=200)
-    parties: Literal["inbound", "outbound", "AI", "WebRTC"] | None = None
-    agent: str | None = None  # agent name; "__none" = calls with no agent
-    duration: Literal["short", "mid", "long", "none"] | None = None
-    sentiment: Literal["positive", "neutral", "negative", "frustrated", "unscored"] | None = None
-    status: Literal[
-        "live", "completed", "succeeded", "failed", "done", "to_person", "transfer_failed", "dropped",
-    ] | None = None
-
-
 class CallFlowCreate(BaseModel):
     slug:        str
     name:        str
@@ -418,6 +391,19 @@ class CarrierUpdate(BaseModel):
     carrier_account_ref:  str | None = None
 
 
+def _canonical_did(value: str | None) -> str:
+    # Canonicalised here so the router's local-number check sees the value that gets stored.
+    if value is None:
+        raise ValueError("did must not be null")
+    did = normalize_did(value)
+    if not did:
+        raise ValueError("did must not be empty")
+    if not is_routable_did(did):
+        raise ValueError("did must be a phone number (digits, optional +, spaces, dashes, dots, "
+                         "brackets), a SIP URI, or an extension")
+    return did
+
+
 class PhoneNumberCreate(BaseModel):
     did:                 str
     agent_id:            str | None = None
@@ -426,6 +412,8 @@ class PhoneNumberCreate(BaseModel):
     telephony_config_id: str | None = None
     region:              str | None = None
     status:              Literal["active", "inactive", "suspended"] = "active"
+
+    _did = field_validator("did")(_canonical_did)
 
 
 class PhoneNumberUpdate(BaseModel):
@@ -436,6 +424,8 @@ class PhoneNumberUpdate(BaseModel):
     telephony_config_id: str | None = None
     region:              str | None = None
     status:              Literal["active", "inactive", "suspended"] | None = None
+
+    _did = field_validator("did")(_canonical_did)
 
 
 class LoginRequest(BaseModel):
