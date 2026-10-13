@@ -26,7 +26,8 @@ SELECT count(*) FILTER (WHERE j.status = 'pending')                             
        extract(epoch FROM now() - min(j.created_at) FILTER (WHERE j.status = 'pending')) AS oldest_pending_age_s
   FROM kb_ingestion_jobs j
  WHERE EXISTS (SELECT 1 FROM kb_documents d
-                WHERE d.id = j.document_id AND d.tenant_id = current_setting('app.tenant_id')::uuid)
+                WHERE d.id = j.document_id AND d.deleted_at IS NULL
+                  AND d.tenant_id = current_setting('app.tenant_id')::uuid)
 """
 
 # One row per document that is currently failed; the document's own error column is the reason.

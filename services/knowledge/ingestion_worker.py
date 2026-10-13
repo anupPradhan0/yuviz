@@ -452,10 +452,33 @@ async def _claim_next_job(
     return dict(row) if row is not None else None
 
 
+async def _cancel_jobs_of_deleted_documents(conn: asyncpg.Connection) -> int:
+    """A pending job whose document was soft-deleted is never claimed (the claim skips deleted documents) and would sit
+    in the queue forever, counted by the health endpoint and the stalled-queue alert. One short UPDATE (no row lock on
+    the document or the tenant) marks it failed/permanent with an event."""
+    rows = await conn.fetch(
+        "UPDATE kb_ingestion_jobs j SET status = 'failed', error = 'document was deleted', error_class = 'permanent', "
+        "finished_at = now(), updated_at = now(), lease_expires_at = NULL "
+        "FROM kb_documents d WHERE d.id = j.document_id AND d.deleted_at IS NOT NULL AND j.status = 'pending' "
+        "RETURNING j.id, j.document_id, j.attempts, d.tenant_id",
+    )
+    for r in rows:
+        await conn.execute(
+            "INSERT INTO kb_ingestion_events (job_id, document_id, tenant_id, attempt, stage, status, detail) "
+            "VALUES ($1, $2, $3, $4, 'worker', 'error', $5::jsonb)",
+            r["id"], r["document_id"], r["tenant_id"], r["attempts"],
+            json.dumps({"error_class": "permanent", "error": "document was deleted"}),
+        )
+    if rows:
+        log.info("Cancelled %d pending ingestion job(s) of deleted documents", len(rows))
+    return len(rows)
+
+
 async def reap_expired_leases(pool: asyncpg.Pool) -> int:
     """Requeue (or dead-letter) running jobs whose worker stopped heartbeating. Returns jobs reaped."""
     reaped = 0
     async with platform_conn(pool, reason="kb-ingestion-lease-reaper") as conn:
+        await _cancel_jobs_of_deleted_documents(conn)
         rows = await conn.fetch(
             "SELECT j.*, d.tenant_id AS doc_tenant_id FROM kb_ingestion_jobs j "
             "JOIN kb_documents d ON d.id = j.document_id "

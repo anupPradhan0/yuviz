@@ -6,6 +6,8 @@ import uuid
 os.environ.setdefault("POSTGRES_DSN", "postgresql://satish@localhost:5432/voiceai")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("JWT_SECRET", "dev-only-insecure-secret-do-not-deploy-" * 2)
+# The shipped default is OFF (parsers/limits.py); the suite parses PDF/Office, so it opts in for the test session.
+os.environ.setdefault("KNOWLEDGE_BINARY_PARSERS", "1")
 os.environ.setdefault("KNOWLEDGE_STORAGE_ROOT", "/tmp/voiceai-knowledge-test-storage")
 
 import pytest

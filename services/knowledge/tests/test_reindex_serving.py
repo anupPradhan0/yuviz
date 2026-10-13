@@ -221,3 +221,28 @@ async def test_the_api_says_when_retry_will_work(tenant_agent, pool):
     await pool.execute("UPDATE kb_documents SET status = 'failed' WHERE id = $1", doc["id"])
     assert await retryable() is True                                    # a failed first ingest
     await _purge_tenant(pool, tenant["id"])
+
+
+async def test_pending_jobs_of_deleted_documents_are_cancelled_and_leave_the_health_counts(tenant_agent, pool):
+    from services.knowledge import health
+    tenant, _ = tenant_agent
+    await _drain_pending(pool)
+    kb = await _make_kb(tenant, "deleted-job-kb")
+    doc = await _upload(tenant, kb, "doomed", content=_DOC, content_type="text/markdown")     # job pending, never claimed
+    keep = await _upload(tenant, kb, "kept", content=_DOC, content_type="text/markdown")
+    set_caller_tenant(str(tenant["id"]))
+    await documents_service.soft_delete_document(doc["id"])
+    await reap_expired_leases(pool)
+    j = dict(await pool.fetchrow("SELECT * FROM kb_ingestion_jobs WHERE id = $1", doc["ingestion_job_id"]))
+    assert j["status"] == "failed" and j["error_class"] == "permanent" and j["error"] == "document was deleted" and j["finished_at"]
+    ev = await pool.fetchrow("SELECT status, detail FROM kb_ingestion_events WHERE job_id = $1", j["id"])
+    assert ev["status"] == "error" and "document was deleted" in ev["detail"]
+    assert (await pool.fetchval("SELECT status FROM kb_ingestion_jobs WHERE id = $1", keep["ingestion_job_id"])) == "pending"
+    # the health queue counts ignore jobs of deleted documents even before the reaper has run
+    other = await _upload(tenant, kb, "doomed2", content=_DOC, content_type="text/markdown")
+    await documents_service.soft_delete_document(other["id"])
+    from libs.tenancy import tenant_conn
+    async with tenant_conn(pool, explicit_tenant=str(tenant["id"]), reason="kb-ingestion-job") as conn:
+        pending = (await conn.fetchrow(health._QUEUE_SQL))["pending"]
+    assert pending == 1                                             # only the kept document's job
+    await _purge_tenant(pool, tenant["id"])

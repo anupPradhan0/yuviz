@@ -77,23 +77,36 @@ async def spawn(tail: list[str], cwd: str, nonce: str = "") -> asyncio.subproces
     )
 
 
-def _group_rss_proc(pgid: int) -> float:
-    """RSS of every process in the group straight from /proc (Linux): no process is spawned."""
-    page = os.sysconf("SC_PAGE_SIZE")
+def parse_proc_stat(data: bytes) -> tuple[int, int] | None:
+    """(process group id, resident pages) from the text of /proc/<pid>/stat. Field 24 (rss) is the CURRENT resident set,
+    not a high-water mark, so it is the right value for a limit. `comm` (field 2) may contain spaces and parentheses, so
+    the fields after it are split after the LAST ')': then state is [0], ppid [1], pgrp [2] and rss [21]."""
+    fields = data[data.rfind(b")") + 2:].split()
+    if len(fields) > 21:
+        return int(fields[2]), int(fields[21])
+    return None
+
+
+def _group_rss_proc(pgid: int, page: int | None = None, scan=None) -> float:
+    """RSS of every process in the group straight from /proc (Linux): no process is spawned. `page` and `scan` (an
+    iterable of stat file contents) are injectable so the logic is testable off Linux."""
+    page = page or os.sysconf("SC_PAGE_SIZE")
     total = 0
-    with os.scandir("/proc") as it:
-        for e in it:
-            if not e.name.isdigit():
-                continue
-            try:
-                with open(f"/proc/{e.name}/stat", "rb") as f:
-                    data = f.read()
-            except OSError:
-                continue
-            # pid (comm) state ppid pgrp ... rss: comm may hold spaces and parentheses, so split after the last ')'
-            fields = data[data.rfind(b")") + 2:].split()
-            if len(fields) > 21 and int(fields[2]) == pgid:
-                total += int(fields[21]) * page
+
+    def stats():
+        with os.scandir("/proc") as it:
+            for e in it:
+                if e.name.isdigit():
+                    try:
+                        with open(f"/proc/{e.name}/stat", "rb") as f:
+                            yield f.read()
+                    except OSError:
+                        continue
+
+    for data in (scan if scan is not None else stats()):
+        parsed = parse_proc_stat(data)
+        if parsed and parsed[0] == pgid:
+            total += parsed[1] * page
     return total / (1024 * 1024)
 
 
