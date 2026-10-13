@@ -109,4 +109,5 @@ class CacheAsideKnowledgeProvider:
             status=status,
             degraded=list(raw.get("degraded") or []),
             trace_id=raw.get("trace_id"),
+            low_confidence=bool(raw.get("low_confidence", False)),
         )

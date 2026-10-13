@@ -58,3 +58,5 @@ class RetrievedContext:
     status: str = "ok"
     degraded: list[str] = field(default_factory=list)  # stages that fell back, when status is partial
     trace_id: str | None = None
+    # The server's "the top hits are too close to call" signal; the caller should hedge, not assert.
+    low_confidence: bool = False

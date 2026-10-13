@@ -200,3 +200,16 @@ async def test_close_delegates_to_both_repositories():
     provider = CacheAsideKnowledgeProvider(availability, retrieval)
     await provider.close()
     assert availability.closed and retrieval.closed
+
+
+async def test_low_confidence_is_carried_from_the_server_response():
+    raw = _raw_context(status="ok", low_confidence=True)
+    provider = CacheAsideKnowledgeProvider(FakeAvailabilityRepo(value=True), FakeRetrievalRepo(raw=raw))
+
+    assert (await provider.retrieve("acme", "sup", "q")).low_confidence is True
+
+
+async def test_low_confidence_defaults_to_false_for_an_older_server():
+    provider = CacheAsideKnowledgeProvider(FakeAvailabilityRepo(value=True), FakeRetrievalRepo(raw=_raw_context()))
+
+    assert (await provider.retrieve("acme", "sup", "q")).low_confidence is False

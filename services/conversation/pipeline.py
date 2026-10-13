@@ -47,7 +47,7 @@ from .tools.llm_adapter import LocalToolCompletedEvent
 from .tools.llm_adapter import TokenEvent as ToolTokenEvent
 from .tools.llm_adapter import ToolCallStartedEvent
 from .tools.orchestrator import ToolCallOrchestrator
-from .tools.envelope import UNTRUSTED_NOTICE, cap_passages, defang, wrap_untrusted
+from .tools.envelope import UNTRUSTED_NOTICE, cap_passages, defang, visible_degraded, wrap_untrusted
 from .tools.registry import SEARCH_KNOWLEDGE
 from .tools.types import ToolResult, ToolStatus
 from .transcript_builder import TranscriptBuilder, TurnLatency
@@ -239,8 +239,8 @@ _FALLBACK_LLM_ERROR = t("fallback_llm_error", "en")
 
 _TOOL_CALL_FILLER_MIN_GAP_S = 4.0
 # Hard ceiling on retrieved text handed to the LLM, in the knowledge service's own token unit (words).
-# The agent's token budget is enforced server-side; this also bounds always-included prompt-mode documents,
-# which bypass that budget.
+# The agent's token budget is enforced server-side (prompt-mode documents get at most half of it); this
+# ceiling is the backstop for what a word count cannot bound and for a service with a larger budget.
 _KNOWLEDGE_TOOL_MAX_TOKENS = int(os.environ.get("KNOWLEDGE_TOOL_MAX_TOKENS", "1500"))
 # Words are no bound for CJK, minified JSON or base64 (no spaces), so characters are capped as well.
 _KNOWLEDGE_TOOL_MAX_CHARS = int(os.environ.get("KNOWLEDGE_TOOL_MAX_CHARS", "6000"))
@@ -1372,19 +1372,32 @@ class PipelineConversationHandler:
             except Exception:
                 log.exception("search_knowledge retrieval failed session=%s", session_id)
                 return ToolResult(status=ToolStatus.FAILED, error="knowledge_unavailable")
+            if context is not None and context.status != "ok":
+                # trace_id, never the query: the caller's words are not logged.
+                log.warning(
+                    "search_knowledge: status=%s chunks=%d degraded=%s trace_id=%s session=%s",
+                    context.status, len(context.chunks), context.degraded, context.trace_id, session_id,
+                )
             if context is not None and context.status == "unavailable":
-                log.warning("search_knowledge: retrieval unavailable session=%s degraded=%s", session_id, context.degraded)
+                # Whatever the degraded codes (overloaded, deadline, dense_failed ...) the service has already
+                # spent its budget or is shedding load: a retry only adds load and doubles the caller's wait.
+                # (A lookup that raised is different and is still retried once, by FAILED.)
                 if "timeout" in context.degraded:
-                    # The service already spent its budget; a retry would only double the caller's wait.
                     return ToolResult(status=ToolStatus.TIMEOUT, error="timeout")
-                return ToolResult(status=ToolStatus.FAILED, error="knowledge_unavailable")
+                return ToolResult(status=ToolStatus.UNAVAILABLE, error="knowledge_unavailable")
+            if context is not None and not context.chunks and context.status == "partial":
+                # A branch was lost and the rest found nothing: that is "could not fully check", never "no match".
+                return ToolResult(
+                    status=ToolStatus.UNAVAILABLE, error="knowledge_incomplete",
+                    payload={"found": None, "incomplete": True, "degraded": visible_degraded(context.degraded)},
+                )
             if context is None or not context.chunks:
                 return ToolResult(
                     status=ToolStatus.SUCCESS, outcome="no_match", payload={"found": False, "passages": []},
                 )
             # Retrieved text is tenant-uploaded, so it is data to quote, never instructions to follow.
-            # Prompt-mode documents come first (retrieval_metadata.always_included) and bypass the server's
-            # budget; capping them apart keeps the matches that answer the question from being dropped.
+            # Prompt-mode documents come first (retrieval_metadata.always_included); capping them apart keeps
+            # the matches that answer the question from being dropped.
             kept, truncated = cap_passages(
                 [c.content for c in context.chunks],
                 int(context.retrieval_metadata.get("always_included") or 0),
@@ -1395,11 +1408,11 @@ class PipelineConversationHandler:
                 "untrusted_notice": UNTRUSTED_NOTICE,
                 "passages": [wrap_untrusted(text) for text in kept],
             }
-            degraded = list(context.degraded)
-            if truncated:
-                degraded.append("truncated_to_token_budget")
+            degraded = visible_degraded([*context.degraded, *(["truncated_to_token_budget"] if truncated else [])])
             if degraded:
                 payload["degraded"] = degraded
+            if context.low_confidence:
+                payload["low_confidence"] = True
             if context.include_citations and context.sources:
                 payload["sources"] = [defang(title)[:120] for title in context.sources]
             partial = context.status == "partial" or truncated
