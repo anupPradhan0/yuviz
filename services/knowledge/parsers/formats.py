@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import re
 import time
 import zipfile
@@ -203,18 +204,87 @@ def _has_fill(el) -> bool:
     return shd is not None and (shd.get(_W + "fill") or "auto").upper() not in ("AUTO", "FFFFFF", "FFF")
 
 
-def _run_hidden_reason(r) -> str | None:
-    """Why a run is invisible, or None. White text counts only when nothing darker sits behind it (run, paragraph or
-    table-cell shading), so white-on-dark headings survive; white-on-white detection is a heuristic."""
-    rpr = r.find(_W + "rPr")
+_STYLE_PROPS: dict[str, dict] = {}
+_STYLE_PARENT: dict[str, str] = {}
+_TINY_HALF_POINTS = 4   # w:sz is in half-points: 4 = 2 pt
+
+
+def _rpr_props(rpr) -> dict:
+    props: dict = {}
     if rpr is None:
-        return None
-    vanish = rpr.find(_W + "vanish")
-    if vanish is not None and not _false_flag(vanish):
+        return props
+    v = rpr.find(_W + "vanish")
+    if v is not None:
+        props["vanish"] = not _false_flag(v)
+    c = rpr.find(_W + "color")
+    if c is not None and c.get(_W + "val"):
+        props["color"] = c.get(_W + "val").upper()
+    sz = rpr.find(_W + "sz")
+    if sz is not None and (sz.get(_W + "val") or "").isdigit():
+        props["sz"] = int(sz.get(_W + "val"))
+    if _has_fill(rpr):
+        props["fill"] = True
+    return props
+
+
+def _load_docx_styles(zf: zipfile.ZipFile) -> None:
+    """Character and paragraph styles can hide or whiten text for every run that uses them, so the effective run
+    properties are style chain + direct formatting, not direct formatting alone."""
+    _STYLE_PROPS.clear()
+    _STYLE_PARENT.clear()
+    if "word/styles.xml" not in zf.namelist():
+        return
+    try:
+        root = etree.fromstring(zf.read("word/styles.xml"), _XML)
+    except etree.XMLSyntaxError:
+        return
+    for st in root.iter(_W + "style"):
+        sid = st.get(_W + "styleId")
+        if not sid:
+            continue
+        _STYLE_PROPS[sid] = _rpr_props(st.find(_W + "rPr"))
+        based = st.find(_W + "basedOn")
+        if based is not None and based.get(_W + "val"):
+            _STYLE_PARENT[sid] = based.get(_W + "val")
+
+
+def _style_chain(sid: str | None) -> list[str]:
+    chain: list[str] = []
+    while sid and sid not in chain and len(chain) < 12:
+        chain.append(sid)
+        sid = _STYLE_PARENT.get(sid)
+    return chain[::-1]   # base style first, so derived styles override
+
+
+def _effective_props(r) -> dict:
+    props: dict = {}
+    p = next((a for a in r.iterancestors() if _local(a.tag) == "p"), None)
+    ids: list[str] = []
+    if p is not None:
+        ps = p.find(f"{_W}pPr/{_W}pStyle")
+        if ps is not None:
+            ids += _style_chain(ps.get(_W + "val"))
+    rpr = r.find(_W + "rPr")
+    rs = rpr.find(_W + "rStyle") if rpr is not None else None
+    if rs is not None:
+        ids += _style_chain(rs.get(_W + "val"))
+    for sid in ids:
+        props.update(_STYLE_PROPS.get(sid, {}))
+    props.update(_rpr_props(rpr))
+    return props
+
+
+def _run_hidden_reason(r) -> str | None:
+    """Why a run is invisible, or None, from direct formatting AND its paragraph/character style. White text counts
+    only when nothing darker sits behind it (run, paragraph or table-cell shading), so white-on-dark headings survive;
+    white-on-white detection is a heuristic."""
+    props = _effective_props(r)
+    if props.get("vanish"):
         return "docx_hidden_runs"
-    color = rpr.find(_W + "color")
-    if color is not None and (color.get(_W + "val") or "").upper() in _WHITE:
-        if _has_fill(rpr):
+    if props.get("sz") is not None and props["sz"] <= _TINY_HALF_POINTS:
+        return "docx_tiny_text"
+    if props.get("color") in _WHITE:
+        if props.get("fill"):
             return None
         for anc in r.iterancestors():
             name = _local(anc.tag)
@@ -296,6 +366,7 @@ def _docx_native(zf: zipfile.ZipFile, raw: bytes) -> ParsedDocument:
     from docx.text.paragraph import Paragraph
 
     d = docx.Document(io.BytesIO(raw))
+    _load_docx_styles(zf)
 
     def style_of(p_el) -> str:
         try:
@@ -310,6 +381,7 @@ def _docx_native(zf: zipfile.ZipFile, raw: bytes) -> ParsedDocument:
 
 
 def _docx_xml(zf: zipfile.ZipFile) -> ParsedDocument:
+    _load_docx_styles(zf)
     root = etree.fromstring(zf.read("word/document.xml"), _XML)
 
     def style_of(p_el) -> str:
@@ -323,6 +395,45 @@ def _docx_xml(zf: zipfile.ZipFile) -> ParsedDocument:
 
 # ── PPTX ────────────────────────────────────────────────────────────────
 
+_TINY_PPTX = 200   # a:rPr sz is in hundredths of a point: 200 = 2 pt
+
+
+def _a_par_text(p, hidden: Counter) -> str:
+    parts: list[str] = []
+    for child in p:
+        name = _local(child.tag)
+        if name in ("r", "fld"):
+            rpr = child.find("{*}rPr")
+            sz = rpr.get("sz") if rpr is not None else None
+            if sz and sz.isdigit() and int(sz) <= _TINY_PPTX:
+                hidden["pptx_tiny_text"] += 1
+                continue
+            t = child.find("{*}t")
+            if t is not None and t.text:
+                parts.append(t.text)
+        elif name == "br":
+            parts.append("\n")
+    return "".join(parts).strip()
+
+
+def _pptx_shape_hidden(el, slide_w: int, slide_h: int) -> str | None:
+    """A shape hidden in the selection pane (cNvPr hidden=1) or placed entirely off the slide is not shown."""
+    c = el.find("{*}nvSpPr/{*}cNvPr")
+    if c is None:
+        c = next(el.iter("{*}cNvPr"), None)
+    if c is not None and c.get("hidden") in ("1", "true"):
+        return "pptx_hidden_shapes"
+    off, ext = el.find(".//{*}xfrm/{*}off"), el.find(".//{*}xfrm/{*}ext")
+    if off is not None and ext is not None and slide_w and slide_h:
+        try:
+            x, y, cx, cy = int(off.get("x")), int(off.get("y")), int(ext.get("cx")), int(ext.get("cy"))
+        except (TypeError, ValueError):
+            return None
+        if x + cx <= 0 or x >= slide_w or y + cy <= 0 or y >= slide_h:
+            return "pptx_offslide_shapes"
+    return None
+
+
 def _pptx_native(zf: zipfile.ZipFile, raw: bytes, limits: Limits) -> ParsedDocument:
     from pptx import Presentation
 
@@ -331,18 +442,25 @@ def _pptx_native(zf: zipfile.ZipFile, raw: bytes, limits: Limits) -> ParsedDocum
         raise ParseRejected(f"presentation has more than {limits.max_pages} slides")
     blocks = _Blocks()
     hidden: Counter = Counter()
+    sw, sh = int(prs.slide_width or 0), int(prs.slide_height or 0)
     for n, slide in enumerate(prs.slides, start=1):
         if slide._element.get("show") == "0":
             hidden["pptx_hidden_slides"] += 1
             continue
         title_shape = slide.shapes.title
-        title = title_shape.text_frame.text.strip() if title_shape is not None and title_shape.has_text_frame else ""
+        title = ""
+        if title_shape is not None and title_shape.has_text_frame and not _pptx_shape_hidden(title_shape._element, sw, sh):
+            title = title_shape.text_frame.text.strip()
         blocks.append(Block(HEADING, title or f"Slide {n}", level=1, page=n))
         for shape in slide.shapes:
             if shape is title_shape:
                 continue
+            reason = _pptx_shape_hidden(shape._element, sw, sh)
+            if reason:
+                hidden[reason] += 1
+                continue
             if shape.has_text_frame:
-                lines = [p.text.strip() for p in shape.text_frame.paragraphs if p.text.strip()]
+                lines = [t for t in (_a_par_text(p, hidden) for p in shape.text_frame._txBody.iter("{*}p")) if t]
                 if lines:
                     blocks.append(Block(PARAGRAPH, "\n".join(lines), page=n))
             elif getattr(shape, "has_table", False) and shape.has_table:
@@ -362,6 +480,11 @@ def _pptx_xml(zf: zipfile.ZipFile, limits: Limits) -> ParsedDocument:
         (n for n in zf.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)),
         key=lambda n: int(re.search(r"(\d+)\.xml", n).group(1)),
     )
+    sw = sh = 0
+    if "ppt/presentation.xml" in zf.namelist():
+        sz = next(etree.fromstring(zf.read("ppt/presentation.xml"), _XML).iter("{*}sldSz"), None)
+        if sz is not None:
+            sw, sh = int(sz.get("cx") or 0), int(sz.get("cy") or 0)
     blocks = _Blocks()
     hidden: Counter = Counter()
     for i, name in enumerate(slides[: limits.max_pages], start=1):
@@ -369,7 +492,19 @@ def _pptx_xml(zf: zipfile.ZipFile, limits: Limits) -> ParsedDocument:
         if root.get("show") == "0":
             hidden["pptx_hidden_slides"] += 1
             continue
-        paras = [t for t in (_xml_text(p) for p in root.iter("{*}p")) if t]
+        doomed: set = set()
+        for sp in root.iter("{*}sp", "{*}graphicFrame", "{*}pic", "{*}grpSp"):
+            reason = _pptx_shape_hidden(sp, sw, sh)
+            if reason:
+                hidden[reason] += 1
+                doomed.add(sp)
+        paras = []
+        for p in root.iter("{*}p"):
+            if doomed and any(a in doomed for a in p.iterancestors()):
+                continue
+            t = _a_par_text(p, hidden)
+            if t:
+                paras.append(t)
         if paras:
             blocks.append(Block(HEADING, f"Slide {i}", level=1, page=i))
             blocks.append(Block(PARAGRAPH, "\n".join(paras), page=i))
@@ -423,6 +558,58 @@ def _sheet_members(zf: zipfile.ZipFile) -> list[tuple[str, str, str]]:
     return out
 
 
+_XLSX_WHITE = {"FFFFFFFF", "00FFFFFF", "FFFFFF"}
+
+
+def _xlsx_hidden_styles(zf: zipfile.ZipFile) -> set[int]:
+    """Cell style indices whose text cannot be seen: a number format of `;;;` (shows nothing) or a white font with
+    no fill behind it. (White font on a coloured fill is kept.)"""
+    if "xl/styles.xml" not in zf.namelist():
+        return set()
+    try:
+        root = etree.fromstring(zf.read("xl/styles.xml"), _XML)
+    except etree.XMLSyntaxError:
+        return set()
+    codes = {n.get("numFmtId"): (n.get("formatCode") or "") for n in root.iter("{*}numFmt")}
+    fonts = []
+    for f in root.iter("{*}font"):
+        c = f.find("{*}color")
+        fonts.append(bool(c is not None and (c.get("rgb") or "").upper() in _XLSX_WHITE or (c is not None and c.get("theme") == "0")))
+    fills = []
+    for fl in root.iter("{*}fill"):
+        pf = fl.find("{*}patternFill")
+        solid = pf is not None and pf.get("patternType") == "solid"
+        fg = pf.find("{*}fgColor") if pf is not None else None
+        fills.append(solid and not (fg is not None and (fg.get("rgb") or "").upper() in _XLSX_WHITE))
+    xfs = root.find("{*}cellXfs")
+    out: set[int] = set()
+    for i, xf in enumerate(xfs if xfs is not None else []):
+        code = re.sub(r"\s+", "", codes.get(xf.get("numFmtId"), ""))
+        invisible_format = bool(code) and all(part == "" or part == "@" for part in code.split(";")) and ";" in code
+        font_id, fill_id = int(xf.get("fontId") or 0), int(xf.get("fillId") or 0)
+        white_font = font_id < len(fonts) and fonts[font_id]
+        coloured_fill = fill_id < len(fills) and fills[fill_id]
+        if invisible_format or (white_font and not coloured_fill):
+            out.add(i)
+    return out
+
+
+def _xlsx_hidden_refs(zf: zipfile.ZipFile, member: str, styles: set[int]) -> set[str]:
+    if not styles:
+        return set()
+    refs: set[str] = set()
+    with zf.open(member) as f:
+        try:
+            for _, el in etree.iterparse(f, events=("end",), tag="{*}c", resolve_entities=False, no_network=True,
+                                         load_dtd=False, huge_tree=False):
+                if (el.get("s") or "").isdigit() and int(el.get("s")) in styles and el.get("r"):
+                    refs.add(el.get("r"))
+                el.clear()
+        except etree.XMLSyntaxError:
+            pass
+    return refs
+
+
 def _xlsx_native(zf: zipfile.ZipFile, raw: bytes, limits: Limits) -> ParsedDocument:
     for _, state, member in _sheet_members(zf):
         if state == "visible" and _declared_cells(zf, member) > limits.max_cells:
@@ -433,14 +620,25 @@ def _xlsx_native(zf: zipfile.ZipFile, raw: bytes, limits: Limits) -> ParsedDocum
     blocks = _Blocks()
     hidden: Counter = Counter()
     cells = 0
+    styles = _xlsx_hidden_styles(zf)
+    members = {name: path for name, _, path in _sheet_members(zf)}
     try:
         for ws in wb.worksheets:
             if ws.sheet_state != "visible":
                 hidden["xlsx_hidden_sheets"] += 1
                 continue
+            refs = _xlsx_hidden_refs(zf, members[ws.title], styles) if ws.title in members else set()
             rows: list[tuple[str, ...]] = []
-            for row in ws.iter_rows(values_only=True):
-                vals = tuple("" if v is None else str(v).strip() for v in row)
+            for row in ws.iter_rows():
+                vals = []
+                for c in row:
+                    if getattr(c, "coordinate", None) in refs:
+                        hidden["xlsx_hidden_cells"] += 1
+                        vals.append("")
+                    else:
+                        v = getattr(c, "value", None)
+                        vals.append("" if v is None else str(v).strip())
+                vals = tuple(vals)
                 cells += len(vals)
                 if cells > limits.max_cells or len(rows) > limits.max_table_rows:
                     raise LimitExceeded("spreadsheet has too many cells")
@@ -463,6 +661,7 @@ def _xlsx_xml(zf: zipfile.ZipFile, limits: Limits) -> ParsedDocument:
     blocks = _Blocks()
     hidden: Counter = Counter()
     cells = 0
+    styles = _xlsx_hidden_styles(zf)
     for name, state, member in _sheet_members(zf):
         if state != "visible":
             hidden["xlsx_hidden_sheets"] += 1
@@ -472,6 +671,10 @@ def _xlsx_xml(zf: zipfile.ZipFile, limits: Limits) -> ParsedDocument:
         for r in root.iter("{*}row"):
             vals = []
             for c in r.findall("{*}c"):
+                if (c.get("s") or "").isdigit() and int(c.get("s")) in styles:
+                    hidden["xlsx_hidden_cells"] += 1
+                    vals.append("")
+                    continue
                 v = c.find("{*}v")
                 val = "" if v is None or v.text is None else v.text
                 if c.get("t") == "s" and val.isdigit() and int(val) < len(shared):
@@ -789,41 +992,79 @@ _TINY_PT = 3.0
 
 
 class _TextState:
-    """Graphics/text state that decides whether shown text is visible (shared by the pypdf and raw readers)."""
+    """Graphics/text state that decides whether shown text is visible (shared by the pypdf and raw readers): render
+    mode, fill colour (g, rg, k, sc, scn), font size scaled by the text matrix and CTM, horizontal scaling (Tz) and
+    optional-content layers that are off by default (BDC /OC ... EMC)."""
 
-    def __init__(self) -> None:
+    def __init__(self, off_layers: frozenset = frozenset()) -> None:
         self.mode, self.white, self.size = 0, False, 12.0
-        self.stack: list[tuple[int, bool, float]] = []
+        self.tscale, self.cscale, self.hscale = 1.0, 1.0, 100.0
+        self.stack: list[tuple] = []
+        self.layers: list[bool] = []
+        self.off_layers = off_layers
+
+    def _fill(self, args: list) -> None:
+        n = len(args)
+        if n == 1:
+            self.white = float(args[-1]) >= _WHITE_GRAY
+        elif n >= 4:
+            self.white = all(float(a) <= 0.05 for a in args[-4:])
+        elif n == 3:
+            self.white = all(float(a) >= _WHITE_GRAY for a in args[-3:])
 
     def op(self, op: bytes, args: list) -> None:
+        nums = [a for a in args if isinstance(a, float)]
         try:
             if op == b"q":
-                self.stack.append((self.mode, self.white, self.size))
+                self.stack.append((self.mode, self.white, self.size, self.cscale, self.hscale))
             elif op == b"Q" and self.stack:
-                self.mode, self.white, self.size = self.stack.pop()
+                self.mode, self.white, self.size, self.cscale, self.hscale = self.stack.pop()
+            elif op == b"BT":
+                self.tscale = 1.0
             elif op == b"Tr":
-                self.mode = int(float(args[-1]))
+                self.mode = int(nums[-1])
             elif op == b"Tf":
-                self.size = abs(float(args[-1]))
-            elif op == b"g":
-                self.white = float(args[-1]) >= _WHITE_GRAY
-            elif op == b"rg":
-                self.white = all(float(a) >= _WHITE_GRAY for a in args[-3:])
-            elif op == b"k":
-                self.white = all(float(a) <= 0.05 for a in args[-4:])
+                self.size = abs(nums[-1])
+            elif op == b"Tz":
+                self.hscale = abs(nums[-1])
+            elif op == b"Tm" and len(nums) >= 6:
+                self.tscale = math.hypot(nums[2], nums[3])
+            elif op == b"cm" and len(nums) >= 6:
+                self.cscale *= math.hypot(nums[2], nums[3]) or 1.0
+            elif op in (b"g", b"rg", b"k"):
+                self._fill(nums)
+            elif op in (b"sc", b"scn"):
+                self._fill(nums)
+            elif op in (b"BDC", b"BMC"):
+                self.layers.append(op == b"BDC" and len(args) >= 2 and args[0] == b"/OC" and args[1] in self.off_layers)
+            elif op == b"EMC" and self.layers:
+                self.layers.pop()
         except (ValueError, IndexError, TypeError):
             pass
 
     def hidden(self, size: float | None = None) -> bool:
-        sz = self.size if size is None else size
-        return self.mode in (3, 7) or sz < 2 or (self.white and sz <= _TINY_PT)
+        sz = (self.size if size is None else size) * self.tscale * self.cscale
+        return (self.mode in (3, 7) or sz < 2 or self.hscale <= 1 or any(self.layers)
+                or (self.white and sz <= _TINY_PT))
 
 
-def _hidden_strings(content: bytes) -> list[str]:
+def _off_layer_names(page) -> frozenset:
+    """Names (as the content stream writes them, '/MC0') of optional-content layers that are off by default."""
+    try:
+        root = page.pdf.trailer["/Root"]
+        off_ids = {o.idnum for o in root["/OCProperties"]["/D"].get("/OFF", [])}
+        props = page["/Resources"]["/Properties"]
+        return frozenset(b"/" + str(k).lstrip("/").encode() for k, v in props.items()
+                         if getattr(v, "idnum", None) in off_ids)
+    except Exception:
+        return frozenset()
+
+
+def _hidden_strings(content: bytes, off_layers: frozenset = frozenset()) -> list[str]:
     """Text shown while invisible (render mode 3/7, tiny, or white-and-small), read from the page's content stream
     with the same linear scanner the raw rung uses. pypdf's own visitor callbacks run lazily, after later operators
     have changed the state, so they cannot say what was invisible when a string was shown."""
-    st = _TextState()
+    st = _TextState(off_layers)
     out: list[str] = []
     for op, args in _scan_pdf_ops(content):
         if op in (b"Tj", b"TJ", b"'", b'"'):
@@ -862,7 +1103,7 @@ def _pdf_page_text(page, hidden: Counter) -> str:
     full = page.extract_text() or ""
     # Longest first, so a hidden string is never matched inside a longer one. Only strings that pypdf decoded the
     # same way (simple fonts) can be located; invisible text in CID-keyed fonts is a known gap.
-    for t in sorted(_hidden_strings(data), key=len, reverse=True):
+    for t in sorted(_hidden_strings(data, _off_layer_names(page)), key=len, reverse=True):
         if t in full:
             full = full.replace(t, "", 1)
             hidden["pdf_invisible_text"] += 1
