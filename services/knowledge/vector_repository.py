@@ -160,11 +160,27 @@ _LEXICAL_SQL = f"""
 """
 
 
-_LEXICAL_CAPPED_SQL = _LEXICAL_SQL.replace(
-    "WHERE c.kb_id = ANY($2::uuid[]) AND NOT c.is_parent AND c.tsv @@ q.tsq\n    )",
-    "WHERE c.kb_id = ANY($2::uuid[]) AND NOT c.is_parent AND c.tsv @@ q.tsq\n        LIMIT $6\n    )",
-)
-assert "LIMIT $6" in _LEXICAL_CAPPED_SQL
+# The capped variant (all-common-word queries) takes its candidate cap AFTER the document filters: soft delete keeps
+# a document's chunks, so capping first could fill the candidate set with deleted/prompt/not-ready chunks and
+# leave the live match out.
+_LEXICAL_CAPPED_SQL = f"""
+    WITH q AS (SELECT to_tsquery('simple', $1) AS tsq),
+    hits AS (
+        SELECT c.id, ts_rank_cd(c.tsv, q.tsq, 32) AS score
+        FROM kb_chunks c
+        JOIN kb_documents dd ON dd.id = c.document_id AND dd.deleted_at IS NULL AND dd.usage_mode = 'auto'
+                            AND dd.status = ANY($4::text[]),
+             q
+        WHERE c.kb_id = ANY($2::uuid[]) AND NOT c.is_parent AND c.tsv @@ q.tsq
+        LIMIT $6
+    )
+    SELECT {_SELECT_COLUMNS}, h.score
+    FROM hits h
+    JOIN kb_chunks c ON c.id = h.id {_DOC_JOINS}
+    WHERE h.score >= $5
+    ORDER BY h.score DESC
+    LIMIT $3
+"""
 
 
 def _to_match(row: asyncpg.Record, found_by: str) -> VectorMatch:
@@ -300,7 +316,7 @@ class PgVectorRepository:
         dropped = 0
         if kb_ids and terms and (approx_chunks is None or approx_chunks > _SMALL_KB_CHUNKS):
             terms, capped_and, dropped = await self._discriminating_terms(conn, kb_ids, terms)
-        if dropped and notes is not None:
+        if (dropped or capped_and) and notes is not None:  # the fallback itself is a degradation, even with 1-2 terms
             notes.append("lexical_terms_dropped")
         tsquery = tsquery_from_terms(terms, " & " if capped_and else " | ")
         if not kb_ids or tsquery is None:  # nothing searchable in the query: no round trip

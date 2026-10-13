@@ -736,23 +736,53 @@ async def test_a_lone_oversized_prompt_doc_is_truncated_not_dropped_and_the_top_
 
 # --- 5. Redis flag namespace ---------------------------------------------------------------------------------
 
-async def test_redis_flag_uses_a_new_namespace_has_a_ttl_and_legacy_keys_are_purged():
+async def test_redis_flag_uses_a_new_namespace_and_has_a_ttl():
     client = cache.get_client()
     suffix = uuid.uuid4().hex[:6]
     tenant, agent = f"4{suffix}", "acme:bot"
+    new_key = cache._agent_kb_key(f"acme{suffix}", "bot")
     legacy = f"agent_kb:{tenant}:{agent}"
     try:
-        await client.set(legacy, "1")  # what the old writer left behind, no TTL
-        new_key = cache._agent_kb_key(f"acme{suffix}", "bot")
+        await client.set(legacy, "1")  # what the old writer left behind (own key, own suffix)
         assert not new_key.startswith("agent_kb:")  # the old tenant/agent pair can never be byte-identical now
         await cache.set_has_enabled_kb(f"acme{suffix}", "bot", True)
         assert await cache.get_has_enabled_kb(f"acme{suffix}", "bot") is True
         assert 0 < await client.ttl(new_key) <= 7 * 24 * 3600
         assert await cache.get_has_enabled_kb(tenant, agent) is None  # the legacy key is never read
-        assert await cache.purge_legacy_keys() >= 1
-        assert await client.exists(legacy) == 0
     finally:
-        await client.delete(legacy, cache._agent_kb_key(f"acme{suffix}", "bot"))
+        await client.delete(legacy, new_key)  # only keys this test created
+
+
+async def test_legacy_purge_deletes_only_keys_under_its_prefix_in_the_client_it_is_given():
+    import redis.asyncio as aioredis
+    own = aioredis.from_url("redis://localhost:6379/13", decode_responses=True)  # test-only database
+    prefix = f"legacytest{uuid.uuid4().hex[:8]}:"
+    mine, other = [f"{prefix}{i}" for i in range(3)], f"othertest{uuid.uuid4().hex[:8]}:x"
+    try:
+        await own.mset({k: "1" for k in mine} | {other: "keep"})
+        assert await cache.purge_legacy_keys(client=own, prefix=prefix) == 3
+        assert [await own.exists(k) for k in mine] == [0, 0, 0] and await own.get(other) == "keep"
+    finally:
+        await own.delete(*mine, other)
+        await own.aclose()
+
+
+async def test_the_production_purge_default_is_exactly_the_legacy_prefix():
+    """A stub client: nothing real is touched. Only keys starting with 'agent_kb:' may reach delete()."""
+    deleted = []
+
+    class Stub:
+        async def scan_iter(self, match, count):
+            assert match == "agent_kb:*"
+            for key in ("agent_kb:t:a", "agent_kbx:t:a", "kbflag2:1:t:a", "xagent_kb:t:a", "agent_kb:"):
+                yield key  # a glob/SCAN that over-matches must still be filtered by the exact prefix
+
+        async def delete(self, *keys):
+            deleted.extend(keys)
+            return len(keys)
+
+    assert await cache.purge_legacy_keys(client=Stub()) == 2
+    assert sorted(deleted) == ["agent_kb:", "agent_kb:t:a"]
 
 
 # --- 6. redaction ------------------------------------------------------------------------------------------
@@ -949,3 +979,87 @@ def test_sdk_redis_reader_uses_the_key_the_service_writes(tenant, agent):
     from libs.knowledge_sdk.repositories.redis_repository import agent_kb_flag_key
 
     assert agent_kb_flag_key(tenant, agent) == cache._agent_kb_key(tenant, agent)
+
+
+# === round 4 ===================================================================================================
+
+async def test_refused_background_refreshes_never_stay_registered(world):
+    """Deployed caps (9 global slots), all taken: 20 refused refreshes must leave the registry empty and the next
+    refresh must still be schedulable (it used to leak one registration per refusal, then switch refresh off)."""
+    from services.knowledge.resilience import admission
+    t, a = world["tenant"], world["agent"]
+    await _run(t, a, world["embedder"], "refunds processed days")
+    key = cache.plan_key(t["slug"], a["slug"])
+    cfg = RetrievalConfig.from_env()
+    assert cfg.max_inflight == 9
+    held = [f"busy{i}" for i in range(cfg.max_inflight)]
+    for k in held:
+        assert await admission.acquire(k, cfg, 0)
+    try:
+        for _ in range(20):
+            plans._loaded_at[key] = time.monotonic() - plans._PLAN_TTL_S
+            assert plans.cached_plan(t["slug"], a["slug"]) is not None  # served stale, refresh scheduled
+            await asyncio.sleep(0.01)  # the task runs, is refused, and must deregister
+            assert plans._refresh_tasks == {}
+    finally:
+        for k in held:
+            admission.release(k)
+    plans._loaded_at[key] = time.monotonic() - plans._PLAN_TTL_S
+    plans.cached_plan(t["slug"], a["slug"])
+    assert key in plans._refresh_tasks  # schedulable again
+    await asyncio.sleep(0.2)
+    assert plans._refresh_tasks == {} and time.monotonic() - plans._loaded_at[key] < 1.0  # and it ran
+    assert admission.in_flight == 0
+
+
+async def test_fallback_candidate_cap_is_applied_after_the_document_filters(pool, world, monkeypatch):
+    """A soft-deleted document keeps its chunks: 2100 of them used to fill the 2000-candidate cap and hide the one
+    live match for an all-common-word query."""
+    t, kb = world["tenant"], world["kb"]
+    monkeypatch.setattr(vr, "_MAX_TERM_DF", 5)
+    monkeypatch.setattr(vr, "_SMALL_KB_CHUNKS", 0)
+    dead = await add_document(pool, t, kb, "Dead", ["seed"], embed=False, deleted=True)
+    await pool.executemany(
+        "INSERT INTO kb_chunks (document_id, kb_id, tenant_id, chunk_index, content, token_count) "
+        "VALUES ($1, $2, $3, $4, 'refund policy deleted words', 4)",
+        [(dead["id"], kb["id"], t["id"], 1000 + i) for i in range(2100)])
+    await add_document(pool, t, kb, "Live", ["refund policy live words"], embed=False)
+    async with tenant_conn(pool) as conn:
+        found = await PgVectorRepository().lexical_search(conn, [str(kb["id"])], "refund policy", 5, 0.0,
+                                                          approx_chunks=100000)
+    assert [m.document_title for m in found] == ["Live"]
+
+
+async def test_the_fallback_note_is_added_even_for_a_one_or_two_word_query(pool, world, monkeypatch):
+    t, kb = world["tenant"], world["kb"]
+    monkeypatch.setattr(vr, "_MAX_TERM_DF", 5)
+    await _fill_common(pool, t, kb)
+    notes = []
+    async with tenant_conn(pool) as conn:
+        found = await PgVectorRepository().lexical_search(conn, [str(kb["id"])], "widget gadget", 10, 0.0,
+                                                          approx_chunks=100000, notes=notes)
+    assert len(found) == 8 and notes == ["lexical_terms_dropped"]  # 2 terms: nothing "dropped", but the fallback ran
+
+
+async def test_pool_min_never_exceeds_max_and_idle_connections_are_kept_warm(monkeypatch):
+    from services.knowledge import db as kdb
+    monkeypatch.setenv("KNOWLEDGE_DB_POOL_MAX", "4")
+    monkeypatch.setenv("KNOWLEDGE_DB_POOL_MIN", "10")
+    kwargs = kdb._pool_kwargs()
+    assert kwargs["min_size"] == 4 and kwargs["max_size"] == 4  # asyncpg would raise for min > max
+    p = await asyncpg.create_pool(os.environ["POSTGRES_DSN"], **kwargs)  # real startup path
+    try:
+        assert p.get_size() == 4
+    finally:
+        await p.close()
+    # Idle close is disabled by default; with a tiny lifetime the same wiring does close idle connections.
+    monkeypatch.setenv("KNOWLEDGE_DB_POOL_MIN", "3")
+    assert kdb._pool_kwargs()["max_inactive_connection_lifetime"] == 0.0
+    for idle, expected in (("0.3", 0), ("0", 3)):
+        monkeypatch.setenv("KNOWLEDGE_DB_POOL_IDLE_S", idle)
+        p = await asyncpg.create_pool(os.environ["POSTGRES_DSN"], **kdb._pool_kwargs())
+        try:
+            await asyncio.sleep(1.0)
+            assert p.get_size() == expected, (idle, p.get_size())
+        finally:
+            await p.close()

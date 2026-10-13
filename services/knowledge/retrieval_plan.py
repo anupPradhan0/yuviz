@@ -171,12 +171,14 @@ def _refresh_in_background(key: str, plan: "RetrievalPlan") -> None:
     started = _seq
 
     async def run() -> None:
-        cfg = RetrievalConfig.from_env()
-        # A pseudo-tenant key: the refresh needs a global slot (it is a pool user) but must not be refused because
-        # the tenant itself is busy, which is exactly when its plan is being served stale.
-        if not await admission.acquire(_REFRESH_KEY, cfg, 0):
-            return  # overloaded: keep serving the old plan
-        try:
+        acquired = False
+        try:  # one outer try: whatever happens (refused, failed, cancelled) the registration is removed
+            cfg = RetrievalConfig.from_env()
+            # A pseudo-tenant key: the refresh needs a global slot (it is a pool user) but must not be refused
+            # because the tenant itself is busy, which is exactly when its plan is being served stale.
+            acquired = await admission.acquire(_REFRESH_KEY, cfg, 0)
+            if not acquired:
+                return  # overloaded: keep serving the old plan; the next request schedules another attempt
             pool = BoundedPool(await db.get_pool(), cfg.acquire_timeout_s)
             async with tenant_conn(pool, explicit_tenant=plan.tenant_id, reason="retrieval-search") as conn:
                 fresh = await load_plan(conn, plan.tenant_slug, plan.agent_slug)
@@ -187,7 +189,8 @@ def _refresh_in_background(key: str, plan: "RetrievalPlan") -> None:
         except Exception:  # noqa: BLE001
             log.warning("retrieval plan refresh failed agent=%s", plan.agent_id, exc_info=True)
         finally:
-            admission.release(_REFRESH_KEY)
+            if acquired:
+                admission.release(_REFRESH_KEY)
             _refresh_tasks.pop(key, None)
 
     try:
