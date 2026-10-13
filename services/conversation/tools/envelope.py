@@ -34,6 +34,7 @@ _ERRORS: dict[str, tuple[str, str]] = {
     "cancelled": ("error", "The caller interrupted; do not mention this call."),
     "partial_failure": ("partial", "Only part of that went through. Do not say it is done; tell the caller and offer to connect them with someone."),
     "needs_caller_confirmation": ("error", "Reference documents were read this turn, so nothing can be changed yet. Do not call that again now: ask the caller to confirm out loud exactly what they want done, and make the call after their reply."),
+    "knowledge_incomplete": ("unavailable", f"I couldn't fully check the documents and found nothing in the part I could check. Say that you couldn't fully check, do not say the business has no such information. {_TRANSFER}"),
     "tool_failed": ("error", f"I wasn't able to do that. {_TRANSFER}"),
 }
 # A transient failure is retryable for a read tool, but never when the guard itself refused the call.
@@ -91,6 +92,19 @@ def build_envelope(
         "latency_ms": round(latency_ms),
         "trace_id": trace_id,
     }
+
+
+# Degraded tags that change what the model should say. Everything else the knowledge service emits
+# (plan_cache_miss, prompt_docs_trimmed, rerank_*, plan_unavailable ...) is diagnostic and stays in logs.
+MODEL_VISIBLE_DEGRADED = frozenset({
+    "lexical_only", "dense_only", "embedding_model_mismatch", "lexical_terms_dropped", "overloaded", "deadline",
+    "dense_failed", "lexical_failed", "embedding_unavailable", "embedding_config_missing",
+    "truncated_to_token_budget", "stale_cache",
+})
+
+
+def visible_degraded(tags: list[str]) -> list[str]:
+    return [t for t in dict.fromkeys(tags) if t in MODEL_VISIBLE_DEGRADED]
 
 
 # --- retrieved text is data, never instructions ---------------------------------------------------

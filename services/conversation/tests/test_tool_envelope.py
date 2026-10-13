@@ -435,15 +435,15 @@ async def test_knowledge_ok_no_match_and_partial_are_distinct_statuses():
         assert envelope["error"] is None
 
 
-async def test_unavailable_knowledge_is_retried_once_then_reported_as_unavailable_not_as_no_match():
+async def test_unavailable_knowledge_is_reported_as_unavailable_not_as_no_match_and_is_not_retried():
     knowledge = _RecordingKnowledge([_ctx(status="unavailable", texts=(), degraded=["retrieval_unavailable"])])
 
     history, _ = await _turn(_local_orchestrator(), [_search(), [TokenEvent(text="x")]], local_tools=_knowledge_tools(knowledge))
 
     [envelope] = _envelopes(history)
     _assert_sayable(envelope, "unavailable", "knowledge_unavailable")
-    assert envelope["error"]["retryable"] is True and _TRANSFER_WORDS in envelope["error"]["user_safe_message"]
-    assert len(knowledge.calls) == 2
+    assert envelope["error"]["retryable"] is False and _TRANSFER_WORDS in envelope["error"]["user_safe_message"]
+    assert len(knowledge.calls) == 1
 
 
 async def test_a_raising_knowledge_service_is_retried_once_and_the_raw_exception_never_reaches_the_model():
@@ -619,13 +619,125 @@ async def test_guard_refusals_are_never_retryable_even_for_a_read_only_tool():
         assert envelope["error"]["retryable"] is False, code
 
 
-async def test_a_retrieval_timeout_reported_by_the_service_is_not_retried():
-    knowledge = _RecordingKnowledge([_ctx(status="unavailable", texts=(), degraded=["timeout"])])
+# Every degraded tag the knowledge service can emit (retrieval.py, resilience.py, routers/retrieve.py, reranker.py).
+_SERVER_DEGRADED_CODES = [
+    ["timeout"], ["overloaded"], ["deadline"], ["retrieval_error"], ["plan_unavailable"],
+    ["dense_failed"], ["lexical_failed"], ["dense_failed", "lexical_failed"], ["embedding_unavailable"],
+    ["embedding_config_missing"], ["embedding_model_mismatch"], ["lexical_terms_dropped"], ["lexical_only"],
+    ["dense_only"], ["plan_cache_miss"], ["prompt_docs_trimmed"], ["rerank_skipped", "rerank_timeout"],
+    ["rerank_skipped", "rerank_not_configured"], ["rerank_skipped", "rerank_budget"],
+    ["rerank_skipped", "rerank_provider_error"], ["rerank_skipped", "rerank_rate_limited"],
+    ["rerank_skipped", "rerank_bad_response"], ["rerank_skipped", "rerank_error"], ["plan_cache_miss", "dense_failed"], [],
+]
+
+
+@pytest.mark.parametrize("degraded", _SERVER_DEGRADED_CODES, ids=lambda d: "+".join(d) or "none")
+async def test_every_unavailable_result_is_unavailable_and_costs_exactly_one_retrieve_call(degraded):
+    """The service is already shedding load or out of budget: a retry doubles the load and the caller's wait."""
+    knowledge = _RecordingKnowledge([_ctx(status="unavailable", texts=(), degraded=degraded)])
 
     history, _ = await _turn(_local_orchestrator(), [_search(), [TokenEvent(text="x")]], local_tools=_knowledge_tools(knowledge))
 
-    _assert_sayable(_envelopes(history)[0], "unavailable", "timeout")
+    [envelope] = _envelopes(history)
+    assert envelope["status"] == "unavailable"
+    assert envelope["error"]["code"] == ("timeout" if "timeout" in degraded else "knowledge_unavailable")
+    assert envelope["error"]["user_safe_message"].strip()
     assert len(knowledge.calls) == 1
+
+
+async def test_the_tool_status_is_unavailable_for_every_degraded_code_not_failed():
+    tools = _knowledge_tools(_RecordingKnowledge([_ctx(status="unavailable", texts=(), degraded=["overloaded"])]))
+    _defn, invoke = tools["search_knowledge"]
+
+    assert (await invoke({"query": "q"})).status is ToolStatus.UNAVAILABLE
+
+
+# -- partial / ok / no_match / unavailable with and without chunks
+
+@pytest.mark.parametrize("status,with_chunks,expect_status,expect_found", [
+    ("ok", True, "ok", True),
+    ("partial", True, "partial", True),
+    ("partial", False, "unavailable", None),   # a branch was lost and nothing was found: NOT "no match"
+    ("ok", False, "no_match", False),          # should not happen; nothing was found, so no_match
+    ("no_match", False, "no_match", False),
+    ("unavailable", False, "unavailable", None),
+])
+async def test_each_status_and_chunk_combination_reaches_the_model_as_the_right_envelope(
+    status, with_chunks, expect_status, expect_found,
+):
+    ctx = _ctx(status=status, texts=("Refunds take 30 days.",) if with_chunks else (), degraded=["dense_failed"])
+    knowledge = _RecordingKnowledge([ctx])
+
+    history, _ = await _turn(_local_orchestrator(), [_search(), [TokenEvent(text="x")]], local_tools=_knowledge_tools(knowledge))
+
+    [envelope] = _envelopes(history)
+    assert envelope["status"] == expect_status
+    if expect_found is not None:
+        assert envelope["data"]["found"] is expect_found
+    elif status == "partial":
+        assert envelope["data"]["found"] is None and envelope["data"]["incomplete"] is True
+        assert envelope["error"]["code"] == "knowledge_incomplete"
+        assert "couldn't fully check" in envelope["error"]["user_safe_message"]
+        assert "no such information" in envelope["error"]["user_safe_message"]  # the instruction not to say it
+    assert len(knowledge.calls) == 1
+
+
+async def test_an_incomplete_lookup_never_looks_like_no_match():
+    knowledge = _RecordingKnowledge([_ctx(status="partial", texts=(), degraded=["embedding_unavailable"])])
+
+    history, _ = await _turn(_local_orchestrator(), [_search(), [TokenEvent(text="x")]], local_tools=_knowledge_tools(knowledge))
+
+    [envelope] = _envelopes(history)
+    assert envelope["status"] != "no_match" and envelope["data"].get("found") is not False
+
+
+# -- low_confidence, trace_id logging, model-visible degraded tags
+
+async def test_low_confidence_reaches_the_model_so_it_can_hedge():
+    knowledge = _RecordingKnowledge([_ctx(low_confidence=True)])
+
+    history, _ = await _turn(_local_orchestrator(), [_search(), [TokenEvent(text="x")]], local_tools=_knowledge_tools(knowledge))
+
+    assert _envelopes(history)[0]["data"]["low_confidence"] is True
+
+
+async def test_a_confident_result_carries_no_low_confidence_flag():
+    history, _ = await _turn(_local_orchestrator(), [_search(), [TokenEvent(text="x")]],
+                             local_tools=_knowledge_tools(_RecordingKnowledge([_ctx()])))
+
+    assert "low_confidence" not in _envelopes(history)[0]["data"]
+
+
+@pytest.mark.parametrize("status,texts", [("unavailable", ()), ("partial", ()), ("partial", ("x y z",))])
+async def test_the_trace_id_but_never_the_query_is_logged_on_unavailable_and_partial(caplog, status, texts):
+    import logging
+    caplog.set_level(logging.WARNING)
+    knowledge = _RecordingKnowledge([_ctx(status=status, texts=texts, trace_id="trace-abc123", degraded=["dense_failed"])])
+
+    await _turn(_local_orchestrator(), [_search(query="my pin is 8675309"), [TokenEvent(text="x")]],
+                local_tools=_knowledge_tools(knowledge))
+
+    assert "trace-abc123" in caplog.text and "8675309" not in caplog.text
+
+
+async def test_only_tags_that_change_what_the_model_should_say_reach_it():
+    knowledge = _RecordingKnowledge([_ctx(status="partial", degraded=[
+        "plan_cache_miss", "prompt_docs_trimmed", "rerank_skipped", "rerank_not_configured", "plan_unavailable",
+        "lexical_only", "embedding_model_mismatch", "lexical_terms_dropped", "overloaded",
+    ])])
+
+    history, _ = await _turn(_local_orchestrator(), [_search(), [TokenEvent(text="x")]], local_tools=_knowledge_tools(knowledge))
+
+    assert _envelopes(history)[0]["data"]["degraded"] == [
+        "lexical_only", "embedding_model_mismatch", "lexical_terms_dropped", "overloaded"]
+
+
+async def test_a_result_whose_only_tags_are_diagnostic_carries_no_degraded_key():
+    knowledge = _RecordingKnowledge([_ctx(degraded=["plan_cache_miss", "rerank_skipped", "rerank_timeout"])])
+
+    history, _ = await _turn(_local_orchestrator(), [_search(), [TokenEvent(text="x")]], local_tools=_knowledge_tools(knowledge))
+
+    assert "degraded" not in _envelopes(history)[0]["data"]
 
 
 # -- taint: a retrieved passage must not be able to steer a write in the same turn
