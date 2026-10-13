@@ -106,3 +106,33 @@ def test_the_two_backends_agree_on_the_corpus_page():
     native = formats.parse_by_type(B.HTML_PAGE, "text/html", Limits(binary_parsers=True))
     formats._LIMITS = Limits()
     assert pure.text() == native.text()
+
+
+_WORKER_PROBE = r"""
+import io, json, sys, types
+sys.path.insert(0, {root!r})
+from services.knowledge.parsers import _worker
+args = {{"content_type": "text/html", "language": None, "root": {root!r}, "nproc_limit": 0,
+        "limits": {limits!r}}}
+sys.argv = ["_worker.py", json.dumps(args)]
+sys.stdin = types.SimpleNamespace(buffer=io.BytesIO({html!r}))
+out = io.BytesIO()
+real_stdout = sys.stdout
+sys.stdout = types.SimpleNamespace(buffer=out, write=lambda s: None, flush=lambda: None)
+_worker.main()
+sys.stdout = real_stdout
+loaded = sorted(k for k, v in sys.modules.items() if v is not None and (k == "lxml" or k.startswith("lxml.")))
+print(json.dumps({{"loaded": loaded, "result": json.loads(out.getvalue())["ok"]}}))
+"""
+
+
+@pytest.mark.parametrize("binary,expect_lxml", [(False, False), (True, True)])
+def test_the_real_worker_entry_point_loads_lxml_only_when_binary_parsers_are_on(binary, expect_lxml):
+    import dataclasses
+    import json
+    limits = dataclasses.asdict(Limits(binary_parsers=binary))
+    code = _WORKER_PROBE.format(root=sandbox._REPO_ROOT, limits=limits, html=B.HTML_PAGE)
+    r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr[-800:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["result"] is True and bool(out["loaded"]) is expect_lxml, out
