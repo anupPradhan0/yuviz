@@ -442,3 +442,7 @@ def test_the_estimate_is_additive_over_whitespace_pieces():
     c = EstimatingTokenCounter()
     pieces = ["alpha beta ", "退款政策客户 ", "रिफंड नीति ", "x = 1\n", "gamma"]
     assert c.count("".join(pieces)) <= sum(c.count(p) for p in pieces)
+    # The case that broke the running sum: Latin long words (counted per word) next to CJK (per character). Sniffing the
+    # script of the WHOLE text counted all of it per character: 68 for the whole against 57 for the parts.
+    latin, cjk = "internationalization characterization differentiation ", "退款政策客户可以在购买之日起三十天内申请全额退款退款政策客户可以在购"
+    assert c.count(latin + cjk) <= c.count(latin) + c.count(cjk)
