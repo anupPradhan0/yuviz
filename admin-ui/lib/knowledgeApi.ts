@@ -89,6 +89,8 @@ export interface KbDocument {
   version: number;
   usage_mode: UsageMode;
   chunk_count: number;
+  // Whether Retry will work now: failed (or a failed re-index) and no job already pending or running.
+  retryable?: boolean;
   // null for documents uploaded before sizes were recorded.
   byte_size: number | null;
   created_at: string;

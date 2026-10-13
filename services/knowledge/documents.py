@@ -12,13 +12,22 @@ from .storage import StorageProvider
 
 _UPDATABLE_FIELDS = {"title", "language", "tags", "usage_mode"}
 
+# What retry_document accepts, computed for the API so the console only offers Retry when it will work: a failed
+# document, or a ready one whose last re-index failed, and in both cases no job already pending or running (an automatic
+# transient retry is a pending job).
+RETRYABLE_SQL = (
+    "((d.status = 'failed' OR (d.status IN ('ready', 'ready_degraded') AND d.error LIKE 're-index failed:%')) "
+    "AND NOT EXISTS (SELECT 1 FROM kb_ingestion_jobs j WHERE j.document_id = d.id AND j.status IN ('pending', 'running')))"
+)
+
 
 async def get_document(document_id: Any, *, platform_scoped: bool = False) -> dict[str, Any] | None:
     pool = await db.get_pool()
     conn_cm = platform_conn(pool, reason="document-by-id") if platform_scoped else tenant_conn(pool)
     async with conn_cm as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM kb_documents WHERE id = $1 AND deleted_at IS NULL", document_id,
+            f"SELECT d.*, {RETRYABLE_SQL} AS retryable FROM kb_documents d WHERE d.id = $1 AND d.deleted_at IS NULL",
+            document_id,
         )
     return dict(row) if row is not None else None
 
@@ -29,7 +38,7 @@ async def list_documents(kb_id: Any) -> list[dict[str, Any]]:
         # Not parent rows (no embedding of their own), and regardless of version: during a re-ingest the document keeps
         # serving its old chunks, so the count stays what is searchable.
         rows = await conn.fetch(
-            "SELECT d.*, "
+            f"SELECT d.*, {RETRYABLE_SQL} AS retryable, "
             "(SELECT COUNT(*) FROM kb_chunks c WHERE c.document_id = d.id AND NOT c.is_parent) AS chunk_count "
             "FROM kb_documents d WHERE d.kb_id = $1 AND d.deleted_at IS NULL ORDER BY d.created_at DESC",
             kb_id,

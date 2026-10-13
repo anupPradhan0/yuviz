@@ -197,3 +197,27 @@ async def test_admin_can_retry_a_failed_reingest_of_a_ready_document(tenant_agen
     # a healthy ready document cannot be "retried"
     assert await documents_service.retry_document(doc["id"], tenant_id=tenant["id"]) is None
     await _purge_tenant(pool, tenant["id"])
+
+
+async def test_the_api_says_when_retry_will_work(tenant_agent, pool):
+    tenant, _ = tenant_agent
+    await _drain_pending(pool)
+    kb = await _make_kb(tenant, "retryable-kb")
+    doc = await _ingest(pool, tenant, kb, Provider(pool))
+
+    async def retryable():
+        set_caller_tenant(str(tenant["id"]))
+        listed = next(d for d in await documents_service.list_documents(kb["id"]) if d["id"] == doc["id"])
+        assert (await documents_service.get_document(doc["id"]))["retryable"] == listed["retryable"]
+        return listed["retryable"]
+
+    assert await retryable() is False                                   # healthy ready document
+    await _reingest_once(pool, tenant, Provider(pool, fail=_http(401)))
+    assert await retryable() is True                                    # ready, last re-index failed, no active job
+    await _reingest_once(pool, tenant, Provider(pool, fail=RuntimeError("down")))   # automatic retry now pending
+    assert (await pool.fetchval("SELECT count(*) FROM kb_ingestion_jobs WHERE document_id = $1 AND status = 'pending'", doc["id"])) == 1
+    assert await retryable() is False                                   # clicking Retry would 409
+    await pool.execute("UPDATE kb_ingestion_jobs SET status = 'failed' WHERE document_id = $1 AND status = 'pending'", doc["id"])
+    await pool.execute("UPDATE kb_documents SET status = 'failed' WHERE id = $1", doc["id"])
+    assert await retryable() is True                                    # a failed first ingest
+    await _purge_tenant(pool, tenant["id"])
