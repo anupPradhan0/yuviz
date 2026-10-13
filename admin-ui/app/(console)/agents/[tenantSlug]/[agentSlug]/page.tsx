@@ -6,8 +6,8 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
-  AlertCircle, ArrowLeft, ArrowRight, BookOpen, Check, Copy, FileText, Hash, Mic, MoreHorizontal,
-  Loader2, PhoneForwarded, SlidersHorizontal, Sparkles, Trash2, Undo2,
+  AlertCircle, ArrowLeft, ArrowRight, BookOpen, Check, Copy, FileText, Mic, MoreHorizontal,
+  Loader2, Settings2, SlidersHorizontal, Sparkles, Trash2, Undo2,
 } from "lucide-react";
 import {
   Agent, AgentUpdate, ApiError, Call, PhoneNumber, ProviderConfig, createAgent, deleteAgent, getAgent,
@@ -22,18 +22,18 @@ import { AgentVoiceSettings, isLanguageError, multilingualPayload } from "@/comp
 import { AgentTestPanel } from "@/components/AgentTestPanel";
 import { LANGUAGES, OTHER } from "@/lib/engineCatalog";
 import { normalizeDialTarget } from "@/lib/dialTargets";
+import { useMenuKeys } from "@/lib/useMenuKeys";
 
-type Section = "instructions" | "voice" | "knowledge" | "transfers" | "phone" | "advanced";
+type Section = "instructions" | "voice" | "knowledge" | "settings" | "advanced";
 
 const SECTIONS: { key: Section; label: string; hint: string; icon: typeof FileText }[] = [
   { key: "instructions", label: "Instructions", hint: "What the agent says first and how it handles the call.", icon: FileText },
   { key: "voice", label: "Voice", hint: "The language it speaks and how it sounds.", icon: Mic },
   { key: "knowledge", label: "Knowledge", hint: "Documents and tools the agent can use to answer.", icon: BookOpen },
-  { key: "transfers", label: "Transfers & ending", hint: "When to pass the caller to a person, and when to hang up.", icon: PhoneForwarded },
-  { key: "phone", label: "Phone number", hint: "The number people call to reach this agent.", icon: Hash },
+  { key: "settings", label: "Settings", hint: "Phone number, AI model, speech recognition and call behaviour.", icon: Settings2 },
 ];
 
-const ADVANCED = { key: "advanced" as Section, label: "Advanced", hint: "AI model, speech recognition and fine-tuning.", icon: SlidersHorizontal };
+const ADVANCED = { key: "advanced" as Section, label: "Advanced", hint: "Optional: transfers to a person and ending the call.", icon: SlidersHorizontal };
 
 const TRANSFER_TYPES: { value: NonNullable<AgentUpdate["transfer_type"]>; title: string; blurb: string }[] = [
   { value: "none", title: "Don't transfer", blurb: "The agent handles every call on its own." },
@@ -111,6 +111,7 @@ export default function AgentDetailPage() {
   const [beforeRewrite, setBeforeRewrite] = useState<string | null>(null);
 
   const [menuOpen, setMenuOpen] = useState(false);
+  const { triggerRef: menuTriggerRef, menuRef, onMenuKey } = useMenuKeys(menuOpen, () => setMenuOpen(false));
   const [duplicating, setDuplicating] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -407,11 +408,11 @@ export default function AgentDetailPage() {
 
   // First thing still stopping the agent from taking real calls.
   const blocker: { text: string; action?: string; section: Section } | null =
-    !form.llm_config_id ? { text: "Choose an AI model so the agent can think", action: "Choose", section: "advanced" }
-      : !form.stt_config_id ? { text: "Choose speech recognition so the agent can hear callers", action: "Choose", section: "advanced" }
+    !form.llm_config_id ? { text: "Choose an AI model so the agent can think", action: "Choose", section: "settings" }
+      : !form.stt_config_id ? { text: "Choose speech recognition so the agent can hear callers", action: "Choose", section: "settings" }
       : !form.tts_config_id ? { text: "Pick a voice so the agent can speak", action: "Pick voice", section: "voice" }
       : !form.system_prompt?.trim() ? { text: "Write instructions so the agent knows its job", section: "instructions" }
-      : needsNumber ? { text: "Almost ready — add a phone number to take real calls", action: "Add number", section: "phone" }
+      : needsNumber ? { text: "Almost ready — add a phone number to take real calls", action: "Add number", section: "settings" }
       : null;
 
   const saveStatus = saveError ? (
@@ -484,21 +485,28 @@ export default function AgentDetailPage() {
             Test
           </button>
           <button className="btn btn-ghost btn-sm" onClick={() => router.push(`/workflows/${tenantSlug}/${agentSlug}`)}>
-            Call flow <ArrowRight size={13} />
+            Conversation steps <ArrowRight size={13} />
           </button>
           <div className="ed2-menu">
-            <button className="btn btn-ghost btn-sm" aria-label="More actions" aria-expanded={menuOpen} onClick={() => setMenuOpen((o) => !o)}>
+            <button
+              ref={menuTriggerRef}
+              className="btn btn-ghost btn-sm"
+              aria-label="More actions"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              onClick={() => setMenuOpen((o) => !o)}
+            >
               <MoreHorizontal size={15} />
             </button>
             {menuOpen && (
               <>
                 <div className="ed2-menu-backdrop" onClick={() => setMenuOpen(false)} />
-                <div className="ed2-menu-pop" role="menu">
+                <div ref={menuRef} className="ed2-menu-pop" role="menu" onKeyDown={onMenuKey}>
                   <button
                     role="menuitem"
                     onClick={handleDuplicate}
                     disabled={duplicating}
-                    title="Copies the settings. Documents, connections and the call flow are not copied, and the copy starts paused."
+                    title="Copies the settings. Documents, connections and conversation steps are not copied, and the copy starts paused."
                   >
                     <Copy size={13} /> Duplicate settings
                   </button>
@@ -517,7 +525,7 @@ export default function AgentDetailPage() {
           {SECTIONS.map((s) => (
             <button key={s.key} className={section === s.key ? "on" : ""} onClick={() => setSection(s.key)}>
               <s.icon size={15} /> {s.label}
-              {s.key === "phone" && needsNumber && <span className="ed2-warn" aria-label="No phone number" />}
+              {s.key === "settings" && needsNumber && <span className="ed2-warn" aria-label="No phone number" />}
             </button>
           ))}
           <button className={`ed2-nav-adv${section === "advanced" ? " on" : ""}`} onClick={() => setSection("advanced")}>
@@ -603,14 +611,20 @@ export default function AgentDetailPage() {
                     onBlur={saveHeld}
                   />
                   <div className="form-hint">
-                    Say who the agent is, what it helps with, and what it must never do. Changes also update its call flow.
+                    Say who the agent is, what it helps with, and what it must never do. Changes also update its conversation steps.
                   </div>
                 </div>
               </div>
             </div>
           )}
 
-          {(section === "voice" || section === "advanced") && (
+          {section === "settings" && (
+            <div style={{ marginBottom: 14 }}>
+              <SipPanel tenantId={agent.tenant_id} agentId={agent.id} />
+            </div>
+          )}
+
+          {(section === "voice" || section === "settings") && (
             <AgentVoiceSettings
               part={section === "voice" ? "voice" : "engines"}
               tenantId={agent.tenant_id}
@@ -645,7 +659,7 @@ export default function AgentDetailPage() {
             </>
           )}
 
-          {section === "transfers" && (
+          {section === "advanced" && (
             <>
               <div className="card" style={{ marginBottom: 14 }}>
                 <div className="card-hdr">
@@ -823,9 +837,7 @@ export default function AgentDetailPage() {
             </>
           )}
 
-          {section === "phone" && <SipPanel tenantId={agent.tenant_id} agentId={agent.id} />}
-
-          {section === "advanced" && (
+          {section === "settings" && (
             <div className="card" style={{ marginTop: 14 }}>
               <div className="card-hdr">
                 <div className="card-title">Call behaviour</div>
@@ -860,7 +872,7 @@ export default function AgentDetailPage() {
                   {escalation !== null && transferType === "none" && (
                     <div className="voice-missing">
                       This needs a transfer set up first.{" "}
-                      <a href="#" onClick={(e) => { e.preventDefault(); setSection("transfers"); }}>Set up a transfer</a>
+                      <a href="#" onClick={(e) => { e.preventDefault(); setSection("advanced"); }}>Set up a transfer</a>
                     </div>
                   )}
                 </div>

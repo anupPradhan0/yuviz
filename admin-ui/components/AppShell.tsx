@@ -7,11 +7,14 @@ import { Check, ChevronDown, Moon, Sun } from "lucide-react";
 import { getCurrentUser, isConsoleRole, listAllUsageTrend, listTenants, Tenant, User } from "@/lib/api";
 import { clearToken, getToken } from "@/lib/auth";
 import { clearAllAgentDrafts } from "@/lib/agentDraft";
+import { BrandMark } from "@/components/BrandMark";
 
 // Shared with other pages' tenant pickers (e.g. Live Calls) so they stay in sync with the header.
 export const ACTIVE_TENANT_STORAGE_KEY = "yuviz.activeTenantId";
 /** Stored when a superadmin explicitly picks "All tenants" (distinct from nothing stored). */
 export const ALL_TENANTS_SENTINEL = "__all__";
+// The pre-paint script in app/layout.tsx reads the same key.
+const THEME_STORAGE_KEY = "yuviz.theme";
 
 function tenantInitial(name: string): string {
   return (name.trim()[0] || "?").toUpperCase();
@@ -133,7 +136,7 @@ const OVERVIEW_ITEMS: NavItem[] = [{ href: "/dashboard", label: "Dashboard", ico
 const BUILD_ITEMS: NavItem[] = [
   { href: "/tenants", label: "Accounts", icon: "accounts" },
   { href: "/agents", label: "Agents", icon: "agents" },
-  { href: "/workflows", label: "Call Flows", icon: "workflows" },
+  { href: "/ivr-call", label: "IVR-Call", icon: "workflows" },
   { href: "/knowledge-bases", label: "Knowledge", icon: "knowledge-bases" },
   { href: "/ai-voice", label: "AI & Voice", icon: "ai-voice" },
   { href: "/telephony", label: "Phone Numbers", icon: "telephony" },
@@ -162,7 +165,7 @@ const ALL_ITEMS = [...OVERVIEW_ITEMS, ...BUILD_ITEMS, USERS_ITEM, ...CALLING_ITE
 const PAGE_SUBTITLE: Record<string, string> = {
   "/dashboard": "Overview of your calls and agents",
   "/agents": "The AI that answers and makes your calls",
-  "/workflows": "Menus and routing before an agent picks up",
+  "/ivr-call": "Menus and routing before an agent picks up",
   "/knowledge-bases": "Documents your agents can answer from",
   "/telephony": "Numbers and carriers your calls come through",
   "/integrations": "Calendars, CRMs and helpdesks",
@@ -174,10 +177,10 @@ const PAGE_SUBTITLE: Record<string, string> = {
 // Shown only on the list page itself, and never to viewers (read-only).
 const PAGE_CTA: Record<string, { label: string; href: string }> = {
   "/agents": { label: "+ Create Agent", href: "/agents/new" },
-  "/workflows": { label: "+ New Flow", href: "/workflows/new" },
+  "/ivr-call": { label: "+ New menu", href: "/ivr-call/new" },
   "/knowledge-bases": { label: "+ Add Document", href: "/knowledge-bases?add=1" },
   "/telephony": { label: "+ Add Number", href: "/telephony?add=1" },
-  "/integrations": { label: "+ Connect App", href: "/integrations#connect" },
+  "/integrations": { label: "+ Connect App", href: "/integrations?add=1" },
   "/campaigns": { label: "+ New Campaign", href: "/campaigns/new" },
 };
 
@@ -186,7 +189,10 @@ const monthKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).pad
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [theme, setTheme] = useState<"dark" | "light">("light");
+  // The layout script already applied the saved theme; theme only renders inside the closed account menu.
+  const [theme, setTheme] = useState<"dark" | "light">(() =>
+    typeof document !== "undefined" && document.documentElement.dataset.theme === "dark" ? "dark" : "light",
+  );
   const [search, setSearch] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
@@ -332,11 +338,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const noResults = [visibleOverview, visibleBuild, visibleCalling, visiblePinned].every((g) => g.length === 0);
 
   // Longest-prefix match, not first-match: /agents/acme/bot resolves to Agents.
+  // An agent's conversation steps live at /workflows/{tenant}/{agent}, so they belong to Agents too.
+  const navPath = pathname.startsWith("/workflows/") ? "/agents" : pathname;
   const activeItem = [...ALL_ITEMS]
     .sort((a, b) => b.href.length - a.href.length)
-    .find((item) => pathname.startsWith(item.href));
+    .find((item) => navPath.startsWith(item.href));
 
-  const inAgentConfig = /^\/agents\/[^/]+\/[^/]+/.test(pathname);
+  const inAgentConfig = /^\/(agents|workflows)\/[^/]+\/[^/]+/.test(pathname);
   const pageTitle = activeItem?.label ?? "Yuviz";
   const pageSubtitle = inAgentConfig ? "Configuration" : PAGE_SUBTITLE[pathname];
   const cta = user?.role !== "viewer" ? PAGE_CTA[pathname] : undefined;
@@ -354,11 +362,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       <aside className={`sidebar${collapsed ? " collapsed" : ""}`}>
         <div className="logo">
-          <div className="logo-icon" aria-hidden="true">
-            <span className="logo-bar" />
-            <span className="logo-bar" />
-            <span className="logo-bar" />
-          </div>
+          <BrandMark size={32} className="logo-icon" />
           <div className="logo-text">Yuviz<span>.ai</span></div>
           <button
             className="sidebar-collapse-btn"
@@ -508,7 +512,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   </div>
                   <button
                     className="account-dropdown-item"
-                    onClick={() => { setTheme((t) => (t === "dark" ? "light" : "dark")); }}
+                    onClick={() => {
+                      const next = theme === "dark" ? "light" : "dark";
+                      setTheme(next);
+                      try { window.localStorage.setItem(THEME_STORAGE_KEY, next); } catch { /* non-fatal */ }
+                    }}
                   >
                     {theme === "dark" ? <Sun size={13} /> : <Moon size={13} />}
                     <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
