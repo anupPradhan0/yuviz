@@ -13,6 +13,12 @@ from services.knowledge.parsers.model import PARAGRAPH, TABLE, Block
 from services.knowledge.parsers.textblocks import blocks_from_text
 from services.knowledge.tokens import EstimatingTokenCounter
 
+@pytest.fixture(autouse=True)
+def _structure_mode(monkeypatch):
+    """These tests exercise the structure-aware strategies; the mode switch has its own tests at the bottom."""
+    monkeypatch.setenv("KNOWLEDGE_CHUNKER", "structure")
+
+
 COUNTER = EstimatingTokenCounter()
 CAP = ChunkConfig().cap
 
@@ -327,3 +333,65 @@ def test_recorded_version_is_the_strategy_that_actually_ran(monkeypatch, caplog)
     assert any("falling back to fixed windows" in x.getMessage() for x in caplog.records)
     assert {chunker_version(s) for s in ("structure", "prose", "qa", "table", "fixed")} == {
         "structure-v1", "recursive-v1", "qa-v1", "table-v1", "fixed-v1"}
+
+
+# ── KNOWLEDGE_CHUNKER switch ────────────────────────────────────────────
+
+def _strategy_for(text_or_blocks, mode, monkeypatch):
+    monkeypatch.setenv("KNOWLEDGE_CHUNKER", mode)
+    blocks = blocks_from_text(text_or_blocks) if isinstance(text_or_blocks, str) else text_or_blocks
+    return chunk_document(blocks).strategy
+
+
+def test_env_switch_selects_the_strategy_for_headed_documents(monkeypatch):
+    assert _strategy_for(POLICY, "structure", monkeypatch) == "structure"
+    assert _strategy_for(POLICY, "recursive", monkeypatch) == "prose"
+    assert _strategy_for(POLICY, "fixed", monkeypatch) == "fixed"
+    assert _strategy_for(POLICY, "auto", monkeypatch) == "fixed"   # the data-chosen default: fixed beat structure
+    assert _strategy_for(ENGLISH, "auto", monkeypatch) == "fixed"
+    assert _strategy_for(ENGLISH, "structure", monkeypatch) == "prose"
+    assert _strategy_for(ENGLISH, "recursive", monkeypatch) == "prose"
+
+
+def test_default_with_no_env_is_auto(monkeypatch):
+    monkeypatch.delenv("KNOWLEDGE_CHUNKER", raising=False)
+    assert chunker.chunker_mode() == "auto" and chunk_document(blocks_from_text(POLICY)).strategy == "fixed"
+    monkeypatch.setenv("KNOWLEDGE_CHUNKER", "  FIXED ")
+    assert chunker.chunker_mode() == "fixed"
+
+
+def test_unknown_value_falls_back_to_auto_with_a_warning(monkeypatch, caplog):
+    caplog.set_level("WARNING")
+    monkeypatch.setenv("KNOWLEDGE_CHUNKER", "semantic")
+    assert chunker.chunker_mode() == "auto"
+    assert any("KNOWLEDGE_CHUNKER" in r.getMessage() for r in caplog.records)
+
+
+def test_qa_and_tables_keep_their_shape_routes_except_in_fixed_mode(monkeypatch):
+    table = [Block(TABLE, rows=(("a", "b"),) + tuple((str(i), "x") for i in range(40)))]
+    for mode in ("auto", "structure", "recursive"):
+        assert _strategy_for(QA, mode, monkeypatch) == "qa"
+        assert _strategy_for(table, mode, monkeypatch) == "table"
+    assert _strategy_for(QA, "fixed", monkeypatch) == "fixed" and _strategy_for(table, "fixed", monkeypatch) == "fixed"
+
+
+def test_fixed_default_matches_the_legacy_window_and_respects_the_cap(monkeypatch):
+    monkeypatch.setenv("KNOWLEDGE_CHUNKER", "auto")
+    r = chunk_document(blocks_from_text(ENGLISH))
+    legacy = chunk_text(ENGLISH, chunk_size=200, chunk_overlap=40)
+    assert [c.content for c in r.children] == [c.content for c in legacy]
+    small = chunk_document(blocks_from_text(ENGLISH), config=ChunkConfig.for_embedder(64))
+    _assert_within_cap(small, 64)
+
+
+def test_chunker_version_follows_the_strategy_that_ran_in_every_mode(monkeypatch):
+    for mode, expected in (("auto", "fixed-v1"), ("fixed", "fixed-v1"), ("recursive", "recursive-v1"), ("structure", "structure-v1")):
+        monkeypatch.setenv("KNOWLEDGE_CHUNKER", mode)
+        assert chunker_version(chunk_document(blocks_from_text(POLICY)).strategy) == expected
+
+
+def test_breadcrumb_off_keeps_section_path_but_drops_the_prefix():
+    cfg = ChunkConfig(breadcrumb=False)
+    r = chunk_document(blocks_from_text(POLICY), config=cfg)
+    assert all(c.section_path for c in r.children if "Store policy" in (c.section_path or ""))
+    assert not any(c.content.startswith(c.section_path) for c in r.children if c.section_path)

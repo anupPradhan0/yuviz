@@ -1,11 +1,16 @@
-"""Structure-aware chunking: the ingestion default (chunking.chunk_text is the fixed-window fallback).
+"""Chunking strategies and the switch that picks one (KNOWLEDGE_CHUNKER = auto | structure | recursive | fixed).
 
-Routes by document shape:
+The default is chosen by the bake-off in tests/eval (see docs/knowledge-chunking.md): a more complex strategy has to beat
+the simpler one to be the default, and on the golden set structure-aware and recursive splitting did not beat fixed
+windows for headed or plain prose, so `auto` uses fixed windows there. It keeps the shape routes for Q&A pairs and
+tables, where fixed windows are wrong by construction (they cut pairs and rows and drop the repeated header).
+
+Routes by document shape (what `structure` mode uses everywhere):
   qa         3+ Q:/A: pairs                      -> one pair per chunk
   table      mostly tables / a CSV               -> row groups, header repeated in every group
   structure  has headings                        -> split on headings, lists and tables kept whole
   prose      no structure                        -> recursive paragraph -> line -> sentence -> word -> window
-  fixed      any splitter failure                -> legacy fixed windows
+  fixed      any splitter failure, or the data-chosen default for prose and headed documents -> fixed windows
 
 Every embedded (child) chunk is prefixed with its heading breadcrumb and is held to ChunkConfig.cap estimated tokens by
 a hard-split fallback, so none can exceed the embedder's limit. Sections that split into several children also get a
@@ -14,6 +19,7 @@ parent row (is_parent, never embedded) holding the whole section; children point
 from __future__ import annotations
 
 import logging
+import os
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -29,6 +35,18 @@ CHUNKER_VERSIONS = {"structure": "structure-v1", "prose": "recursive-v1", "qa": 
                     "fixed": "fixed-v1"}
 
 
+MODES = ("auto", "structure", "recursive", "fixed")
+
+
+def chunker_mode() -> str:
+    """KNOWLEDGE_CHUNKER, read per call so it can change without a restart. Unknown values fall back to auto."""
+    raw = os.environ.get("KNOWLEDGE_CHUNKER", "auto").strip().lower() or "auto"
+    if raw not in MODES:
+        log.warning("KNOWLEDGE_CHUNKER=%r is not one of %s; using auto", raw, MODES)
+        return "auto"
+    return raw
+
+
 def chunker_version(strategy: str) -> str:
     """What is recorded on the document: the strategy that actually produced the chunks, never the one intended."""
     return CHUNKER_VERSIONS.get(strategy, f"{strategy}-v1")
@@ -42,6 +60,10 @@ class ChunkConfig:
     child_target: int = 250
     parent_max: int = 900
     min_section: int = 40                # a section smaller than this folds into the next one
+    pack_target: int | None = None       # sibling sections are packed up to this many tokens (default: child_target)
+    breadcrumb: bool = True              # prefix the heading breadcrumb to the embedded text (section_path is stored either way)
+    fixed_words: int = 200               # fixed-window size and overlap, in words (the legacy chunk_text defaults)
+    fixed_overlap: int = 40
 
     @classmethod
     def for_embedder(cls, max_tokens: object) -> "ChunkConfig":
@@ -293,7 +315,7 @@ def _build_sections(
 ) -> ChunkResult:
     res = ChunkResult()
     for sec in sections:
-        crumb = _crumb(sec.path, counter, cfg.cap)
+        crumb = _crumb(sec.path, counter, cfg.cap) if cfg.breadcrumb else ""
         path = " > ".join(sec.path) or None
         prefix = counter.count(crumb) + 2 if crumb else 0
         budget = max(24, min(cfg.child_target, cfg.cap - 4) - prefix)  # packing aims for child_target in all
@@ -426,11 +448,24 @@ def route(blocks: list[Block]) -> str:
 def _fixed(blocks: list[Block], language: str | None, counter: TokenCounter, cfg: ChunkConfig) -> ChunkResult:
     text = "\n\n".join(b.render() for b in blocks if b.render().strip())
     res = ChunkResult(strategy="fixed")
-    for c in chunk_text(text, chunk_size=max(20, cfg.child_target // 2), chunk_overlap=min(20, max(20, cfg.child_target // 2) // 4), language=language):
+    # ~2.5 estimated tokens per word: a small embedder cap shrinks the window, a large one keeps the legacy 200 words.
+    size = max(20, min(cfg.fixed_words, int(cfg.cap / 2.5)))
+    overlap = min(cfg.fixed_overlap, size // 4)
+    for c in chunk_text(text, chunk_size=size, chunk_overlap=overlap, language=language):
         for piece in split_to_budget(c.content, cfg.cap, counter):
             if piece.strip():
                 res.children.append(Chunk(piece.strip(), counter.count(piece)))
     return res
+
+
+def pick_strategy(blocks: list[Block], mode: str) -> str:
+    """The strategy a mode uses for this document. Q&A and table shapes keep their routes in every mode but `fixed`."""
+    shape = route(blocks)
+    if mode == "fixed":
+        return "fixed"
+    if shape in ("qa", "table") or mode == "structure":
+        return shape
+    return "prose" if mode == "recursive" else "fixed"  # auto: fixed windows won the sweep for headed and plain prose
 
 
 def chunk_document(
@@ -438,7 +473,8 @@ def chunk_document(
     config: ChunkConfig | None = None, strategy: str | None = None,
 ) -> ChunkResult:
     """Children (embedded) and parents (context) for a parsed document. `strategy` forces a route (the bake-off
-    uses it); otherwise the document's shape picks one. Any splitter error falls back to fixed windows."""
+    uses it); otherwise KNOWLEDGE_CHUNKER and the document's shape pick one. Any splitter error falls back to fixed
+    windows, and the result's `strategy` is always the one that actually ran."""
     cfg = config or ChunkConfig()
     counter = counter or EstimatingTokenCounter(language=language)
     blocks = [b for b in blocks if b.render().strip()]
@@ -446,7 +482,7 @@ def chunk_document(
         return ChunkResult()
     if all(b.kind == HEADING for b in blocks):  # nothing under any heading: the headings are the content
         blocks = [Block(PARAGRAPH, b.text, page=b.page) for b in blocks]
-    chosen = strategy or route(blocks)
+    chosen = strategy or pick_strategy(blocks, chunker_mode())
     try:
         if chosen == "qa":
             res = _build_qa(blocks, counter, cfg)
@@ -457,7 +493,7 @@ def chunk_document(
                 sections = [_Section((), blocks)]
             elif chosen == "structure":
                 sections = _merge_siblings(
-                    _fold_small(_sections(blocks), counter, cfg.min_section), counter, cfg.child_target,
+                    _fold_small(_sections(blocks), counter, cfg.min_section), counter, cfg.pack_target or cfg.child_target,
                 )
             else:
                 sections = _sections(blocks) or [_Section((), blocks)]

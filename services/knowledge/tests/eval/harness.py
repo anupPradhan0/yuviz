@@ -14,12 +14,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable
 
-from services.knowledge.chunker import ChunkConfig, chunk_document
+from services.knowledge.chunker import ChunkConfig, chunk_document, pick_strategy
 from services.knowledge.chunking import chunk_text
 from services.knowledge.parsers.model import TABLE, Block
 from services.knowledge.parsers.textblocks import blocks_from_text
+from services.knowledge.tokens import EstimatingTokenCounter
 
 DIMS = 768
+_TOKENS = EstimatingTokenCounter()
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)  # underscores split words, as a real tokenizer would
 
 
@@ -57,33 +59,51 @@ def _blocks(kind: str, text: str) -> list[Block]:
     return blocks_from_text(text)
 
 
-def fixed_window(name: str, kind: str, text: str) -> list[IndexedChunk]:
-    return [IndexedChunk(name, c.content, c.content) for c in chunk_text(text.replace("\n", "\n\n") if kind == "table" else text)]
+def fixed_window_strategy(size: int = 200, overlap: int = 40) -> Strategy:
+    def run(name: str, kind: str, text: str) -> list[IndexedChunk]:
+        text = text.replace("\n", "\n\n") if kind == "table" else text
+        return [IndexedChunk(name, c.content, c.content) for c in chunk_text(text, chunk_size=size, chunk_overlap=overlap)]
+    return run
 
 
-def recursive_prose(name: str, kind: str, text: str) -> list[IndexedChunk]:
-    r = chunk_document(_blocks(kind, text), strategy="prose")
-    return [IndexedChunk(name, c.content, c.content) for c in r.children]
+def _structured(mode: str | None, config: ChunkConfig, return_parent: bool) -> Strategy:
+    """mode: a chunker route ('structure', 'prose', ...) or None for the shape-routed default. Production returns the
+    PARENT section when a child matches (Phase 5 expands via parent_id), so `return_parent` is the default."""
+    def run(name: str, kind: str, text: str) -> list[IndexedChunk]:
+        r = chunk_document(_blocks(kind, text), config=config, strategy=mode)
+        return [
+            IndexedChunk(name, c.content, r.parents[c.parent].content if return_parent and c.parent is not None else c.content)
+            for c in r.children
+        ]
+    return run
 
 
-def structure_children(name: str, kind: str, text: str) -> list[IndexedChunk]:
-    r = chunk_document(_blocks(kind, text), config=ChunkConfig(parent_max=900))
-    return [IndexedChunk(name, c.content, c.content) for c in r.children]
+def structure_strategy(config: ChunkConfig | None = None, return_parent: bool = True) -> Strategy:
+    return _structured("structure", config or ChunkConfig(), return_parent)
 
 
-def structure_parent_child(name: str, kind: str, text: str) -> list[IndexedChunk]:
-    r = chunk_document(_blocks(kind, text), config=ChunkConfig(parent_max=900))
-    return [
-        IndexedChunk(name, c.content, r.parents[c.parent].content if c.parent is not None else c.content)
-        for c in r.children
-    ]
+def recursive_strategy(config: ChunkConfig | None = None, return_parent: bool = True) -> Strategy:
+    return _structured("prose", config or ChunkConfig(), return_parent)
 
 
+def mode_strategy(mode: str, config: ChunkConfig | None = None) -> Strategy:
+    """What KNOWLEDGE_CHUNKER=<mode> does in production: the mode picks the strategy per document shape."""
+    cfg = config or ChunkConfig()
+
+    def run(name: str, kind: str, text: str) -> list[IndexedChunk]:
+        blocks = _blocks(kind, text)
+        return _structured(pick_strategy(blocks, mode), cfg, True)(name, kind, text)
+    return run
+
+
+# The baseline set. "+parent" variants return what production returns; "child" variants return only the matched chunk.
 STRATEGIES: dict[str, Strategy] = {
-    "fixed-window": fixed_window,
-    "recursive-prose": recursive_prose,
-    "structure": structure_children,
-    "structure+parent": structure_parent_child,
+    "fixed-window": fixed_window_strategy(),
+    "recursive+parent": recursive_strategy(),
+    "structure+parent": structure_strategy(),
+    "structure child-only": structure_strategy(return_parent=False),
+    "mode=auto (default)": mode_strategy("auto"),
+    "mode=structure": mode_strategy("structure"),
 }
 
 
@@ -98,6 +118,7 @@ class Metrics:
     recall_at_5: float = 0.0
     mrr: float = 0.0
     answer_in_context: float = 0.0
+    avg_context_tokens: float = 0.0   # tokens actually returned per query (top-3 contexts, identical ones counted once)
 
 
 @dataclass
@@ -117,9 +138,12 @@ def _score(index: list[IndexedChunk], questions: list, docs: dict, embed, k: int
         top = sorted(index, key=lambda c: -_dot(qv, c.vector))[:k]
         answer = _norm(q.answer)
         rank = next((i + 1 for i, c in enumerate(top) if c.doc == q.doc and answer in _norm(c.embed_text)), None)
-        context = _norm(" ".join(c.context for c in top[:3]))
+        returned = list(dict.fromkeys(c.context for c in top[:3]))  # parents shared by two hits are returned once
+        context = _norm(" ".join(returned))
         in_context = all(_norm(t) in context for t in q.terms)
+        tokens = sum(_TOKENS.count(c) for c in returned)
         for m in into:
+            m.avg_context_tokens += tokens
             m.n += 1
             m.recall_at_5 += rank is not None
             m.mrr += 1 / rank if rank else 0.0
@@ -162,13 +186,14 @@ def evaluate(
             m.recall_at_5 /= m.n
             m.mrr /= m.n
             m.answer_in_context /= m.n
+            m.avg_context_tokens /= m.n
     return Report(by_s, by_sk, failures)
 
 
 def format_report(r: Report) -> str:
-    lines = [f"{'strategy':<18}{'kind':<8}{'n':>3}{'recall@5':>10}{'MRR':>8}{'in-ctx':>8}"]
+    lines = [f"{'strategy':<22}{'kind':<8}{'n':>3}{'recall@5':>10}{'MRR':>8}{'in-ctx':>8}{'ctx tok':>9}"]
     for (s, kind), m in sorted(r.by_strategy_and_kind.items(), key=lambda kv: (kv[0][1], kv[0][0])):
-        lines.append(f"{s:<18}{kind:<8}{m.n:>3}{m.recall_at_5:>10.2f}{m.mrr:>8.2f}{m.answer_in_context:>8.2f}")
+        lines.append(f"{s:<22}{kind:<8}{m.n:>3}{m.recall_at_5:>10.2f}{m.mrr:>8.2f}{m.answer_in_context:>8.2f}{m.avg_context_tokens:>9.0f}")
     for s, m in r.by_strategy.items():
-        lines.append(f"{s:<18}{'mixed KB':<8}{m.n:>3}{m.recall_at_5:>10.2f}{m.mrr:>8.2f}{m.answer_in_context:>8.2f}")
+        lines.append(f"{s:<22}{'mixed KB':<8}{m.n:>3}{m.recall_at_5:>10.2f}{m.mrr:>8.2f}{m.answer_in_context:>8.2f}{m.avg_context_tokens:>9.0f}")
     return "\n".join(lines)
