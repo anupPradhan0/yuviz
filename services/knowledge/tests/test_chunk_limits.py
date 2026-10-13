@@ -130,3 +130,29 @@ async def test_vectors_are_held_as_compact_float32_arrays():
 
     vectors = await embed_in_batches(P(), ["a"] * 100)
     assert all(isinstance(v, array) and v.itemsize == 4 and len(v) == 768 for v in vectors)
+
+
+async def test_the_worker_keeps_its_event_loop_responsive_while_it_chunks(tenant_agent, pool, monkeypatch):
+    """The heartbeat shares the loop with chunking, so a stall longer than the lease would get the job reaped."""
+    monkeypatch.setenv("KNOWLEDGE_MAX_CHUNKS_PER_DOC", "1000000")
+    monkeypatch.setenv("KNOWLEDGE_CHUNKER", "structure")   # the slower route: ~6 s of CPU for this document
+    tenant, _ = tenant_agent
+    kb = await _make_kb(tenant, "loop-kb")
+    doc = await _upload(tenant, kb, "big", content=("refund policy " * 500_000).encode(), content_type="text/plain")
+    job = dict(await pool.fetchrow("SELECT * FROM kb_ingestion_jobs WHERE id = $1", doc["ingestion_job_id"]))
+    gaps, last, stop = [], time.monotonic(), False
+
+    async def beat():
+        nonlocal last
+        while not stop:
+            await asyncio.sleep(0.01)
+            now = time.monotonic()
+            gaps.append(now - last)
+            last = now
+
+    task = asyncio.create_task(beat())
+    await process_one_job(pool, LocalStorageProvider(), _manager(_FakeProvider()), job)
+    stop = True
+    await task
+    assert max(gaps) < 0.5, f"the event loop stalled for {max(gaps):.2f}s while the worker chunked"
+    await _purge_tenant(pool, tenant["id"])
