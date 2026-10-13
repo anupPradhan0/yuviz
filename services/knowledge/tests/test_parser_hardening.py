@@ -1168,6 +1168,18 @@ async def test_the_watchdog_still_reacts_fast_when_memory_grows():
     assert time.time() - t0 < 10 and _bounded_since(before, ceiling=700)
 
 
+def test_poll_interval_policy_backs_off_when_flat_and_snaps_back_when_memory_moves():
+    f = sandbox._next_poll_interval
+    lo, hi = sandbox._RSS_POLL_MIN_S, sandbox._RSS_POLL_MAX_S
+    interval = lo
+    for _ in range(10):                                            # small and flat: doubles up to the maximum
+        interval = f(interval, 50.0, 50.0, 1024)
+    assert interval == hi
+    assert f(hi, 120.0, 50.0, 1024) == lo                          # grew 70 MB (> 5% of 1 GB) since the last poll
+    assert f(hi, 500.0, 500.0, 1024) == lo                         # flat but over 40% of the limit
+    assert f(lo, 50.0, 50.0, 1024) == lo * 2
+
+
 @pytest.mark.skipif(not LINUX, reason="/proc is Linux-only (UNVERIFIED on macOS)")
 def test_linux_group_rss_comes_from_proc_without_spawning_ps():
     import os as _os

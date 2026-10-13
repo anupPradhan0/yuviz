@@ -122,6 +122,14 @@ async def _group_rss_mb(pgid: int) -> float | None:
         return None
 
 
+def _next_poll_interval(interval: float, rss: float, last: float, limit_mb: float) -> float:
+    """Poll fast while memory is large (over 40% of the limit) or growing quickly (over 5% of the limit since the last
+    poll); otherwise back off, doubling up to the maximum."""
+    if rss > 0.4 * limit_mb or rss - last > 0.05 * limit_mb:
+        return _RSS_POLL_MIN_S
+    return min(_RSS_POLL_MAX_S, interval * 2)
+
+
 async def _exited(proc: asyncio.subprocess.Process) -> None:
     """Returns when the child itself has exited. proc.wait() also waits for every inherited pipe to close, and a
     grandchild that holds them open would stall it until the timeout."""
@@ -225,8 +233,7 @@ async def _supervise(proc: asyncio.subprocess.Process, raw: bytes, limits: Limit
                 breach.append("memory")
                 _killpg(pid)
                 return
-            hot = rss > 0.4 * limits.memory_mb or rss - last > 0.05 * limits.memory_mb
-            interval = _RSS_POLL_MIN_S if hot else min(_RSS_POLL_MAX_S, interval * 2)
+            interval = _next_poll_interval(interval, rss, last, limits.memory_mb)
             last = rss
 
     async def stdout() -> tuple[bytes, bool]:
