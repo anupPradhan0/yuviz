@@ -1184,3 +1184,12 @@ def test_poll_interval_policy_backs_off_when_flat_and_snaps_back_when_memory_mov
 def test_linux_group_rss_comes_from_proc_without_spawning_ps():
     import os as _os
     assert sandbox._group_rss_proc(_os.getpgrp()) > 5
+
+
+def test_after_pages_were_skipped_for_size_neither_the_raw_rung_nor_ocr_second_guesses_it():
+    raw = B.text_pdf()
+    with pytest.raises(formats.TierSkip):
+        formats._pdf_raw(raw, {"limit_hit": True})
+    with pytest.raises(formats.TierSkip):
+        formats._pdf_ocr(object(), None, {"limit_hit": True})
+    assert formats._pdf_raw(raw, {}).text()          # without the flag the raw rung does read it
