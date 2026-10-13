@@ -247,7 +247,7 @@ async def test_worker_fails_a_misconfigured_provider_after_one_call_per_batch(te
     j = dict(await pool.fetchrow("SELECT * FROM kb_ingestion_jobs WHERE id = $1", doc["ingestion_job_id"]))
     d = dict(await pool.fetchrow("SELECT * FROM kb_documents WHERE id = $1", doc["id"]))
     assert j["status"] == "failed" and j["error_class"] == "permanent" and j["attempts"] == 1
-    assert d["status"] == "failed" and "HTTP 401" in d["error"] and "secret" not in d["error"]
+    assert d["status"] == "failed" and d["error"] == "provider_auth_failed"
     assert len(bad.batches) == 1
     await _purge_tenant(pool, tenant["id"])
 
