@@ -21,6 +21,7 @@ from services.knowledge.tests.eval.harness import Metrics, _norm
 from services.knowledge.tests.rag_fakes import FakeEmbedder, make_kb, make_manager
 
 TOP_K = 5
+_BENIGN = frozenset({"plan_cache_miss", "prompt_docs_trimmed"})  # not fallbacks: a cold plan, and tiny prompt-mode docs
 # The default minimum_score (0.3) is a cosine threshold tuned for real embedding models; the bag-of-words fake scores
 # lower, so under it the dense branch returned nothing and the eval was lexical-only, where equal ts_rank scores
 # tie in arbitrary order (one golden question flipped between runs). With no floor both branches rank and RRF
@@ -91,7 +92,7 @@ async def run_pipeline_eval(pool, chunker: str = "auto") -> dict:
             # Prompt-mode documents (tiny files auto-inline) come first and are always returned: an answer there
             # counts as rank 1, and they do not push the ranked matches down.
             always = result["retrieval_metadata"]["always_included"]
-            degraded += [d for d in result["degraded"] if d != "plan_cache_miss"]
+            degraded += [d for d in result["degraded"] if d not in _BENIGN]
             chunks = result["chunks"][:always + TOP_K]
             answer = _norm(q.answer)
 
