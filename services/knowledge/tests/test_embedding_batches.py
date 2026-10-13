@@ -155,6 +155,10 @@ async def test_vector_search_ignores_parent_rows(tenant_agent, pool):
         doc["id"], "[" + ",".join(str(x) for x in one_hot) + "]",
     )
     async with tenant_conn(pool, explicit_tenant=str(tenant["id"]), reason="test") as conn:
+        # Exact scan inside this transaction: this test is about which rows the SQL admits (NOT is_parent), not about
+        # HNSW recall, and the approximate index is shared with every other test's rows, whose neighbours can crowd
+        # the candidate list (ef_search) before the kb filter and make the result depend on test order.
+        await conn.execute("SET LOCAL enable_indexscan = off")
         matches = await PgVectorRepository().search(conn, [str(kb["id"])], one_hot, 100, 0.0)
     parent_ids = {str(r["id"]) for r in await pool.fetch("SELECT id FROM kb_chunks WHERE document_id = $1 AND is_parent", doc["id"])}
     status = await pool.fetchrow("SELECT status, error FROM kb_documents WHERE id = $1", doc["id"])

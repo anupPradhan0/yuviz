@@ -13,6 +13,7 @@ from libs.tenancy import set_caller_tenant, set_target_tenant
 from services.knowledge import documents as documents_service
 from services.knowledge import retrieval, retrieval_log
 from services.knowledge.ingestion_worker import process_one_job
+from services.knowledge.resilience import RetrievalConfig
 from services.knowledge.runtime import get_vector_repo
 from services.knowledge.storage import LocalStorageProvider
 from services.knowledge.tests.eval.golden import ALL_DOCS, QUESTIONS
@@ -20,6 +21,18 @@ from services.knowledge.tests.eval.harness import Metrics, _norm
 from services.knowledge.tests.rag_fakes import FakeEmbedder, make_kb, make_manager
 
 TOP_K = 5
+# The default minimum_score (0.3) is a cosine threshold tuned for real embedding models; the bag-of-words fake scores
+# lower, so under it the dense branch returned nothing and the eval was lexical-only, where equal ts_rank scores
+# tie in arbitrary order (one golden question flipped between runs). With no floor both branches rank and RRF
+# fusion breaks the ties.
+MINIMUM_SCORE = 0.0
+# This eval measures answer quality, not latency. Under the production budget (120 ms per branch) a loaded machine
+# times a branch out now and then, the answer silently becomes lexical-only or dense-only, and one question flips
+# between runs. Generous timeouts make a run depend on the data and the code only; the result also reports any
+# degraded answer so a real fallback cannot hide inside the numbers.
+QUALITY_CONFIG = RetrievalConfig(
+    embed_timeout_s=10.0, dense_timeout_s=10.0, lexical_timeout_s=10.0, rerank_timeout_s=10.0, deadline_s=30.0,
+    queue_wait_s=10.0, acquire_timeout_s=10.0, breaker_failures=10**9)
 
 
 async def _purge(pool, tenant_id) -> None:
@@ -69,14 +82,16 @@ async def run_pipeline_eval(pool, chunker: str = "auto") -> dict:
 
         retrieval.clear_caches()
         repo = await get_vector_repo()
-        m, missed = Metrics(), []
+        m, missed, degraded = Metrics(), [], []
         for q in QUESTIONS:
             set_caller_tenant(str(tenant["id"]))
             result = await retrieval.retrieve(
-                None, repo, manager, tenant_slug=slug, agent_slug="golden", query=q.question, top_k=TOP_K)
+                None, repo, manager, tenant_slug=slug, agent_slug="golden", query=q.question, top_k=TOP_K,
+                minimum_score=MINIMUM_SCORE, config=QUALITY_CONFIG)
             # Prompt-mode documents (tiny files auto-inline) come first and are always returned: an answer there
             # counts as rank 1, and they do not push the ranked matches down.
             always = result["retrieval_metadata"]["always_included"]
+            degraded += [d for d in result["degraded"] if d != "plan_cache_miss"]
             chunks = result["chunks"][:always + TOP_K]
             answer = _norm(q.answer)
 
@@ -93,7 +108,7 @@ async def run_pipeline_eval(pool, chunker: str = "auto") -> dict:
                 missed.append(q.question)
         return {
             "n": m.n, "documents_not_ready": not_ready, "recall_at_5": m.recall_at_5 / m.n, "mrr": m.mrr / m.n,
-            "answer_in_context": m.answer_in_context / m.n, "missed": missed,
+            "answer_in_context": m.answer_in_context / m.n, "missed": missed, "degraded": degraded,
         }
     finally:
         if previous is None:

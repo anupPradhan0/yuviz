@@ -42,14 +42,14 @@
   },
   "pipeline": {
     "auto": {
-      "recall_at_5": 0.7692,
-      "mrr": 0.7564,
-      "answer_in_context": 0.7692
+      "recall_at_5": 0.7179,
+      "mrr": 0.7051,
+      "answer_in_context": 0.7436
     },
     "structure": {
-      "recall_at_5": 0.8718,
-      "mrr": 0.7906,
-      "answer_in_context": 0.8718
+      "recall_at_5": 0.8205,
+      "mrr": 0.7265,
+      "answer_in_context": 0.8205
     }
   }
 }

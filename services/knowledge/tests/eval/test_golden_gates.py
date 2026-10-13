@@ -22,6 +22,7 @@ def test_chunking_strategies_do_not_regress_on_the_golden_set():
     assert set(baseline["chunking"]) == set(measured), "strategy set changed: refresh the baseline"
     failures: list[str] = []
     for strategy, expected in baseline["chunking"].items():
+        assert not result["degraded"], f"a fallback fired during the eval (KNOWLEDGE_CHUNKER={mode}): {result['degraded']}"
         failures += gates.regressions(measured[strategy], expected, baseline["tolerance"], f"chunking/{strategy}")
     assert not failures, "\n".join(failures)
 
@@ -33,6 +34,7 @@ async def test_the_whole_pipeline_does_not_regress_on_the_golden_set(pool):
     for mode in gates.PIPELINE_MODES:
         result = await run_pipeline_eval(pool, mode)
         assert result["documents_not_ready"] == 0, f"a golden document failed to ingest (KNOWLEDGE_CHUNKER={mode})"
+        assert not result["degraded"], f"a fallback fired during the eval (KNOWLEDGE_CHUNKER={mode}): {result['degraded']}"
         failures += gates.regressions(
             result, baseline["pipeline"][mode], baseline["tolerance"], f"pipeline/{mode}") + (
             [f"  missed: {result['missed']}"] if gates.regressions(
