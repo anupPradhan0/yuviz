@@ -33,6 +33,7 @@ from .chunking import Chunk, count_tokens
 from .embedding_manager import (
     EMBEDDING_DIMS, EmbeddingProviderConfig, EmbeddingProviderManager, effective_model, embed_in_batches,
 )
+from .enrichment import enrich_texts
 from .parsers import SUPPORTED_CONTENT_TYPES, ParsedDocument, ParseRejected, parse_document
 from .reembed import assert_kb_config_current
 from .storage import StorageProvider
@@ -262,11 +263,14 @@ async def process_one_job(
                     embedding_cfg = await _fetch_embedding_config(conn, kb_id)
             provider = await embedding_manager.get(embedding_cfg)
             embed_stats: dict[str, int] = {}
-            vectors = await embed_in_batches(provider, [c.content for c in new_chunks], stats=embed_stats)
+            # Optional contextual enrichment (off by default): only the EMBEDDED text changes, never the stored chunk.
+            embed_texts, enrich_detail = await enrich_texts(
+                pool, tenant_id, doc_row["title"], new_chunks, embed_max_tokens=embedding_cfg.extra.get("max_tokens"))
+            vectors = await embed_in_batches(provider, embed_texts, stats=embed_stats)
             embedding_model = effective_model(embedding_cfg)
             # Preserve an admin's manual usage_mode across re-ingestion.
             new_usage_mode = doc_row["usage_mode"]
-            stages.ok(vectors=len(vectors), **embed_stats)
+            stages.ok(vectors=len(vectors), **embed_stats, **enrich_detail)
 
         stages.begin("index")
         async with tenant_conn(pool, explicit_tenant=tenant_id, reason="kb-ingestion-job") as conn:
