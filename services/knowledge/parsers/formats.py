@@ -1346,17 +1346,17 @@ def parse_by_type(raw: bytes, content_type: str, limits: Limits, language: str |
         ])
     elif ct == detect.DOCX:
         zf = guard_zip(raw, limits, "DOCX")
-        _count_all_elements(zf, limits.max_elements)
+        _count_all_elements(zf, limits.max_ooxml_elements)
         _count_elements(zf, r"word/document\.xml", _W + "p", limits.max_paragraphs, "paragraphs")
         doc = run_ladder([("python-docx", lambda: _docx_native(zf, raw)), ("docx-xml", lambda: _docx_xml(zf))])
     elif ct == detect.PPTX:
         zf = guard_zip(raw, limits, "PPTX")
-        _count_all_elements(zf, limits.max_elements)
+        _count_all_elements(zf, limits.max_ooxml_elements)
         _count_elements(zf, r"ppt/slides/slide\d+\.xml", "{*}p", limits.max_paragraphs, "paragraphs")
         doc = run_ladder([("python-pptx", lambda: _pptx_native(zf, raw, limits)), ("pptx-xml", lambda: _pptx_xml(zf, limits))])
     elif ct == detect.XLSX:
         zf = guard_zip(raw, limits, "XLSX")
-        _count_all_elements(zf, limits.max_elements)
+        _count_all_elements(zf, 3 * limits.max_cells)
         _count_elements(zf, r"xl/worksheets/sheet\d+\.xml", "{*}c", limits.max_cells, "cells")
         doc = run_ladder([("openpyxl", lambda: _xlsx_native(zf, raw, limits)), ("xlsx-xml", lambda: _xlsx_xml(zf, limits))])
     else:

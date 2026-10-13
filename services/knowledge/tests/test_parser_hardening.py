@@ -291,7 +291,7 @@ async def test_empty_paragraph_docx_is_rejected_by_the_streaming_paragraph_count
     assert len(raw) < 200_000
     t0 = time.time()
     reason = await _reason(raw)
-    assert "more than 200000 paragraphs" in reason or "XML elements" in reason
+    assert "more than 800000 paragraphs" in reason or "XML elements" in reason
     assert time.time() - t0 < 10 and _bounded_since(before)  # unfixed: python-docx builds ~1 GB
 
 
@@ -793,14 +793,45 @@ def _bookmark_flood_docx() -> bytes:
     return B._zip({"[Content_Types].xml": b"<Types/>", "word/document.xml": head + b'<w:bookmarkStart w:id="1" w:name="a"/>' * 1_000_000 + b"</w:p></w:body></w:document>"})
 
 
-@pytest.mark.parametrize("raw_fn", [_tc_flood_docx, _bookmark_flood_docx])
-async def test_element_floods_are_rejected_by_the_general_element_bound(raw_fn):
+async def test_a_flood_of_table_cells_is_rejected_by_the_ooxml_element_bound():
     before = _children_maxrss_mb()
-    raw = raw_fn()
+    raw = _tc_flood_docx()
     assert len(raw) < 400_000
     t0 = time.time()
-    assert "XML elements" in await _reason(raw)
+    assert "more than 2500000 XML elements" in await _reason(raw)
     assert time.time() - t0 < 15 and _bounded_since(before)
+
+
+async def test_a_bookmark_flood_stays_under_the_documented_memory_bound():
+    """1M elements is below the element cap on purpose (a 1,000-page document is ~220k, a heavy one ~1.4M); the memory
+    watchdog and the child's self-exit are the backstop. Documented bound: memory_mb (1024) plus a little overshoot."""
+    before = _children_maxrss_mb()
+    raw = _bookmark_flood_docx()
+    t0 = time.time()
+    with pytest.raises(ParseRejected):
+        await parse_document(raw)
+    assert time.time() - t0 < 30 and _bounded_since(before, ceiling=1100)
+
+
+async def test_ordinary_large_files_still_ingest_with_bounded_memory():
+    """Both sides of the element cap: these were rejected by the 500k cap in 5540518. Measured here: 30k-row XLSX
+    ~150 MB peak / 2.2 s, 1,000-page DOCX ~140 MB / 3.5 s."""
+    before = _children_maxrss_mb()
+    t0 = time.time()
+    xlsx = await parse_document(B.big_xlsx(30_000))
+    assert xlsx.parser_used == "openpyxl" and len(xlsx.text()) > 3_000_000
+    docx = await parse_document(B.big_docx(1000))
+    assert docx.parser_used == "python-docx" and "Section 999" in docx.text()
+    assert time.time() - t0 < 40 and _bounded_since(before, ceiling=400)
+
+
+async def test_a_heavy_docx_of_about_a_million_elements_still_parses():
+    head = b'<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+    body = b"<w:p><w:r><w:t>Ordinary paragraph.</w:t></w:r></w:p>" * 200_000   # 600k elements
+    raw = B._zip({"[Content_Types].xml": b"<Types/>", "word/document.xml": head + body + b"</w:body></w:document>"})
+    before = _children_maxrss_mb()
+    doc = await parse_document(raw)
+    assert "Ordinary paragraph" in doc.text() and _bounded_since(before, ceiling=700)
 
 
 async def test_a_flood_of_html_elements_is_rejected_before_a_tree_is_built():

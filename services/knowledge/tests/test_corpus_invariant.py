@@ -26,7 +26,7 @@ async def _run(pool, tenant, kb, name: str):
 
 @pytest.fixture
 def small_bomb_limit(monkeypatch):
-    monkeypatch.setenv("KB_PARSE_MAX_DECOMPRESSED", str(2 * 1024 * 1024))
+    monkeypatch.setenv("KB_PARSE_MAX_DECOMPRESSED", str(24 * 1024 * 1024))   # legit big files here inflate to ~15 MB; the bombs to 40 MB
     # 5 MB of prose is ~4,300 fixed windows or ~8,300 structure chunks; the shipped ceiling is 5,000 per document
     # (KNOWLEDGE_MAX_CHUNKS_PER_DOC), so the corpus run raises it to keep "5 MB of text is ready" meaningful.
     monkeypatch.setenv("KNOWLEDGE_MAX_CHUNKS_PER_DOC", "20000")
