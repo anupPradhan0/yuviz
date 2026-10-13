@@ -721,7 +721,7 @@ async def test_upload_route_refuses_binary_types_when_the_kill_switch_is_off(tes
 async def test_child_stderr_is_never_logged_as_a_sandbox_note_and_is_escaped(caplog):
     caplog.set_level(logging.DEBUG)
     code = ("import sys\n"
-            "sys.stderr.write('hardening: FORGED-NOTE\\n')\n"
+            "sys.stderr.write('hardening: ' + 'x' * 60 + 'FORGED-NOTE\\n')\n"
             "sys.stderr.write('/Name#0Ahardening: font encoding FORGED2\\n')\n"
             "sys.stderr.write('hardening[wrong]: FORGED3\\n')\n"
             "sys.stderr.write('Err\\x1b[31m: customer text FORGED4\\n')\n"
@@ -809,3 +809,17 @@ async def test_a_flood_of_html_elements_is_rejected_before_a_tree_is_built():
     t0 = time.time()
     assert "more than 500000 elements" in await _reason(raw)
     assert time.time() - t0 < 15 and _bounded_since(before)
+
+
+async def test_a_page_the_main_html_parser_cannot_handle_is_rejected_not_leaked_through_a_weaker_rung(monkeypatch):
+    """Run the ladder in-process with the main rung failing: nothing downstream may index the hidden payload."""
+    from services.knowledge.parsers import formats as f
+
+    def boom(_text):
+        raise RuntimeError("parser failure")
+
+    monkeypatch.setattr(f, "_html_main", boom)
+    html = f"<html><body><p>{VISIBLE}.</p><div style='display:none'>{PAYLOAD}</div></body></html>".encode()
+    with pytest.raises(ParseRejected) as e:
+        f.parse_by_type(html, detect.HTML, Limits())
+    assert PAYLOAD not in e.value.reason
