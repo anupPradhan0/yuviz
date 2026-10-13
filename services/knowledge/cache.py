@@ -47,12 +47,16 @@ def _agent_kb_key(tenant_slug: str, agent_slug: str) -> str:
     return slug_key("kbflag2", tenant_slug, agent_slug)
 
 
-async def purge_legacy_keys(batch: int = 500) -> int:
-    """Best-effort SCAN + DELETE of the pre-injective keys (they have no TTL). Returns how many were deleted."""
+async def purge_legacy_keys(batch: int = 500, *, client: "redis.Redis | None" = None,
+                            prefix: str = _LEGACY_PREFIX) -> int:
+    """Best-effort SCAN + DELETE of the pre-injective keys (they have no TTL). Returns how many were deleted.
+    Only keys that really start with `prefix` (default the exact legacy "agent_kb:") are ever deleted: the SCAN
+    pattern is re-checked per key, so a glob quirk cannot widen it. `client`/`prefix` exist so tests can run
+    against their own database and namespace instead of whatever the process-wide client points at."""
     deleted = 0
     try:
-        client = get_client()
-        keys = [k async for k in client.scan_iter(match=_LEGACY_PREFIX + "*", count=batch)]
+        client = client or get_client()
+        keys = [k async for k in client.scan_iter(match=prefix + "*", count=batch) if k.startswith(prefix)]
         for i in range(0, len(keys), batch):
             deleted += await client.delete(*keys[i:i + batch])
     except redis.RedisError:

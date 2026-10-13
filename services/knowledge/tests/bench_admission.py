@@ -26,6 +26,7 @@ from services.knowledge import db, retrieval, retrieval_log  # noqa: E402
 from services.knowledge.resilience import RetrievalConfig, RetrievalUnavailable  # noqa: E402
 from services.knowledge.vector_repository import PgVectorRepository  # noqa: E402
 
+DEGRADED: dict[str, int] = {}  # degraded tags seen in the scenario (why 'partial' happened)
 VOCAB = [f"term{i}" for i in range(300)]
 
 
@@ -86,6 +87,8 @@ async def one(pool, tenant, agent, repo, embedder, query, held_shape, results, n
         else:
             r = await retrieval.retrieve(None, repo, make_manager(embedder), **kw)
         status = r["status"]
+        for tag in r["degraded"]:
+            DEGRADED[tag] = DEGRADED.get(tag, 0) + 1
     except RetrievalUnavailable as exc:
         status = "unavailable(overloaded)" if "overloaded" in exc.degraded else "unavailable"
     results.append((name or tenant["slug"], status, (time.perf_counter() - t0) * 1000))
@@ -121,6 +124,7 @@ async def main():
             retrieval.clear_caches()
             for t, a in tenants[:n_tenants]:
                 await warm(t, a)
+            DEGRADED.clear()
             repo, embedder, results, peak = SlowRepo(0.010), FakeEmbedder(latency_s=0.060), [], [0]
             watcher = asyncio.create_task(watch_pool(pool, peak))
             jobs = []
@@ -131,13 +135,15 @@ async def main():
             watcher.cancel()
             sp, lat = split(results), [r[2] for r in results]
             print(f"{label:58} {sp.get('ok', 0):>4} {sp.get('partial', 0):>8} {sp.get('unavailable', 0):>8} "
-                  f"{sp.get('unavailable(overloaded)', 0):>9} {statistics.median(lat):7.1f} {max(lat):7.1f} {peak[0]:>10}")
+                  f"{sp.get('unavailable(overloaded)', 0):>9} {statistics.median(lat):7.1f} {max(lat):7.1f} {peak[0]:>10}"
+                  f"  {({k: v for k, v in DEGRADED.items() if k != 'plan_cache_miss'}) or ''}")
 
         # Noisy neighbour: tenant 0 sends 20 slow requests (150 ms of DB time each), 7 others send one normal request.
         retrieval.clear_caches()
         noisy, others = tenants[0], tenants[1:]
         for t, a in tenants:
             await warm(t, a)
+        DEGRADED.clear()
         results, jobs = [], []
         slow, fast = SlowRepo(0.150, dense_only=True), PgVectorRepository()
         for i in range(20):
