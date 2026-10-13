@@ -21,10 +21,11 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 import unicodedata
 from dataclasses import dataclass, field
 
-from .chunking import Chunk, chunk_text
+from .chunking import _BUDGET_S, _DEADLINE, _MAX_CHUNKS, Chunk, ChunkLimitError, chunk_text, tick
 from .parsers.model import CODE, HEADING, LIST, PARAGRAPH, TABLE, Block, render_row
 from .parsers.textblocks import blocks_from_text
 from .tokens import EstimatingTokenCounter, TokenCounter
@@ -36,6 +37,14 @@ CHUNKER_VERSIONS = {"structure": "structure-v1", "prose": "recursive-v1", "qa": 
 
 
 MODES = ("auto", "structure", "recursive", "fixed")
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        v = float(os.environ.get(name, default))
+        return v if v > 0 else default
+    except ValueError:
+        return default
 
 
 def chunker_mode() -> str:
@@ -103,6 +112,9 @@ def _pieces(text: str, sep: re.Pattern) -> list[str]:
     return out
 
 
+_COMBINING_LOOKBACK = 16
+
+
 def _hard_window(text: str, budget: int, counter: TokenCounter) -> list[str]:
     """Last resort: fixed windows sized by the counter, cut at whitespace when one is near and never inside a
     combining sequence. Always terminates and always meets the budget (a window shrinks until it fits)."""
@@ -112,14 +124,21 @@ def _hard_window(text: str, budget: int, counter: TokenCounter) -> list[str]:
     size = max(1, int(n * budget / est * 0.9))
     while i < n:
         j = min(n, i + size)
+        tick(len(out))
         while j > i + 1 and counter.count(text[i:j]) > budget:
             j = i + max(1, int((j - i) * 0.8))
         if j < n:
             back = text.rfind(" ", i + (j - i) * 3 // 4, j)
             if back > i:
                 j = back + 1
-            while j > i + 1 and j < n and unicodedata.category(text[j]).startswith("M"):
+            # Do not cut inside a combining sequence, but only look back a few characters: a run of marks longer
+            # than that (a hostile file, or Zalgo text) is cut where the window ends. Backing off to one character
+            # per chunk is how 100 KB became 49,602 chunks.
+            cut = j
+            while j > i + 1 and j < n and unicodedata.category(text[j]).startswith("M") and cut - j < _COMBINING_LOOKBACK:
                 j -= 1
+            if j < n and unicodedata.category(text[j]).startswith("M"):
+                j = cut
         out.append(text[i:j])
         i = j
     return out
@@ -137,17 +156,21 @@ def split_to_budget(text: str, budget: int, counter: TokenCounter, level: int = 
         return split_to_budget(text, budget, counter, level + 1)
     out: list[str] = []
     current = ""
+    used = 0  # running estimate: parts are cut at whitespace, so counts add up (each part's own count is rounded up)
     for part in parts:
-        if current and counter.count(current + part) > budget:
+        tick(len(out))
+        size = counter.count(part)
+        if current and used + size > budget:
             out.append(current)
-            current = ""
-        if counter.count(part) > budget:
+            current, used = "", 0
+        if size > budget:
             if current:
                 out.append(current)
-                current = ""
+                current, used = "", 0
             out.extend(split_to_budget(part, budget, counter, level + 1))
         else:
             current += part
+            used += size
     if current:
         out.append(current)
     return out
@@ -257,6 +280,7 @@ def _table_groups(rows: tuple[tuple[str, ...], ...], budget: int, counter: Token
     current: list[str] = []
     used = counter.count(head)
     for row in body:
+        tick(len(groups))
         line = render_row(row)
         cost = counter.count(line) + 1
         if current and used + cost > budget:
@@ -274,6 +298,7 @@ def _pieces_for(blocks: list[Block], budget: int, whole_limit: int, counter: Tok
     `whole_limit` and otherwise splits (list items / table row groups with the header repeated) at `budget`."""
     out: list[_Piece] = []
     for b in blocks:
+        tick()
         text = b.render().strip()
         if not text:
             continue
@@ -315,6 +340,7 @@ def _build_sections(
 ) -> ChunkResult:
     res = ChunkResult()
     for sec in sections:
+        tick(len(res.children))
         crumb = _crumb(sec.path, counter, cfg.cap) if cfg.breadcrumb else ""
         path = " > ".join(sec.path) or None
         prefix = counter.count(crumb) + 2 if crumb else 0
@@ -323,6 +349,7 @@ def _build_sections(
         bodies = _pack(_pieces_for(sec.blocks, budget, hard, counter), budget, counter)
         first = len(res.children)
         for body, page in bodies:
+            tick(len(res.children))
             content = _with_crumb(crumb, body)
             if counter.count(content) > cfg.cap:  # a whole table/list that overshoots once the breadcrumb is added
                 for sub in split_to_budget(body, hard, counter):
@@ -412,6 +439,7 @@ def _build_qa(blocks: list[Block], counter: TokenCounter, cfg: ChunkConfig) -> C
         pair, pair_page = [], None
 
     for kind, text, level, page in _qa_events(blocks):
+        tick(len(res.children))
         if kind == "h":
             flush()
             while stack and stack[-1][0] >= level:
@@ -454,6 +482,7 @@ def _fixed(blocks: list[Block], language: str | None, counter: TokenCounter, cfg
     for c in chunk_text(text, chunk_size=size, chunk_overlap=overlap, language=language):
         for piece in split_to_budget(c.content, cfg.cap, counter):
             if piece.strip():
+                tick(len(res.children))
                 res.children.append(Chunk(piece.strip(), counter.count(piece)))
     return res
 
@@ -475,6 +504,20 @@ def chunk_document(
     """Children (embedded) and parents (context) for a parsed document. `strategy` forces a route (the bake-off
     uses it); otherwise KNOWLEDGE_CHUNKER and the document's shape pick one. Any splitter error falls back to fixed
     windows, and the result's `strategy` is always the one that actually ran."""
+    budget_s, max_chunks = _env_float("KNOWLEDGE_CHUNK_BUDGET_S", 60.0), int(_env_float("KNOWLEDGE_MAX_CHUNKS_PER_DOC", 5000))
+    tokens = (_DEADLINE.set(time.monotonic() + budget_s), _BUDGET_S.set(budget_s), _MAX_CHUNKS.set(max_chunks))
+    try:
+        return _chunk_document(blocks, language, counter, config, strategy)
+    finally:
+        _DEADLINE.reset(tokens[0])
+        _BUDGET_S.reset(tokens[1])
+        _MAX_CHUNKS.reset(tokens[2])
+
+
+def _chunk_document(
+    blocks: list[Block], language: str | None, counter: TokenCounter | None, config: ChunkConfig | None,
+    strategy: str | None,
+) -> ChunkResult:
     cfg = config or ChunkConfig()
     counter = counter or EstimatingTokenCounter(language=language)
     blocks = [b for b in blocks if b.render().strip()]
@@ -501,7 +544,10 @@ def chunk_document(
             res.strategy = chosen
         if not res.children:
             raise ValueError("splitter produced no chunks")
+        tick(len(res.children))
         _check(res, counter, cfg)
+    except ChunkLimitError:
+        raise  # a limit is final: the fixed-window fallback would only hit the same one
     except Exception:
         log.warning("chunking strategy %r failed; falling back to fixed windows", chosen, exc_info=True)
         res = _fixed(blocks, language, counter, cfg)

@@ -109,3 +109,86 @@ async def test_requeue_never_touches_another_tenants_documents_or_failed_ones(te
 def test_cli_requires_a_tenant():
     with pytest.raises(SystemExit):
         reingest_main([])
+
+
+# ── review follow-ups: concurrent runs, fairness, batching ──────────────
+
+async def _bulk_documents(pool, tenant, kb, n):
+    """n ready documents, inserted directly (the queue behaviour is what is under test, not parsing)."""
+    ids = []
+    for i in range(n):
+        row = await pool.fetchrow(
+            "INSERT INTO kb_documents (kb_id, tenant_id, title, source_ref, content_type, status, chunker_version) "
+            "VALUES ($1, $2, $3, 'x', 'text/plain', 'ready', 'structure-v1') RETURNING id", kb["id"], tenant["id"], f"d{i}")
+        ids.append(row["id"])
+    return ids
+
+
+async def test_overlapping_runs_never_queue_a_document_twice(tenant_agent, pool):
+    import asyncio
+    tenant, _ = tenant_agent
+    await _drain_pending(pool)
+    kb = await _make_kb(tenant, "race-kb")
+    ids = await _bulk_documents(pool, tenant, kb, 40)
+    set_caller_tenant(None)
+    results = await asyncio.gather(*[requeue_documents(pool, tenant["id"], batch=0) for _ in range(8)])
+    queued = [d for r in results for d in r]
+    assert sorted(queued) == sorted(str(i) for i in ids)                       # each document queued by exactly one run
+    assert await pool.fetchval("SELECT count(*) FROM kb_ingestion_jobs WHERE document_id = ANY($1)", ids) == 40
+    assert await pool.fetchval("SELECT max(version) FROM kb_documents WHERE id = ANY($1)", ids) == 2   # bumped once
+    await _purge_tenant(pool, tenant["id"])
+
+
+async def test_a_fresh_upload_is_claimed_before_the_whole_tenant_wide_reingest(tenant_agent, pool):
+    tenant, _ = tenant_agent
+    await _drain_pending(pool)
+    kb = await _make_kb(tenant, "fair-kb")
+    await _bulk_documents(pool, tenant, kb, 200)
+    set_caller_tenant(None)
+    assert len(await requeue_documents(pool, tenant["id"], batch=0)) == 200
+    fresh = await _upload(tenant, kb, "fresh", content=_DOC, content_type="text/markdown")   # queued AFTER the 200
+    first = await _claim_next_job(pool, tenant_cap=100)
+    assert first["id"] == fresh["ingestion_job_id"]
+    order = [first["document_id"]]
+    for _ in range(5):                                            # the rest is the re-ingest backlog, oldest first
+        order.append((await _claim_next_job(pool, tenant_cap=100))["document_id"])
+    assert fresh["id"] == order[0] and fresh["id"] not in order[1:]
+    await pool.execute("UPDATE kb_ingestion_jobs SET status = 'succeeded' WHERE document_id = ANY($1)", order)
+    await _purge_tenant(pool, tenant["id"])
+
+
+async def test_batch_limits_each_run_and_repeated_runs_walk_through_every_document(tenant_agent, pool):
+    tenant, _ = tenant_agent
+    await _drain_pending(pool)
+    kb = await _make_kb(tenant, "batch-kb")
+    ids = await _bulk_documents(pool, tenant, kb, 25)
+    set_caller_tenant(None)
+    seen: list[str] = []
+    for _ in range(4):
+        got = await requeue_documents(pool, tenant["id"], batch=10)
+        assert len(got) <= 10 and not (set(got) & set(seen))
+        seen += got
+    assert sorted(seen) == sorted(str(i) for i in ids)
+    assert len(await requeue_documents(pool, tenant["id"], batch=10, dry_run=True)) == 0     # all have active jobs
+    await _purge_tenant(pool, tenant["id"])
+
+
+async def test_a_second_run_waits_for_the_first_and_then_sees_its_jobs(tenant_agent, pool):
+    """Deterministic version of the race: run 1 is held open mid-transaction holding the tenant's re-ingest lock."""
+    import asyncio
+
+    from libs.tenancy import tenant_conn
+    tenant, _ = tenant_agent
+    await _drain_pending(pool)
+    kb = await _make_kb(tenant, "lock-kb")
+    a, b = await _bulk_documents(pool, tenant, kb, 2)
+    set_caller_tenant(None)
+    async with tenant_conn(pool, explicit_tenant=str(tenant["id"]), reason="kb-ingestion-job") as conn:
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('kb-reingest:' || $1::text, 0))", str(tenant["id"]))
+        await conn.execute("INSERT INTO kb_ingestion_jobs (document_id, kb_id, stage) VALUES ($1, $2, 'reingest-queued')", a, kb["id"])
+        second = asyncio.create_task(requeue_documents(pool, tenant["id"], batch=0))
+        await asyncio.sleep(0.4)
+        assert not second.done(), "the second run did not wait for the first"
+    queued = await asyncio.wait_for(second, 10)
+    assert queued == [str(b)]          # `a` was queued by the first run and is skipped
+    await _purge_tenant(pool, tenant["id"])

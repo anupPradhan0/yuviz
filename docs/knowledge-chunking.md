@@ -79,3 +79,18 @@ Documents keep the chunks they were indexed with until re-ingested. `python -m s
 retrieval keeps the old chunks until the new ones commit. It runs on a tenant-scoped connection (reason `kb-ingestion-job`, no
 `platform_conn`), one tenant per call. The console chunk count reads 0 for a document between the version bump and the swap.
 Failed documents are not re-queued (use the document retry).
+
+## Limits that protect the worker
+Chunking runs off the event loop (`asyncio.to_thread`), so the lease heartbeat keeps running, and carries its own limits:
+`KNOWLEDGE_CHUNK_BUDGET_S` (default 60 s wall clock, checked inside every loop; exceeding it fails the document permanently with
+"document too complex to index") and `KNOWLEDGE_MAX_CHUNKS_PER_DOC` (default 5,000; "document too large to index (more than N chunks)"),
+both enforced before anything is embedded. The shipped ceiling rejects very large prose: 5 MB of ordinary text is about 4,300 fixed windows
+(8,300 structure chunks), so a bigger ceiling has to be set deliberately. Vectors are held as float32 arrays while embedding, so memory is
+bounded by chunks x 768 x 4 bytes (5,000 chunks = 15 MB). The windowing is linear: a 10 MB single-line document chunks in a few seconds.
+
+## Re-ingest behaviour
+A document that is already `ready` or `ready_degraded` keeps its status and keeps serving its old chunks while it re-ingests and through a failed,
+retried, dead-lettered or lease-reaped re-ingest; the new chunks replace the old ones only in the single-transaction swap. A failed re-ingest records
+`re-index failed: <reason>` in `kb_documents.error` (and in the job and its events); the console shows it on the ready document and offers Retry, and
+`python -m services.knowledge.reingest` queues it again. First-time ingests keep pending -> processing -> ready/failed. Re-ingest jobs run behind all normal
+jobs, in batches (`--batch`, default 100), one run per tenant at a time (advisory lock).

@@ -1,6 +1,7 @@
 """Process hardening for the ingestion worker. The worker holds the DB DSN and other secrets in its environment and
 spawns document parsers as the same OS user; making it non-dumpable stops those children reading
-/proc/<worker>/environ or /proc/<worker>/mem. Linux only; elsewhere it logs that nothing was done."""
+/proc/<worker>/environ or /proc/<worker>/mem. Linux only; elsewhere it logs that nothing was done. It protects the
+worker only: the Knowledge API and other same-user processes stay readable, and so does everything on macOS."""
 
 from __future__ import annotations
 
