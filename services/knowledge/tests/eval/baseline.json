@@ -43,13 +43,13 @@
   "pipeline": {
     "auto": {
       "recall_at_5": 0.7179,
-      "mrr": 0.7051,
+      "mrr": 0.6923,
       "answer_in_context": 0.7436
     },
     "structure": {
-      "recall_at_5": 0.8205,
-      "mrr": 0.7265,
-      "answer_in_context": 0.8205
+      "recall_at_5": 0.7949,
+      "mrr": 0.7009,
+      "answer_in_context": 0.7949
     }
   }
 }

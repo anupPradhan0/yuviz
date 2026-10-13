@@ -14,7 +14,7 @@ from services.knowledge import documents as documents_service
 from services.knowledge import retrieval, retrieval_log
 from services.knowledge.ingestion_worker import process_one_job
 from services.knowledge.resilience import RetrievalConfig
-from services.knowledge.runtime import get_vector_repo
+from services.knowledge.vector_repository import PgVectorRepository
 from services.knowledge.storage import LocalStorageProvider
 from services.knowledge.tests.eval.golden import ALL_DOCS, QUESTIONS
 from services.knowledge.tests.eval.harness import Metrics, _norm
@@ -34,6 +34,30 @@ MINIMUM_SCORE = 0.0
 QUALITY_CONFIG = RetrievalConfig(
     embed_timeout_s=10.0, dense_timeout_s=10.0, lexical_timeout_s=10.0, rerank_timeout_s=10.0, deadline_s=30.0,
     queue_wait_s=10.0, acquire_timeout_s=10.0, breaker_failures=10**9)
+
+
+class ExactRepo(PgVectorRepository):
+    """Dense search by exact scan, and a total order on equal scores, so a run depends on the data and the code only.
+
+    Two things made the same golden set score 0.72, 0.69 or 0.67 in different runs: the approximate HNSW index keeps
+    dead entries from every earlier insert and delete until a VACUUM, and the templated distractor documents contain
+    identical chunks whose equal scores (cosine distance, ts_rank_cd) come back in physical row order, which differs on
+    a database other tests have churned. Exact scan fixes the first; fetching a wider candidate list and ordering ties
+    by (title, content) fixes the second. This eval measures the pipeline, not index health or tie order."""
+
+    _WIDE = 200
+
+    @staticmethod
+    def _stable(matches, limit):
+        return sorted(matches, key=lambda m: (-m.score, m.document_title, m.child_content or m.content))[:limit]
+
+    async def search(self, conn, kb_ids, embedding, top_k, minimum_score):
+        await conn.execute("SET LOCAL enable_indexscan = off")
+        return self._stable(await super().search(conn, kb_ids, embedding, max(top_k, self._WIDE), minimum_score), top_k)
+
+    async def lexical_search(self, conn, kb_ids, query, limit, minimum_score, *args, **kwargs):
+        wide = await super().lexical_search(conn, kb_ids, query, max(limit, self._WIDE), minimum_score, *args, **kwargs)
+        return self._stable(wide, limit)
 
 
 async def _purge(pool, tenant_id) -> None:
@@ -82,7 +106,7 @@ async def run_pipeline_eval(pool, chunker: str = "auto") -> dict:
             tenant["id"])
 
         retrieval.clear_caches()
-        repo = await get_vector_repo()
+        repo = ExactRepo()
         m, missed, degraded = Metrics(), [], []
         for q in QUESTIONS:
             set_caller_tenant(str(tenant["id"]))
