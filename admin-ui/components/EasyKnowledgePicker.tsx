@@ -1,7 +1,7 @@
 "use client";
 
 // The optional "documents" part of the Easy business step: tick collections
-// the account already has, or choose .txt/.md files to upload. All text comes
+// the account already has, or choose files to upload. All text comes
 // from lib/easyCopy.
 
 import { useState } from "react";

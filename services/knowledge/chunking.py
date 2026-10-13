@@ -1,5 +1,6 @@
-"""Paragraph-first chunking into ~chunk_size-word windows with chunk_overlap words of overlap.
-Word count is the token-count proxy throughout.
+"""Fixed-window chunking: paragraph-first ~chunk_size-word windows with chunk_overlap words of overlap.
+Word count is the token-count proxy throughout. The structure-aware chunker (chunker.py) is the ingestion default;
+this is its last-resort fallback and the behaviour existing callers of chunk_text() rely on.
 
 Languages written without spaces between words (Chinese, Japanese, Thai, Lao, Khmer,
 Myanmar) have no words to count, so they are sized by characters instead: token
@@ -34,6 +35,11 @@ _UNSPACED_CHARS_PER_WORD = 1.5
 class Chunk:
     content: str
     token_count: int
+    # Set by the structure-aware chunker (chunker.py); the fixed-window path here leaves them at their defaults.
+    section_path: str | None = None
+    page: int | None = None
+    parent: int | None = None   # index into the parents list of the ChunkResult this child belongs to
+    is_parent: bool = False
 
 
 def is_unspaced(text: str, language: str | None = None) -> bool:
@@ -79,10 +85,18 @@ def _chunk_units(
         if content:
             chunks.append(Chunk(content=content, token_count=count(units)))
 
+    if chunk_size < 1 or chunk_overlap < 0 or chunk_overlap >= chunk_size:
+        # With overlap >= size the window never advances and the loop below appends chunks until memory runs out.
+        raise ValueError(f"invalid chunking window: chunk_size={chunk_size}, chunk_overlap={chunk_overlap}")
+    # Each emitted chunk consumes at least (chunk_size - chunk_overlap) >= 1 fresh unit, so more chunks than
+    # units plus one per paragraph means the loop is not advancing; fail permanently instead of spinning.
+    max_chunks = sum(len(u) for u in paragraphs) + len(paragraphs) + 1
     chunks: list[Chunk] = []
     current: list[str] = []
 
     for units in paragraphs:
+        if len(chunks) > max_chunks:
+            raise ValueError("chunking made no progress")
         if current and len(current) + len(units) > chunk_size:
             emit(current)
             overlap = current[-chunk_overlap:] if chunk_overlap else []
@@ -93,6 +107,8 @@ def _chunk_units(
         # A single paragraph longer than chunk_size on its own still needs
         # splitting, or it would produce one oversized chunk forever.
         while len(current) > chunk_size:
+            if len(chunks) > max_chunks:
+                raise ValueError("chunking made no progress")
             head, current = current[:chunk_size], current[chunk_size:]
             emit(head)
             if chunk_overlap:

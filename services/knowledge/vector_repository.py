@@ -60,7 +60,7 @@ class PgVectorRepository:
             FROM kb_chunks c
             JOIN kb_documents d ON d.id = c.document_id AND d.deleted_at IS NULL AND d.usage_mode = 'auto'
             JOIN knowledge_bases kb ON kb.id = c.kb_id
-            WHERE c.kb_id = ANY($2::uuid[]) AND c.embedding IS NOT NULL
+            WHERE c.kb_id = ANY($2::uuid[]) AND c.embedding IS NOT NULL AND NOT c.is_parent
             ORDER BY c.embedding <=> $1::vector
             LIMIT $3
             """,

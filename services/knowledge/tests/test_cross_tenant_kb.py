@@ -272,12 +272,17 @@ async def test_retry_is_admin_only(client, pool, caller, test_viewer, doc_cleanu
     assert await pool.fetchval("SELECT status FROM kb_documents WHERE id = $1", doc["id"]) == "failed"
 
 
-@pytest.mark.parametrize("content_type, status", [
-    ("text/plain", 201),
-    ("text/markdown", 201),
-    ("Text/Plain; charset=utf-8", 201),
-    ("application/pdf", 415),
-    ("application/octet-stream", 415),
+# The declared type is only a hint; the bytes decide (parsers/detect.py), so plain text is accepted under any label
+# and unsupported bytes are refused under any label.
+@pytest.mark.parametrize("content, content_type, status", [
+    (b"hello", "text/plain", 201),
+    (b"hello", "text/markdown", 201),
+    (b"hello", "Text/Plain; charset=utf-8", 201),
+    (b"hello", "application/pdf", 201),
+    (b"hello", "application/octet-stream", 201),
+    (b"\x89PNG\r\n\x1a\n" + bytes(64), "text/plain", 415),
+    (bytes(range(256)), "application/octet-stream", 415),
+    (b"", "text/plain", 400),
 ])
-async def test_upload_content_type_is_enforced(client, caller, doc_cleanup, content_type, status):
-    assert (await _upload(client, caller, b"hello", content_type)).status_code == status
+async def test_upload_content_type_is_enforced(client, caller, doc_cleanup, content, content_type, status):
+    assert (await _upload(client, caller, content, content_type)).status_code == status

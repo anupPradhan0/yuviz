@@ -173,6 +173,104 @@ CREATE TABLE IF NOT EXISTS kb_ingestion_jobs (
 CREATE INDEX IF NOT EXISTS idx_kb_ingestion_jobs_status ON kb_ingestion_jobs(status) WHERE status IN ('pending', 'running');
 CREATE INDEX IF NOT EXISTS idx_kb_ingestion_jobs_document ON kb_ingestion_jobs(document_id);
 
+-- Queue hardening: lease + heartbeat, retry with backoff, dead-letter, error class.
+--   pending      = waiting (also a retry waiting for next_attempt_at)
+--   running      = claimed; lease_expires_at is pushed forward by the worker heartbeat
+--   succeeded    = done
+--   failed       = permanent error (retrying cannot help), not retried
+--   dead_letter  = transient errors exhausted max_attempts; an admin can retry the document
+ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ;
+ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS next_attempt_at   TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS max_attempts      INT NOT NULL DEFAULT 5;
+ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS stage             TEXT;
+ALTER TABLE kb_ingestion_jobs ADD COLUMN IF NOT EXISTS error_class       TEXT;
+-- Each pair is one DO block so the drop and the re-add commit together.
+DO $$ BEGIN
+    ALTER TABLE kb_ingestion_jobs DROP CONSTRAINT IF EXISTS kb_ingestion_jobs_status_check;
+    ALTER TABLE kb_ingestion_jobs ADD CONSTRAINT kb_ingestion_jobs_status_check
+        CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'dead_letter'));
+END $$;
+DO $$ BEGIN
+    ALTER TABLE kb_ingestion_jobs DROP CONSTRAINT IF EXISTS kb_ingestion_jobs_error_class_check;
+    ALTER TABLE kb_ingestion_jobs ADD CONSTRAINT kb_ingestion_jobs_error_class_check
+        CHECK (error_class IS NULL OR error_class IN ('transient', 'permanent'));
+END $$;
+
+-- Jobs a pre-lease worker left running have no lease; give them one so the reaper can recover them
+-- (a NULL lease never compares as expired, and they would otherwise count against the tenant cap forever).
+UPDATE kb_ingestion_jobs SET lease_expires_at = now() + interval '120 seconds'
+ WHERE status = 'running' AND lease_expires_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_kb_ingestion_jobs_claim ON kb_ingestion_jobs(next_attempt_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_kb_ingestion_jobs_lease ON kb_ingestion_jobs(lease_expires_at) WHERE status = 'running';
+
+-- ── kb_ingestion_events — append-only trail: where is my document, and why did it fail ──
+CREATE TABLE IF NOT EXISTS kb_ingestion_events (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_id       UUID NOT NULL REFERENCES kb_ingestion_jobs(id) ON DELETE CASCADE,
+    document_id  UUID NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
+    tenant_id    UUID NOT NULL REFERENCES tenants(id),
+    attempt      INT NOT NULL,
+    stage        TEXT NOT NULL,  -- read | extract | chunk | embed | index | worker
+    status       TEXT NOT NULL CHECK (status IN ('ok', 'error', 'retry_scheduled', 'dead_letter', 'lease_expired')),
+    duration_ms  INT,
+    detail       JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()  -- not now(): events in one transaction must keep insert order
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_ingestion_events_job ON kb_ingestion_events(job_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_kb_ingestion_events_document ON kb_ingestion_events(document_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_kb_ingestion_events_tenant ON kb_ingestion_events(tenant_id);
+
+-- ── Phases 3-6 schema (parsers, chunking, hybrid retrieval, measurement) ────
+-- One idempotent block so the parallel phase branches share a single schema change.
+
+-- Documents: how they were parsed, how good the parse was, which chunker produced the chunks.
+-- ready_degraded = indexed, but some of the document could not be read (still retrievable).
+ALTER TABLE kb_documents ADD COLUMN IF NOT EXISTS content_hash    TEXT;
+ALTER TABLE kb_documents ADD COLUMN IF NOT EXISTS parser_used     TEXT;
+ALTER TABLE kb_documents ADD COLUMN IF NOT EXISTS quality_score   REAL;
+ALTER TABLE kb_documents ADD COLUMN IF NOT EXISTS chunker_version TEXT;
+DO $$ BEGIN
+    ALTER TABLE kb_documents DROP CONSTRAINT IF EXISTS kb_documents_status_check;
+    ALTER TABLE kb_documents ADD CONSTRAINT kb_documents_status_check
+        CHECK (status IN ('pending', 'processing', 'ready', 'ready_degraded', 'failed'));
+END $$;
+
+-- Chunks. Parent-child: small child chunks are embedded and searched; the enclosing section is stored as
+-- a parent row (is_parent = true, embedding NULL, chunk_index = -1 - parent ordinal so it never collides
+-- with a child's index) and returned for context. Lexical search runs on tsv ('simple' config: no
+-- language-specific stemming, so it works for every language the platform serves).
+ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS parent_id       UUID REFERENCES kb_chunks(id) ON DELETE SET NULL;
+ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS is_parent       BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS section_path    TEXT;   -- heading breadcrumb, e.g. 'Refunds > Eligibility'
+ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS embedding_model TEXT;
+ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS dims            INT;
+ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS tsv tsvector
+    GENERATED ALWAYS AS (to_tsvector('simple', coalesce(content, ''))) STORED;
+
+CREATE INDEX IF NOT EXISTS idx_kb_chunks_tsv ON kb_chunks USING gin (tsv);
+CREATE INDEX IF NOT EXISTS idx_kb_chunks_parent ON kb_chunks(parent_id) WHERE parent_id IS NOT NULL;
+
+-- ── retrieval_logs — one row per retrieval: what was asked, what came back, where the time went ──
+CREATE TABLE IF NOT EXISTS retrieval_logs (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id    UUID NOT NULL REFERENCES tenants(id),
+    agent_id     UUID REFERENCES agents(id),
+    trace_id     TEXT NOT NULL,
+    query        TEXT NOT NULL,
+    status       TEXT NOT NULL CHECK (status IN ('ok', 'no_match', 'partial', 'unavailable', 'error')),
+    degraded     TEXT[] NOT NULL DEFAULT '{}',          -- fallbacks taken, e.g. {lexical_only, rerank_skipped}
+    chunk_ids    UUID[] NOT NULL DEFAULT '{}',
+    top_score    REAL,
+    candidates   INT,
+    timings_ms   JSONB NOT NULL DEFAULT '{}'::jsonb,    -- plan, embed, dense, lexical, fuse, rerank, total
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_retrieval_logs_tenant_time ON retrieval_logs(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_retrieval_logs_trace ON retrieval_logs(trace_id);
+
 -- knowledge_base_ids is default-deny: give the start node the agent's enabled KBs
 -- when no node in the graph lists any.
 DO $kb_workflow_backfill$

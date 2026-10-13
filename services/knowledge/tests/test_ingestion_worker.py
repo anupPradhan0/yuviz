@@ -123,8 +123,8 @@ async def test_process_one_job_unsupported_content_type_marks_failed(tenant_agen
         tenant_id=tenant["id"], slug="policies2", name="Policies2", embedding_config_id=embedding_cfg["id"],
     )
     doc = await documents_service.upload_document(
-        tenant_id=tenant["id"], kb_id=kb["id"], title="Scan", filename="scan.pdf",
-        content_type="application/pdf", content=b"%PDF-1.4 fake",
+        tenant_id=tenant["id"], kb_id=kb["id"], title="Scan", filename="scan.png",
+        content_type="image/png", content=b"\x89PNG\r\n\x1a\n" + bytes(64),
         storage=LocalStorageProvider(),
     )
     job = dict(await pool.fetchrow("SELECT * FROM kb_ingestion_jobs WHERE id = $1", doc["ingestion_job_id"]))
@@ -134,7 +134,7 @@ async def test_process_one_job_unsupported_content_type_marks_failed(tenant_agen
 
     updated_doc = await documents_service.get_document(doc["id"])
     assert updated_doc["status"] == "failed"
-    assert "unsupported content_type" in updated_doc["error"]
+    assert "not supported" in updated_doc["error"]
 
     updated_job = await pool.fetchrow("SELECT * FROM kb_ingestion_jobs WHERE id = $1", job["id"])
     assert updated_job["status"] == "failed"
