@@ -53,3 +53,29 @@ async def test_rerank_plumbing_reorders_and_reports_latency_on_the_golden_set(po
     assert result["reordered"] > 0, "the fake scorer never changed an order: the hook is not in the loop"
     assert min(result["rerank_ms"]) >= 4 and max(result["rerank_ms"]) < 120  # accounted, and inside the stage budget
     assert result["n"] == len(QUESTIONS)
+
+
+async def test_enrichment_plumbing_runs_through_the_whole_pipeline_on_the_golden_set(pool, monkeypatch):
+    """PLUMBING ONLY (see the rerank test above). A fake OpenAI-compatible LLM writes a sentence from the title in the
+    prompt; the run proves the tenant's LLM config is found, chunks get enriched, every document still ends ready and
+    the stored chunks stay the original text. Whether enrichment IMPROVES retrieval is not established: it needs a
+    real embedder and a real LLM (docs/knowledge-phase7.md), and the feature ships off by default."""
+    import json
+    import re
+
+    import httpx
+
+    from services.knowledge import enrichment
+
+    def llm(request):
+        user = json.loads(request.content)["messages"][1]["content"]
+        title = re.search(r"<title>(.*?)</title>", user).group(1)
+        return httpx.Response(200, json={"choices": [{"message": {"content": f"This passage is part of the {title} document."}}]})
+
+    monkeypatch.setenv("KNOWLEDGE_ENRICH_CHUNKS", "1")
+    monkeypatch.setenv("EVAL_FAKE_LLM_KEY", "k")
+    monkeypatch.setattr(enrichment, "_test_transport", httpx.MockTransport(llm))
+    result = await run_pipeline_eval(pool, llm_config={"engine": "openai", "model": "fake", "api_key_ref": "env:EVAL_FAKE_LLM_KEY"})
+    assert result["documents_not_ready"] == 0
+    assert result["enriched_chunks"] > 0 and result["enrich_failed"] == 0
+    assert result["n"] == len(QUESTIONS)

@@ -23,6 +23,7 @@ TOP_K = 5
 
 async def _purge(pool, tenant_id) -> None:
     await retrieval_log.flush()
+    await pool.execute("UPDATE tenants SET default_llm_config_id = NULL WHERE id = $1", tenant_id)
     for sql in (
         "DELETE FROM retrieval_logs WHERE tenant_id = $1",
         "DELETE FROM kb_chunks WHERE tenant_id = $1",
@@ -39,11 +40,12 @@ async def _purge(pool, tenant_id) -> None:
         await pool.execute(sql, tenant_id)
 
 
-async def run_pipeline_eval(pool, reranker=None) -> dict:
+async def run_pipeline_eval(pool, reranker=None, *, embedder=None, llm_config: dict | None = None) -> dict:
     """Index every golden document into one KB and ask every question. Returns recall@5, MRR and
     answer-in-context over the questions, plus the questions that missed (for the failure message). With a
     `reranker`, every question runs with rerank=True and the result also reports how many questions got a different
-    chunk order and the rerank stage's latency."""
+    chunk order and the rerank stage's latency. `embedder` replaces the deterministic fake (real_eval.py), and
+    `llm_config` ({engine, model, api_key_ref}) gives the eval tenant an LLM provider for contextual enrichment."""
     slug = f"golden-{uuid.uuid4().hex[:8]}"
     tenant = dict(await pool.fetchrow("INSERT INTO tenants (name, slug) VALUES ($1, $1) RETURNING *", slug))
     try:
@@ -51,7 +53,13 @@ async def run_pipeline_eval(pool, reranker=None) -> dict:
             "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, 'golden', 'Golden') RETURNING *", tenant["id"]))
         set_caller_tenant(str(tenant["id"]))
         kb = await make_kb(pool, tenant, agent, "golden")
-        embedder, storage = FakeEmbedder(), LocalStorageProvider()
+        if llm_config:
+            cfg_id = await pool.fetchval(
+                "INSERT INTO provider_configs (tenant_id, name, role, engine, model, api_key_ref) "
+                "VALUES ($1, 'eval-llm', 'llm', $2, $3, $4) RETURNING id", tenant["id"], llm_config["engine"],
+                llm_config.get("model"), llm_config["api_key_ref"])
+            await pool.execute("UPDATE tenants SET default_llm_config_id = $2 WHERE id = $1", tenant["id"], cfg_id)
+        embedder, storage = embedder or FakeEmbedder(), LocalStorageProvider()
         manager = make_manager(embedder)
         for name, (kind, text) in ALL_DOCS.items():
             ctype, ext = ("text/csv", "csv") if kind == "table" else ("text/markdown", "md")
@@ -66,6 +74,9 @@ async def run_pipeline_eval(pool, reranker=None) -> dict:
             "SELECT count(*) FROM kb_documents WHERE tenant_id = $1 AND status NOT IN ('ready', 'ready_degraded')",
             tenant["id"])
 
+        enrich = await pool.fetchrow(
+            "SELECT coalesce(sum((detail->>'enriched')::int), 0) AS enriched, coalesce(sum((detail->>'failed')::int), 0) AS failed "
+            "FROM kb_ingestion_events WHERE tenant_id = $1 AND stage = 'embed' AND status = 'ok'", tenant["id"])
         retrieval.clear_caches()
         repo = await get_vector_repo()
         m, missed = Metrics(), []
@@ -103,6 +114,7 @@ async def run_pipeline_eval(pool, reranker=None) -> dict:
         return {
             "n": m.n, "documents_not_ready": not_ready, "recall_at_5": m.recall_at_5 / m.n, "mrr": m.mrr / m.n,
             "answer_in_context": m.answer_in_context / m.n, "missed": missed,
+            **({"enriched_chunks": enrich["enriched"], "enrich_failed": enrich["failed"]} if llm_config else {}),
             **({"reordered": reordered, "rerank_ms": rerank_ms, "degraded": sorted(degraded_seen)} if reranker else {}),
         }
     finally:
