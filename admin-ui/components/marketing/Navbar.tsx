@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { ArrowRight, Menu, X, LogIn } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { BrandMark } from '@/components/BrandMark'
 
 const navItems = [
   { label: 'Product', href: '#product' },
@@ -16,9 +17,7 @@ const navItems = [
 export function Logo() {
   return (
     <a href="#top" className="flex items-center gap-2.5 font-semibold tracking-[-0.04em] text-lg text-foreground">
-      <span className="logo-mark">
-        <span />
-      </span>
+      <BrandMark size={26} className="logo-mark" />
       yuviz ai
     </a>
   )

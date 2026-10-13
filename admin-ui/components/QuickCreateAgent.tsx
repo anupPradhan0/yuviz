@@ -10,7 +10,7 @@ import {
 import { ApiError, ProviderConfig, createAgent, createProvider, generateSystemPrompt, listProviders } from "@/lib/api";
 import { BUILTIN_TTS_ENGINE, BUILTIN_TTS_VOICE } from "@/lib/engineCatalog";
 import { useActiveTenant } from "@/lib/useActiveTenant";
-import { AGENT_TEMPLATES, AgentTemplate, CallDirection, templateByKey } from "@/lib/agentTemplates";
+import { AGENT_TEMPLATES, AgentTemplate, CallDirection, DEFAULT_GREETING, templateByKey } from "@/lib/agentTemplates";
 import { buildSystemPrompt } from "@/lib/systemPromptBuilder";
 
 const slugify = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -23,11 +23,6 @@ const DIRECTIONS: { key: CallDirection; title: string; blurb: string }[] = [
 const ROLE_LINE: Record<CallDirection, string> = {
   inbound: "You answer incoming phone calls for the business.",
   outbound: "You place outbound phone calls to customers on behalf of the business.",
-};
-
-const DEFAULT_GREETING: Record<CallDirection, string> = {
-  inbound: "Hi, thanks for calling! How can I help you today?",
-  outbound: "Hi, do you have a quick minute?",
 };
 
 const TASK_PLACEHOLDER: Record<CallDirection, string> = {
