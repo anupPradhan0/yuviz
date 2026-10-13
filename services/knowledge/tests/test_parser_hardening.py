@@ -659,19 +659,59 @@ def _shared_stream_pdf(pages: int, repeats: int = 450_000) -> bytes:
     return bytes(out)
 
 
-async def test_400_pages_sharing_one_huge_content_stream_are_refused_fast():
+async def test_400_pages_sharing_one_huge_content_stream_with_no_other_text_fail_fast_with_the_reason():
     raw = _shared_stream_pdf(400)
     assert len(raw) < 200_000
     t0 = time.time()
-    assert "more content than can be processed" in await _reason(raw, limits=Limits(timeout_s=40))
+    reason = await _reason(raw, limits=Limits(timeout_s=40))
+    assert "no PDF page could be read" in reason and "more content than can be processed" in reason
     assert time.time() - t0 < 10
 
 
-async def test_400_pages_sharing_a_stream_under_the_per_page_cap_are_caught_by_the_repeat_check():
+async def test_400_pages_sharing_a_stream_under_the_per_page_cap_degrade_after_the_repeat_check():
     raw = _shared_stream_pdf(400, repeats=30_000)     # 1.4 MB per page, under the 2 MB cap, shared by every page
     t0 = time.time()
-    assert "share or repeat" in await _reason(raw, limits=Limits(timeout_s=55))
-    assert time.time() - t0 < 40
+    doc = await parse_document(raw, limits=Limits(timeout_s=55))
+    assert doc.degraded and any("shares or repeats" in w for w in doc.warnings)
+    assert "visible text on every page" in doc.text() and time.time() - t0 < 40
+
+
+def _pdf_with_a_heavy_page() -> bytes:
+    heavy = "0 0 m 10 10 l S\n" * 220_000                                  # ~3.5 MB of vector drawing, no text
+    return B.make_pdf([{"text": VISIBLE + ".\nFirst page text that is perfectly readable."},
+                       {"text": "Second page text that is also readable.", "ops": heavy},
+                       {"text": "Third page text after the heavy one."}])
+
+
+async def test_one_heavy_vector_page_degrades_the_document_instead_of_rejecting_it():
+    raw = _pdf_with_a_heavy_page()
+    doc = await _parse(raw)
+    assert doc.degraded and doc.parser_used == "pypdf"
+    assert any("1 page(s) skipped" in w and "KB_PARSE_PDF_PAGE_BYTES" in w for w in doc.warnings)
+    assert VISIBLE in doc.text() and "Third page text" in doc.text() and "Second page text" not in doc.text()
+
+
+async def test_the_page_size_limit_is_configurable():
+    doc = await parse_document(_pdf_with_a_heavy_page(), limits=Limits(pdf_page_bytes=8 * 1024 * 1024, timeout_s=55))
+    assert "Second page text" in doc.text() and not any("skipped" in w for w in doc.warnings)
+
+
+def test_the_extraction_time_budget_stops_early_and_keeps_what_was_read(monkeypatch):
+    import itertools
+    import types
+
+    raw = B.make_pdf([{"text": f"Page number {i} has plenty of readable text on it."} for i in range(8)])
+    ticks = itertools.count()
+    monkeypatch.setattr(formats, "time", types.SimpleNamespace(monotonic=lambda: next(ticks) * 2.0))   # a fake clock
+    doc = formats.parse_by_type(raw, detect.PDF, Limits(pdf_budget_s=5))
+    assert doc.degraded and any("stopped at its time budget after 2 of 8 pages" in w for w in doc.warnings)
+    assert "Page number 0" in doc.text() and "Page number 1" in doc.text() and "Page number 5" not in doc.text()
+
+
+async def test_a_zero_budget_with_nothing_read_is_a_clear_final_rejection():
+    raw = B.make_pdf([{"text": "Page with readable text here."}])
+    reason = await _reason(raw, limits=Limits(pdf_budget_s=0.0))
+    assert "no PDF page could be read" in reason and "time budget" in reason
 
 
 # ── S1 interim: kill switch ─────────────────────────────────────────────

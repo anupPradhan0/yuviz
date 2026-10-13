@@ -1243,10 +1243,20 @@ def _hidden_strings(content: bytes, off_layers: frozenset = frozenset()) -> list
     return out
 
 
-MAX_PDF_PAGE_CONTENT = 2 * 1024 * 1024     # decoded content stream of one page; pypdf interprets ~0.2 MB/s
 MAX_PDF_SHARED_REPEATS = 2                  # the same big stream used by more pages than this is a repeat bomb
-PDF_TEXT_BUDGET_S = 25.0                    # wall clock for text extraction across all pages
 _PDF_STATE: dict = {"seen": {}, "t0": 0.0}
+
+
+class _PageSkipped(Exception):
+    """One page is too heavy to interpret; the rest of the document still is."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _BudgetHit(Exception):
+    """The extraction time budget ran out; pages processed so far are kept."""
 
 
 def _pdf_page_text(page, hidden: Counter) -> str:
@@ -1257,15 +1267,16 @@ def _pdf_page_text(page, hidden: Counter) -> str:
         data = b""
     # Extracting a page interprets its content stream in pure Python, and pages may share one stream: 400 pages sharing a
     # 20 MB stream is hours of work from a 95 KB file. Bound one page, the repeats of a big stream, and the total time.
-    if len(data) > MAX_PDF_PAGE_CONTENT:
-        raise LimitExceeded("a PDF page has more content than can be processed safely")
+    # The offending page is skipped, not the document: the rest is kept and the result is marked degraded.
+    if len(data) > _LIMITS.pdf_page_bytes:
+        raise _PageSkipped("more content than can be processed safely (KB_PARSE_PDF_PAGE_BYTES)")
     if len(data) > 256 * 1024:
         key = hash(data)
         _PDF_STATE["seen"][key] = _PDF_STATE["seen"].get(key, 0) + 1
         if _PDF_STATE["seen"][key] > MAX_PDF_SHARED_REPEATS:
-            raise LimitExceeded("PDF pages share or repeat more content than can be processed safely")
-    if time.monotonic() - _PDF_STATE["t0"] > PDF_TEXT_BUDGET_S:
-        raise LimitExceeded("PDF text extraction exceeded its time budget")
+            raise _PageSkipped("shares or repeats a large content stream")
+    if time.monotonic() - _PDF_STATE["t0"] > _LIMITS.pdf_budget_s:
+        raise _BudgetHit()
     full = page.extract_text() or ""
     # Longest first, so a hidden string is never matched inside a longer one. Only strings that pypdf decoded the
     # same way (simple fonts) can be located; invisible text in CID-keyed fonts is a known gap.
@@ -1279,17 +1290,32 @@ def _pdf_page_text(page, hidden: Counter) -> str:
 def _pdf_pypdf(reader, state: dict) -> ParsedDocument:
     if reader is None:
         raise TierSkip
-    texts = []
+    texts: list[str] = []
     hidden: Counter = Counter()
-    for page in reader.pages:
+    skipped: Counter = Counter()
+    stopped_at: int | None = None
+    pages = list(reader.pages)
+    _PDF_STATE["t0"] = time.monotonic()
+    for i, page in enumerate(pages):
         try:
             texts.append(_pdf_page_text(page, hidden))
-        except LimitExceeded:
-            raise
+        except _PageSkipped as exc:
+            texts.append("")
+            skipped[exc.reason] += 1
+        except _BudgetHit:
+            texts.extend([""] * (len(pages) - i))
+            stopped_at = i
+            break
         except Exception:
             texts.append("")
     state["pypdf_had_text"] = any(t.strip() for t in texts)
-    return _pdf_pages_to_doc(texts, hidden=dict(hidden))
+    state["limit_hit"] = bool(skipped or stopped_at is not None)
+    warnings = [f"{n} page(s) skipped: {reason}" for reason, n in skipped.items()]
+    if stopped_at is not None:
+        warnings.append(f"text extraction stopped at its time budget after {stopped_at} of {len(pages)} pages")
+    if warnings and not state["pypdf_had_text"]:
+        raise LimitExceeded("no PDF page could be read: " + "; ".join(warnings))
+    return _pdf_pages_to_doc(texts, degraded=bool(warnings), warnings=warnings, hidden=dict(hidden))
 
 
 _ESCAPES = {b"n": b"\n", b"r": b"\r", b"t": b"\t", b"b": b"\b", b"f": b"\f", b"(": b"(", b")": b")", b"\\": b"\\"}
@@ -1431,7 +1457,7 @@ def _pdf_raw(raw: bytes, state: dict) -> ParsedDocument:
     """Text-layer rung for files pypdf cannot open or read nothing from: inflate content streams and read the
     show-text operators. Handles simple (non-CID) fonts only; the quality gate rejects what comes out garbled.
     Skipped when pypdf did read text: this rung has no page boundaries, so it would hide empty pages."""
-    if state.get("pypdf_had_text"):
+    if state.get("pypdf_had_text") or state.get("limit_hit"):
         raise TierSkip
     lines: list[str] = []
     hidden: Counter = Counter()
@@ -1460,17 +1486,15 @@ def _pdf_raw(raw: bytes, state: dict) -> ParsedDocument:
     return doc
 
 
-def _pdf_ocr(reader, language: str | None) -> ParsedDocument:
+def _pdf_ocr(reader, language: str | None, state: dict) -> ParsedDocument:
     """OCR the pages that have no text layer, using the images embedded in them (a scan is one image per page)."""
-    if reader is None:
-        raise TierSkip
+    if reader is None or state.get("limit_hit"):
+        raise TierSkip   # pages skipped for size are not scans: OCR would not help and would mislabel them
     texts: list[str] = []
     empty: list[int] = []
     for i, page in enumerate(reader.pages):
         try:
             t = _pdf_page_text(page, Counter())
-        except LimitExceeded:
-            raise
         except Exception:
             t = ""
         texts.append(t)
@@ -1508,7 +1532,7 @@ def parse_by_type(raw: bytes, content_type: str, limits: Limits, language: str |
         doc = run_ladder([
             ("pypdf", lambda: _pdf_pypdf(reader, state)),
             ("pdf-raw", lambda: _pdf_raw(raw, state)),
-            ("ocr", lambda: _pdf_ocr(reader, language)),
+            ("ocr", lambda: _pdf_ocr(reader, language, state)),
         ])
     elif ct == detect.DOCX:
         zf = guard_zip(raw, limits, "DOCX")
