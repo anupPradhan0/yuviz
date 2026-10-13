@@ -7,6 +7,7 @@ from typing import Any
 from libs.tenancy import tenant_conn
 
 from . import audit, db
+from . import retrieval_plan as plans
 
 _UPDATABLE_FIELDS = {"top_k", "max_tokens", "minimum_score", "rerank", "hybrid_search", "include_citations"}
 
@@ -49,4 +50,5 @@ async def upsert_policy(
             action="updated" if old is not None else "created",
             user_id=user_id, user_email=user_email, old_value=old, new_value=new,
         )
+    plans.clear_cache()  # the resolved plan embeds the agent's policy row
     return new

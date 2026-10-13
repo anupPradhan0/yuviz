@@ -8,6 +8,7 @@ from typing import Any
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import cache, db
+from . import retrieval_plan as plans
 
 
 async def get_agent_tenant_id(agent_id: Any, *, platform_scoped: bool = False) -> str | None:
@@ -37,6 +38,7 @@ async def _refresh_flag(agent_id: Any) -> None:
     if slugs is None:
         return
     tenant_slug, agent_slug = slugs
+    plans.invalidate_agent(tenant_slug, agent_slug)
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         row = await conn.fetchrow(

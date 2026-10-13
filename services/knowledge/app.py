@@ -6,6 +6,7 @@ Run: uvicorn services.knowledge.app:app --reload --port 8100
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -14,8 +15,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from . import db
-from .routers import agent_kb, documents, knowledge_bases, retrieval_policies, retrieve
+from . import db, retrieval_log
+from .routers import agent_kb, documents, knowledge_bases, prewarm, retrieval_policies, retrieve
 from .runtime import get_embedding_manager, get_vector_repo
 
 log = logging.getLogger(__name__)
@@ -27,7 +28,14 @@ async def lifespan(app: FastAPI):
     await db.get_pool()
     await get_vector_repo()
     get_embedding_manager()
+    purge_task = asyncio.create_task(retrieval_log.purge_loop())
     yield
+    purge_task.cancel()
+    try:
+        await purge_task
+    except asyncio.CancelledError:
+        pass
+    await retrieval_log.shutdown()  # before close_pool: the writer uses the pool
     await db.close_pool()
 
 
@@ -47,6 +55,7 @@ app.include_router(documents.router)
 app.include_router(agent_kb.router)
 app.include_router(retrieval_policies.router)
 app.include_router(retrieve.router)
+app.include_router(prewarm.router)
 
 
 @app.exception_handler(LookupError)

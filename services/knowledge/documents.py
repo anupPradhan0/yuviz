@@ -8,6 +8,7 @@ from typing import Any
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import audit, db
+from . import retrieval_plan as plans
 from .storage import StorageProvider
 
 _UPDATABLE_FIELDS = {"title", "language", "tags", "usage_mode"}
@@ -123,6 +124,7 @@ async def update_document(
             conn, entity_type="kb_document", entity_id=document_id, action="updated",
             user_id=user_id, user_email=user_email, old_value=old, new_value=new,
         )
+    plans.clear_cache()  # usage_mode/title edits change the plan's prompt-mode documents
     return new
 
 
@@ -185,3 +187,4 @@ async def soft_delete_document(
             conn, entity_type="kb_document", entity_id=document_id, action="deleted",
             user_id=user_id, user_email=user_email, old_value=old,
         )
+    plans.clear_cache()  # a deleted prompt-mode document must stop being served now, not at TTL
