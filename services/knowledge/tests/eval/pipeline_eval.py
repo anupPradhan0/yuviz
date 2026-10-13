@@ -51,9 +51,11 @@ class ExactRepo(PgVectorRepository):
     def _stable(matches, limit):
         return sorted(matches, key=lambda m: (-m.score, m.document_title, m.child_content or m.content))[:limit]
 
-    async def search(self, conn, kb_ids, embedding, top_k, minimum_score):
+    async def search(self, conn, kb_ids, embedding, top_k, minimum_score, *args, **kwargs):
+        # *args/**kwargs: model and notes (and whatever the real signature grows next) pass straight through.
         await conn.execute("SET LOCAL enable_indexscan = off")
-        return self._stable(await super().search(conn, kb_ids, embedding, max(top_k, self._WIDE), minimum_score), top_k)
+        wide = await super().search(conn, kb_ids, embedding, max(top_k, self._WIDE), minimum_score, *args, **kwargs)
+        return self._stable(wide, top_k)
 
     async def lexical_search(self, conn, kb_ids, query, limit, minimum_score, *args, **kwargs):
         wide = await super().lexical_search(conn, kb_ids, query, max(limit, self._WIDE), minimum_score, *args, **kwargs)
