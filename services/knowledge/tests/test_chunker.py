@@ -395,3 +395,50 @@ def test_breadcrumb_off_keeps_section_path_but_drops_the_prefix():
     r = chunk_document(blocks_from_text(POLICY), config=cfg)
     assert all(c.section_path for c in r.children if "Store policy" in (c.section_path or ""))
     assert not any(c.content.startswith(c.section_path) for c in r.children if c.section_path)
+
+
+# ── stored estimate is an upper bound on mixed-script text ──────────────
+
+def _random_mixed_text(rng, n_words):
+    scripts = [
+        lambda: "".join(rng.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(rng.randint(2, 9))),
+        lambda: "".join(rng.choice("退款政策客户可以在购买之日起三十天内申请全额") for _ in range(rng.randint(1, 6))),
+        lambda: "".join(rng.choice("रिफंडनीतिग्राहकखरीदतारीख") for _ in range(rng.randint(2, 7))),
+        lambda: "".join(rng.choice("سياسةالاسترداديمكنللعملاء") for _ in range(rng.randint(2, 7))),
+        lambda: str(rng.randint(0, 10**rng.randint(1, 6))),
+        lambda: rng.choice(["def f(x):", "{'a': [1, 2]}", "x_y = a[0] + b[1]", "!!!", "—", "😀", "á́"]),
+    ]
+    sep = [" ", " ", " ", ", ", ". ", "\n", "\n\n"]
+    out = []
+    for _ in range(n_words):
+        out.append(rng.choice(scripts)())
+        out.append(rng.choice(sep))
+    return "".join(out)
+
+
+@pytest.mark.parametrize("seed", range(40))
+@pytest.mark.parametrize("cap,strategy", [(512, None), (256, "prose"), (128, "structure"), (512, "fixed")])
+def test_stored_token_count_never_exceeds_the_cap_on_random_mixed_scripts(seed, cap, strategy, monkeypatch):
+    import random
+    monkeypatch.setenv("KNOWLEDGE_CHUNKER", "structure")
+    rng = random.Random(seed)
+    text = _random_mixed_text(rng, rng.randint(200, 1500))
+    r = chunk_document(blocks_from_text(text), config=ChunkConfig.for_embedder(cap), strategy=strategy)
+    counter = EstimatingTokenCounter()
+    for c in r.children:
+        assert c.token_count == counter.count(c.content)
+        assert c.token_count <= ChunkConfig.for_embedder(cap).cap, (seed, cap, strategy, c.token_count)
+
+
+def test_the_reported_mixed_latin_and_cjk_case_stays_under_the_cap():
+    latin = "refunds are processed within thirty days of purchase and shipping takes a few days " * 3
+    text = "\n\n".join((latin + "退款政策客户可以在购买之日起三十天内申请全额退款" * 8) for _ in range(20))
+    cfg = ChunkConfig.for_embedder(512)
+    r = chunk_document(blocks_from_text(text), config=cfg)
+    assert max(c.token_count for c in r.children) <= cfg.cap
+
+
+def test_the_estimate_is_additive_over_whitespace_pieces():
+    c = EstimatingTokenCounter()
+    pieces = ["alpha beta ", "退款政策客户 ", "रिफंड नीति ", "x = 1\n", "gamma"]
+    assert c.count("".join(pieces)) <= sum(c.count(p) for p in pieces)
