@@ -346,7 +346,8 @@ async def test_another_tenants_config_or_kb_is_invisible_to_the_migration(app_po
             await reembed.reembed_kb(app_pool, mgr, tenant_id=str(mig["tenant"]["id"]), kb_id=mig["kb"]["id"], to_config=foreign["id"])
         with pytest.raises(ValueError):  # their scope, my KB
             await reembed.reembed_kb(app_pool, mgr, tenant_id=str(other_tenant["id"]), kb_id=mig["kb"]["id"], to_config=foreign["id"])
-        assert await reembed.abandon(app_pool, str(other_tenant["id"]), mig["kb"]["id"]) == 0
+        with pytest.raises(ValueError):
+            await reembed.abandon(app_pool, str(other_tenant["id"]), mig["kb"]["id"])
         report = await reembed.reembed_kb(app_pool, _manager(_spaces(mig)), tenant_id=str(mig["tenant"]["id"]), kb_id=mig["kb"]["id"], to_config=mig["b"])
         assert report.swapped  # the legitimate path works through the RLS-bound role
     finally:
@@ -468,7 +469,7 @@ async def test_the_swap_waits_for_an_in_flight_worker_transaction_and_then_sees_
     async with pool.acquire() as worker:
         tx = worker.transaction()
         await tx.start()
-        await reembed.assert_kb_config_current(worker, mig["kb"]["id"], mig["a"])  # what the worker's index step does
+        await reembed.assert_kb_config_current(worker, mig["kb"]["id"], mig["a"], mig["tenant"]["id"])  # what the worker's index step does
         swap_task = asyncio.create_task(reembed.swap(pool, tenant_id, mig["kb"]["id"], cfg))
         await asyncio.sleep(0.3)
         assert not swap_task.done(), "the swap did not wait for the worker transaction holding the KB row"
@@ -479,3 +480,210 @@ async def test_the_swap_waits_for_an_in_flight_worker_transaction_and_then_sees_
         await tx.commit()
     assert await asyncio.wait_for(swap_task, 5) == (False, "incomplete")  # saw the committed chunk, refused
     assert (await _state(pool, mig))[0] == mig["a"]
+
+
+# --- ownership, enforced by the module (the CLI runs on the service DSN, where RLS does not apply) -------------------
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def foreign(pool, mig):
+    """A second tenant with its own KB, chunks and embedding config, all reachable by id on the non-RLS pool."""
+    other = dict(await pool.fetchrow("INSERT INTO tenants (name, slug) VALUES ('o', $1) RETURNING *", f"o-{uuid.uuid4().hex[:8]}"))
+    agent = dict(await pool.fetchrow("INSERT INTO agents (tenant_id, slug, name) VALUES ($1, 'x', 'X') RETURNING *", other["id"]))
+    set_caller_tenant(str(other["id"]))
+    kb = await make_kb(pool, other, agent, "theirs")
+    await add_document(pool, other, kb, "Their doc", ["their confidential chunk one", "their confidential chunk two"])
+    cfg = await _config(other, "Embed-theirs", "m-x")
+    set_caller_tenant(None)
+    yield {"tenant": other, "kb": kb, "cfg": cfg}
+    await pool.execute("DELETE FROM audit_log WHERE tenant_id = $1", other["id"])
+    await pool.execute("DELETE FROM kb_chunks WHERE tenant_id = $1", other["id"])
+    await pool.execute("DELETE FROM kb_documents WHERE tenant_id = $1", other["id"])
+    await pool.execute("DELETE FROM agent_knowledge_bases WHERE agent_id = $1", agent["id"])
+    await pool.execute("DELETE FROM knowledge_bases WHERE tenant_id = $1", other["id"])
+    await pool.execute("DELETE FROM agents WHERE tenant_id = $1", other["id"])
+    await pool.execute("DELETE FROM provider_configs WHERE tenant_id = $1", other["id"])
+    await pool.execute("DELETE FROM tenants WHERE id = $1", other["id"])
+
+
+async def _snapshot(pool, *tenant_ids):
+    chunks = await pool.fetch(
+        "SELECT id, embedding::text, embedding_model, embedding_next::text, embedding_next_model FROM kb_chunks "
+        "WHERE tenant_id = ANY($1) ORDER BY id", list(tenant_ids))
+    kbs = await pool.fetch("SELECT id, embedding_config_id, config_version FROM knowledge_bases WHERE tenant_id = ANY($1) ORDER BY id", list(tenant_ids))
+    audits = await pool.fetchval("SELECT count(*) FROM audit_log WHERE tenant_id = ANY($1)", list(tenant_ids))
+    return [tuple(r) for r in chunks], [tuple(r) for r in kbs], audits
+
+
+def _spied(mig, foreign):
+    spaces = {**_spaces(mig), str(foreign["cfg"]["id"]): Space("theirs")}
+    return spaces
+
+
+async def _refused(pool, mig, foreign, spaces, **call):
+    """Run a cross-tenant call on the service pool: it must raise ValueError, call no provider and write nothing."""
+    ids = [mig["tenant"]["id"], foreign["tenant"]["id"]]
+    before = await _snapshot(pool, *ids)
+    set_caller_tenant(None)
+    with pytest.raises(ValueError):
+        await reembed.reembed_kb(pool, _manager(spaces), **call)
+    assert all(sp.calls == 0 for sp in spaces.values()), "a provider was called for a refused migration"
+    assert await _snapshot(pool, *ids) == before
+
+
+async def test_a_config_of_another_tenant_is_refused_before_any_text_leaves(pool, mig, foreign):
+    spaces = _spaces(mig) | {str(foreign["cfg"]["id"]): Space("theirs")}
+    for dry in (False, True):
+        await _refused(pool, mig, foreign, spaces, tenant_id=str(mig["tenant"]["id"]), kb_id=mig["kb"]["id"],
+                       to_config=foreign["cfg"]["id"], dry_run=dry)
+
+
+async def test_a_kb_of_another_tenant_is_refused(pool, mig, foreign):
+    spaces = _spaces(mig) | {str(foreign["cfg"]["id"]): Space("theirs")}
+    for dry in (False, True):
+        await _refused(pool, mig, foreign, spaces, tenant_id=str(mig["tenant"]["id"]), kb_id=foreign["kb"]["id"],
+                       to_config=mig["b"], dry_run=dry)
+
+
+async def test_the_wrong_tenant_flag_is_refused(pool, mig, foreign):
+    spaces = _spaces(mig) | {str(foreign["cfg"]["id"]): Space("theirs")}
+    for dry in (False, True):  # their tenant id with my KB and my config
+        await _refused(pool, mig, foreign, spaces, tenant_id=str(foreign["tenant"]["id"]), kb_id=mig["kb"]["id"],
+                       to_config=mig["b"], dry_run=dry)
+    await _refused(pool, mig, foreign, spaces, tenant_id=str(foreign["tenant"]["id"]), kb_id=mig["kb"]["id"],
+                   to_config=foreign["cfg"]["id"])
+
+
+async def test_abandon_under_the_wrong_tenant_clears_nothing(pool, mig, foreign):
+    await _run(pool, mig, "b", batch=2, max_batches=1)
+    before = await _snapshot(pool, mig["tenant"]["id"], foreign["tenant"]["id"])
+    with pytest.raises(ValueError):
+        await reembed.abandon(pool, str(foreign["tenant"]["id"]), mig["kb"]["id"])
+    assert await _snapshot(pool, mig["tenant"]["id"], foreign["tenant"]["id"]) == before
+    assert await reembed.abandon(pool, str(mig["tenant"]["id"]), mig["kb"]["id"]) == 2  # the owner can
+
+
+async def test_bad_ids_are_refused_not_executed(pool, mig):
+    set_caller_tenant(None)
+    for kw in ({"tenant_id": "x' OR '1'='1"}, {"kb_id": "not-a-uuid"}, {"to_config": "nope"}):
+        args = {"tenant_id": str(mig["tenant"]["id"]), "kb_id": mig["kb"]["id"], "to_config": mig["b"]} | kw
+        with pytest.raises(ValueError):
+            await reembed.reembed_kb(pool, _manager(_spaces(mig)), **args)
+
+
+async def test_the_swap_and_audit_are_recorded_under_the_kbs_owner(pool, mig, foreign):
+    assert (await _run(pool, mig, "b")).swapped
+    owners = {r["tenant_id"] for r in await pool.fetch("SELECT tenant_id FROM audit_log WHERE entity_id = $1 AND entity_type = 'knowledge_base' AND new_value->>'embedding_config_id' = $2", mig["kb"]["id"], mig["b"])}
+    assert owners == {mig["tenant"]["id"]}
+    theirs = await pool.fetch("SELECT embedding_next IS NULL AS clean, embedding_model FROM kb_chunks WHERE tenant_id = $1", foreign["tenant"]["id"])
+    assert theirs and all(r["clean"] and r["embedding_model"] is None for r in theirs)
+
+
+# --- soft-deleted documents ----------------------------------------------------------------------------------------
+
+async def test_soft_deleted_documents_are_not_sent_out_again_and_leave_no_old_space_vectors(pool, mig):
+    gone = await add_document(pool, mig["tenant"], mig["kb"], "Deleted doc", ["deleted secret text one", "deleted secret text two"], deleted=True)
+    for cid in gone["chunk_ids"]:
+        await pool.execute("UPDATE kb_chunks SET embedding_model = 'm-a' WHERE id = $1", cid)
+    v2 = Space("v2")
+    sent = []
+    orig = v2.embed
+
+    async def spy(texts):
+        sent.extend(texts)
+        return await orig(texts)
+    v2.embed = spy
+    report = await _run(pool, mig, "b", _spaces(mig, v2))
+    assert report.swapped and report.embedded == 7 and not any("deleted secret" in t for t in sent)
+    rows = await pool.fetch("SELECT embedding IS NULL AS none, embedding_next IS NULL AS clean FROM kb_chunks WHERE document_id = $1", gone["id"])
+    assert rows and all(r["none"] and r["clean"] for r in rows)  # no vector left in the wrong space
+
+
+# --- the swap's lock and uploads -------------------------------------------------------------------------------------
+
+async def test_uploads_proceed_while_the_real_swap_holds_the_kb_row(pool, mig, monkeypatch):
+    await _run(pool, mig, "b", batch=100, max_batches=1)
+    inside = asyncio.Event()
+    orig = audit.write_audit
+
+    async def slow_audit(*a, **k):  # runs inside the swap transaction, after it took the KB row lock
+        inside.set()
+        await asyncio.sleep(1.0)
+        return await orig(*a, **k)
+    monkeypatch.setattr(audit, "write_audit", slow_audit)
+    swap_task = asyncio.create_task(_run(pool, mig, "b"))
+    await asyncio.wait_for(inside.wait(), 5)
+    t0 = asyncio.get_running_loop().time()
+    await asyncio.wait_for(add_document(pool, mig["tenant"], mig["kb"], "uploaded during swap", ["x"], embed=False), 0.6)
+    assert asyncio.get_running_loop().time() - t0 < 0.6 and not swap_task.done()
+    assert (await swap_task).swapped
+
+
+async def test_the_worker_guard_is_tenant_scoped(pool, mig, foreign):
+    async with pool.acquire() as conn:
+        with pytest.raises(reembed.KbConfigChanged):
+            await reembed.assert_kb_config_current(conn, mig["kb"]["id"], mig["a"], foreign["tenant"]["id"])
+        await reembed.assert_kb_config_current(conn, mig["kb"]["id"], mig["a"], mig["tenant"]["id"])
+
+
+async def test_a_swap_over_the_threshold_needs_allow_long_swap(pool, mig, monkeypatch):
+    monkeypatch.setattr(reembed, "MAX_SWAP_CHUNKS", 5)
+    v2 = Space("v2")
+    with pytest.raises(ValueError, match="allow-long-swap"):
+        await _run(pool, mig, "b", _spaces(mig, v2))
+    assert v2.calls == 0  # refused before spending any embedding calls
+    dry = await _run(pool, mig, "b", dry_run=True)
+    assert dry.too_large and dry.swap_chunks == 7
+    assert (await _run(pool, mig, "b", allow_long_swap=True)).swapped
+
+
+async def test_a_worker_waiting_on_the_swap_keeps_a_valid_lease_and_is_not_reaped_or_duplicated(pool, mig):
+    """The reviewer's worry: a worker blocked on the swap's lock outlives the 120 s lease and is reaped. The reaper
+    skips job rows that are locked (the worker holds its own job row FOR UPDATE while it waits), so it cannot take
+    the job; once the swap commits the worker's guard refuses its old-space vectors and the retry succeeds."""
+    from services.knowledge.ingestion_worker import reap_expired_leases
+    spaces = _spaces(mig)
+    await _run(pool, mig, "b", spaces, batch=100, max_batches=1)
+    from services.knowledge.embedding_manager import EmbeddingProviderConfig
+    cfg = EmbeddingProviderConfig(id=mig["b"], engine="ollama", model="m-b")
+    from services.knowledge.db import get_pool
+    p = await get_pool()
+    set_caller_tenant(str(mig["tenant"]["id"]))
+    doc = await documents_service.upload_document(
+        tenant_id=mig["tenant"]["id"], kb_id=mig["kb"]["id"], title="slow", filename="s.txt", content_type="text/plain",
+        content=_DOC, storage=LocalStorageProvider())
+    set_caller_tenant(None)
+    job = dict(await p.fetchrow("SELECT * FROM kb_ingestion_jobs WHERE id = $1", doc["ingestion_job_id"]))
+    async with pool.acquire() as swapper:
+        tx = swapper.transaction()
+        await tx.start()
+        await swapper.fetchval("SELECT 1 FROM knowledge_bases WHERE id = $1 FOR NO KEY UPDATE", mig["kb"]["id"])  # the swap, mid-flight
+        worker = asyncio.create_task(process_one_job(p, LocalStorageProvider(), _manager(spaces), job, lease_s=1.0, heartbeat_s=0.2))
+        await asyncio.sleep(2.5)  # past the 1 s lease
+        assert not worker.done()  # blocked on the KB row
+        assert await reap_expired_leases(p) == 0  # the locked job row is skipped, not reaped
+        await tx.rollback()
+    await asyncio.wait_for(worker, 10)
+    row = await pool.fetchrow("SELECT status, attempts FROM kb_ingestion_jobs WHERE id = $1", doc["ingestion_job_id"])
+    assert row["status"] == "succeeded" and row["attempts"] == 1
+
+
+# --- throttle ---------------------------------------------------------------------------------------------------------
+
+async def test_batches_are_paced(pool, mig, monkeypatch):
+    sleeps = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(s):
+        sleeps.append(s)
+        await real_sleep(0)
+    monkeypatch.setattr(reembed.asyncio, "sleep", fake_sleep)
+    report = await _run(pool, mig, "b", batch=2, sleep_s=0.5)
+    assert report.swapped and len([s for s in sleeps if s > 0.4]) == report.batches == 4
+    sleeps.clear()
+    from services.knowledge.db import get_pool  # noqa: F401
+    await _run(pool, mig, "c", batch=3, max_batches_per_minute=30)
+    assert len([s for s in sleeps if 1.5 < s <= 2.0]) == 3  # 60/30 = 2 s per batch
+
+
+_DOC = (b"Warranty claims for the Zephyr line are handled within 14 days. Replacement parts ship free of charge. "
+        b"Contact the service desk with the serial number printed under the base of the unit. ") * 3

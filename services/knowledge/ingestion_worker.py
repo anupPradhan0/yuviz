@@ -299,7 +299,7 @@ async def process_one_job(
                 log.warning("Ingestion job=%s attempt=%s lost its lease; dropping results", job["id"], job["attempts"])
                 return
             if embedding_model is not None:  # re-embed migration: never land vectors from a config the KB just left
-                await assert_kb_config_current(conn, kb_id, embedding_cfg.id)
+                await assert_kb_config_current(conn, kb_id, embedding_cfg.id, doc_row["tenant_id"])
             # The queuer owns the version (retry_document bumps it); this swap is one transaction,
             # so readers see the old chunks until commit and the new ones after, never a gap.
             version = doc_row["version"]
