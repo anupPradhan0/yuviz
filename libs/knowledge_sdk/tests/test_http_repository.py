@@ -15,6 +15,7 @@ from libs.tenancy import set_target_tenant
 from services.config import agents, provider_configs, tenants, users
 from services.config import db as config_db
 from services.config.app import app as config_app
+from services.knowledge import retrieval_log
 from services.knowledge.app import app as knowledge_app
 
 
@@ -60,6 +61,8 @@ async def tenant_agent(pool):
     with _seeding_as(tenant["id"]):
         agent = await agents.create_agent(tenant_id=tenant["id"], slug="sup", name="Support", tenant_slug=slug)
     yield tenant, agent
+    await retrieval_log.flush()  # the retrieve calls above queue a log row; it must land before the delete
+    await pool.execute("DELETE FROM retrieval_logs WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM agent_knowledge_bases WHERE agent_id = $1", agent["id"])
     await pool.execute("DELETE FROM kb_chunks WHERE tenant_id = $1", tenant["id"])
     await pool.execute("DELETE FROM kb_documents WHERE tenant_id = $1", tenant["id"])
