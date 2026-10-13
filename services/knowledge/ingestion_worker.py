@@ -426,7 +426,7 @@ async def _claim_next_job(
                  LEFT JOIN running ru ON ru.tenant_id = d.tenant_id
                  WHERE c.status = 'pending' AND c.next_attempt_at <= now()
                    AND COALESCE(ru.n, 0) < $2
-                 ORDER BY (COALESCE(c.stage, '') = 'reingest-queued'), c.next_attempt_at, c.created_at
+                 ORDER BY c.background, c.next_attempt_at, c.created_at
                  FOR UPDATE OF c SKIP LOCKED
                  LIMIT 1)
             RETURNING j.*

@@ -185,10 +185,36 @@ async def test_a_second_run_waits_for_the_first_and_then_sees_its_jobs(tenant_ag
     set_caller_tenant(None)
     async with tenant_conn(pool, explicit_tenant=str(tenant["id"]), reason="kb-ingestion-job") as conn:
         await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('kb-reingest:' || $1::text, 0))", str(tenant["id"]))
-        await conn.execute("INSERT INTO kb_ingestion_jobs (document_id, kb_id, stage) VALUES ($1, $2, 'reingest-queued')", a, kb["id"])
+        await conn.execute("INSERT INTO kb_ingestion_jobs (document_id, kb_id, background) VALUES ($1, $2, true)", a, kb["id"])
         second = asyncio.create_task(requeue_documents(pool, tenant["id"], batch=0))
         await asyncio.sleep(0.4)
         assert not second.done(), "the second run did not wait for the first"
     queued = await asyncio.wait_for(second, 10)
     assert queued == [str(b)]          # `a` was queued by the first run and is skipped
+    await _purge_tenant(pool, tenant["id"])
+
+
+async def test_a_retried_reingest_job_still_queues_behind_a_fresh_upload(tenant_agent, pool, monkeypatch):
+    """The marker is a column nothing overwrites; the claim and the failure path both rewrite `stage`."""
+    from services.knowledge import embedding_manager as em
+    from services.knowledge.tests.test_ingestion_queue import _FakeProvider
+    monkeypatch.setattr(em, "EMBED_BATCH_RETRIES", 0)
+    tenant, _ = tenant_agent
+    await _drain_pending(pool)
+    kb = await _make_kb(tenant, "retry-lane-kb")
+    monkeypatch.setenv("KNOWLEDGE_CHUNKER", "structure")
+    doc = await _ingest(pool, tenant, kb, "doc")
+    set_caller_tenant(None)
+    await requeue_documents(pool, tenant["id"])
+    job = await _claim_next_job(pool, tenant_cap=100)                       # claim rewrites stage to 'claimed'
+    await process_one_job(pool, LocalStorageProvider(), _manager(_FakeProvider(fail_times=1)), job)   # fails, back to pending
+    row = dict(await pool.fetchrow("SELECT * FROM kb_ingestion_jobs WHERE id = $1", job["id"]))
+    assert row["status"] == "pending" and row["stage"] == "embed" and row["background"] is True
+    await pool.execute("UPDATE kb_ingestion_jobs SET next_attempt_at = now() - interval '1 hour' WHERE id = $1", job["id"])
+    fresh = await _upload(tenant, kb, "fresh", content=_DOC, content_type="text/markdown")
+    first = await _claim_next_job(pool, tenant_cap=100)
+    assert first["id"] == fresh["ingestion_job_id"]                          # even though the retry is older and due
+    second = await _claim_next_job(pool, tenant_cap=100)
+    assert second["id"] == job["id"]
+    await pool.execute("UPDATE kb_ingestion_jobs SET status = 'succeeded' WHERE id = ANY($1)", [first["id"], second["id"]])
     await _purge_tenant(pool, tenant["id"])
