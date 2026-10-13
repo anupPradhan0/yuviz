@@ -25,6 +25,7 @@ class Limits:
     max_paragraphs: int = 800_000               # DOCX/PPTX paragraph elements, counted by streaming before parsing
     timeout_s: float = 60.0                     # wall clock for the whole parse subprocess
     memory_mb: int = 1024                       # RSS cap enforced by the parent's watchdog (all platforms)
+    keep_collapsed: bool = False                # HTML closed disclosures (details, collapsed panels) are dropped; 1 keeps them
     index_speaker_notes: bool = False           # PPTX notes are internal; off unless KNOWLEDGE_INDEX_SPEAKER_NOTES=1
 
     @classmethod
@@ -43,5 +44,6 @@ class Limits:
             max_ooxml_elements=int(_env("KB_PARSE_MAX_OOXML_ELEMENTS", d.max_ooxml_elements)),
             timeout_s=_env("KB_PARSE_TIMEOUT_S", d.timeout_s),
             memory_mb=int(_env("KB_PARSE_MEMORY_MB", d.memory_mb)),
+            keep_collapsed=os.environ.get("KNOWLEDGE_KEEP_COLLAPSED_CONTENT", "").lower() in ("1", "true", "yes"),
             index_speaker_notes=os.environ.get("KNOWLEDGE_INDEX_SPEAKER_NOTES", "").lower() in ("1", "true", "yes"),
         )

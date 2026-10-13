@@ -996,3 +996,101 @@ async def test_pdf_text_in_an_optional_content_layer_that_is_off_by_default_is_r
     doc = await _parse(out.getvalue())
     assert PAYLOAD not in doc.text() and VISIBLE in doc.text() and "Layer on text stays" in doc.text()
     assert doc.hidden_removed.get("pdf_invisible_text", 0) >= 1
+
+
+# ── S3 round 3: HTML stylesheet engine is linear, depth is real, false positives are gone ──
+
+async def test_a_stylesheet_with_no_braces_does_not_stall_the_parser(hang_guard):
+    raw = f"<html><head><style>{'a' * 196_000}</style></head><body><p>{VISIBLE}.</p></body></html>".encode()
+    signal.alarm(10)
+    t0 = time.time()
+    doc = await _parse(raw)
+    signal.alarm(0)
+    assert VISIBLE in doc.text() and time.time() - t0 < 10     # the regex version ran to the 60 s timeout
+
+
+@pytest.mark.parametrize("css,expect", [
+    (",".join(f".a{i}" for i in range(60_000)) + "{display:none}", "too many selectors"),       # ~850 KB, one rule
+    ("".join(f".c{i}{{display:none}}" for i in range(6_000)), "too many rules"),
+    ("/*" + "x" * 1_100_000 + "*/.a{display:none}", "too large to evaluate"),
+])
+async def test_stylesheet_floods_end_quickly_as_final_rejections(css, expect):
+    raw = f"<html><head><style>{css}</style></head><body><p class='a0'>{VISIBLE}.</p></body></html>".encode()
+    t0 = time.time()
+    assert expect in await _reason(raw)
+    assert time.time() - t0 < 10
+
+
+async def test_stray_close_tags_cannot_hide_deep_nesting():
+    raw = b"<html><body>" + b"<div></p>" * 50_000 + b"<p>text</p></body></html>"
+    t0 = time.time()
+    assert "nested more than 400 levels" in await _reason(raw)
+    assert time.time() - t0 < 3                                   # was 16.8 s of tree building
+
+
+def _page(body: str, css: str = "") -> bytes:
+    return f"<html><head><style>{css}</style></head><body><main>{body}</main></body></html>".encode()
+
+
+async def test_a_zero_size_container_hides_only_its_own_text_not_its_sized_children():
+    doc = await _parse(_page(f'<div style="font-size:0">{PAYLOAD}<span style="font-size:16px">Visible column one</span>'
+                             f'<span style="font-size:16px">Visible column two</span></div><p>{VISIBLE}.</p>'))
+    assert PAYLOAD not in doc.text() and "Visible column one" in doc.text() and "Visible column two" in doc.text()
+
+
+async def test_children_inheriting_a_zero_size_are_hidden_too():
+    doc = await _parse(_page(f'<div style="font-size:0"><span>{PAYLOAD}-inherits</span></div><p>{VISIBLE}.</p>'))
+    assert PAYLOAD not in doc.text() and VISIBLE in doc.text()
+
+
+@pytest.mark.parametrize("size", ["2vw", "1in", "5vh", "calc(1px)", "large", "1rem", "3px", "50%", "0.5em"])
+async def test_sizes_that_are_not_tiny_or_not_knowable_keep_the_text(size):
+    doc = await _parse(_page(f'<p style="font-size:{size}">Sized text {size.replace("(", "").replace(")", "")}</p>'))
+    assert "Sized text" in doc.text()
+
+
+@pytest.mark.parametrize("size", ["0", "1px", "2px", "1pt", "0.1em", "10%", "0.1in"])
+async def test_tiny_sizes_are_hidden(size):
+    doc = await _parse(_page(f'<p style="font-size:{size}">{PAYLOAD}</p><p>{VISIBLE}.</p>'))
+    assert PAYLOAD not in doc.text() and VISIBLE in doc.text()
+
+
+async def test_unknown_offsets_and_indents_do_not_hide_but_real_ones_do():
+    doc = await _parse(_page(f'<p style="text-indent:-9999vw">Viewport indent kept</p>'
+                             f'<p style="position:absolute;left:-9999px">{PAYLOAD}</p><p>{VISIBLE}.</p>'))
+    assert "Viewport indent kept" in doc.text() and PAYLOAD not in doc.text()
+
+
+@pytest.mark.parametrize("css", [
+    ".hero{background:url(banner.png) center;color:#fff}",
+    ".hero{background-image:linear-gradient(#000,#333);color:#fff}",
+    ".hero{background:radial-gradient(circle,#123,#456);color:#ffffff}",
+])
+async def test_white_text_over_an_image_or_gradient_is_kept(css):
+    doc = await _parse(_page('<div class="hero"><h2>Welcome banner text</h2></div>', css))
+    assert "Welcome banner text" in doc.text()
+
+
+async def test_white_text_with_no_background_at_all_is_still_removed():
+    doc = await _parse(_page(f'<p style="color:white">{PAYLOAD}</p><p>{VISIBLE}.</p>'))
+    assert PAYLOAD not in doc.text() and VISIBLE in doc.text()
+
+
+_COLLAPSED = (f'<details><summary>How long do refunds take?</summary>{PAYLOAD}-details answer</details>'
+              '<button aria-expanded="false" aria-controls="p1">Shipping?</button>'
+              f'<div id="p1" hidden>{PAYLOAD}-panel answer</div>'
+              f'<div class="collapse">{PAYLOAD}-bootstrap answer</div>'
+              f'<details open><summary>Open one</summary>Open details answer is visible</details>')
+
+
+async def test_collapsed_content_is_stripped_by_default_and_counted_separately():
+    doc = await _parse(_page(_COLLAPSED + f'<div style="display:none">{PAYLOAD}-attack</div><p>{VISIBLE}.</p>'))
+    assert PAYLOAD not in doc.text() and "Open details answer is visible" in doc.text() and "How long do refunds take?" in doc.text()
+    assert doc.hidden_removed.get("html_collapsed") == 3 and doc.hidden_removed.get("html_hidden_elements") == 1
+
+
+async def test_keep_collapsed_flag_indexes_closed_disclosures_but_never_plain_hidden_text(monkeypatch):
+    monkeypatch.setenv("KNOWLEDGE_KEEP_COLLAPSED_CONTENT", "1")
+    doc = await parse_document(_page(_COLLAPSED + f'<div style="display:none">{PAYLOAD}-attack</div>'), limits=Limits.from_env())
+    assert f"{PAYLOAD}-details answer" in doc.text() and f"{PAYLOAD}-panel answer" in doc.text()
+    assert f"{PAYLOAD}-attack" not in doc.text()
