@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
@@ -402,6 +403,33 @@ def _canonical_did(value: str | None) -> str:
         raise ValueError("did must be a phone number (digits, optional +, spaces, dashes, dots, "
                          "brackets), a SIP URI, or an extension")
     return did
+
+
+CallExportColumn = Literal[
+    "session_id", "started_at", "ended_at", "account", "direction", "caller_number", "called_number",
+    "agent", "duration", "status", "outcome", "close_reason", "sentiment", "sentiment_reason",
+    "turns", "disposition", "languages",
+]
+
+
+class CallExport(BaseModel):
+    """Calls page export; filter values mirror the page's column filters."""
+    tenant_slugs: list[str] = Field(min_length=1, max_length=500)
+    format: Literal["csv", "xlsx"] = "csv"
+    columns: list[CallExportColumn] = Field(min_length=1)
+    # Set = export exactly these calls and ignore the filters below.
+    session_ids: list[str] | None = Field(default=None, max_length=10_000)
+    timezone: str = "UTC"
+    started_after: datetime | None = None
+    started_before: datetime | None = None
+    q: str | None = Field(default=None, max_length=200)
+    parties: Literal["inbound", "outbound", "AI", "WebRTC"] | None = None
+    agent: str | None = None  # agent name; "__none" = calls with no agent
+    duration: Literal["short", "mid", "long", "none"] | None = None
+    sentiment: Literal["positive", "neutral", "negative", "frustrated", "unscored"] | None = None
+    status: Literal[
+        "live", "completed", "succeeded", "failed", "done", "to_person", "transfer_failed", "dropped",
+    ] | None = None
 
 
 class PhoneNumberCreate(BaseModel):

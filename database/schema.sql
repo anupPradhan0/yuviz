@@ -470,7 +470,7 @@ DO $$
 DECLARE clashes TEXT;
 BEGIN
   SELECT string_agg(canon, ', ') INTO clashes FROM (
-    SELECT CASE WHEN btrim(did, E' \t\n\r\f\v') ~ '^\+?[0-9 ().-]*[0-9][0-9 ().-]*$'
+    SELECT CASE WHEN btrim(did, E' \t\n\r\f\x0b') ~ '^\+?[0-9 ().-]*[0-9][0-9 ().-]*$'
                 THEN regexp_replace(did, '[^0-9]', '', 'g') ELSE did END AS canon
     FROM phone_numbers WHERE deleted_at IS NULL GROUP BY 1 HAVING count(*) > 1
   ) c;
@@ -479,7 +479,7 @@ BEGIN
   END IF;
   UPDATE phone_numbers SET did = regexp_replace(did, '[^0-9]', '', 'g')
   WHERE deleted_at IS NULL
-    AND btrim(did, E' \t\n\r\f\v') ~ '^\+?[0-9 ().-]*[0-9][0-9 ().-]*$'
+    AND btrim(did, E' \t\n\r\f\x0b') ~ '^\+?[0-9 ().-]*[0-9][0-9 ().-]*$'
     AND did ~ '[^0-9]';
 END $$;
 
