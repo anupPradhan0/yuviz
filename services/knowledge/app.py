@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from . import db, retrieval_log
-from .routers import agent_kb, documents, knowledge_bases, prewarm, retrieval_policies, retrieve
+from .routers import agent_kb, documents, health, knowledge_bases, ops, prewarm, retrieval_policies, retrieve
 from .runtime import get_embedding_manager, get_vector_repo
 
 log = logging.getLogger(__name__)
@@ -56,6 +56,8 @@ app.include_router(agent_kb.router)
 app.include_router(retrieval_policies.router)
 app.include_router(retrieve.router)
 app.include_router(prewarm.router)
+app.include_router(ops.router)
+app.include_router(health.tenant_scoped_router)
 
 
 @app.exception_handler(LookupError)

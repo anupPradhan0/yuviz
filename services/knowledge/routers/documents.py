@@ -11,6 +11,7 @@ from services.config.auth import CurrentUser
 from services.config.deps import assert_tenant_access, get_current_user, is_platform_scoped, require_role
 
 from .. import documents as documents_service
+from .. import health as health_service
 from .. import knowledge_bases as kb_service
 from ..parsers import SUPPORTED_CONTENT_TYPES, detect_content_type, unsupported_reason
 from ..schemas import DocumentUpdate
@@ -110,6 +111,13 @@ async def upload_document(
 @router.get("/documents/{document_id}")
 async def get_document(document_id: str, current_user: CurrentUser = Depends(get_current_user)):
     return await _authorize_document(document_id, current_user)
+
+
+@router.get("/documents/{document_id}/events")
+async def list_document_events(document_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    """The ingestion trail (stage, outcome, retry/dead-letter markers) for one document, oldest first."""
+    await _authorize_document(document_id, current_user)
+    return await health_service.document_events(document_id)
 
 
 @router.patch("/documents/{document_id}")
