@@ -9,30 +9,47 @@
       "mrr": 0.6282,
       "answer_in_context": 0.7179
     },
-    "recursive-prose": {
+    "recursive+parent": {
       "recall_at_5": 0.641,
       "mrr": 0.5598,
-      "answer_in_context": 0.641
-    },
-    "structure": {
-      "recall_at_5": 0.6154,
-      "mrr": 0.5534,
-      "answer_in_context": 0.5897
+      "answer_in_context": 0.7179
     },
     "structure+parent": {
+      "recall_at_5": 0.5897,
+      "mrr": 0.5214,
+      "answer_in_context": 0.641
+    },
+    "structure child-only": {
+      "recall_at_5": 0.5897,
+      "mrr": 0.5214,
+      "answer_in_context": 0.5897
+    },
+    "mode=auto (default)": {
+      "recall_at_5": 0.7179,
+      "mrr": 0.609,
+      "answer_in_context": 0.6923
+    },
+    "mode=structure": {
       "recall_at_5": 0.6154,
       "mrr": 0.5534,
       "answer_in_context": 0.6154
     },
-    "production": {
-      "recall_at_5": 0.6154,
-      "mrr": 0.5534,
-      "answer_in_context": 0.6154
+    "production (auto)": {
+      "recall_at_5": 0.7179,
+      "mrr": 0.609,
+      "answer_in_context": 0.6923
     }
   },
   "pipeline": {
-    "recall_at_5": 0.8718,
-    "mrr": 0.7906,
-    "answer_in_context": 0.8718
+    "auto": {
+      "recall_at_5": 0.7692,
+      "mrr": 0.7564,
+      "answer_in_context": 0.7692
+    },
+    "structure": {
+      "recall_at_5": 0.8718,
+      "mrr": 0.7906,
+      "answer_in_context": 0.8718
+    }
   }
 }

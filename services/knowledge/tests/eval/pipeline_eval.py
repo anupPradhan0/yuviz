@@ -6,6 +6,7 @@ model's scores."""
 
 from __future__ import annotations
 
+import os
 import uuid
 
 from libs.tenancy import set_caller_tenant, set_target_tenant
@@ -39,9 +40,11 @@ async def _purge(pool, tenant_id) -> None:
         await pool.execute(sql, tenant_id)
 
 
-async def run_pipeline_eval(pool) -> dict:
+async def run_pipeline_eval(pool, chunker: str = "auto") -> dict:
     """Index every golden document into one KB and ask every question. Returns recall@5, MRR and
     answer-in-context over the questions, plus the questions that missed (for the failure message)."""
+    previous = os.environ.get("KNOWLEDGE_CHUNKER")
+    os.environ["KNOWLEDGE_CHUNKER"] = chunker  # read per call by the chunker
     slug = f"golden-{uuid.uuid4().hex[:8]}"
     tenant = dict(await pool.fetchrow("INSERT INTO tenants (name, slug) VALUES ($1, $1) RETURNING *", slug))
     try:
@@ -93,6 +96,10 @@ async def run_pipeline_eval(pool) -> dict:
             "answer_in_context": m.answer_in_context / m.n, "missed": missed,
         }
     finally:
+        if previous is None:
+            os.environ.pop("KNOWLEDGE_CHUNKER", None)
+        else:
+            os.environ["KNOWLEDGE_CHUNKER"] = previous
         set_caller_tenant(None)
         set_target_tenant(None)
         await _purge(pool, tenant["id"])

@@ -133,7 +133,7 @@ async def leak_report(pool, settle_s: float = 1.5) -> dict:
     while True:
         report = {
             "limiter_in_flight": admission.in_flight, "limiter_tenants": len(admission._per),
-            "limiter_waiters": len(admission._waiters), "pool_busy_connections": pool.get_size() - pool.get_idle_size(),
+            "limiter_waiters": sum(len(q) for q in admission._queues.values()), "pool_busy_connections": pool.get_size() - pool.get_idle_size(),
         }
         if not any(report.values()) or time.monotonic() > deadline:
             return report

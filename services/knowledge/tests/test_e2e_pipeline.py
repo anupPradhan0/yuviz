@@ -220,7 +220,9 @@ async def test_csv_row_is_found_by_its_identifier(world):
     assert result["status"] == "ok" and "SKU0042" in _texts(result)
 
 
-async def test_markdown_child_hit_expands_to_its_parent_section(world):
+async def test_markdown_child_hit_expands_to_its_parent_section(world, monkeypatch):
+    # The shipped default (KNOWLEDGE_CHUNKER=auto) uses fixed windows for headed prose, so parents are opt-in.
+    monkeypatch.setenv("KNOWLEDGE_CHUNKER", "structure")
     doc = await world.ingest(await world.upload("handbook.md", MARKDOWN, "text/markdown", title="Handbook"))
     assert doc["status"] == "ready"
     assert await world.pool.fetchval(
@@ -237,6 +239,15 @@ async def test_markdown_child_hit_expands_to_its_parent_section(world):
     listed = (await world.client.get(f"/knowledge-bases/{world.a.kb['id']}/documents",
                                      headers=world.auth(world.a.admin_token))).json()
     assert listed[0]["chunk_count"] >= 3  # children only; parent rows are not counted as retrievable
+
+
+async def test_default_chunker_indexes_headed_markdown_without_parents_and_still_answers(world):
+    doc = await world.ingest(await world.upload("handbook.md", MARKDOWN, "text/markdown", title="Handbook"))
+    assert doc["status"] == "ready" and doc["chunker_version"]
+    assert await world.pool.fetchval(
+        "SELECT count(*) FROM kb_chunks WHERE document_id = $1 AND is_parent", doc["id"]) == 0
+    result = await world.retrieve("topic2x paragraph")
+    assert result["status"] == "ok" and "topic2x" in _texts(result)
 
 
 async def test_a_tenant_user_and_the_service_account_both_retrieve(world):
@@ -332,6 +343,7 @@ async def test_embedder_down_with_dense_only_policy_still_answers_lexically(worl
 async def test_overload_is_a_typed_unavailable_and_recovers(world):
     await world.ingest(await world.upload("policy.pdf", builders.text_pdf(), PDF_TYPE, title="Refund PDF"))
     cfg = dataclasses.replace(retrieval._config, max_inflight=1, tenant_max_inflight=1, queue_wait_s=0.0)
+    original = retrieval._config
     retrieval._config = cfg
     before = ops_metrics.snapshot()["retrieval_overloaded"]
     try:
@@ -339,7 +351,7 @@ async def test_overload_is_a_typed_unavailable_and_recovers(world):
         refused = await world.retrieve("refund within 30 days")
         admission.release(world.a.slug)
     finally:
-        retrieval._config = dataclasses.replace(cfg, max_inflight=5, tenant_max_inflight=3, queue_wait_s=0.15)
+        retrieval._config = original
     assert refused["status"] == "unavailable" and refused["degraded"] == ["overloaded"] and refused["chunks"] == []
     assert ops_metrics.snapshot()["retrieval_overloaded"] == before + 1
     assert admission.in_flight == 0
@@ -585,13 +597,14 @@ async def test_search_knowledge_tool_envelope_over_the_real_service(world, test_
         world.embedder.fail = False
 
         cfg = dataclasses.replace(retrieval._config, max_inflight=1, tenant_max_inflight=1, queue_wait_s=0.0)
+        original = retrieval._config
         retrieval._config = cfg
         try:
             assert await admission.acquire(world.a.slug, cfg, 0.0)
             unavailable = await call("topic2x paragraph")
             admission.release(world.a.slug)
         finally:
-            retrieval._config = dataclasses.replace(cfg, max_inflight=5, tenant_max_inflight=3, queue_wait_s=0.15)
+            retrieval._config = original
         assert unavailable["status"] == "unavailable" and unavailable["error"]["code"] == "knowledge_unavailable"
         assert unavailable["error"]["user_safe_message"] and "overloaded" not in unavailable["error"]["user_safe_message"]
         assert (await call("topic2x paragraph"))["status"] == "ok"  # and it recovers
