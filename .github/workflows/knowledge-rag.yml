@@ -51,13 +51,16 @@ jobs:
       POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/yuviz
       REDIS_URL: redis://localhost:6379/0
       JWT_SECRET: ci-only-jwt-secret-not-used-anywhere-else-0123456789abcdef
-      KNOWLEDGE_STORAGE_ROOT: ${{ runner.temp }}/knowledge-storage
       PGPASSWORD: postgres
       PGHOST: localhost
       PGUSER: postgres
 
     steps:
       - uses: actions/checkout@v4
+
+      # The runner context is not available in job-level env, so the storage root is set from the step environment.
+      - name: Set the knowledge storage root
+        run: echo "KNOWLEDGE_STORAGE_ROOT=${RUNNER_TEMP}/knowledge-storage" >> "$GITHUB_ENV"
 
       - uses: actions/setup-python@v5
         with:
