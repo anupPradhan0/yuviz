@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from array import array
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -91,7 +92,9 @@ async def embed_in_batches(
                     raise EmbeddingError(f"embedding provider returned {len(got)} vectors for {len(batch)} texts")
                 for v in got:
                     _validate(v)
-                vectors.extend(got)
+                # float32 arrays (what pgvector stores anyway): 3 KB per vector instead of ~25 KB of Python floats, so
+                # holding a document's vectors is bounded by chunks x 768 x 4 bytes (5,000 chunks = 15 MB).
+                vectors.extend(array("f", v) for v in got)
                 break
             except EmbeddingDimensionError:
                 raise

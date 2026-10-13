@@ -265,7 +265,12 @@ async def process_one_job(
             except ValueError:
                 embedding_cfg = None
             max_tokens = embedding_cfg.extra.get("max_tokens") if embedding_cfg else None
-            result = chunk_document(parsed.blocks, doc_row["language"], config=ChunkConfig.for_embedder(max_tokens))
+            # Off the event loop: chunking is CPU work, and the heartbeat must keep running while it does. It carries its
+            # own wall-clock budget and chunk ceiling (KNOWLEDGE_CHUNK_BUDGET_S, KNOWLEDGE_MAX_CHUNKS_PER_DOC) and
+            # raises a permanent error when either is hit, before anything is embedded.
+            result = await asyncio.to_thread(
+                chunk_document, parsed.blocks, doc_row["language"], config=ChunkConfig.for_embedder(max_tokens),
+            )
             new_chunks, parents, strategy = result.children, result.parents, result.strategy
             if not new_chunks:
                 raise ValueError("document produced zero chunks (empty or unextractable content)")
