@@ -475,39 +475,153 @@ _BOILERPLATE_ATTR_RE = re.compile(
     r"(^|[\s_-])(nav|navbar|menu|footer|sidebar|cookie|consent|banner|advert|ads?|breadcrumb|share|social|popup|modal)([\s_-]|$)",
     re.IGNORECASE,
 )
-_HIDDEN_STYLE_RE = re.compile(
-    r"display:none|visibility:hidden|opacity:0(?![.\d])|font-size:0(?![.\d])|text-indent:-\d{3,}|"
-    r"(?:left|top):-\d{4,}px|height:0(?:px)?;[^\"]*overflow:hidden", re.IGNORECASE)
-_WHITE_STYLE_RE = re.compile(r"(?:^|;)color:(?:#fff(?:fff)?|white|rgb\(255,255,255\))(?:;|$)", re.IGNORECASE)
-_TINY_FONT_RE = re.compile(r"font-size:(\d+(?:\.\d+)?)(px|pt)?", re.IGNORECASE)
+_CSS_RULE_RE = re.compile(r"([^{}@]+)\{([^{}]*)\}")
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_MAX_CSS_RULES = 400
+_WHITE_VALUES = frozenset({"#fff", "#ffffff", "white", "rgb(255,255,255)", "rgba(255,255,255,1)", "hsl(0,0%,100%)"})
+_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+_OPTIONAL_END = frozenset({"p", "li", "dt", "dd", "tr", "td", "th", "option", "thead", "tbody", "tfoot"})
 
 
-def _html_hidden(tag) -> bool:
-    attrs = tag.attrs or {}
-    if "hidden" in attrs or str(attrs.get("aria-hidden", "")).lower() == "true":
-        return True
-    if tag.name == "input" and str(attrs.get("type", "")).lower() == "hidden":
-        return True
-    style = re.sub(r"\s+", "", str(attrs.get("style", ""))).lower()
-    if not style:
+def _css_decls(text: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for part in text.split(";"):
+        if ":" in part:
+            k, v = part.split(":", 1)
+            out[k.strip().lower()] = re.sub(r"\s+", "", v.replace("!important", "")).lower()
+    return out
+
+
+def _stylesheet_decls(soup) -> dict[int, dict[str, str]]:
+    """Declarations that <style> rules give each element, keyed by id(tag). Later rules override earlier ones;
+    specificity is not modelled, at-rules (@media, @font-face) are ignored. Selectors are matched with soupsieve."""
+    css = _CSS_COMMENT_RE.sub(" ", "\n".join(st.get_text() for st in soup.find_all("style")))
+    css = re.sub(r"@[^{;]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}", " ", css)  # whole @media blocks
+    out: dict[int, dict[str, str]] = {}
+    for n, m in enumerate(_CSS_RULE_RE.finditer(css)):
+        if n >= _MAX_CSS_RULES:
+            break
+        decls = _css_decls(m.group(2))
+        if not decls:
+            continue
+        for sel in m.group(1).split(","):
+            sel = sel.strip()
+            if not sel:
+                continue
+            try:
+                matched = soup.select(sel)
+            except Exception:  # unsupported or malformed selector (pseudo-classes, etc.): skip the rule
+                continue
+            for tag in matched:
+                out.setdefault(id(tag), {}).update(decls)
+    return out
+
+
+def _px(value: str) -> float | None:
+    m = _NUM_RE.match(value)
+    if not m:
+        return None
+    n = float(m.group())
+    unit = value[m.end():]
+    return n * 16 if unit.startswith("em") or unit.startswith("rem") else n
+
+
+class _HtmlStyles:
+    def __init__(self, soup) -> None:
+        self.rules = _stylesheet_decls(soup)
+        self._cache: dict[int, dict[str, str]] = {}
+
+    def decls(self, tag) -> dict[str, str]:
+        d = self._cache.get(id(tag))
+        if d is None:
+            d = {**self.rules.get(id(tag), {}), **_css_decls(str((tag.attrs or {}).get("style", "")))}
+            self._cache[id(tag)] = d
+        return d
+
+    def dark_background(self, tag) -> bool:
+        """True when this element or an ancestor paints a background that is not white (so white text can be read)."""
+        for t in [tag, *tag.parents]:
+            if t.name == "[document]":
+                continue
+            d = self.decls(t)
+            bg = d.get("background-color") or d.get("background") or ""
+            bg = bg.split("url(")[0] if "url(" not in bg else "url"
+            if bg and bg not in _WHITE_VALUES and bg not in ("none", "transparent", "inherit", "initial", "unset"):
+                return True
+            bgcolor = str((getattr(t, "attrs", None) or {}).get("bgcolor", "")).lower().replace(" ", "")
+            if bgcolor and bgcolor not in _WHITE_VALUES and bgcolor != "white":
+                return True
         return False
-    if _HIDDEN_STYLE_RE.search(style):
-        return True
-    if _WHITE_STYLE_RE.search(style):
-        m = _TINY_FONT_RE.search(style)
-        return bool(m and float(m.group(1)) <= 2)  # white AND tiny; white alone is common on dark backgrounds
-    return False
+
+    def hidden(self, tag) -> bool:
+        attrs = tag.attrs or {}
+        if "hidden" in attrs or str(attrs.get("aria-hidden", "")).lower() == "true":
+            return True
+        if tag.name == "input" and str(attrs.get("type", "")).lower() == "hidden":
+            return True
+        d = self.decls(tag)
+        if not d:
+            return False
+        if d.get("display") == "none" or d.get("visibility") in ("hidden", "collapse"):
+            return True
+        op = d.get("opacity")
+        if op and (_px(op) is not None and _px(op) <= 0.1):
+            return True
+        size = d.get("font-size")
+        if size and (_px(size) is not None and _px(size) <= (2 if not size.endswith(("em", "%")) else 0.1 * 16)):
+            return True
+        color = d.get("color", "")
+        if color == "transparent" or re.fullmatch(r"rgba\(\d+,\d+,\d+,0(?:\.0+)?\)", color):
+            return True
+        if d.get("clip", "").startswith("rect(0") or "inset(100%)" in d.get("clip-path", "") or "circle(0" in d.get("clip-path", ""):
+            return True
+        indent = d.get("text-indent")
+        if indent and (_px(indent) or 0) <= -999:
+            return True
+        if d.get("position") in ("absolute", "fixed"):
+            for k in ("left", "top", "right", "bottom", "margin-left", "margin-top"):
+                v = d.get(k)
+                if v and (_px(v) or 0) <= -999:
+                    return True
+        zero = lambda k: d.get(k) in ("0", "0px", "0pt")  # noqa: E731
+        if (zero("height") or zero("max-height") or zero("width") or zero("max-width")) and d.get("overflow") in ("hidden", "clip"):
+            return True
+        if color in _WHITE_VALUES and not self.dark_background(tag):
+            return True   # white text on a white (or unset) background; a heuristic, a background image is not modelled
+        return False
+
+
+_HTML_TAG_RE = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9:-]*)([^>]*)>")
+_HTML_VOID = frozenset("area base br col embed hr img input link meta param source track wbr".split())
+MAX_HTML_DEPTH = 400
+
+
+def _check_html_depth(html: str) -> None:
+    """Reject absurd nesting before any tree is built: a 537 KB page of 50,000 nested divs holds the parser for the
+    whole timeout, and a page nested deeper than the main parser allows must be refused, not handed to a weaker
+    fallback that would index its hidden text. Browsers stop at 512."""
+    depth = 0
+    for m in _HTML_TAG_RE.finditer(html):
+        name = m.group(2).lower()
+        if m.group(1):
+            depth = max(0, depth - 1)
+        elif name not in _HTML_VOID and name not in _OPTIONAL_END and not m.group(3).rstrip().endswith("/"):
+            depth += 1
+            if depth > MAX_HTML_DEPTH:
+                raise LimitExceeded(f"HTML is nested more than {MAX_HTML_DEPTH} levels deep")
 
 
 def _html_main(html: str) -> ParsedDocument:
     from bs4 import BeautifulSoup
+    _check_html_depth(html)
 
     soup = BeautifulSoup(html, "lxml")
     hidden: Counter = Counter()
-    for tag in soup.find_all(True):
-        if getattr(tag, "decomposed", False):
-            continue
-        if _html_hidden(tag):
+    styles = _HtmlStyles(soup)
+    # Decide everything against the untouched tree first (ancestors are consulted), then remove.
+    doomed = [tag for tag in soup.find_all(True) if styles.hidden(tag)]
+    for tag in doomed:
+        if not getattr(tag, "decomposed", False):
             hidden["html_hidden_elements"] += 1
             tag.decompose()
     for tag in soup(list(_BOILERPLATE_TAGS)):
@@ -572,26 +686,6 @@ def _html_main(html: str) -> ParsedDocument:
     walk(root)
     flush()
     return ParsedDocument(blocks, detect.HTML, hidden_removed=dict(hidden))
-
-
-_HIDDEN_ELEMENT_RE = re.compile(
-    r"<(\w+)\b[^>]{0,500}?(?:\shidden\b|aria-hidden\s*=\s*[\"']true[\"']|style\s*=\s*[\"'][^\"']{0,300}?"
-    r"(?:display\s*:\s*none|visibility\s*:\s*hidden)[^\"']{0,300}?[\"'])[^>]{0,500}>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
-
-
-def _html_strip(html: str) -> ParsedDocument:
-    text = re.sub(r"(?is)<(script|style|noscript|svg)\b.*?</\1\s*>", " ", html)
-    text, n_hidden = _HIDDEN_ELEMENT_RE.subn(" ", text)  # best effort: nested hidden elements are not matched exactly
-    text = re.sub(r"(?s)<!--.*?-->", " ", text)
-    text = re.sub(r"(?i)</(p|div|li|tr|h[1-6]|br|section|article)\s*>|<br\s*/?>", "\n\n", text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    import html as html_mod
-    text = html_mod.unescape(text)
-    text = re.sub(r"[ \t]+", " ", text)
-    doc = ParsedDocument(blocks_from_text(re.sub(r"\n\s*\n+", "\n\n", text)), detect.HTML)
-    if n_hidden:
-        doc.hidden_removed = {"html_hidden_elements": n_hidden}
-    return doc
 
 
 # ── CSV / TSV, plain text ───────────────────────────────────────────────
@@ -715,13 +809,22 @@ def _hidden_strings(content: bytes) -> list[str]:
     return out
 
 
+_PDF_CONTENT_BUDGET = [0]
+MAX_PDF_CONTENT_BYTES = 128 * 1024 * 1024
+
+
 def _pdf_page_text(page, hidden: Counter) -> str:
-    full = page.extract_text() or ""
     try:
         contents = page.get_contents()
         data = contents.get_data() if contents is not None else b""
     except Exception:
         data = b""
+    # Pages may share one content stream, and extracting each page decodes and interprets it again: 400 pages sharing
+    # a 20 MB stream is 8 GB of work from a 95 KB file. Bound the total content decoded for the document.
+    _PDF_CONTENT_BUDGET[0] += len(data)
+    if _PDF_CONTENT_BUDGET[0] > MAX_PDF_CONTENT_BYTES:
+        raise LimitExceeded("PDF pages share or repeat more content than can be processed safely")
+    full = page.extract_text() or ""
     # Longest first, so a hidden string is never matched inside a longer one. Only strings that pypdf decoded the
     # same way (simple fonts) can be located; invisible text in CID-keyed fonts is a known gap.
     for t in sorted(_hidden_strings(data), key=len, reverse=True):
@@ -739,6 +842,8 @@ def _pdf_pypdf(reader, state: dict) -> ParsedDocument:
     for page in reader.pages:
         try:
             texts.append(_pdf_page_text(page, hidden))
+        except LimitExceeded:
+            raise
         except Exception:
             texts.append("")
     state["pypdf_had_text"] = any(t.strip() for t in texts)
@@ -857,6 +962,29 @@ def _scan_pdf_ops(data: bytes) -> Iterator[tuple[bytes, list]]:
                 operands = operands[-8:]
 
 
+def _pdf_streams(raw: bytes) -> Iterator[bytes]:
+    """Bodies of `stream ... endstream` pairs by plain searching. (A lazy regex re-scans to the end of the file from
+    every unterminated `stream` keyword: a 1 MB file of them held the worker for the whole timeout.)"""
+    pos, n = 0, len(raw)
+    while pos < n:
+        i = raw.find(b"stream", pos)
+        if i < 0:
+            return
+        start = i + 6
+        if raw[start:start + 2] == b"\r\n":
+            start += 2
+        elif raw[start:start + 1] == b"\n":
+            start += 1
+        else:
+            pos = start
+            continue
+        end = raw.find(b"endstream", start)
+        if end < 0:
+            return  # no terminated stream after this point, so none of the later keywords can start one either
+        yield raw[start:end]
+        pos = end + 9
+
+
 def _pdf_raw(raw: bytes, state: dict) -> ParsedDocument:
     """Text-layer rung for files pypdf cannot open or read nothing from: inflate content streams and read the
     show-text operators. Handles simple (non-CID) fonts only; the quality gate rejects what comes out garbled.
@@ -865,8 +993,7 @@ def _pdf_raw(raw: bytes, state: dict) -> ParsedDocument:
         raise TierSkip
     lines: list[str] = []
     hidden: Counter = Counter()
-    for m in re.finditer(rb"stream\r?\n(.*?)endstream", raw, re.DOTALL):
-        data = m.group(1)
+    for data in _pdf_streams(raw):
         try:
             data = zlib.decompressobj().decompress(data, _MAX_STREAM)
         except zlib.error:
@@ -900,6 +1027,8 @@ def _pdf_ocr(reader, language: str | None) -> ParsedDocument:
     for i, page in enumerate(reader.pages):
         try:
             t = _pdf_page_text(page, Counter())
+        except LimitExceeded:
+            raise
         except Exception:
             t = ""
         texts.append(t)
@@ -929,6 +1058,7 @@ def _pdf_ocr(reader, language: str | None) -> ParsedDocument:
 def parse_by_type(raw: bytes, content_type: str, limits: Limits, language: str | None = None) -> ParsedDocument:
     global _LIMITS
     _LIMITS = limits
+    _PDF_CONTENT_BUDGET[0] = 0
     ct = content_type
     if ct == detect.PDF:
         reader = _open_pdf(raw, limits)
@@ -957,7 +1087,9 @@ def parse_by_type(raw: bytes, content_type: str, limits: Limits, language: str |
         text, encoding = decoded
         text = text.lstrip("﻿")
         if ct == detect.HTML:
-            doc = run_ladder([("bs4-main", lambda: _html_main(text)), ("html-strip", lambda: _html_strip(text))])
+            # One rung on purpose: a tag-stripping fallback cannot see CSS, so it would index exactly the hidden text this
+            # parser removes. A page the main parser cannot handle is rejected instead.
+            doc = run_ladder([("bs4-main", lambda: _html_main(text))])
         elif ct in (detect.CSV, detect.TSV):
             delim = "\t" if ct == detect.TSV else None
             doc = run_ladder([("csv", lambda: _csv_rows(text, delim, limits)), ("text", lambda: _text_blocks(text, ct))])

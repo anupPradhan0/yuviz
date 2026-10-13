@@ -398,8 +398,6 @@ async def test_html_hidden_content_is_removed():
     doc = await _parse(html)
     assert PAYLOAD not in doc.text() and VISIBLE in doc.text() and "Second visible paragraph" in doc.text()
     assert doc.hidden_removed["html_hidden_elements"] >= 6
-    fallback = formats._html_strip(html.decode())
-    assert PAYLOAD + "-1" not in fallback.text() and PAYLOAD + "-2" not in fallback.text() and VISIBLE in fallback.text()
 
 
 async def test_white_text_on_a_dark_background_is_kept_in_html():
@@ -545,3 +543,115 @@ async def test_hidden_counts_reach_the_ingestion_event_and_payload_never_reaches
         "SELECT detail FROM kb_ingestion_events WHERE job_id = $1 AND stage = 'extract' AND status = 'ok'", job["id"]))
     assert detail["hidden_removed"]["docx_hidden_runs"] >= 2
     await _purge_tenant(pool, tenant["id"])
+
+
+# ── S3 round 2: stylesheet-driven hiding, and no leaky HTML fallback ────
+
+def _html_doc(css: str, body: str) -> bytes:
+    return f"<html><head><style>{css}</style></head><body><main><h1>Policy</h1><p>{VISIBLE}.</p>{body}</main></body></html>".encode()
+
+
+@pytest.mark.parametrize("css,attr", [
+    (".x{display:none}", 'class="x"'),
+    (".x{visibility:hidden}", 'class="x"'),
+    ("#x{opacity:0}", 'id="x"'),
+    (".x{opacity:0.02}", 'class="x"'),
+    (".x{font-size:0}", 'class="x"'),
+    (".x{font-size:1px}", 'class="x"'),
+    (".x{color:transparent}", 'class="x"'),
+    (".x{color:rgba(0,0,0,0)}", 'class="x"'),
+    (".x{clip:rect(0,0,0,0);position:absolute}", 'class="x"'),
+    (".x{clip-path:inset(100%)}", 'class="x"'),
+    (".x{position:absolute;left:-9999px}", 'class="x"'),
+    (".x{text-indent:-9999px}", 'class="x"'),
+    (".x{height:0;overflow:hidden}", 'class="x"'),
+    (".x{color:#fff}", 'class="x"'),                                   # white on the default (unset = white) background
+    (".x{color:white;background:#fff}", 'class="x"'),
+    ("div p.x{display:none}", 'class="x"'),
+    (".a,.x{display:none}", 'class="x"'),
+    ("", 'style="color:#ffffff"'),
+    ("", 'style="position:fixed; top:-5000px"'),
+    ("", 'style="font-size:0.1em"'),
+])
+async def test_html_stylesheet_and_inline_hiding_is_removed(css, attr):
+    raw = _html_doc(css, f"<div><p {attr}>{PAYLOAD}</p></div><p>Second visible paragraph.</p>")
+    doc = await _parse(raw)
+    assert PAYLOAD not in doc.text() and VISIBLE in doc.text() and "Second visible paragraph" in doc.text()
+    assert doc.hidden_removed.get("html_hidden_elements", 0) >= 1
+
+
+@pytest.mark.parametrize("css,body", [
+    (".dark{background:#000}.x{color:#fff}", '<div class="dark"><p class="x">White on dark panel</p></div>'),
+    ("body{background:#111}.x{color:#fff}", '<p class="x">White on dark page</p>'),
+    ("", '<p style="color:#fff;background-color:navy">White on navy</p>'),
+    ("@media print{.x{display:none}}", '<p class="x">Hidden only when printing, shown on screen</p>'),
+    (".big{font-size:18px;opacity:1}", '<p class="big">Normal sized visible text</p>'),
+])
+async def test_html_visible_styled_text_is_kept(css, body):
+    doc = await _parse(_html_doc(css, body))
+    text = doc.text()
+    assert any(w in text for w in ("White on dark", "White on navy", "Hidden only when printing", "Normal sized"))
+
+
+async def test_deeply_nested_html_is_rejected_not_downgraded_to_a_leaky_parser():
+    for depth in (1_200, 50_000):
+        raw = (f"<html><body><div style='display:none'>{PAYLOAD}</div>" + "<div>" * depth + f"<p>{VISIBLE}</p>" + "</div>" * depth + "</body></html>").encode()
+        t0 = time.time()
+        reason = await _reason(raw)
+        assert "nested more than 400 levels" in reason and time.time() - t0 < 10
+    assert PAYLOAD not in reason
+
+
+async def test_unclosed_optional_end_tags_do_not_count_as_nesting():
+    raw = ("<html><body><ul>" + "<li>item text here" * 800 + "</ul><p>" + "<p>para text" * 800 + "</body></html>").encode()
+    assert "item text here" in (await _parse(raw)).text()
+
+
+# ── R6 follow-ups: linear stream scan, PDF content budget ───────────────
+
+async def test_pdf_with_a_million_unterminated_stream_keywords_ends_quickly(hang_guard):
+    raw = b"%PDF-1.4\n" + b"stream\n" * 150_000      # ~1 MB; the lazy regex re-scanned to EOF from every keyword
+    assert len(raw) > 1_000_000
+    signal.alarm(8)
+    t0 = time.time()
+    with pytest.raises(ParseRejected):
+        await parse_document(raw)
+    signal.alarm(0)
+    assert time.time() - t0 < 8
+    t0 = time.time()
+    list(formats._pdf_streams(raw))
+    assert time.time() - t0 < 0.5
+
+
+def test_pdf_stream_iterator_returns_every_terminated_stream():
+    raw = b"1 0 obj\nstream\r\nAAA\nendstream\nendobj 2 0 obj\nstream\nBBB\nendstream\nxstreamy\nstream\nunterminated"
+    assert list(formats._pdf_streams(raw)) == [b"AAA\n", b"BBB\n"]
+
+
+def _shared_stream_pdf(pages: int) -> bytes:
+    import zlib
+    content = b"BT /F1 12 Tf (visible text on every page) Tj ET\n" * 450_000        # ~21 MB decoded, ~100 KB encoded
+    stream = zlib.compress(content, 9)
+    kids = " ".join(f"{4 + i} 0 R" for i in range(pages))
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", f"<< /Type /Pages /Kids [{kids}] /Count {pages} >>".encode(),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    objs += [b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 3000 0 R /Resources << /Font << /F1 3 0 R >> >> >>"] * pages
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + body + b"\nendobj\n"
+    offsets_extra = len(out)
+    out += f"{3000} 0 obj\n<< /Filter /FlateDecode /Length {len(stream)} >>\nstream\n".encode() + stream + b"\nendstream\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 1\n0000000000 65535 f \n".encode()
+    out += b"trailer\n<< /Size 3001 /Root 1 0 R >>\nstartxref\n" + str(xref).encode() + b"\n%%EOF\n"
+    return bytes(out)
+
+
+async def test_400_pages_sharing_one_huge_content_stream_are_refused_fast():
+    raw = _shared_stream_pdf(400)
+    assert len(raw) < 200_000
+    t0 = time.time()
+    reason = await _reason(raw, limits=Limits(timeout_s=40))
+    assert "share or repeat more content" in reason and time.time() - t0 < 30
