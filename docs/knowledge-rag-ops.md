@@ -3,6 +3,8 @@
 Operating notes for the knowledge service's ingestion queue and retrieval hot path (epic #82, phase #88). Design
 targets are in the redesign doc; this page is what to look at, why, and how each target is checked.
 
+Every tunable named here (deadlines, limiter, pool, caches, retention, parser limits, opt-ins) is listed with its default and meaning in `docs/knowledge-env-vars.md`.
+
 ## Where the signals are
 
 | Signal | Where | Scope |
@@ -32,7 +34,7 @@ The admin UI screens for these endpoints are not built yet; the endpoints are th
 4. **Degraded / fallback rate.** `partial` answers mean a branch was lost (embedder, vector search or lexical search).
    Callers still got an answer, so nothing pages on a single one, but a sustained rate is an unhealthy dependency:
    `degraded_by_reason` says which (`embedding_unavailable`, `lexical_only`, `dense_failed`, `rerank_skipped`,
-   `deadline`, `overloaded`).
+   `deadline`, `overloaded`, `prompt_docs_trimmed`). Prompt-mode documents are always returned but capped at half of `max_tokens`; `prompt_docs_trimmed` means some did not fit, so a growing prompt-mode set is eating the budget for ranked answers.
 5. **`unavailable` rate.** The caller-visible failure: the tool envelope tells the agent to apologise or transfer.
    This is the number behind "retrieval error surfaced to the caller < 0.1%".
 6. **No-match rate.** Jumps mean content is missing (a document failed ingestion, a KB was detached) or queries have
