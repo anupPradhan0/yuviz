@@ -937,3 +937,15 @@ def test_prewarm_route_still_authorises_the_tenant_before_doing_anything():
     src = inspect.getsource(prewarm.prewarm)
     assert "assert_tenant_access(body.tenant_slug, current_user)" in src
     assert src.index("assert_tenant_access") < src.index("set_target_tenant") < src.index("retrieval_plan.prewarm")
+
+
+# ── SDK reader and service writer agree on the Redis flag key ───────────────
+
+@pytest.mark.parametrize("tenant,agent", [
+    ("acme", "bot"), ("acme", "support:bot"), ("acme:support", "bot"), ("4", "acme:bot"), ("", "x"), ("t", ""),
+    ("ünï", "bøt"),
+])
+def test_sdk_redis_reader_uses_the_key_the_service_writes(tenant, agent):
+    from libs.knowledge_sdk.repositories.redis_repository import agent_kb_flag_key
+
+    assert agent_kb_flag_key(tenant, agent) == cache._agent_kb_key(tenant, agent)
