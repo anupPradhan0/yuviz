@@ -205,8 +205,9 @@ def _http_error(status: int) -> httpx.HTTPStatusError:
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
 async def test_permanent_client_errors_are_not_retried(status):
     p = Scripted({n: _http_error(status) for n in range(1, 20)})
-    with pytest.raises(EmbeddingRequestRejected, match=f"HTTP {status}") as e:
+    with pytest.raises(EmbeddingRequestRejected) as e:
         await embed_in_batches(p, ["a", "b"])
+    assert str(e.value) == ("provider_auth_failed" if status in (401, 403) else "provider_error")
     assert len(p.batches) == 1 and classify_error(e.value) == "permanent"
     assert "secret" not in str(e.value) and "sk-live" not in str(e.value)
 
@@ -216,8 +217,9 @@ async def test_rate_limits_timeouts_and_server_errors_are_retried(status):
     p = Scripted({1: _http_error(status), 2: _http_error(status)})
     assert len(await embed_in_batches(p, ["a"])) == 1 and len(p.batches) == 3
     always = Scripted({n: _http_error(status) for n in range(1, 20)})
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(em.ProviderTransientError) as e:
         await embed_in_batches(always, ["a"])
+    assert str(e.value) == ("provider_rate_limited" if status == 429 else "provider_error")
     assert len(always.batches) == em.EMBED_BATCH_RETRIES + 1 and classify_error(_http_error(status)) == "transient"
 
 

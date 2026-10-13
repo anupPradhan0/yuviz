@@ -48,6 +48,37 @@ take retrieval or ingestion down.
 | `KNOWLEDGE_ENRICH_MAX_CHUNKS_PER_DOC` | `100` | Chunks past this are embedded plain. |
 | `KNOWLEDGE_ENRICH_MAX_TOKENS_PER_DOC` | `60000` | Estimated prompt + output tokens per document. |
 | `KNOWLEDGE_ENRICH_DOC_DEADLINE_S` | `90` | Wall-clock for one document's enrichment. |
+| `KNOWLEDGE_PROVIDER_ALLOWED_HOSTS` | the operator's Ollama only | Comma-separated `host` or `host:port` entries a tenant's embedding `extra.base_url` may point at even though it is private. See "Provider URLs". Set on the Config service AND the Knowledge service. |
+
+## Provider URLs (tenant-supplied embedding endpoints)
+
+A tenant admin can set `extra.base_url` on an `embedding` provider config (engine `ollama`). It is treated as an
+origin, never as a URL to fetch (issue #97):
+
+- Only scheme, host and port are used. The API path (`/api/embeddings`) is fixed in code. A `base_url` with a path,
+  query, fragment, credentials, a non-http(s) scheme, an empty host or an odd IP spelling (`2130706433`, `0x7f.0.0.1`,
+  `127.1`, `0177.0.0.1`, IPv4-mapped IPv6) is refused with a 400 when the config is created or edited, and again when
+  the Knowledge service builds the client (a row written before this check still cannot be used).
+- Every address the host resolves to must be public. Loopback, link-local (169.254.0.0/16 including cloud metadata,
+  fe80::/10), private (10/8, 172.16/12, 192.168/16, fc00::/7), CGNAT 100.64/10, multicast, reserved, unspecified,
+  IPv4-mapped IPv6 and the 6to4/Teredo/NAT64 forms are refused. The resolution happens once, inside the connect, and the
+  connection goes to the validated address (Host header and TLS SNI still use the hostname), so DNS rebinding cannot
+  swap the address. Redirects are not followed and proxy environment variables are ignored.
+- The allow-list `KNOWLEDGE_PROVIDER_ALLOWED_HOSTS` (comma-separated `host` or `host:port`) names endpoints that are
+  allowed although private. **Unset**, it holds only the operator's own Ollama: the host:port of `OLLAMA_BASE_URL`, or
+  `localhost:11434` (the code's default), plus `127.0.0.1` on the same port when the host is `localhost`; so local
+  development needs no extra configuration for exactly that endpoint. **Set**, it replaces that default (an empty value
+  allows nothing). An entry without a port allows every port on that host; prefer `host:port`.
+  The Config service reads the same variable at write time, so set it on both services.
+- Failures are stored and returned as fixed codes, never exception text: `provider_unreachable` (refused, timeout,
+  DNS, TLS and the guard's own refusal are all this one code, so a port's state cannot be read back), `provider_auth_failed`
+  (401/403), `provider_rate_limited` (429), `provider_error` (any other non-2xx, including a redirect),
+  `provider_bad_response` (invalid JSON or shape), `provider_url_invalid` (the URL fails the syntax rules above). They
+  appear in `documents.error`, the job and its events, the health endpoint and document events. Retry behaviour is
+  unchanged (4xx other than 408/425/429 are permanent) but is decided from the structured exception.
+- Rows written before this change may still hold old error text; it is re-scrubbed on read, not rewritten.
+- Not covered: STT, LLM and TTS adapters in the Conversation service and custom tool URLs still take tenant URLs (tracked
+  in issue #97). Services also still connect to Postgres with a superuser DSN.
 
 ## Data each feature sends, and where
 
