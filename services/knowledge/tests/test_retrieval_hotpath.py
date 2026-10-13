@@ -500,13 +500,15 @@ async def test_rls_holds_on_dense_and_lexical_branches(app_pool, world, other_te
     repo = PgVectorRepository()
     async with tenant_conn(app_pool) as conn:  # tenant B's connection, tenant A's KB id
         dense = await repo.search(conn, [str(world["kb"]["id"])], embed_text(REFUND), 5, -1.0)
-        lexical = await repo.lexical_search(conn, [str(world["kb"]["id"])], "refunds processed days", 5, 0.0)
+        lexical = await repo.lexical_search(conn, [str(world["kb"]["id"])], "refunds processed days", 5, 0.0,
+                                            approx_chunks=100)
     assert dense == [] and lexical == []
     # And the same ids under the owner's scope do return rows (the test is not vacuous).
     set_caller_tenant(str(world["tenant"]["id"]))
     async with tenant_conn(app_pool) as conn:
         assert await repo.search(conn, [str(world["kb"]["id"])], embed_text(REFUND), 5, -1.0)
-        assert await repo.lexical_search(conn, [str(world["kb"]["id"])], "refunds processed days", 5, 0.0)
+        assert await repo.lexical_search(conn, [str(world["kb"]["id"])], "refunds processed days", 5, 0.0,
+                                         approx_chunks=100)
 
 
 # --- fallback ladder -----------------------------------------------------------------------------------------

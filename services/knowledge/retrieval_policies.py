@@ -44,11 +44,12 @@ async def upsert_policy(
             agent_id, *fields.values(),
         )
         new = dict(new_row)
+        tenant_id = await conn.fetchval("SELECT tenant_id FROM agents WHERE id = $1", agent_id)
 
         await audit.write_audit(
             conn, entity_type="agent_retrieval_policy", entity_id=agent_id,
             action="updated" if old is not None else "created",
             user_id=user_id, user_email=user_email, old_value=old, new_value=new,
         )
-    plans.clear_cache()  # the resolved plan embeds the agent's policy row
+    plans.invalidate_tenant_id(tenant_id)  # the resolved plan embeds the agent's policy row
     return new

@@ -1,12 +1,17 @@
 """retrieval_logs writer: one row per retrieval, off the response path.
 record() is a put_nowait onto a bounded queue; one background task drains it. A slow or broken database can
 therefore cost a dropped log line (counted, warned about) but never latency, and never unbounded memory. Each
-tenant also has a token bucket, so one noisy tenant cannot fill the queue or the table; over-limit rows are
+tenant also has a token bucket (default 5 rows/s, burst 20: at most 432,000 rows per tenant per day, about
+13M over the 30-day retention), so one noisy tenant cannot fill the queue or the table; over-limit rows are
 dropped and counted.
 
 What is stored: the caller's words are speech. Before storing, the query is cut to 500 characters, runs of six
 or more digits (spaces/dashes between digits allowed: phone and card numbers) become "[digits]" and e-mail
-addresses become "[email]". NOT redacted: names, addresses, free-text account details, short numbers. Rows carry a
+addresses become "[email]"; runs of six or more spoken digit words ("four one five five five ...") too. Digit runs
+are caught across single or double spaces, dashes, dots, commas, slashes, underscores and " - ", in any Unicode
+digit script (fullwidth, Devanagari, ...). NOT redacted: names, addresses, free-text account details, numbers
+shorter than six digits, digits split by words ("my pin is 12 oh 34 56"), spoken digits in other languages,
+deliberately obfuscated numbers. Prices and dates with six or more digits are masked too (false positives). Rows carry a
 trace_id but no call/session id, so they are not linked to a call; they are tenant-scoped by RLS and purged after
 KNOWLEDGE_RETRIEVAL_LOG_RETENTION_DAYS (default 30)."""
 
@@ -29,10 +34,16 @@ from . import db
 log = logging.getLogger(__name__)
 
 QUERY_MAX_CHARS = 500
-_DIGIT_RUN_RE = re.compile(r"\d(?:[ \-]?\d){5,}")
+# Six or more digits (any script: \d is Unicode) with up to three separator characters between neighbours
+# (space, dash, dot, comma, slash, underscore, en/em dash): phone and card numbers however an STT engine
+# punctuates them. Also six or more spoken digit words in a row.
+_SEP = r"[\s.,/_\-\u2013\u2014]"
+_DIGIT_RUN_RE = re.compile(rf"\d(?:{_SEP}{{0,3}}\d){{5,}}")
+_DIGIT_WORDS = r"(?:zero|oh|one|two|three|four|five|six|seven|eight|nine)"
+_SPOKEN_DIGITS_RE = re.compile(rf"\b{_DIGIT_WORDS}(?:{_SEP}{{1,3}}{_DIGIT_WORDS}\b){{5,}}", re.IGNORECASE)
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-_RATE_PER_S = float(os.environ.get("KNOWLEDGE_RETRIEVAL_LOG_RATE_PER_S", "20"))
-_BURST = float(os.environ.get("KNOWLEDGE_RETRIEVAL_LOG_BURST", "50"))
+_RATE_PER_S = float(os.environ.get("KNOWLEDGE_RETRIEVAL_LOG_RATE_PER_S", "5"))
+_BURST = float(os.environ.get("KNOWLEDGE_RETRIEVAL_LOG_BURST", "20"))
 _RETENTION_DAYS = int(os.environ.get("KNOWLEDGE_RETRIEVAL_LOG_RETENTION_DAYS", "30"))
 _PURGE_BATCH = 1000
 _PURGE_INTERVAL_S = 3600.0
@@ -64,7 +75,7 @@ _buckets: dict[str, tuple[float, float]] = {}  # tenant_id -> (tokens, last refi
 def redact_query(query: str) -> str:
     """Cap first (so the regexes only ever see a bounded string), then mask digits and e-mail addresses."""
     capped = query[: QUERY_MAX_CHARS * 2]
-    masked = _EMAIL_RE.sub("[email]", _DIGIT_RUN_RE.sub("[digits]", capped))
+    masked = _EMAIL_RE.sub("[email]", _DIGIT_RUN_RE.sub("[digits]", _SPOKEN_DIGITS_RE.sub("[digits]", capped)))
     return masked[:QUERY_MAX_CHARS]
 
 

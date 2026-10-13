@@ -26,6 +26,7 @@ from libs.tenancy import TenantScopeConflict, current_tenant, tenant_conn
 
 from . import cache, db
 from .embedding_manager import EmbeddingProviderConfig, EmbeddingProviderManager
+from .resilience import BoundedPool, RetrievalConfig, RetrievalUnavailable, admission
 from .vector_repository import SEARCHABLE_STATUSES, VectorMatch
 
 log = logging.getLogger(__name__)
@@ -77,30 +78,65 @@ class RetrievalPlan:
 _PLAN_TTL_S = float(os.environ.get("KNOWLEDGE_PLAN_TTL_S", "30"))
 _plans = cache.TTLCache(ttl_s=_PLAN_TTL_S, max_entries=int(os.environ.get("KNOWLEDGE_PLAN_CACHE_MAX", "2048")))
 _loaded_at: dict[str, float] = {}  # key -> monotonic time of the load, for stale-while-revalidate
-_refreshing: set[str] = set()
+_refresh_tasks: dict[str, asyncio.Task] = {}  # tracked so shutdown can cancel them before the pool closes
 _MAX_BACKGROUND_REFRESHES = 8
-# Bumped by every invalidation. A load that started before a bump must not be stored: it may carry the data
-# the invalidation was meant to evict.
-_generation = 0
+_REFRESH_KEY = "\x00plan-refresh"
+_closed = False
+
+# Invalidation sequence. A load that started at sequence s must not be stored if an invalidation that covers its
+# plan happened after s: it may carry the data the invalidation was meant to evict. Invalidations are scoped
+# (one agent, one tenant, or everything), so one tenant's edit never makes another tenant's loads uncacheable.
+_seq = 0
+_clear_seq = 0
+_tenant_inval: dict[str, int] = {}  # tenant_id -> seq of its last invalidation
+_agent_inval: dict[tuple[str, str], int] = {}  # (tenant_slug, agent_slug) -> seq
+_MAX_INVAL_ENTRIES = 50000
+
+
+def _bump() -> int:
+    global _seq
+    _seq += 1
+    return _seq
+
+
+def _record(table: dict, key: Any) -> None:
+    table[key] = _bump()
+    if len(table) > _MAX_INVAL_ENTRIES:  # forget the oldest half: they predate any load still in flight
+        for stale in sorted(table, key=table.get)[: _MAX_INVAL_ENTRIES // 2]:
+            del table[stale]
 
 
 def invalidate_agent(tenant_slug: str, agent_slug: str) -> None:
-    global _generation
-    _generation += 1
+    _record(_agent_inval, (tenant_slug, agent_slug))
     _plans.delete(cache.plan_key(tenant_slug, agent_slug))
 
 
 def invalidate_tenant(tenant_slug: str) -> None:
-    global _generation
-    _generation += 1
+    """By slug (the cache key's tenant): evicts every plan of that tenant slug."""
+    _bump()
     _plans.delete_prefix(cache.plan_tenant_prefix(tenant_slug))
 
 
+def invalidate_tenant_id(tenant_id: Any) -> None:
+    """Evict only this tenant's plans (found by the plan's tenant_id) and stop its in-flight loads storing."""
+    tid = str(tenant_id)
+    _record(_tenant_inval, tid)
+    _plans.delete_where(lambda plan: plan.tenant_id == tid)
+
+
 def clear_cache() -> None:
-    global _generation
-    _generation += 1
+    global _clear_seq
+    _clear_seq = _bump()
     _plans.clear()
     _loaded_at.clear()
+
+
+def _may_store(plan: "RetrievalPlan", started_seq: int) -> bool:
+    return (
+        _clear_seq <= started_seq
+        and _tenant_inval.get(plan.tenant_id, 0) <= started_seq
+        and _agent_inval.get((plan.tenant_slug, plan.agent_slug), 0) <= started_seq
+    )
 
 
 def check_scope(plan: "RetrievalPlan") -> None:
@@ -128,29 +164,53 @@ def cached_plan(tenant_slug: str, agent_slug: str) -> "RetrievalPlan | None":
 def _refresh_in_background(key: str, plan: "RetrievalPlan") -> None:
     """Stale-while-revalidate: past TTL/2 the cached plan is still served while one bounded background task
     reloads it, so a live agent does not pay a cold plan whenever the hard TTL lapses. Failure keeps the old
-    plan until the hard TTL evicts it."""
-    if key in _refreshing or len(_refreshing) >= _MAX_BACKGROUND_REFRESHES:
+    plan until the hard TTL evicts it. The task goes through admission and a bounded pool acquire like any other
+    pool user, and is tracked so shutdown() can cancel it before the pool closes."""
+    if _closed or key in _refresh_tasks or len(_refresh_tasks) >= _MAX_BACKGROUND_REFRESHES:
         return
-    _refreshing.add(key)
-    generation = _generation
+    started = _seq
 
     async def run() -> None:
+        cfg = RetrievalConfig.from_env()
+        # A pseudo-tenant key: the refresh needs a global slot (it is a pool user) but must not be refused because
+        # the tenant itself is busy, which is exactly when its plan is being served stale.
+        if not await admission.acquire(_REFRESH_KEY, cfg, 0):
+            return  # overloaded: keep serving the old plan
         try:
-            pool = await db.get_pool()
+            pool = BoundedPool(await db.get_pool(), cfg.acquire_timeout_s)
             async with tenant_conn(pool, explicit_tenant=plan.tenant_id, reason="retrieval-search") as conn:
                 fresh = await load_plan(conn, plan.tenant_slug, plan.agent_slug)
-            if fresh is not None and generation == _generation:
+            if fresh is not None and _may_store(fresh, started):
                 _store(key, fresh)
+        except asyncio.CancelledError:
+            raise
         except Exception:  # noqa: BLE001
             log.warning("retrieval plan refresh failed agent=%s", plan.agent_id, exc_info=True)
         finally:
-            _refreshing.discard(key)
+            admission.release(_REFRESH_KEY)
+            _refresh_tasks.pop(key, None)
 
     try:
         # Empty context: the refresh must not run under whichever request happened to trigger it.
-        asyncio.get_running_loop().create_task(run(), context=contextvars.Context())
+        _refresh_tasks[key] = asyncio.get_running_loop().create_task(run(), context=contextvars.Context())
     except RuntimeError:
-        _refreshing.discard(key)
+        pass
+
+
+async def shutdown() -> None:
+    """Cancel and await background refreshes, and refuse new ones. Call before db.close_pool()."""
+    global _closed
+    _closed = True
+    tasks = list(_refresh_tasks.values())
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    _refresh_tasks.clear()
+
+
+def startup() -> None:
+    global _closed
+    _closed = False
 
 
 def _store(key: str, plan: "RetrievalPlan") -> None:
@@ -182,7 +242,8 @@ async def _load_prompt_matches(conn: asyncpg.Connection, kb_ids: list[str]) -> l
                             AND d.usage_mode = 'prompt' AND d.status = ANY($2::text[])
         JOIN knowledge_bases kb ON kb.id = c.kb_id
         WHERE c.kb_id = ANY($1::uuid[]) AND NOT c.is_parent
-        GROUP BY c.document_id, c.kb_id, d.title, kb.slug
+        GROUP BY c.document_id, c.kb_id, d.title, kb.slug, d.created_at
+        ORDER BY d.created_at, c.document_id  -- deterministic: the half-budget cap keeps the oldest documents
         """,
         kb_ids, SEARCHABLE_STATUSES,
     )
@@ -266,7 +327,7 @@ async def resolve_plan(
     hit = cached_plan(tenant_slug, agent_slug)
     if hit is not None:
         return hit, True
-    generation = _generation
+    started = _seq
     if conn is not None:
         plan = await load_plan(conn, tenant_slug, agent_slug)
     else:
@@ -274,7 +335,7 @@ async def resolve_plan(
             plan = await load_plan(own_conn, tenant_slug, agent_slug)
     if plan is not None:
         check_scope(plan)  # cold path too: a plan for another tenant is neither cached nor returned
-        if generation == _generation:
+        if _may_store(plan, started):
             _store(cache.plan_key(tenant_slug, agent_slug), plan)
     return plan, False
 
@@ -282,25 +343,42 @@ async def resolve_plan(
 async def prewarm(
     tenant_slug: str, agent_slug: str, *,
     embedding_manager: EmbeddingProviderManager | None = None, pool: asyncpg.Pool | None = None,
+    config: RetrievalConfig | None = None,
 ) -> bool:
     """Resolve and cache the plan, instantiate its embedding providers and open two pooled connections, so the
     first retrieve() of a call spends nothing on setup. Call at call start, after the caller's tenant scope is
     set (set_target_tenant / the router's assert_tenant_access). Returns False when the agent does not exist.
-    Never raises for a missing provider: retrieve() degrades, prewarm only tries."""
-    pool = pool or await db.get_pool()
-    plan, _ = await resolve_plan(tenant_slug, agent_slug, pool=pool)
-    if plan is None:
-        return False
-    if embedding_manager is not None:
-        for cfg in plan.embedding_configs.values():
-            try:
-                await embedding_manager.get(cfg)
-            except Exception:  # noqa: BLE001 - a broken provider is retrieve()'s fallback, not prewarm's failure
-                pass
+    Never raises for a missing provider: retrieve() degrades, prewarm only tries.
 
-    async def _touch() -> None:
-        async with pool.acquire() as c:
-            await c.fetchval("SELECT 1")
+    It is an ordinary pool user: it goes through the same admission limiter as retrieve() and acquires
+    connections with the same bound, so a prewarm flood cannot starve retrieval. Past the cap it raises
+    RetrievalUnavailable(degraded=['overloaded']); callers treat prewarm as best effort."""
+    cfg = config or RetrievalConfig.from_env()
+    if not await admission.acquire(tenant_slug, cfg, min(cfg.queue_wait_s, cfg.deadline_s)):
+        raise RetrievalUnavailable("prewarm overloaded", degraded=["overloaded"], trace_id="")
+    try:
+        bpool = BoundedPool(pool or await db.get_pool(), cfg.acquire_timeout_s)
+        plan, _ = await resolve_plan(tenant_slug, agent_slug, pool=bpool)
+        if plan is None:
+            return False
+        if embedding_manager is not None:
+            for provider_cfg in plan.embedding_configs.values():
+                try:
+                    await embedding_manager.get(provider_cfg)
+                except Exception:  # noqa: BLE001 - a broken provider is retrieve()'s fallback
+                    pass
 
-    await asyncio.gather(_touch(), _touch(), return_exceptions=True)
-    return True
+        async def _touch() -> None:
+            async with bpool.acquire() as c:
+                await c.fetchval("SELECT 1")
+
+        await asyncio.gather(_touch(), _touch(), return_exceptions=True)
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if type(exc).__name__ == "PoolOverloaded":
+            raise RetrievalUnavailable("prewarm overloaded", degraded=["overloaded"], trace_id="") from exc
+        raise
+    finally:
+        admission.release(tenant_slug)
