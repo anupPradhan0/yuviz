@@ -1193,3 +1193,96 @@ def test_after_pages_were_skipped_for_size_neither_the_raw_rung_nor_ocr_second_g
     with pytest.raises(formats.TierSkip):
         formats._pdf_ocr(object(), None, {"limit_hit": True})
     assert formats._pdf_raw(raw, {}).text()          # without the flag the raw rung does read it
+
+
+# ── Linux memory accounting and hardening order (pure, testable on macOS) ──
+
+from services.knowledge.parsers import _worker  # noqa: E402
+
+PAGE = 4096
+
+
+def _statm(resident_mb: float) -> str:
+    return f"{int(resident_mb * 1024 * 1024 / PAGE) * 4} {int(resident_mb * 1024 * 1024 / PAGE)} 100 1 0 5 0"
+
+
+def test_linux_usage_is_the_current_resident_set_not_the_inherited_peak():
+    # A child forked from a worker whose peak was 900 MB: ru_maxrss says 900 MB from its first instruction, statm says 30.
+    usage = _worker.usage_mb("linux", lambda: _statm(30), PAGE, maxrss=900 * 1024)   # Linux ru_maxrss is in KB
+    assert usage == pytest.approx(30, abs=0.1)
+    baseline = usage
+    assert not _worker.memory_exceeded(usage, baseline, limit_mb=512)                  # must NOT exit
+    grown = _worker.usage_mb("linux", lambda: _statm(700), PAGE, maxrss=900 * 1024)
+    assert _worker.memory_exceeded(grown, baseline, limit_mb=512)                      # real growth does
+
+
+def test_the_reading_that_broke_ci_would_have_exited_immediately():
+    """The old guard: ru_maxrss / 1024 on Linux. Documented here so the regression is visible: with the parent's peak
+    inherited it is over the limit at start, and memory_exceeded() with that reading as its own baseline still holds."""
+    inherited = 900 * 1024 / 1024
+    assert inherited > 512                                  # the old comparison: exit code 75 for a 900-byte file
+    assert not _worker.memory_exceeded(inherited, inherited, 512)   # the baseline rule alone would have saved it
+
+
+@pytest.mark.parametrize("platform,maxrss,expected", [("darwin", 200 * 1024 * 1024, 200), ("linux", 0, 0)])
+def test_macos_uses_its_own_maxrss_in_bytes_and_a_missing_proc_falls_back(platform, maxrss, expected):
+    def no_proc():
+        raise OSError("no /proc")
+    got = _worker.usage_mb(platform, no_proc, PAGE, maxrss)
+    assert got == pytest.approx(expected)
+
+
+def test_memory_exceeded_needs_both_the_limit_and_growth():
+    assert not _worker.memory_exceeded(600, 590, 512)       # over the limit but only 10 MB since start
+    assert _worker.memory_exceeded(600, 30, 512)
+    assert not _worker.memory_exceeded(400, 30, 512)        # grown a lot, still under the limit
+
+
+def test_proc_stat_parsing_handles_awkward_comm_and_page_size():
+    line = b"4242 (py (weird) name) S 1 777 4242 0 -1 4194304 1000 0 0 0 5 1 0 0 20 0 1 0 100 12345678 2500 18446744073709551615"
+    assert sandbox.parse_proc_stat(line) == (777, 2500)
+    other = b"4243 (x) S 1 778 4243 0 -1 4194304 1000 0 0 0 5 1 0 0 20 0 1 0 100 12345678 100 18446744073709551615"
+    assert sandbox._group_rss_proc(777, page=4096, scan=[line, other]) == pytest.approx(2500 * 4096 / 1048576)
+    assert sandbox._group_rss_proc(777, page=65536, scan=[line]) == pytest.approx(2500 * 65536 / 1048576)
+    assert sandbox._group_rss_proc(999, page=4096, scan=[line]) == 0
+
+
+def test_privileges_and_namespaces_are_set_up_before_any_thread_and_the_guard_before_rlimits(monkeypatch):
+    import threading
+    events = []
+
+    def fake_privileges():
+        events.append(("privileges", threading.active_count()))
+
+    def fake_guard(limit):
+        events.append(("guard", threading.active_count()))
+
+    def fake_limits(*a):
+        events.append(("limits", threading.active_count()))
+
+    monkeypatch.setattr(_worker, "harden_privileges", fake_privileges)
+    monkeypatch.setattr(_worker, "_start_memory_guard", fake_guard)
+    monkeypatch.setattr(_worker, "harden_limits", fake_limits)
+    monkeypatch.setattr(sys, "argv", ["w", json.dumps({"content_type": "text/plain", "root": sandbox._REPO_ROOT,
+                                                       "limits": {"memory_mb": 512, "timeout_s": 5, "binary_parsers": False}})])
+    import io
+    import types
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"hello")))
+    monkeypatch.setattr(sys, "stdout", types.SimpleNamespace(buffer=io.BytesIO(), write=lambda s: None, flush=lambda: None))
+    # the real child would block lxml; keep this process's modules intact
+    monkeypatch.setattr(_worker, "block_native_xml", lambda: None)
+    try:
+        _worker.main()
+    except Exception:
+        pass
+    assert [e[0] for e in events] == ["privileges", "guard", "limits"]
+    assert events[0][1] == threading.active_count()      # nothing was started by main() before privileges ran
+    # and the real guard's thread is started inside _start_memory_guard, which is called after privileges (above)
+
+
+def test_the_guard_starts_exactly_one_thread_and_privileges_start_none():
+    code = ("import sys, threading\nsys.path.insert(0, %r)\nfrom services.knowledge.parsers import _worker\n"
+            "n0 = threading.active_count()\n_worker.harden_privileges()\nn1 = threading.active_count()\n"
+            "_worker._start_memory_guard(100000)\nn2 = threading.active_count()\nprint(n0, n1, n2)" % sandbox._REPO_ROOT)
+    r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    assert r.stdout.split() == ["1", "1", "2"], (r.stdout, r.stderr[-300:])

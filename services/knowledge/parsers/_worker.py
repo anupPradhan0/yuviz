@@ -28,7 +28,34 @@ def _libc():
     return ctypes.CDLL(None, use_errno=True)
 
 
-def harden(memory_mb: int, cpu_s: int, nproc_limit: int) -> None:
+def harden_privileges() -> None:
+    """no_new_privs, non-dumpable and the user/network namespace (Linux). MUST run before any thread exists:
+    unshare(CLONE_NEWUSER) fails with EINVAL in a multithreaded process (CI logged errno 22 on every parse when the
+    memory-guard thread was started first). Nothing else here assumes a single thread, but order it first anyway."""
+    if not sys.platform.startswith("linux"):
+        _note("no_new_privs, nproc, RLIMIT_AS and the network namespace are Linux-only; "
+              "the parent's RSS watchdog is the memory cap on this platform")
+        return
+    try:
+        libc = _libc()
+        if libc.prctl(38, 1, 0, 0, 0) != 0:         # PR_SET_NO_NEW_PRIVS
+            _note("PR_SET_NO_NEW_PRIVS failed")
+        if libc.prctl(4, 0, 0, 0, 0) != 0:          # PR_SET_DUMPABLE = 0: same-uid processes cannot read /proc/<pid>
+            _note("PR_SET_DUMPABLE failed")
+        import ctypes
+        # An unprivileged user namespace first (CLONE_NEWUSER|CLONE_NEWNET needs no capability where the kernel allows
+        # it); then plain CLONE_NEWNET (needs CAP_SYS_ADMIN, so it mostly fails); else the child keeps the network.
+        if libc.unshare(0x10000000 | 0x40000000) != 0:
+            first = ctypes.get_errno()
+            if libc.unshare(0x40000000) != 0:
+                _note(f"network namespace unavailable (errno {first} with a user namespace, {ctypes.get_errno()} without); "
+                      "child keeps network access")
+    except Exception as exc:  # no libc, ctypes blocked, seccomp
+        _note(f"prctl/unshare not applied: {type(exc).__name__}")
+
+
+def harden_limits(memory_mb: int, cpu_s: int, nproc_limit: int) -> None:
+    """rlimits. Runs AFTER the memory-guard thread has started: RLIMIT_NPROC=1 would forbid creating it."""
     try:
         import resource
     except ImportError:  # Windows
@@ -53,30 +80,18 @@ def harden(memory_mb: int, cpu_s: int, nproc_limit: int) -> None:
     limit("RLIMIT_CORE", 0)
     limit("RLIMIT_NOFILE", 64)
     if not sys.platform.startswith("linux"):
-        _note("memory cap (RLIMIT_AS), no_new_privs, nproc and network namespace are Linux-only; "
-              "the parent's RSS watchdog is the memory cap on this platform")
         return
     limit("RLIMIT_AS", memory_mb * 2 * 1024 * 1024)  # virtual size runs well above RSS; the parent enforces RSS
     # Fork is only needed to run the OCR binary; without it the parser has no reason to start processes.
     # RLIMIT_NPROC is per user, so a limit of 1 makes every fork by this process fail.
     if nproc_limit and shutil.which("tesseract") is None:
         limit("RLIMIT_NPROC", nproc_limit)
-    try:
-        libc = _libc()
-        if libc.prctl(38, 1, 0, 0, 0) != 0:         # PR_SET_NO_NEW_PRIVS
-            _note("PR_SET_NO_NEW_PRIVS failed")
-        if libc.prctl(4, 0, 0, 0, 0) != 0:          # PR_SET_DUMPABLE = 0: same-uid processes cannot read /proc/<pid>
-            _note("PR_SET_DUMPABLE failed")
-        import ctypes
-        # An unprivileged user namespace first (CLONE_NEWUSER|CLONE_NEWNET needs no capability where the kernel allows
-        # it); then plain CLONE_NEWNET (needs CAP_SYS_ADMIN, so it mostly fails); else the child keeps the network.
-        if libc.unshare(0x10000000 | 0x40000000) != 0:
-            first = ctypes.get_errno()
-            if libc.unshare(0x40000000) != 0:
-                _note(f"network namespace unavailable (errno {first} with a user namespace, {ctypes.get_errno()} without); "
-                      "child keeps network access")
-    except Exception as exc:  # no libc, ctypes blocked, seccomp
-        _note(f"prctl/unshare not applied: {type(exc).__name__}")
+
+
+def harden(memory_mb: int, cpu_s: int, nproc_limit: int) -> None:
+    """Both steps in the safe order, for callers that start no thread of their own."""
+    harden_privileges()
+    harden_limits(memory_mb, cpu_s, nproc_limit)
 
 
 EXIT_MEMORY = 75
@@ -89,22 +104,57 @@ def block_native_xml() -> None:
         sys.modules[name] = None
 
 
+def rss_mb_from_statm(statm: str, page_size: int) -> float:
+    """Resident set from /proc/<pid>/statm ("size resident shared ..." in pages), in MB."""
+    return int(statm.split()[1]) * page_size / (1024 * 1024)
+
+
+def usage_mb(platform: str, read_statm, page_size: int, maxrss: int) -> float:
+    """Memory in use by THIS process now, in MB.
+    Linux: the CURRENT resident set from /proc/self/statm. ru_maxrss must not be used there: it is a high-water mark that
+    Linux carries over fork+exec, so a parser child started by a worker whose own peak was 900 MB reports 900 MB from its
+    first instruction (CI: exit code 75 for every document, even a 900-byte one; in production, every parse for every
+    tenant after the worker's peak crossed the limit). Elsewhere (macOS: bytes, the child's own) ru_maxrss is used."""
+    if platform.startswith("linux"):
+        try:
+            return rss_mb_from_statm(read_statm(), page_size)
+        except (OSError, ValueError, IndexError):
+            pass  # no /proc: fall through to the high-water mark; memory_exceeded() still subtracts the baseline
+    scale = 1024 * 1024 if platform == "darwin" else 1024
+    return maxrss / scale
+
+
+def memory_exceeded(usage: float, baseline: float, limit_mb: float) -> bool:
+    """Over the limit AND grown since this process started. The baseline (measured at start) means an inherited high
+    value alone can never trigger the exit; real growth still does."""
+    return usage > limit_mb and usage - baseline > 0.1 * limit_mb
+
+
 def _start_memory_guard(limit_mb: int) -> None:
-    """Exit the moment this process's peak RSS passes the limit. The parent's watchdog polls too, but this reacts in
+    """Exit the moment this process's memory passes the limit. The parent's watchdog polls too, but this reacts in
     milliseconds and cannot be outrun by a fast allocator. (A long C call that holds the GIL delays it; the parent's
-    group-wide watchdog still covers that.)"""
+    group-wide watchdog still covers that.) Starts a thread, so it must come after harden_privileges()."""
     import threading
     import time
     try:
         import resource
     except ImportError:
         return
-    scale = 1024 * 1024 if sys.platform == "darwin" else 1024     # ru_maxrss is bytes on macOS, KB on Linux
+    page_size = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+
+    def read_statm() -> str:
+        with open("/proc/self/statm") as f:
+            return f.read()
+
+    def now() -> float:
+        return usage_mb(sys.platform, read_statm, page_size, resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+
+    baseline = now()
 
     def watch() -> None:
         while True:
             time.sleep(0.005)
-            if resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / scale > limit_mb:
+            if memory_exceeded(now(), baseline, limit_mb):
                 os._exit(EXIT_MEMORY)
 
     threading.Thread(target=watch, daemon=True).start()
@@ -112,8 +162,10 @@ def _start_memory_guard(limit_mb: int) -> None:
 
 def main() -> int:
     args = json.loads(sys.argv[1])
-    _start_memory_guard(args["limits"]["memory_mb"])   # before harden(): RLIMIT_NPROC would forbid starting a thread
-    harden(args["limits"]["memory_mb"], int(args["limits"]["timeout_s"]) + 1, int(args.get("nproc_limit", 1)))
+    # Order matters: unshare(CLONE_NEWUSER) needs a single-threaded process, and RLIMIT_NPROC would forbid a new thread.
+    harden_privileges()
+    _start_memory_guard(args["limits"]["memory_mb"])
+    harden_limits(args["limits"]["memory_mb"], int(args["limits"]["timeout_s"]) + 1, int(args.get("nproc_limit", 1)))
     raw = sys.stdin.buffer.read()
     sys.path.append(args["root"])
     if not args["limits"].get("binary_parsers", True):
