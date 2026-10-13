@@ -1158,11 +1158,14 @@ async def test_the_watchdog_polls_slowly_while_memory_is_small_and_flat(monkeypa
 
 
 async def test_the_watchdog_still_reacts_fast_when_memory_grows():
-    code = ("import time\nchunks = []\nfor _ in range(40):\n    chunks.append(b'x' * (20 << 20)); time.sleep(0.05)\ntime.sleep(30)")
+    """Memory grows ~2 GB/s: the child must be killed within a few polls of crossing the limit, not allowed to run on to
+    its full size. (Slow polling would let it reach ~1 GB before the first check after it starts growing.)"""
+    before = _children_maxrss_mb()
+    code = ("import time\nchunks = []\nfor _ in range(60):\n    chunks.append(b'x' * (20 << 20)); time.sleep(0.01)\ntime.sleep(30)")
     t0 = time.time()
     with pytest.raises(ParseRejected, match="more memory"):
         await _probe(code, Limits(memory_mb=300, timeout_s=60))
-    assert time.time() - t0 < 10
+    assert time.time() - t0 < 10 and _bounded_since(before, ceiling=700)
 
 
 @pytest.mark.skipif(not LINUX, reason="/proc is Linux-only (UNVERIFIED on macOS)")
