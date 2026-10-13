@@ -763,7 +763,10 @@ def _stylesheet_decls(soup) -> dict[int, dict[str, str]]:
     """Declarations that <style> rules give each element, keyed by id(tag). Later rules override earlier ones;
     specificity is not modelled and at-rules (@media, @font-face) are ignored. Selectors are matched with soupsieve,
     under a time budget and with caps on rules, selectors per rule and selector length."""
-    css = _CSS_COMMENT_RE.sub(" ", "\n".join(st.get_text() for st in soup.find_all("style")))
+    css = "\n".join(st.get_text() for st in soup.find_all("style"))
+    if len(css) > MAX_CSS_BYTES:   # before the comment strip: a megabyte-long comment is as costly as a megabyte of rules
+        raise LimitExceeded("stylesheet is too large to evaluate safely")
+    css = _CSS_COMMENT_RE.sub(" ", css)
     out: dict[int, dict[str, str]] = {}
     deadline = time.monotonic() + CSS_TIME_BUDGET_S
     for head, body in _css_rules(css):
@@ -920,15 +923,14 @@ class _HtmlStyles:
         return color in _WHITE_VALUES and not self.dark_background(tag)
 
     def collapsed(self, tag, controlled_ids: set[str]) -> bool:
-        """A closed disclosure: <details> content, a panel an aria-expanded=false control points at, a Bootstrap
-        `.collapse` panel. Hidden the same way an attacker would hide text, which is why it is counted separately."""
+        """A closed disclosure: a child of a closed <details>, a panel an aria-expanded=false control points at, a
+        Bootstrap `.collapse` panel, a hidden tab panel. Hidden the way an attacker would hide text, which is why it is
+        counted separately and a flag can keep it."""
         attrs = tag.attrs or {}
-        if tag.name == "details" or (tag.parent is not None and getattr(tag.parent, "name", None) == "details"
-                                     and tag.name != "summary" and "open" not in (tag.parent.attrs or {})):
-            return tag.name != "details" or "open" not in attrs
+        parent = tag.parent
+        if parent is not None and getattr(parent, "name", None) == "details" and "open" not in (parent.attrs or {}):
+            return True
         classes = attrs.get("class") or []
-        if isinstance(classes, str):
-            classes = classes.split()
         return (attrs.get("id") in controlled_ids) or ("collapse" in classes and "show" not in classes) \
             or str(attrs.get("role", "")).lower() == "tabpanel"
 
@@ -977,6 +979,29 @@ def _html_main(html: str) -> ParsedDocument:
     # Decide everything against the untouched tree first (ancestors are consulted), then remove.
     whole = [t for t in soup.find_all(True) if styles.subtree_hidden(t)]
     own = [t for t in soup.find_all(True) if styles.own_text_hidden(t)]
+    # Closed disclosures that CSS alone does not hide in the markup: <details> without `open` (all but its summary) and
+    # Bootstrap-style `.collapse` panels without `.show`.
+    whole_ids = {id(t) for t in whole}
+    for d in soup.find_all("details"):
+        if "open" not in (d.attrs or {}):
+            for c in list(d.children):
+                if getattr(c, "name", None) == "summary":
+                    continue
+                if isinstance(c, Comment):
+                    continue
+                if isinstance(c, NavigableString):
+                    if c.strip():
+                        hidden["html_collapsed"] += 1
+                        if not _LIMITS.keep_collapsed:
+                            c.extract()
+                elif id(c) not in whole_ids:
+                    whole_ids.add(id(c))
+                    whole.append(c)
+    for t in soup.find_all(class_="collapse"):
+        classes = t.get("class") or []
+        if "show" not in classes and "in" not in classes and id(t) not in whole_ids:
+            whole_ids.add(id(t))
+            whole.append(t)
     for tag in whole:
         if getattr(tag, "decomposed", False):
             continue

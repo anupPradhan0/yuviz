@@ -1049,7 +1049,7 @@ async def test_sizes_that_are_not_tiny_or_not_knowable_keep_the_text(size):
     assert "Sized text" in doc.text()
 
 
-@pytest.mark.parametrize("size", ["0", "1px", "2px", "1pt", "0.1em", "10%", "0.1in"])
+@pytest.mark.parametrize("size", ["0", "1px", "2px", "1pt", "0.1em", "10%", "0.01in"])
 async def test_tiny_sizes_are_hidden(size):
     doc = await _parse(_page(f'<p style="font-size:{size}">{PAYLOAD}</p><p>{VISIBLE}.</p>'))
     assert PAYLOAD not in doc.text() and VISIBLE in doc.text()
