@@ -34,6 +34,7 @@ from .embedding_manager import (
     EMBEDDING_DIMS, EmbeddingProviderConfig, EmbeddingProviderManager, effective_model, embed_in_batches,
 )
 from .parsers import SUPPORTED_CONTENT_TYPES, ParsedDocument, ParseRejected, parse_document
+from .reembed import assert_kb_config_current
 from .storage import StorageProvider
 
 log = logging.getLogger(__name__)
@@ -272,6 +273,8 @@ async def process_one_job(
             if not await _still_owns_job(conn, job):
                 log.warning("Ingestion job=%s attempt=%s lost its lease; dropping results", job["id"], job["attempts"])
                 return
+            if embedding_model is not None:  # re-embed migration: never land vectors from a config the KB just left
+                await assert_kb_config_current(conn, kb_id, embedding_cfg.id)
             # The queuer owns the version (retry_document bumps it); this swap is one transaction,
             # so readers see the old chunks until commit and the new ones after, never a gap.
             version = doc_row["version"]
