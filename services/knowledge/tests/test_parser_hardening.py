@@ -823,3 +823,145 @@ async def test_a_page_the_main_html_parser_cannot_handle_is_rejected_not_leaked_
     with pytest.raises(ParseRejected) as e:
         f.parse_by_type(html, detect.HTML, Limits())
     assert PAYLOAD not in e.value.reason
+
+
+# ── S3 round 2: the other formats ───────────────────────────────────────
+
+def _docx_with_styled_hiding() -> bytes:
+    import docx
+    from docx.enum.style import WD_STYLE_TYPE
+    from docx.shared import Pt, RGBColor
+
+    d = docx.Document()
+    hid = d.styles.add_style("HiddenChar", WD_STYLE_TYPE.CHARACTER)
+    hid.font.hidden = True
+    white = d.styles.add_style("WhiteChar", WD_STYLE_TYPE.CHARACTER)
+    white.font.color.rgb = RGBColor(255, 255, 255)
+    tiny = d.styles.add_style("TinyChar", WD_STYLE_TYPE.CHARACTER)
+    tiny.font.size = Pt(1)
+    child = d.styles.add_style("ChildOfHidden", WD_STYLE_TYPE.CHARACTER)
+    child.base_style = hid
+    para = d.styles.add_style("HiddenPara", WD_STYLE_TYPE.PARAGRAPH)
+    para.font.hidden = True
+    d.add_paragraph(f"{VISIBLE}.")
+    p = d.add_paragraph("Start of line. ")
+    for style, tag in (("HiddenChar", "style-hidden"), ("WhiteChar", "style-white"), ("TinyChar", "style-tiny"), ("ChildOfHidden", "style-inherited")):
+        p.add_run(f"{PAYLOAD}-{tag} ").style = d.styles[style]
+    p.add_run(f"{PAYLOAD}-direct-tiny ").font.size = Pt(1)
+    p.add_run("End of line.")
+    d.add_paragraph(f"{PAYLOAD}-para-style", style="HiddenPara")
+    buf = io.BytesIO()
+    d.save(buf)
+    return buf.getvalue()
+
+
+async def test_docx_hiding_through_character_and_paragraph_styles_and_tiny_text_is_removed_by_both_tiers():
+    raw = _docx_with_styled_hiding()
+    doc = await _parse(raw)
+    zf = zipfile.ZipFile(io.BytesIO(raw))
+    for d in (doc, formats._docx_xml(zf)):
+        assert PAYLOAD not in d.text(), d.text()
+        assert VISIBLE in d.text() and "Start of line." in d.text() and "End of line." in d.text()
+        assert d.hidden_removed.get("docx_hidden_runs", 0) >= 3 and d.hidden_removed.get("docx_tiny_text", 0) >= 2
+        assert d.hidden_removed.get("docx_white_text") == 1
+
+
+def _pptx_with_hidden_shapes() -> bytes:
+    from pptx import Presentation
+    from pptx.util import Emu, Pt
+
+    prs = Presentation()
+    s = prs.slides.add_slide(prs.slide_layouts[5])
+    s.shapes.title.text = "Visible title"
+    box = s.shapes.add_textbox(Emu(914400), Emu(914400), Emu(3000000), Emu(500000))
+    box.text_frame.text = VISIBLE
+    sel = s.shapes.add_textbox(Emu(914400), Emu(2000000), Emu(3000000), Emu(500000))
+    sel.text_frame.text = f"{PAYLOAD}-selection-pane"
+    sel._element.xpath(".//p:cNvPr")[0].set("hidden", "1")
+    off = s.shapes.add_textbox(prs.slide_width + Emu(1000000), Emu(100000), Emu(3000000), Emu(500000))
+    off.text_frame.text = f"{PAYLOAD}-off-slide"
+    above = s.shapes.add_textbox(Emu(100000), Emu(-2000000), Emu(3000000), Emu(500000))
+    above.text_frame.text = f"{PAYLOAD}-above-slide"
+    tiny = s.shapes.add_textbox(Emu(914400), Emu(3000000), Emu(3000000), Emu(500000))
+    tiny.text_frame.text = f"{PAYLOAD}-1pt"
+    tiny.text_frame.paragraphs[0].runs[0].font.size = Pt(1)
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+async def test_pptx_selection_pane_hidden_off_slide_and_one_point_text_are_removed_by_both_tiers():
+    raw = _pptx_with_hidden_shapes()
+    doc = await _parse(raw)
+    xml = formats._pptx_xml(zipfile.ZipFile(io.BytesIO(raw)), Limits())
+    for d in (doc, xml):
+        assert PAYLOAD not in d.text(), d.text()
+        assert VISIBLE in d.text() and "Visible title" in d.text()
+        assert d.hidden_removed.get("pptx_hidden_shapes") == 1 and d.hidden_removed.get("pptx_offslide_shapes") == 2
+        assert d.hidden_removed.get("pptx_tiny_text") == 1
+
+
+def _xlsx_with_invisible_cells() -> bytes:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Rates"
+    ws.append(["City", "Fee"])
+    ws.append(["Pune", 50])
+    ws["C2"] = f"{PAYLOAD}-white"
+    ws["C2"].font = Font(color="FFFFFF")
+    ws["D2"] = f"{PAYLOAD}-format"
+    ws["D2"].number_format = ";;;"
+    ws["E2"] = "Header on dark"
+    ws["E2"].font = Font(color="FFFFFF")
+    ws["E2"].fill = PatternFill("solid", fgColor="000000")
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+async def test_xlsx_white_font_and_semicolon_number_format_cells_are_removed_by_both_tiers():
+    raw = _xlsx_with_invisible_cells()
+    doc = await _parse(raw)
+    xml = formats._xlsx_xml(zipfile.ZipFile(io.BytesIO(raw)), Limits())
+    for d in (doc, xml):
+        assert PAYLOAD not in d.text(), d.text()
+        assert "Pune" in d.text() and "Header on dark" in d.text()
+        assert d.hidden_removed.get("xlsx_hidden_cells") == 2
+
+
+@pytest.mark.parametrize("tag,ops", [
+    ("scn-white", "/DeviceRGB cs 1 1 1 scn /F1 3 Tf ({p}) Tj 0 g /F1 12 Tf"),
+    ("sc-gray-white", "/DeviceGray cs 1 sc /F1 3 Tf ({p}) Tj 0 g /F1 12 Tf"),
+    ("zero-tz", "0 Tz ({p}) Tj 100 Tz"),
+    ("matrix-tiny", "/F1 1 Tf 0.5 0 0 0.5 72 100 Tm ({p}) Tj /F1 12 Tf 1 0 0 1 72 500 Tm"),
+    ("mode-7", "7 Tr ({p}) Tj 0 Tr"),
+])
+async def test_pdf_hiding_through_colour_operators_scaling_and_text_matrix_is_removed(tag, ops):
+    raw = B.make_pdf([{"text": VISIBLE + ".\nSecond visible line here.", "ops": ops.format(p=f"{PAYLOAD}-{tag}")}])
+    doc = await _parse(raw)
+    assert PAYLOAD not in doc.text() and VISIBLE in doc.text()
+    assert doc.hidden_removed.get("pdf_invisible_text", 0) >= 1
+    assert PAYLOAD not in formats._pdf_raw(raw, {}).text()
+
+
+async def test_pdf_text_in_an_optional_content_layer_that_is_off_by_default_is_removed():
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.generic import ArrayObject, DictionaryObject, NameObject, TextStringObject
+
+    base = B.make_pdf([{"text": VISIBLE + ".\nSecond visible line here.", "ops": f"/OC /MC0 BDC ({PAYLOAD}-layer) Tj EMC (Layer on text stays) Tj"}])
+    w = PdfWriter(clone_from=PdfReader(io.BytesIO(base)))
+    ocg = w._add_object(DictionaryObject({NameObject("/Type"): NameObject("/OCG"), NameObject("/Name"): TextStringObject("Hidden")}))
+    w._root_object[NameObject("/OCProperties")] = DictionaryObject({
+        NameObject("/OCGs"): ArrayObject([ocg]),
+        NameObject("/D"): DictionaryObject({NameObject("/OFF"): ArrayObject([ocg])}),
+    })
+    res = w.pages[0]["/Resources"]
+    res[NameObject("/Properties")] = DictionaryObject({NameObject("/MC0"): ocg})
+    out = io.BytesIO()
+    w.write(out)
+    doc = await _parse(out.getvalue())
+    assert PAYLOAD not in doc.text() and VISIBLE in doc.text() and "Layer on text stays" in doc.text()
+    assert doc.hidden_removed.get("pdf_invisible_text", 0) >= 1
