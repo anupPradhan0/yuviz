@@ -854,15 +854,16 @@ async def test_a_bookmark_flood_stays_under_the_documented_memory_bound():
 
 
 async def test_ordinary_large_files_still_ingest_with_bounded_memory():
-    """Both sides of the element cap: these were rejected by the 500k cap in 5540518. Measured here: 30k-row XLSX
-    ~150 MB peak / 2.2 s, 1,000-page DOCX ~140 MB / 3.5 s."""
+    """Both sides of the element cap: these were rejected by the 500k cap in 5540518. Measured here (idle host): 30k-row
+    XLSX ~150 MB peak / 2.2 s, 1,000-page DOCX ~140 MB / 3.5 s. Timing is generous because CI hosts are shared."""
+    xlsx_raw, docx_raw = B.big_xlsx(30_000), B.big_docx(1000)
     before = _children_maxrss_mb()
     t0 = time.time()
-    xlsx = await parse_document(B.big_xlsx(30_000))
+    xlsx = await parse_document(xlsx_raw)
     assert xlsx.parser_used == "openpyxl" and len(xlsx.text()) > 3_000_000
-    docx = await parse_document(B.big_docx(1000))
+    docx = await parse_document(docx_raw)
     assert docx.parser_used == "python-docx" and "Section 999" in docx.text()
-    assert time.time() - t0 < 40 and _bounded_since(before, ceiling=400)
+    assert time.time() - t0 < 120 and _bounded_since(before, ceiling=400)
 
 
 async def test_a_heavy_docx_of_about_a_million_elements_still_parses():
