@@ -80,7 +80,7 @@ jobs:
       - name: Apply database schema
         run: |
           command -v psql >/dev/null || sudo apt-get install -y --no-install-recommends postgresql-client
-          psql -d yuviz -c 'SELECT extversion FROM pg_available_extensions WHERE name = $$vector$$'
+          psql -d yuviz -c 'SELECT default_version FROM pg_available_extensions WHERE name = $$vector$$'
           for f in schema knowledge_schema telephony_schema; do
             psql -d yuviz -q -v ON_ERROR_STOP=1 -f "database/$f.sql"
           done
