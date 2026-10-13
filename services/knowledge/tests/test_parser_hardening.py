@@ -1313,8 +1313,10 @@ def test_privileges_and_namespaces_are_set_up_before_any_thread_and_the_guard_be
     import types
     monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"hello")))
     monkeypatch.setattr(sys, "stdout", types.SimpleNamespace(buffer=io.BytesIO(), write=lambda s: None, flush=lambda: None))
-    # the real child would block lxml; keep this process's modules intact
+    # the real child would block lxml and numpy; keep this process's modules intact (a leaked sys.modules['numpy'] = None
+    # breaks every later test that imports it, e.g. the conversation TTS tests)
     monkeypatch.setattr(_worker, "block_native_xml", lambda: None)
+    monkeypatch.setattr(_worker, "limit_native_threads", lambda: None)
     try:
         _worker.main()
     except Exception:

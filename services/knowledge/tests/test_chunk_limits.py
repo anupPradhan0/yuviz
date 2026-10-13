@@ -154,5 +154,7 @@ async def test_the_worker_keeps_its_event_loop_responsive_while_it_chunks(tenant
     await process_one_job(pool, LocalStorageProvider(), _manager(_FakeProvider()), job)
     stop = True
     await task
-    assert max(gaps) < 0.5, f"the event loop stalled for {max(gaps):.2f}s while the worker chunked"
+    # A blocking chunker stalls the loop for many seconds (it took 30 s on 4.8 MB before it moved off the loop); the bound
+    # only has to tell that apart from GIL contention, and a 2-vCPU CI runner stalled for 0.52 s where a laptop stalls for 0.1 s.
+    assert max(gaps) < 1.5, f"the event loop stalled for {max(gaps):.2f}s while the worker chunked"
     await _purge_tenant(pool, tenant["id"])
