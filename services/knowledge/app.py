@@ -51,6 +51,7 @@ async def lifespan(app: FastAPI):
     await asyncio.gather(legacy_task, return_exceptions=True)
     await plans.shutdown()  # background plan refreshes use the pool: stop them before it closes
     await retrieval_log.shutdown()  # before close_pool: the writer uses the pool
+    await get_embedding_manager().aclose()  # keep-alive HTTP clients; also before the pool, in case a plan load is mid-flight
     await db.close_pool()
 
 

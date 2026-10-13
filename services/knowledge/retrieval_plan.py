@@ -369,7 +369,8 @@ async def prewarm(
         if embedding_manager is not None:
             for provider_cfg in plan.embedding_configs.values():
                 try:
-                    await embedding_manager.get(provider_cfg)
+                    warm = getattr(embedding_manager, "warm", None)  # opens the keep-alive connection too
+                    await (warm(provider_cfg) if warm is not None else embedding_manager.get(provider_cfg))
                 except Exception:  # noqa: BLE001 - a broken provider is retrieve()'s fallback
                     pass
 

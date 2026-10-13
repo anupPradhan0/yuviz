@@ -1063,3 +1063,43 @@ async def test_pool_min_never_exceeds_max_and_idle_connections_are_kept_warm(mon
             assert p.get_size() == expected, (idle, p.get_size())
         finally:
             await p.close()
+
+
+# === round 5 ===================================================================================================
+
+async def test_a_stale_read_path_refill_cannot_overwrite_a_concurrent_writer(tenant_agent, monkeypatch):
+    """Reader: Postgres says 'no KB'. Writer: attaches a KB and sets the flag. Reader's refill lands last."""
+    from services.knowledge import agent_kb as agent_kb_service
+    tenant, agent = tenant_agent
+    t, a = tenant["slug"], agent["slug"]
+    client = cache.get_client()
+    key = cache._agent_kb_key(t, a)
+    await client.delete(key)  # only this test's own key
+    real_fill = cache.fill_has_enabled_kb
+
+    async def writer_commits_then_reader_fills(tenant_slug, agent_slug, enabled):
+        await cache.set_has_enabled_kb(tenant_slug, agent_slug, True)  # the writer's post-commit SET wins the race
+        await real_fill(tenant_slug, agent_slug, enabled)  # the reader's stale value (False) arrives afterwards
+    monkeypatch.setattr(cache, "fill_has_enabled_kb", writer_commits_then_reader_fills)
+    try:
+        set_caller_tenant(str(tenant["id"]))
+        assert await agent_kb_service.has_enabled_kb(t, a) is False  # what the reader itself read
+        assert await client.get(key) == "1"  # but the writer's value survived
+        assert 0 < await client.ttl(key) <= 7 * 24 * 3600
+    finally:
+        await client.delete(key)
+
+
+async def test_the_refill_is_nx_with_a_short_ttl_and_writers_overwrite():
+    client = cache.get_client()
+    key = cache._agent_kb_key(f"t{uuid.uuid4().hex[:6]}", "a")
+    t, a = key.split(":")[2], "a"
+    try:
+        await cache.fill_has_enabled_kb(t, a, False)
+        assert await client.get(key) == "0" and 0 < await client.ttl(key) <= 60
+        await cache.fill_has_enabled_kb(t, a, True)
+        assert await client.get(key) == "0"  # NX: an existing value is never replaced by a refill
+        await cache.set_has_enabled_kb(t, a, True)
+        assert await client.get(key) == "1"  # writers always overwrite
+    finally:
+        await client.delete(key)

@@ -46,7 +46,7 @@ from . import cache, db, ops_metrics, retrieval_log
 from . import retrieval_plan as plans
 from .embedding_manager import EmbeddingProviderManager, effective_model
 from .resilience import (
-    BoundedPool, PoolOverloaded, RetrievalConfig, RetrievalUnavailable, admission, breakers, rerank_valve,
+    BoundedPool, PoolOverloaded, RetrievalConfig, RetrievalUnavailable, admission, breakers, resolve_embed_timeout_s, rerank_valve,
 )
 from .vector_repository import IVectorRepository, VectorMatch
 
@@ -196,7 +196,9 @@ async def _embed(
     if not breaker.allow():
         raise RuntimeError("embedder circuit open")
     try:
-        async with asyncio.timeout(max(min(cfg.embed_timeout_s, time_left), 0.001)):
+        provider_cfg = plan.embedding_configs[config_id]
+        budget = resolve_embed_timeout_s(provider_cfg.engine, provider_cfg.extra, cfg)
+        async with asyncio.timeout(max(min(budget, time_left), 0.001)):
             provider = await embedding_manager.get(plan.embedding_configs[config_id])
             [vector] = await provider.embed([query])
     except asyncio.CancelledError:
