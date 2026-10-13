@@ -3,6 +3,7 @@ gate on quality. parse_document() either returns a ParsedDocument or raises Pars
 
 from __future__ import annotations
 
+import dataclasses
 import os
 
 from .detect import DOCX, EMPTY, PDF, PPTX, SUPPORTED_CONTENT_TYPES, XLSX, detect_content_type
@@ -19,7 +20,7 @@ _UNSUPPORTED_REASONS = {
 # PDF and Office parsing is where the complex, exploitable libraries are. KNOWLEDGE_BINARY_PARSERS=0 turns it off (text,
 # markdown, HTML and CSV keep working) until parsing runs in a separate, contained service (docs/knowledge-parser-sandbox.md).
 BINARY_TYPES = frozenset({PDF, DOCX, PPTX, XLSX})
-BINARY_DISABLED_REASON = "PDF and Office documents are not enabled on this deployment; upload text, markdown, HTML or CSV instead"
+from .formats import BINARY_DISABLED_REASON  # noqa: E402  (one string, defined where the child can also use it)
 
 
 def binary_parsers_enabled() -> bool:
@@ -36,6 +37,8 @@ async def parse_document(
     raw: bytes, hint: str | None = None, language: str | None = None, limits: Limits | None = None,
 ) -> ParsedDocument:
     limits = limits or Limits.from_env()
+    if limits.binary_parsers and not binary_parsers_enabled():
+        limits = dataclasses.replace(limits, binary_parsers=False)
     if not raw:
         raise ParseRejected("file is empty")
     if len(raw) > limits.max_bytes:
