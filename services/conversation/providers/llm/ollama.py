@@ -16,6 +16,8 @@ from typing import Any, AsyncGenerator
 
 import httpx
 
+from libs.egress_guard import UnsafeProviderUrl, failure_code, guarded_client, validate_base_url
+
 from ..interfaces import ChatMessage
 from . import build_chat_messages
 from ...tools.llm_adapter import TokenEvent, ToolCallEvent, TurnEvent
@@ -26,6 +28,22 @@ _DEFAULT_BASE_URL = "http://localhost:11434"
 
 # Ollama evicts idle models after 5m by default; a reload costs ~15s on the next first turn.
 _KEEP_ALIVE = "30m"
+
+
+class OllamaProviderError(Exception):
+    """A provider failure as a FIXED code (libs.egress_guard.failure_code). str(exc) is the code and nothing else:
+    exception text from a request to a tenant-chosen URL (status line, body, host, port) must not reach the call,
+    its transcript or a log a tenant can read. `permanent` says whether retrying can help."""
+
+    def __init__(self, code: str, permanent: bool = False) -> None:
+        super().__init__(code)
+        self.code = code
+        self.permanent = permanent
+
+
+def _coded(exc: BaseException) -> OllamaProviderError | None:
+    failure = failure_code(exc)
+    return None if failure is None else OllamaProviderError(*failure)
 
 
 def _to_ollama_message(m: dict[str, Any]) -> dict[str, Any]:
@@ -61,18 +79,34 @@ class OllamaLLM:
         self._model       = model
         self._system      = system
         self._temperature = temperature
-        self._base_url    = base_url.rstrip("/")
+        # base_url belongs to the tenant: only its origin is used and the API path is ours (libs/egress_guard).
+        try:
+            origin = validate_base_url(base_url)
+        except UnsafeProviderUrl:
+            raise OllamaProviderError("provider_url_invalid", permanent=True) from None
+        self._base_url    = origin.url
         self._timeout     = timeout_s
         self._think       = think
         # Set after a 400 rejecting `think`, so later turns stop sending it.
         self._think_unsupported = False
-        self._client      = httpx.AsyncClient(
-            base_url=self._base_url,
-            timeout=self._timeout,
-        )
+        self._client      = guarded_client(timeout=self._timeout)
+        self._client.base_url = self._base_url
         log.info("OllamaLLM model=%s base_url=%s think=%s", model, self._base_url, think)
 
     async def _stream_chat_lines(self, payload: dict[str, Any]) -> AsyncGenerator[str, None]:
+        try:
+            async for line in self._stream_chat_lines_raw(payload):
+                yield line
+        except OllamaProviderError:
+            raise
+        except Exception as exc:
+            coded = _coded(exc)
+            if coded is None:
+                raise
+            log.warning("OllamaLLM: %s model=%s", coded.code, self._model)
+            raise coded from None
+
+    async def _stream_chat_lines_raw(self, payload: dict[str, Any]) -> AsyncGenerator[str, None]:
         """POST /api/chat; on a 400 rejecting `think`, retry without it and remember."""
         if self._think_unsupported:
             payload = {k: v for k, v in payload.items() if k != "think"}
@@ -128,7 +162,7 @@ class OllamaLLM:
             try:
                 data = json.loads(line)
             except json.JSONDecodeError:
-                log.warning("OllamaLLM: malformed JSON line=%r", line)
+                log.warning("OllamaLLM: malformed JSON line (%d bytes)", len(line))
                 continue
             if data.get("done"):
                 break
@@ -175,7 +209,7 @@ class OllamaLLM:
             try:
                 data = json.loads(line)
             except json.JSONDecodeError:
-                log.warning("OllamaLLM: malformed JSON line=%r", line)
+                log.warning("OllamaLLM: malformed JSON line (%d bytes)", len(line))
                 continue
             if data.get("done"):
                 break

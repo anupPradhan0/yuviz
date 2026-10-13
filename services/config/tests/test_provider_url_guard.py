@@ -54,7 +54,34 @@ async def test_the_update_path_is_guarded_too(admin, test_tenant):
     assert ok.status_code == 200
 
 
-async def test_other_roles_are_not_affected(admin, test_tenant):
-    """Out of scope here (listed in the issue as follow-ups): only role 'embedding' is checked."""
-    resp = await admin.post(f"/tenants/{test_tenant['id']}/providers", json=_body("http://10.0.0.5:11434", role="llm"))
+@pytest.mark.parametrize("base_url", [
+    "http://ollama.example.com:11434/api/pull#", "http://ollama.example.com?x=", "http://169.254.169.254/",
+    "http://10.0.0.5:11434", "http://2130706433", "http://user:pw@ollama.example.com",
+])
+async def test_an_ollama_llm_config_is_guarded_the_same_way(admin, pool, test_tenant, base_url):
+    body = {**_body(base_url, role="llm"), "model": "llama3.2"}
+    resp = await admin.post(f"/tenants/{test_tenant['id']}/providers", json=body)
+    assert resp.status_code == 400 and "extra.base_url rejected" in resp.json()["detail"]
+    assert await pool.fetchval("SELECT count(*) FROM provider_configs WHERE tenant_id = $1", test_tenant["id"]) == 0
+
+
+async def test_an_ollama_llm_may_use_the_default_dev_endpoint(admin, test_tenant):
+    resp = await admin.post(f"/tenants/{test_tenant['id']}/providers",
+                            json={**_body("http://localhost:11434", role="llm"), "model": "llama3.2"})
     assert resp.status_code == 201
+
+
+async def test_switching_an_llm_row_to_ollama_rechecks_its_stored_url(admin, test_tenant):
+    created = await admin.post(f"/tenants/{test_tenant['id']}/providers", json={
+        "name": "L", "role": "llm", "engine": "openai", "model": "gpt-4o", "extra": {"base_url": "http://10.0.0.5:11434"}})
+    assert created.status_code == 201  # openai ignores base_url (fixed vendor URL)
+    resp = await admin.patch(f"/providers/{created.json()['id']}", json={"engine": "ollama"})
+    assert resp.status_code == 400 and "extra.base_url rejected" in resp.json()["detail"]
+    assert (await admin.patch(f"/providers/{created.json()['id']}", json={"name": "renamed"})).status_code == 200
+
+
+async def test_engines_with_fixed_vendor_urls_and_other_roles_are_not_affected(admin, test_tenant):
+    for role, engine in (("llm", "openai"), ("stt", "deepgram"), ("tts", "elevenlabs")):
+        resp = await admin.post(f"/tenants/{test_tenant['id']}/providers", json={
+            "name": engine, "role": role, "engine": engine, "extra": {"base_url": "http://10.0.0.5:11434"}})
+        assert resp.status_code == 201, (role, engine, resp.text)

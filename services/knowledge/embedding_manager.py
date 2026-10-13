@@ -13,7 +13,7 @@ from typing import Any, Awaitable, Callable, Protocol
 
 import httpx
 
-from libs.egress_guard import UnsafeProviderUrl, guarded_client, validate_base_url
+from libs.egress_guard import UnsafeProviderUrl, failure_code, guarded_client, validate_base_url
 
 from .secret_resolver import SecretResolver
 
@@ -82,9 +82,6 @@ class ProviderUrlRejected(ProviderPermanentError):
     code = "provider_url_invalid"
 
 
-# 408 (timeout), 425 and 429 (rate limit) are the 4xx codes that are worth retrying.
-_PERMANENT_STATUS = frozenset({400, 401, 402, 403, 404, 405, 409, 410, 411, 413, 414, 415, 422})
-
 
 def provider_error(exc: BaseException) -> ProviderError | None:
     """Map what an HTTP provider call can raise to a fixed-code ProviderError (None: not a provider failure).
@@ -93,18 +90,11 @@ def provider_error(exc: BaseException) -> ProviderError | None:
     tell a tenant whether a port is closed, filtered, or open. Only 401/403 are named, because the owner must fix the key."""
     if isinstance(exc, ProviderError):
         return exc
-    if isinstance(exc, httpx.HTTPStatusError):
-        status = exc.response.status_code
-        if status in (401, 403):
-            return EmbeddingRequestRejected("provider_auth_failed")
-        if status == 429:
-            return ProviderTransientError("provider_rate_limited")
-        if status in _PERMANENT_STATUS or 300 <= status < 400:  # redirects are never followed, so retrying cannot help
-            return EmbeddingRequestRejected("provider_error")
-        return ProviderTransientError("provider_error")
-    if isinstance(exc, httpx.TransportError):
-        return ProviderTransientError("provider_unreachable")
-    return None
+    failure = failure_code(exc)
+    if failure is None:
+        return None
+    code, permanent = failure
+    return EmbeddingRequestRejected(code) if permanent else ProviderTransientError(code)
 
 
 def effective_model(cfg: "EmbeddingProviderConfig") -> str:
