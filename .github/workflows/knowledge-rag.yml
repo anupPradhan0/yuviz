@@ -54,6 +54,8 @@ jobs:
       PGPASSWORD: postgres
       PGHOST: localhost
       PGUSER: postgres
+      # The shipped default is OFF (parsing untrusted PDF/Office files is uncontained); the tests exercise the parsers.
+      KNOWLEDGE_BINARY_PARSERS: "1"
 
     steps:
       - uses: actions/checkout@v4
