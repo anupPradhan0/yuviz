@@ -12,13 +12,13 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
-from libs.tenancy import set_target_tenant, tenant_conn
+from libs.tenancy import set_target_tenant
 from services.config.auth import CurrentUser
 from services.config.deps import assert_tenant_access, get_current_user
 
 from .. import agent_kb as agent_kb_service
-from .. import db
 from .. import retrieval as retrieval_service
+from ..resilience import RetrievalUnavailable
 from ..runtime import get_embedding_manager, get_vector_repo
 from ..schemas import RetrieveRequest
 
@@ -37,11 +37,11 @@ def _timeout_s() -> float:
     return float(os.environ.get(_RETRIEVE_TIMEOUT_ENV, _DEFAULT_RETRIEVE_TIMEOUT_S))
 
 
-def _unavailable(trace_id: str, reason: str) -> dict[str, Any]:
-    """Safe by construction: a fixed reason code, never the exception text (it can carry URLs and credentials)."""
+def _unavailable(trace_id: str, reasons: list[str]) -> dict[str, Any]:
+    """Safe by construction: fixed reason codes, never the exception text (it can carry URLs and credentials)."""
     return {
         "status": "unavailable", "chunks": [], "sources": [], "token_count": 0,
-        "degraded": [reason], "trace_id": trace_id,
+        "degraded": reasons, "trace_id": trace_id,
     }
 
 
@@ -74,26 +74,34 @@ async def retrieve(
     trace_id = uuid.uuid4().hex[:16]
     try:
         async with asyncio.timeout(_timeout_s()):
-            pool = await db.get_pool()
-            async with tenant_conn(pool) as conn:
-                result = await retrieval_service.retrieve(
-                    conn,
-                    await get_vector_repo(),
-                    get_embedding_manager(),
-                    tenant_slug=body.tenant_slug,
-                    agent_slug=body.agent_slug,
-                    query=body.query,
-                    top_k=body.top_k,
-                    max_tokens=body.max_tokens,
-                    minimum_score=body.minimum_score,
-                    rerank=body.rerank,
-                    hybrid_search=body.hybrid_search,
-                    include_citations=body.include_citations,
-                )
+            # No connection is held here: retrieve() takes its own short-lived ones through its admission
+            # limiter, so a request it refuses costs the pool nothing.
+            result = await retrieval_service.retrieve(
+                None,
+                await get_vector_repo(),
+                get_embedding_manager(),
+                tenant_slug=body.tenant_slug,
+                agent_slug=body.agent_slug,
+                query=body.query,
+                top_k=body.top_k,
+                max_tokens=body.max_tokens,
+                minimum_score=body.minimum_score,
+                rerank=body.rerank,
+                hybrid_search=body.hybrid_search,
+                include_citations=body.include_citations,
+                trace_id=trace_id,
+            )
     except TimeoutError:
         log.warning("retrieve timed out tenant=%s agent=%s trace=%s", body.tenant_slug, body.agent_slug, trace_id)
-        return _unavailable(trace_id, "timeout")
+        return _unavailable(trace_id, ["timeout"])
+    except RetrievalUnavailable as exc:
+        # Overload, or every branch failed: an expected, typed outcome, so a WARNING and no traceback.
+        log.warning(
+            "retrieve unavailable tenant=%s agent=%s trace=%s degraded=%s",
+            body.tenant_slug, body.agent_slug, trace_id, exc.degraded,
+        )
+        return _unavailable(exc.trace_id or trace_id, list(exc.degraded) or ["retrieval_error"])
     except Exception:
         log.exception("retrieve failed tenant=%s agent=%s trace=%s", body.tenant_slug, body.agent_slug, trace_id)
-        return _unavailable(trace_id, "retrieval_error")
+        return _unavailable(trace_id, ["retrieval_error"])
     return _envelope(result, trace_id)

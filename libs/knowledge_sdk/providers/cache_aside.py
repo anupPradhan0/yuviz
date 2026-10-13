@@ -30,6 +30,18 @@ class CacheAsideKnowledgeProvider:
         await self._availability_repo.close()
         await self._retrieval_repo.close()
 
+    async def prewarm(self, tenant_slug: str, agent_slug: str) -> None:
+        """Best effort, at call start: lets the Knowledge Service cache the agent's plan before the first
+        search. Skipped for agents with no KB; never raises."""
+        try:
+            enabled = await self._availability_repo.has_enabled_kb(tenant_slug, agent_slug)
+            if enabled is None:
+                enabled = await self._retrieval_repo.has_enabled_kb(tenant_slug, agent_slug)
+            if enabled:
+                await self._retrieval_repo.prewarm(tenant_slug, agent_slug)
+        except Exception:
+            log.warning("CacheAsideKnowledgeProvider: prewarm skipped tenant=%s agent=%s", tenant_slug, agent_slug)
+
     async def retrieve(
         self,
         tenant_slug: str,

@@ -84,6 +84,17 @@ class HttpKnowledgeRepository:
             return False
         return bool(resp.json()["enabled"])
 
+    async def prewarm(self, tenant_slug: str, agent_slug: str) -> bool:
+        """Best effort: resolve the agent's retrieval plan ahead of its first search. Never raises."""
+        try:
+            resp = await self._request(
+                "POST", "/internal/prewarm", json={"tenant_slug": tenant_slug, "agent_slug": agent_slug},
+            )
+        except Exception:
+            log.warning("HttpKnowledgeRepository: prewarm failed tenant=%s agent=%s", tenant_slug, agent_slug)
+            return False
+        return bool(resp is not None and resp.json().get("warmed"))
+
     async def retrieve(
         self,
         tenant_slug: str,

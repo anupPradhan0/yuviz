@@ -439,6 +439,7 @@ class PipelineConversationHandler:
         self._tenant_slug = runtime_config.tenant.slug
         self._agent_slug  = runtime_config.agent.slug
         self._knowledge = knowledge
+        self._background_tasks: set[asyncio.Task] = set()
         self._session_finalizer = SessionFinalizer(transcripts, metrics)
         self._metrics = metrics if metrics is not None else NullMetrics()
         # None means plain self._llm.generate().
@@ -552,6 +553,19 @@ class PipelineConversationHandler:
                 or log.error("TTS language prewarm failed", exc_info=done.exception())
             )
 
+    def _prewarm_knowledge(self) -> None:
+        """Warm the Knowledge Service's retrieval plan during the greeting, so the first search of the
+        call does not pay for it. Fire and forget: a failure only costs that first search some latency."""
+        prewarm = getattr(self._knowledge, "prewarm", None)
+        if prewarm is None or not self._workflow.knowledge_enabled():
+            return
+        try:
+            task = asyncio.get_running_loop().create_task(prewarm(self._tenant_slug, self._agent_slug))
+        except RuntimeError:
+            return
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     def _greeting_text(self) -> str | None:
         """The per-language greeting for the starting language when the agent has one,
         rendered like the workflow's; otherwise the workflow start node's greeting."""
@@ -603,6 +617,7 @@ class PipelineConversationHandler:
                 self._direction or "inbound", self._caller_number, self._called_number,
                 self._agent_id, self._agent_config_version,
             )
+        self._prewarm_knowledge()
         # Speaking the instant the line opens gets the first syllable
         # clipped on some outbound carriers — the start node can hold off.
         if self._workflow.delayed_start_ms > 0:

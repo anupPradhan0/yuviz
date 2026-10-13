@@ -208,3 +208,48 @@ async def test_wrong_service_password_raises_unavailable(pool):
 
     await repo.close()
     await pool.execute("UPDATE users SET deleted_at = now() WHERE id = $1", user["id"])
+
+
+# ── integration: the router holds no connection and maps overload ───────────
+
+async def test_router_calls_retrieve_without_holding_a_pool_connection(service_account, tenant_agent, monkeypatch):
+    seen = {}
+
+    async def spy(conn, *a, **kw):
+        seen["conn"] = conn
+        seen["trace_id"] = kw.get("trace_id")
+        return {"status": "no_match", "chunks": [], "trace_id": kw.get("trace_id")}
+    _stub_retrieve(monkeypatch, spy)
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    result = await repo.retrieve(tenant["slug"], agent["slug"], "q", RetrievalPolicy())
+    assert seen["conn"] is None            # retrieve() takes its own connections through its limiter
+    assert result["trace_id"] == seen["trace_id"]
+    await repo.close()
+
+
+async def test_router_maps_overload_to_unavailable_with_a_warning_and_no_traceback(
+    service_account, tenant_agent, monkeypatch, caplog,
+):
+    from services.knowledge.resilience import RetrievalUnavailable
+
+    async def overloaded(conn, *a, **kw):
+        raise RetrievalUnavailable("retrieval overloaded", degraded=["overloaded"], trace_id="trace-overload")
+    _stub_retrieve(monkeypatch, overloaded)
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    with caplog.at_level("WARNING", logger="services.knowledge.routers.retrieve"):
+        result = await repo.retrieve(tenant["slug"], agent["slug"], "q", RetrievalPolicy())
+    assert result["status"] == "unavailable" and result["degraded"] == ["overloaded"]
+    assert result["trace_id"] == "trace-overload" and result["chunks"] == []
+    records = [r for r in caplog.records if r.name == "services.knowledge.routers.retrieve"]
+    assert records and all(r.exc_info is None for r in records)   # expected outcome: no stack trace per refusal
+    await repo.close()
+
+
+async def test_sdk_prewarm_is_best_effort_and_never_raises(service_account, tenant_agent):
+    tenant, agent = tenant_agent
+    repo = _repo(service_account)
+    assert isinstance(await repo.prewarm(tenant["slug"], agent["slug"]), bool)
+    assert await repo.prewarm("no-such-tenant-slug", agent["slug"]) is False   # 404 is False, not an error
+    await repo.close()

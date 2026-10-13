@@ -57,5 +57,8 @@ class MockKnowledgeProvider:
             retrieval_metadata={"mock": True},
         )
 
+    async def prewarm(self, tenant_slug: str, agent_slug: str) -> None:
+        pass  # nothing to warm
+
     async def close(self) -> None:
         pass  # no real transport to close
