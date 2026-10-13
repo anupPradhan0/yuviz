@@ -7,7 +7,7 @@ import { Modal } from "@/components/Modal";
 
 // Only "Upload files" is wired up; the other cards are placeholders.
 const SOURCE_CARDS = [
-  { key: "upload", label: "Upload files", hint: "PDF, Word, Excel, PowerPoint, HTML, CSV, text", enabled: true },
+  { key: "upload", label: "Upload files", hint: "text, Markdown, HTML, CSV (PDF and Office only if enabled)", enabled: true },
   { key: "website", label: "Sync a website", hint: "coming soon", enabled: false },
   { key: "text", label: "Write text", hint: "coming soon", enabled: false },
   { key: "integration", label: "Connect an integration", hint: "coming soon", enabled: false },
@@ -23,7 +23,7 @@ export function rejectionReasonFor(file: File): string | null {
   const name = file.name.toLowerCase();
   const hasAcceptedExtension = ACCEPTED_DOC_EXTENSIONS.some((ext) => name.endsWith(ext));
   if (!hasAcceptedExtension) {
-    return `"${file.name}" isn't a supported file type (PDF, Word, Excel, PowerPoint, HTML, CSV or text).`;
+    return `"${file.name}" isn't a supported file type (text, Markdown, HTML or CSV; PDF, Word, Excel and PowerPoint only if your administrator has turned on document parsing).`;
   }
   return null;
 }
@@ -216,7 +216,7 @@ export function AddSourceModal({
 
       <div className="form-group">
         <label className="form-label">
-          File <span className="hint">PDF, Word, Excel, PowerPoint, HTML, CSV or text</span>
+          File <span className="hint">text, Markdown, HTML or CSV; PDF and Office files only if enabled</span>
         </label>
         <input
           className="form-input"

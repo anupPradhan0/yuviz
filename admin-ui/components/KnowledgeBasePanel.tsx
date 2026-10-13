@@ -211,7 +211,7 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
 
       {rows.length === 0 ? (
         <div className="empty-state">
-          No documents yet. Upload a price list, FAQ or policy as a PDF, Word, Excel, HTML, CSV or text file.
+          No documents yet. Upload a price list, FAQ or policy as a text, Markdown, HTML or CSV file (PDF and Office files too, if your administrator has enabled them).
         </div>
       ) : (
         rows.map((row) => {
