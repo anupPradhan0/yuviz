@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from libs.egress_guard import UnsafeProviderUrl, validate_base_url
 from libs.config_sdk.secrets import ENCRYPTED_PREFIX, QUARANTINED as _QUARANTINED, encrypt_secret
 from libs.tenancy import platform_conn, tenant_conn
 
@@ -32,6 +33,17 @@ log = logging.getLogger(__name__)
 
 STORED_SENTINEL = "[stored]"
 _POINTER_SCHEMES = ("env:", "k8s:")
+
+
+def require_safe_embedding_url(role: str, extra: dict[str, Any] | None) -> None:
+    """An embedding config's base_url is fetched by the Knowledge service, so it is vetted at write time too (the
+    service re-checks when it builds the client and again at connect). A 400 that says what to change."""
+    if role != "embedding" or not isinstance(extra, dict) or extra.get("base_url") in (None, ""):
+        return
+    try:
+        validate_base_url(extra["base_url"])
+    except UnsafeProviderUrl as exc:
+        raise ValueError(f"extra.base_url rejected: {exc}") from None
 
 
 def ref_mask_required(user: CurrentUser) -> bool:
@@ -177,6 +189,7 @@ async def create_provider_config(
     import json as _json
 
     api_key_ref = resolve_api_key_input(api_key, api_key_ref, allow_pointer_schemes=allow_pointer_schemes)
+    require_safe_embedding_url(role, extra)
 
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
@@ -221,6 +234,7 @@ async def update_provider_config(
         raise ValueError(f"update_provider_config() got non-updatable field(s): {unknown}")
 
     import json as _json
+    new_extra = fields.get("extra")
     if "extra" in fields and fields["extra"] is not None:
         fields = {**fields, "extra": _json.dumps(fields["extra"])}
 
@@ -234,6 +248,7 @@ async def update_provider_config(
             raise LookupError(f"provider_config {provider_id} not found")
         old = dict(old_row)
         old["extra"] = db.json_col(old["extra"])
+        require_safe_embedding_url(old["role"], new_extra)
 
         # After the FOR UPDATE fetch, so "[stored]" and the byte-identical
         # round-trip are compared with the row this transaction holds.

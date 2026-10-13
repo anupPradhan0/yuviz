@@ -32,6 +32,7 @@ from .chunker import ChunkConfig, chunk_document, chunker_version
 from .chunking import Chunk, count_tokens
 from .embedding_manager import (
     EMBEDDING_DIMS, EmbeddingProviderConfig, EmbeddingProviderManager, effective_model, embed_in_batches,
+    provider_error,
 )
 from .enrichment import enrich_texts
 from .parsers import SUPPORTED_CONTENT_TYPES, ParsedDocument, ParseRejected, parse_document
@@ -69,6 +70,9 @@ def _keep_serving(new: str) -> str:
 
 def classify_error(exc: BaseException) -> str:
     """'permanent' = retrying cannot help (bad type, empty doc, missing config/file); else 'transient'."""
+    coded = provider_error(exc)
+    if coded is not None:
+        exc = coded  # decided from the structured exception, not from its text
     return "permanent" if isinstance(exc, _PERMANENT_ERRORS) else "transient"
 
 
@@ -85,7 +89,11 @@ def _scrub_url(match: re.Match) -> str:
 
 def stored_error(exc: BaseException) -> str:
     """What goes in the document/job error column: a parse rejection's reason is already plain and tenant-safe."""
-    return exc.reason if isinstance(exc, ParseRejected) else redact_error(exc)
+    if isinstance(exc, ParseRejected):
+        return exc.reason
+    # A provider call goes to a tenant-chosen URL; its failure is a fixed code, never the exception text (read-back oracle).
+    coded = provider_error(exc)
+    return coded.code if coded is not None else redact_error(exc)
 
 
 def redact_error(exc: BaseException) -> str:

@@ -13,6 +13,8 @@ from typing import Any, Awaitable, Callable, Protocol
 
 import httpx
 
+from libs.egress_guard import UnsafeProviderUrl, guarded_client, validate_base_url
+
 from .secret_resolver import SecretResolver
 
 log = logging.getLogger(__name__)
@@ -26,9 +28,30 @@ EMBED_RETRY_BASE_S = 0.5
 _DEFAULT_MODELS = {"ollama": "nomic-embed-text", "openai": "text-embedding-3-small"}
 
 
-class EmbeddingError(RuntimeError):
-    """Transient: the provider answered, but not usably (count mismatch, NaN/inf, all-zero vector). RuntimeError, so
-    the worker classifies it as retryable."""
+class ProviderError(Exception):
+    """A provider failure reduced to a FIXED code. `str(exc)` is the code and nothing else: the exception text of a
+    request to a tenant-chosen URL (status line, body, host, port, path) must never reach a stored error, because the
+    tenant can read it back and would otherwise get a port scanner. Details go to the server log only."""
+
+    code = "provider_error"
+
+    def __init__(self, code: str | None = None) -> None:
+        self.code = code or self.code
+        super().__init__(self.code)
+
+
+class ProviderTransientError(ProviderError, RuntimeError):
+    """Worth retrying (unreachable, timeout, 408/429/5xx). RuntimeError, so the worker classifies it as retryable."""
+
+
+class ProviderPermanentError(ProviderError, ValueError):
+    """Retrying cannot help (auth, unknown model, malformed request, unusable URL). ValueError, so the worker fails it."""
+
+
+class EmbeddingError(ProviderTransientError):
+    """Transient: the provider answered, but not usably (count mismatch, NaN/inf, all-zero vector, invalid JSON)."""
+
+    code = "provider_bad_response"
 
 
 class EmbeddingDimensionError(ValueError):
@@ -48,13 +71,40 @@ class EmbeddingProviderConfig:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
-class EmbeddingRequestRejected(ValueError):
+class EmbeddingRequestRejected(ProviderPermanentError):
     """Permanent: the provider answered 4xx (bad key, unknown model, malformed request). Retrying the batch cannot
     help and a misconfigured provider would otherwise be called 3x per batch, per attempt."""
 
 
+class ProviderUrlRejected(ProviderPermanentError):
+    """The config's base_url is not acceptable (see libs/egress_guard). The tenant typed it, so this code is not an oracle."""
+
+    code = "provider_url_invalid"
+
+
 # 408 (timeout), 425 and 429 (rate limit) are the 4xx codes that are worth retrying.
 _PERMANENT_STATUS = frozenset({400, 401, 402, 403, 404, 405, 409, 410, 411, 413, 414, 415, 422})
+
+
+def provider_error(exc: BaseException) -> ProviderError | None:
+    """Map what an HTTP provider call can raise to a fixed-code ProviderError (None: not a provider failure).
+
+    Every connection-level failure (refused, timeout, DNS, TLS, egress refusal) is ONE code, so the stored error cannot
+    tell a tenant whether a port is closed, filtered, or open. Only 401/403 are named, because the owner must fix the key."""
+    if isinstance(exc, ProviderError):
+        return exc
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status in (401, 403):
+            return EmbeddingRequestRejected("provider_auth_failed")
+        if status == 429:
+            return ProviderTransientError("provider_rate_limited")
+        if status in _PERMANENT_STATUS or 300 <= status < 400:  # redirects are never followed, so retrying cannot help
+            return EmbeddingRequestRejected("provider_error")
+        return ProviderTransientError("provider_error")
+    if isinstance(exc, httpx.TransportError):
+        return ProviderTransientError("provider_unreachable")
+    return None
 
 
 def effective_model(cfg: "EmbeddingProviderConfig") -> str:
@@ -68,9 +118,11 @@ def _validate(vector: list[float]) -> None:
             f"vector({EMBEDDING_DIMS}); use a {EMBEDDING_DIMS}-dimension embedding model",
         )
     if not all(math.isfinite(x) for x in vector):
-        raise EmbeddingError("embedding provider returned NaN or infinite values")
+        log.warning("embedding provider returned NaN or infinite values")
+        raise EmbeddingError()
     if not any(vector):
-        raise EmbeddingError("embedding provider returned an all-zero vector")
+        log.warning("embedding provider returned an all-zero vector")
+        raise EmbeddingError()
 
 
 async def embed_in_batches(
@@ -89,7 +141,8 @@ async def embed_in_batches(
             try:
                 got = await provider.embed(batch)
                 if len(got) != len(batch):
-                    raise EmbeddingError(f"embedding provider returned {len(got)} vectors for {len(batch)} texts")
+                    log.warning("embedding provider returned %d vectors for %d texts", len(got), len(batch))
+                    raise EmbeddingError()
                 for v in got:
                     _validate(v)
                 # float32 arrays (what pgvector stores anyway): 3 KB per vector instead of ~25 KB of Python floats, so
@@ -98,19 +151,15 @@ async def embed_in_batches(
                 break
             except EmbeddingDimensionError:
                 raise
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code
-                if status in _PERMANENT_STATUS:
-                    raise EmbeddingRequestRejected(f"embedding provider rejected the request (HTTP {status})") from None
-                if attempt == attempts:
-                    raise
-                retried += 1
-                await asyncio.sleep(EMBED_RETRY_BASE_S * (2 ** (attempt - 1)))
             except Exception as exc:
+                converted = provider_error(exc)
+                if isinstance(converted, ProviderPermanentError):
+                    raise converted from None
                 if attempt == attempts:
-                    raise
+                    raise (converted or exc) from None
                 retried += 1
-                log.warning("embedding batch at %d failed (attempt %d/%d): %s", start, attempt, attempts, type(exc).__name__)
+                log.warning("embedding batch at %d failed (attempt %d/%d): %s", start, attempt, attempts,
+                            converted.code if converted else type(exc).__name__)
                 await asyncio.sleep(EMBED_RETRY_BASE_S * (2 ** (attempt - 1)))
     if stats is not None:
         stats.update(batches=-(-len(texts) // size), batch_retries=retried)
@@ -119,21 +168,43 @@ async def embed_in_batches(
 
 class OllamaEmbeddingProvider:
     def __init__(self, model: str = "nomic-embed-text", base_url: str = "http://localhost:11434") -> None:
+        # The tenant owns base_url, so only its origin is used; the API path is ours (libs/egress_guard).
+        try:
+            self._origin = validate_base_url(base_url)
+        except UnsafeProviderUrl:
+            raise ProviderUrlRejected() from None
         self._model = model
-        self._base_url = base_url.rstrip("/")
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         # /api/embeddings has no batch form: one request per text.
         vectors: list[list[float]] = []
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            for text in texts:
-                resp = await client.post(
-                    f"{self._base_url}/api/embeddings",
-                    json={"model": self._model, "prompt": text},
-                )
-                resp.raise_for_status()
-                vectors.append(resp.json()["embedding"])
+        try:
+            async with guarded_client(timeout=30.0) as client:
+                for text in texts:
+                    resp = await client.post(
+                        f"{self._origin.url}/api/embeddings",
+                        json={"model": self._model, "prompt": text},
+                    )
+                    resp.raise_for_status()
+                    vectors.append(_embedding_of(resp))
+        except ProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            converted = provider_error(exc)
+            if converted is None:
+                raise
+            raise converted from None
         return vectors
+
+
+def _embedding_of(resp: httpx.Response) -> list[float]:
+    try:
+        vector = resp.json()["embedding"]
+    except (ValueError, KeyError, TypeError):
+        raise EmbeddingError() from None
+    if not isinstance(vector, list):
+        raise EmbeddingError()
+    return vector
 
 
 class OpenAIEmbeddingProvider:
@@ -146,22 +217,34 @@ class OpenAIEmbeddingProvider:
         # Only text-embedding-3 supports `dimensions` (ada-002 400s and can't fit the column anyway).
         if self._model.startswith("text-embedding-3"):
             payload["dimensions"] = EMBEDDING_DIMS
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                "https://api.openai.com/v1/embeddings",
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()["data"]
-        return [item["embedding"] for item in sorted(data, key=lambda d: d["index"])]
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    "https://api.openai.com/v1/embeddings",
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    json=payload,
+                )
+                resp.raise_for_status()
+                try:
+                    data = resp.json()["data"]
+                    return [item["embedding"] for item in sorted(data, key=lambda d: d["index"])]
+                except (ValueError, KeyError, TypeError):
+                    raise EmbeddingError() from None
+        except ProviderError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            converted = provider_error(exc)
+            if converted is None:
+                raise
+            raise converted from None
 
 
 EmbeddingFactory = Callable[[EmbeddingProviderConfig, str | None], Awaitable[IEmbeddingProvider]]
 
 
 async def _make_ollama(cfg: EmbeddingProviderConfig, _api_key: str | None) -> IEmbeddingProvider:
-    return OllamaEmbeddingProvider(model=cfg.model or "nomic-embed-text", base_url=cfg.extra.get("base_url", "http://localhost:11434"))
+    return OllamaEmbeddingProvider(
+        model=cfg.model or "nomic-embed-text", base_url=cfg.extra.get("base_url") or "http://localhost:11434")
 
 
 async def _make_openai(cfg: EmbeddingProviderConfig, api_key: str | None) -> IEmbeddingProvider:
