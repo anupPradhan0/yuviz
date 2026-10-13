@@ -64,6 +64,19 @@ async def purge_legacy_keys(batch: int = 500, *, client: "redis.Redis | None" = 
     return deleted
 
 
+_FILL_TTL_S = 60
+
+
+async def fill_has_enabled_kb(tenant_slug: str, agent_slug: str, enabled: bool) -> None:
+    """Read-path refill after a miss: SET NX with a short TTL. A refill carries a value read from Postgres BEFORE it
+    got here, so it must never overwrite what a writer set in the meantime (writers always plain-SET after their
+    commit); NX makes the writer win whichever way the two interleave, and the short TTL bounds a stale fill."""
+    try:
+        await get_client().set(_agent_kb_key(tenant_slug, agent_slug), "1" if enabled else "0", ex=_FILL_TTL_S, nx=True)
+    except redis.RedisError:
+        log.warning("cache.fill_has_enabled_kb: Redis unreachable, skipping tenant=%s agent=%s", tenant_slug, agent_slug)
+
+
 async def set_has_enabled_kb(tenant_slug: str, agent_slug: str, enabled: bool) -> None:
     try:
         await get_client().set(

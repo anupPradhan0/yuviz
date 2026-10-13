@@ -13,7 +13,7 @@ Every tunable named here (deadlines, limiter, pool, caches, retention, parser li
 | Last-24h retrieval counts per status, no-match rate, degraded counts and reasons, p50/p95/p99 | same endpoint, from `retrieval_logs` | one tenant |
 | Ingestion trail for one document (stage, outcome, retry/dead-letter markers) | `GET /documents/{id}/events` | one tenant |
 | Limiter overload count, in-flight retrievals, breaker states, plan-cache hit/miss, `retrieval_logs` drops | `GET /internal/ops` (JSON) and `GET /internal/ops?format=prometheus` | process; platform-scoped callers only (service account or superadmin); no tenant labels, ids or query text |
-| One row per retrieval (trace id, status, degraded reasons, per-stage timings) | `retrieval_logs`, 30-day retention | tenant, RLS |
+| One row per retrieval (trace id, status, degraded reasons, per-stage timings; a cold plan is `retrieval_metadata.plan_cache = miss`, not a degraded reason) | `retrieval_logs`, 30-day retention | tenant, RLS |
 
 The repo has no `/metrics` convention (the conversation service and the gateway take an injected `IMetrics` sink),
 so the process counters are a JSON endpoint behind the existing auth, with a Prometheus text rendering for a

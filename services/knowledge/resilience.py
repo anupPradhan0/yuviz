@@ -31,7 +31,12 @@ def _env_float(name: str, default: float) -> float:
 
 @dataclass(frozen=True)
 class RetrievalConfig:
+    # Query-embedding budget. Local engines (ollama) keep 150 ms; hosted engines need a network round trip and
+    # typically 100-400 ms, so they default to 300 ms. KNOWLEDGE_EMBED_TIMEOUT_MS overrides both; a provider
+    # config's extra.embed_timeout_ms overrides that for one config (see resolve_embed_timeout_s).
     embed_timeout_s: float = 0.150
+    hosted_embed_timeout_s: float = 0.300
+    embed_timeout_override_s: float | None = None
     dense_timeout_s: float = 0.120
     lexical_timeout_s: float = 0.120
     rerank_timeout_s: float = 0.120
@@ -64,7 +69,7 @@ class RetrievalConfig:
         max_inflight = int(_env_float(
             "KNOWLEDGE_RETRIEVAL_MAX_INFLIGHT", max(2, (_env_float("KNOWLEDGE_DB_POOL_MAX", 20) - 2) // 2)))
         return cls(
-            embed_timeout_s=_env_float("KNOWLEDGE_EMBED_TIMEOUT_MS", d.embed_timeout_s * 1000) / 1000,
+            embed_timeout_override_s=_clamped_ms_or_none(os.environ.get("KNOWLEDGE_EMBED_TIMEOUT_MS")),
             dense_timeout_s=_env_float("KNOWLEDGE_DENSE_TIMEOUT_MS", d.dense_timeout_s * 1000) / 1000,
             lexical_timeout_s=_env_float("KNOWLEDGE_LEXICAL_TIMEOUT_MS", d.lexical_timeout_s * 1000) / 1000,
             rerank_timeout_s=_env_float("KNOWLEDGE_RERANK_TIMEOUT_MS", d.rerank_timeout_s * 1000) / 1000,
@@ -81,6 +86,34 @@ class RetrievalConfig:
             acquire_timeout_s=_env_float("KNOWLEDGE_POOL_ACQUIRE_TIMEOUT_MS", d.acquire_timeout_s * 1000) / 1000,
             max_query_chars=int(_env_float("KNOWLEDGE_RETRIEVAL_MAX_QUERY_CHARS", d.max_query_chars)),
         )
+
+
+EMBED_TIMEOUT_MIN_MS, EMBED_TIMEOUT_MAX_MS = 50.0, 2000.0
+LOCAL_EMBED_ENGINES = frozenset({"ollama"})
+
+
+def _clamped_ms_or_none(raw: Any) -> float | None:
+    """A timeout in milliseconds from untrusted-ish config (env, provider_configs.extra): number or numeric string
+    in, seconds out, clamped to 50..2000 ms; anything else (bool, NaN, text, negative) is ignored."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        ms = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if ms != ms or ms in (float("inf"), float("-inf")):
+        return None
+    return min(max(ms, EMBED_TIMEOUT_MIN_MS), EMBED_TIMEOUT_MAX_MS) / 1000
+
+
+def resolve_embed_timeout_s(engine: str, extra: dict | None, cfg: RetrievalConfig) -> float:
+    """Per-config extra.embed_timeout_ms > KNOWLEDGE_EMBED_TIMEOUT_MS > engine default (150 ms local, 300 ms hosted)."""
+    per_config = _clamped_ms_or_none((extra or {}).get("embed_timeout_ms"))
+    if per_config is not None:
+        return per_config
+    if cfg.embed_timeout_override_s is not None:
+        return cfg.embed_timeout_override_s
+    return cfg.embed_timeout_s if engine in LOCAL_EMBED_ENGINES else cfg.hosted_embed_timeout_s
 
 
 class RetrievalUnavailable(RuntimeError):
