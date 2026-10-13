@@ -39,9 +39,11 @@ async def _purge(pool, tenant_id) -> None:
         await pool.execute(sql, tenant_id)
 
 
-async def run_pipeline_eval(pool) -> dict:
+async def run_pipeline_eval(pool, reranker=None) -> dict:
     """Index every golden document into one KB and ask every question. Returns recall@5, MRR and
-    answer-in-context over the questions, plus the questions that missed (for the failure message)."""
+    answer-in-context over the questions, plus the questions that missed (for the failure message). With a
+    `reranker`, every question runs with rerank=True and the result also reports how many questions got a different
+    chunk order and the rerank stage's latency."""
     slug = f"golden-{uuid.uuid4().hex[:8]}"
     tenant = dict(await pool.fetchrow("INSERT INTO tenants (name, slug) VALUES ($1, $1) RETURNING *", slug))
     try:
@@ -67,10 +69,20 @@ async def run_pipeline_eval(pool) -> dict:
         retrieval.clear_caches()
         repo = await get_vector_repo()
         m, missed = Metrics(), []
+        reordered, rerank_ms, degraded_seen = 0, [], set()
         for q in QUESTIONS:
             set_caller_tenant(str(tenant["id"]))
             result = await retrieval.retrieve(
-                None, repo, manager, tenant_slug=slug, agent_slug="golden", query=q.question, top_k=TOP_K)
+                None, repo, manager, tenant_slug=slug, agent_slug="golden", query=q.question, top_k=TOP_K,
+                rerank=reranker is not None or None, reranker=reranker)
+            if reranker is not None:
+                plain = await retrieval.retrieve(
+                    None, repo, manager, tenant_slug=slug, agent_slug="golden", query=q.question, top_k=TOP_K,
+                    rerank=False)
+                reordered += [c["source"]["chunk_id"] for c in result["chunks"]] != [
+                    c["source"]["chunk_id"] for c in plain["chunks"]]
+                rerank_ms.append(result["retrieval_metadata"]["timings_ms"].get("rerank", 0.0))
+                degraded_seen.update(result["degraded"])
             # Prompt-mode documents (tiny files auto-inline) come first and are always returned: an answer there
             # counts as rank 1, and they do not push the ranked matches down.
             always = result["retrieval_metadata"]["always_included"]
@@ -91,6 +103,7 @@ async def run_pipeline_eval(pool) -> dict:
         return {
             "n": m.n, "documents_not_ready": not_ready, "recall_at_5": m.recall_at_5 / m.n, "mrr": m.mrr / m.n,
             "answer_in_context": m.answer_in_context / m.n, "missed": missed,
+            **({"reordered": reordered, "rerank_ms": rerank_ms, "degraded": sorted(degraded_seen)} if reranker else {}),
         }
     finally:
         set_caller_tenant(None)

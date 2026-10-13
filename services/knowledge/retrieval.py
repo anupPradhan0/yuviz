@@ -595,9 +595,11 @@ async def _rerank(
     except asyncio.CancelledError:
         breaker.release_probe()
         raise
-    except Exception:  # noqa: BLE001 - fused order is the fallback
+    except Exception as exc:  # noqa: BLE001 - fused order is the fallback
         breaker.record_failure()
-        degraded.append("rerank_skipped")
+        # Fixed reason codes only (RerankError.degraded_reason, or the stage budget); never provider text.
+        reason = "rerank_timeout" if isinstance(exc, TimeoutError) else getattr(exc, "degraded_reason", "rerank_error")
+        degraded.extend(["rerank_skipped", reason])
         return matches
     finally:
         timings["rerank"] = (time.monotonic() - t0) * 1000

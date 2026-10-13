@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .embedding_manager import EmbeddingProviderManager
 from .retrieval import IReranker, NoopReranker
+from .reranker import build_reranker
 from .secret_resolver import CompositeSecretResolver
 from .vector_repository import PgVectorRepository
 
@@ -25,9 +26,19 @@ def get_embedding_manager() -> EmbeddingProviderManager:
     return _embedding_manager
 
 
-_reranker: IReranker = NoopReranker()
+_reranker: IReranker | None = None
 
 
 def get_reranker() -> IReranker:
-    """Phase 7 swaps in the hosted reranker here; until then rerank=true is reported as rerank_skipped."""
+    """KNOWLEDGE_RERANKER=cohere|voyage picks a hosted reranker; the default is none, and rerank=true is then
+    reported as rerank_skipped. Built once per process (env is read at first use)."""
+    global _reranker
+    if _reranker is None:
+        _reranker = build_reranker() or NoopReranker()
     return _reranker
+
+
+def set_reranker(reranker: IReranker | None) -> None:
+    """Tests: install a reranker, or None to rebuild from the environment at the next call."""
+    global _reranker
+    _reranker = reranker
