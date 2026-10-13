@@ -11,7 +11,8 @@ from typing import Any
 from . import retrieval_log
 from .resilience import admission, breakers
 
-_counters: dict[str, int] = {"retrieval_overloaded": 0, "plan_cache_hit": 0, "plan_cache_miss": 0}
+_counters: dict[str, int] = {"retrieval_overloaded": 0, "plan_cache_hit": 0, "plan_cache_miss": 0,
+             "rerank_calls": 0, "rerank_decisive_skip": 0}
 
 
 def inc(name: str) -> None:

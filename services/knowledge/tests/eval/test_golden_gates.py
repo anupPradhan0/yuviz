@@ -45,3 +45,43 @@ def test_the_regression_check_itself_can_fail():
     assert gates.regressions(base, base, 0.05, "x") == []
     assert gates.regressions({**base, "mrr": 0.66}, base, 0.05, "x") == []  # inside the tolerance
     assert len(gates.regressions({**base, "mrr": 0.6, "recall_at_5": 0.7}, base, 0.05, "x")) == 2
+
+
+async def test_rerank_plumbing_reorders_and_reports_latency_on_the_golden_set(pool):
+    """PLUMBING ONLY. A deterministic fake cross-encoder over the fake embedder proves the rerank flag and hook run
+    through retrieve() end to end, change the order, and account their time. It says nothing about whether a real
+    reranker improves real retrieval: that needs a real provider and real tenant questions."""
+    from services.knowledge.tests.eval.fake_reranker import FakeCrossEncoderReranker
+    reranker = FakeCrossEncoderReranker(latency_s=0.005)
+    result = await run_pipeline_eval(pool, reranker=reranker)
+    assert result["documents_not_ready"] == 0
+    assert reranker.calls > 0 and "rerank_skipped" not in result["degraded"]
+    assert result["reordered"] > 0, "the fake scorer never changed an order: the hook is not in the loop"
+    assert min(result["rerank_ms"]) >= 4 and max(result["rerank_ms"]) < 120  # accounted, and inside the stage budget
+    assert result["n"] == len(QUESTIONS)
+
+
+async def test_enrichment_plumbing_runs_through_the_whole_pipeline_on_the_golden_set(pool, monkeypatch):
+    """PLUMBING ONLY (see the rerank test above). A fake OpenAI-compatible LLM writes a sentence from the title in the
+    prompt; the run proves the tenant's LLM config is found, chunks get enriched, every document still ends ready and
+    the stored chunks stay the original text. Whether enrichment IMPROVES retrieval is not established: it needs a
+    real embedder and a real LLM (docs/knowledge-phase7.md), and the feature ships off by default."""
+    import json
+    import re
+
+    import httpx
+
+    from services.knowledge import enrichment
+
+    def llm(request):
+        user = json.loads(request.content)["messages"][1]["content"]
+        title = re.search(r"<title>(.*?)</title>", user).group(1)
+        return httpx.Response(200, json={"choices": [{"message": {"content": f"This passage is part of the {title} document."}}]})
+
+    monkeypatch.setenv("KNOWLEDGE_ENRICH_CHUNKS", "1")
+    monkeypatch.setenv("EVAL_FAKE_LLM_KEY", "k")
+    monkeypatch.setattr(enrichment, "_test_transport", httpx.MockTransport(llm))
+    result = await run_pipeline_eval(pool, llm_config={"engine": "openai", "model": "fake", "api_key_ref": "env:EVAL_FAKE_LLM_KEY"})
+    assert result["documents_not_ready"] == 0
+    assert result["enriched_chunks"] > 0 and result["enrich_failed"] == 0
+    assert result["n"] == len(QUESTIONS)

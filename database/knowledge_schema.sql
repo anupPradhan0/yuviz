@@ -252,6 +252,12 @@ ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS dims            INT;
 ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS tsv tsvector
     GENERATED ALWAYS AS (to_tsvector('simple', coalesce(content, ''))) STORED;
 
+-- Shadow vector for a re-embed migration (services/knowledge/reembed.py): filled by the migration job with the
+-- NEW embedding config while queries keep using `embedding`, then swapped into `embedding` in one transaction.
+-- Deliberately no index: it is never searched.
+ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS embedding_next       VECTOR(768);
+ALTER TABLE kb_chunks ADD COLUMN IF NOT EXISTS embedding_next_model TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_kb_chunks_tsv ON kb_chunks USING gin (tsv);
 CREATE INDEX IF NOT EXISTS idx_kb_chunks_parent ON kb_chunks(parent_id) WHERE parent_id IS NOT NULL;
 

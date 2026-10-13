@@ -14,6 +14,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
+from .envparse import env_float, env_int
+
 log = logging.getLogger(__name__)
 
 
@@ -145,12 +147,17 @@ class BreakerRegistry:
     """Breakers by key. Embedder keys carry the (tenant-owned) embedding_config_id, so one tenant's
     broken provider never opens the breaker for another tenant."""
 
+    MAX_BREAKERS = 20000  # per-tenant keys exist (rerank:<tenant id>): bound the table, closed breakers go first
+
     def __init__(self) -> None:
         self._breakers: dict[str, CircuitBreaker] = {}
 
     def get(self, key: str, config: RetrievalConfig) -> CircuitBreaker:
         breaker = self._breakers.get(key)
         if breaker is None:
+            if len(self._breakers) >= self.MAX_BREAKERS:
+                for old in [k for k, b in self._breakers.items() if b.state == "closed"][: self.MAX_BREAKERS // 2]:
+                    del self._breakers[old]
             breaker = CircuitBreaker(config.breaker_failures, config.breaker_cooldown_s, name=key)
             self._breakers[key] = breaker
         return breaker
@@ -160,6 +167,59 @@ class BreakerRegistry:
 
 
 breakers = BreakerRegistry()
+
+
+class PlatformValve:
+    """A global safety valve for a platform-wide outage of a shared dependency (the rerank vendor). Unlike a
+    per-tenant breaker it opens only when `tenants` DISTINCT tenants fail within `window_s`, so one tenant's own
+    timeouts (a pathological agent, long documents) can never switch the feature off for everyone. Once open it lets
+    one probe through after `cooldown_s`; a success closes it."""
+
+    def __init__(self, tenants: int = 3, window_s: float = 30.0, cooldown_s: float = 20.0, clock=time.monotonic) -> None:
+        self._tenants, self._window, self._cooldown, self._clock = tenants, window_s, cooldown_s, clock
+        self._failures: dict[str, float] = {}
+        self._opened_at: float | None = None
+        self._probing = False
+
+    @property
+    def state(self) -> str:
+        if self._opened_at is None:
+            return "closed"
+        return "half_open" if self._clock() - self._opened_at >= self._cooldown and not self._probing else "open"
+
+    def allow(self) -> bool:
+        if self._opened_at is None:
+            return True
+        if self._clock() - self._opened_at >= self._cooldown and not self._probing:
+            self._probing = True
+            return True
+        return False
+
+    def record_success(self) -> None:
+        self._failures.clear()
+        self._opened_at = None
+        self._probing = False
+
+    def record_failure(self, tenant: str) -> None:
+        now = self._clock()
+        self._failures[tenant] = now
+        for t in [t for t, at in self._failures.items() if now - at > self._window]:
+            del self._failures[t]
+        if self._probing or len(self._failures) >= self._tenants:
+            self._opened_at, self._probing = now, False
+
+    def release_probe(self) -> None:
+        self._probing = False
+
+    def clear(self) -> None:
+        self.record_success()
+
+
+rerank_valve = PlatformValve(
+    tenants=env_int("KNOWLEDGE_RERANK_VALVE_TENANTS", 3, lo=2, hi=1000),
+    window_s=env_float("KNOWLEDGE_RERANK_VALVE_WINDOW_S", 30.0, lo=1, hi=3600),
+    cooldown_s=env_float("KNOWLEDGE_RERANK_VALVE_COOLDOWN_S", 20.0, lo=1, hi=3600),
+)
 
 
 class PoolOverloaded(RuntimeError):

@@ -19,7 +19,7 @@ from services.config.deps import assert_tenant_access, get_current_user
 from .. import agent_kb as agent_kb_service
 from .. import retrieval as retrieval_service
 from ..resilience import RetrievalUnavailable
-from ..runtime import get_embedding_manager, get_vector_repo
+from ..runtime import get_embedding_manager, get_reranker, get_vector_repo
 from ..schemas import RetrieveRequest
 
 log = logging.getLogger(__name__)
@@ -90,6 +90,7 @@ async def retrieve(
                 hybrid_search=body.hybrid_search,
                 include_citations=body.include_citations,
                 trace_id=trace_id,
+                reranker=get_reranker(),
             )
     except TimeoutError:
         log.warning("retrieve timed out tenant=%s agent=%s trace=%s", body.tenant_slug, body.agent_slug, trace_id)

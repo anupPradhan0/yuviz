@@ -52,6 +52,8 @@ class IVectorRepository(Protocol):
         embedding: list[float],
         top_k: int,
         minimum_score: float,
+        model: str | None = None,
+        notes: list[str] | None = None,
     ) -> list[VectorMatch]: ...
 
     async def lexical_search(
@@ -140,6 +142,9 @@ _DENSE_SQL = f"""
     FROM kb_chunks c {_DOC_JOINS}
     WHERE c.kb_id = ANY($2::uuid[]) AND c.embedding IS NOT NULL AND NOT c.is_parent
       AND (c.embedding <=> $1::vector) <= 1 - $5::float8  -- distance form: a zero vector gives NaN, which must not pass
+      -- Only vectors made by the model the query was embedded with (legacy rows with no model still count): a plan
+      -- that outlived a re-embed swap must not compare an old-model query with new-model vectors.
+      AND ($6::text IS NULL OR c.embedding_model IS NULL OR c.embedding_model = $6::text)
     ORDER BY c.embedding <=> $1::vector
     LIMIT $3
 """
@@ -288,14 +293,24 @@ class PgVectorRepository:
         embedding: list[float],
         top_k: int,
         minimum_score: float,
+        model: str | None = None,
+        notes: list[str] | None = None,
     ) -> list[VectorMatch]:
         if not kb_ids:
             return []
         await self._prepare_hnsw(conn)
         vector_literal = "[" + ",".join(repr(float(x)) for x in embedding) + "]"
         rows = await conn.fetch(
-            _DENSE_SQL, vector_literal, kb_ids, top_k, SEARCHABLE_STATUSES, minimum_score,
+            _DENSE_SQL, vector_literal, kb_ids, top_k, SEARCHABLE_STATUSES, minimum_score, model,
         )
+        if not rows and model is not None and notes is not None:
+            # Nothing came back: either nothing matched, or every chunk was excluded because the KB moved to
+            # another model (a stale plan after a re-embed swap). One sampled row tells which, at index cost.
+            sample = await conn.fetchval(
+                "SELECT embedding_model FROM kb_chunks WHERE kb_id = ANY($1::uuid[]) AND NOT is_parent "
+                "AND embedding IS NOT NULL LIMIT 1", kb_ids)
+            if sample is not None and sample != model:
+                notes.append("embedding_model_mismatch")
         # relaxed_order can hand rows back slightly out of order; the outer sort makes it exact.
         matches = [_to_match(row, "dense") for row in rows]
         matches.sort(key=lambda m: m.score, reverse=True)

@@ -254,7 +254,7 @@ async def test_selective_kb_filter_still_returns_top_k_through_hnsw(pool, tenant
     tenant, agent = tenant_agent
     set_caller_tenant(str(tenant["id"]))
     big, small = await _selective_world(pool, tenant, agent, 1500 if mode != "fallback" else 300)
-    args = (vec_literal(embed_text("alpha beta gamma")), [str(small["id"])], 5, vr.SEARCHABLE_STATUSES, -1.0)
+    args = (vec_literal(embed_text("alpha beta gamma")), [str(small["id"])], 5, vr.SEARCHABLE_STATUSES, -1.0, None)
 
     async with _hnsw_forced(pool) as conn:
         # Premise 1: the repository's own SQL is driven by the HNSW index here.
@@ -657,6 +657,15 @@ class _Reverse:
         return list(reversed(matches))
 
 
+class _Reverse_Counting:
+    configured = True
+    calls = 0
+
+    async def rerank(self, query, matches):
+        type(self).calls += 1
+        return list(reversed(matches))
+
+
 class _Slow:
     configured = True
 
@@ -674,7 +683,36 @@ class _Broken:
         raise RuntimeError("reranker down")
 
 
+async def _agent_rerank(world, on):
+    set_caller_tenant(str(world["tenant"]["id"]))
+    await policy_service.upsert_policy(world["agent"]["id"], rerank=on)
+    retrieval.clear_caches()
+
+
+async def test_a_request_cannot_turn_rerank_on_when_the_agent_policy_is_off(world):
+    for policy in (None, False):
+        if policy is not None:
+            await _agent_rerank(world, False)
+        _Broken.calls = 0
+        result = await _run(world["tenant"], world["agent"], world["embedder"], "refund shipping days",
+                            minimum_score=0.0, rerank=True, reranker=_Reverse_Counting())
+        assert _Reverse_Counting.calls == 0 and "rerank_skipped" not in result["degraded"]
+        assert result["retrieval_metadata"]["rerank"] is False
+
+
+async def test_a_request_may_turn_rerank_off_for_one_call(world):
+    await _agent_rerank(world, True)
+    _Reverse_Counting.calls = 0
+    off = await _run(world["tenant"], world["agent"], world["embedder"], "refund shipping days", minimum_score=0.0,
+                     rerank=False, reranker=_Reverse_Counting())
+    assert _Reverse_Counting.calls == 0 and off["retrieval_metadata"]["rerank"] is False
+    on = await _run(world["tenant"], world["agent"], world["embedder"], "refund shipping days", minimum_score=0.0,
+                    reranker=_Reverse_Counting())  # no request value: the agent's policy applies
+    assert _Reverse_Counting.calls == 1 and on["retrieval_metadata"]["rerank"] is True
+
+
 async def test_rerank_flag_with_no_reranker_is_reported_as_skipped(world):
+    await _agent_rerank(world, True)
     result = await _run(world["tenant"], world["agent"], world["embedder"], "refund shipping", rerank=True)
     assert "rerank_skipped" in result["degraded"] and result["status"] == "ok"
 
@@ -686,6 +724,7 @@ async def test_rerank_off_never_calls_the_reranker(world):
 
 
 async def test_configured_reranker_reorders(world):
+    await _agent_rerank(world, True)
     plain = await _run(world["tenant"], world["agent"], world["embedder"], "refund shipping days", minimum_score=0.0)
     flipped = await _run(world["tenant"], world["agent"], world["embedder"], "refund shipping days",
                          minimum_score=0.0, rerank=True, reranker=_Reverse())
@@ -693,6 +732,7 @@ async def test_configured_reranker_reorders(world):
 
 
 async def test_slow_reranker_is_dropped_and_fused_order_kept_within_budget(world):
+    await _agent_rerank(world, True)
     t0 = time.monotonic()
     result = await _run(world["tenant"], world["agent"], world["embedder"], "refund shipping days",
                         minimum_score=0.0, rerank=True, reranker=_Slow())
@@ -701,6 +741,7 @@ async def test_slow_reranker_is_dropped_and_fused_order_kept_within_budget(world
 
 
 async def test_reranker_breaker_opens_after_repeated_failures(world):
+    await _agent_rerank(world, True)
     cfg = RetrievalConfig(breaker_failures=2, breaker_cooldown_s=60)
     _Broken.calls = 0
     for i in range(4):

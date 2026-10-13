@@ -44,9 +44,9 @@ from libs.tenancy import TenantScopeConflict, tenant_conn
 
 from . import cache, db, ops_metrics, retrieval_log
 from . import retrieval_plan as plans
-from .embedding_manager import EmbeddingProviderManager
+from .embedding_manager import EmbeddingProviderManager, effective_model
 from .resilience import (
-    BoundedPool, PoolOverloaded, RetrievalConfig, RetrievalUnavailable, admission, breakers,
+    BoundedPool, PoolOverloaded, RetrievalConfig, RetrievalUnavailable, admission, breakers, rerank_valve,
 )
 from .vector_repository import IVectorRepository, VectorMatch
 
@@ -65,6 +65,7 @@ def clear_caches() -> None:
     plans.startup()  # re-open background refreshes after a lifespan shutdown
     _embeddings.clear()
     breakers.clear()
+    rerank_valve.clear()
 
 
 class IReranker(Protocol):
@@ -241,8 +242,13 @@ async def _dense_branch(
         matches: list[VectorMatch] = []
         async with asyncio.timeout(max(min(cfg.dense_timeout_s, remaining()), 0.001)):
             async with _branch_conn(held, bpool, plan.tenant_id) as conn:
+                dense_notes: list[str] = []
                 for cid, vector in usable:
-                    matches.extend(await vector_repo.search(conn, plan.groups[cid], vector, limit, minimum_score))
+                    matches.extend(await vector_repo.search(
+                        conn, plan.groups[cid], vector, limit, minimum_score,
+                        model=effective_model(plan.embedding_configs[cid]), notes=dense_notes))
+                if dense_notes:
+                    branch.notes = list(dict.fromkeys([*(branch.notes or []), *dense_notes]))
         matches.sort(key=lambda m: m.score, reverse=True)
         branch.matches = matches[:limit]
         timings["dense"] = (time.monotonic() - t1) * 1000
@@ -433,6 +439,10 @@ async def _retrieve(
     policy = plans.merge_policy(None, {}) if plan is None else {
         key: (overrides[key] if overrides[key] is not None else plan.agent_policy[key]) for key in overrides
     }
+    # Rerank sends the query and chunk text to a third party under the PLATFORM key, so the agent's policy is the
+    # only thing that can switch it on: a request may turn it off for one call, never on.
+    if plan is not None:
+        policy["rerank"] = bool(plan.agent_policy["rerank"]) and overrides["rerank"] is not False
     if plan is None:
         return _result(
             "no_match", selected=[], policy=policy, degraded=degraded, trace_id=trace_id, low_confidence=False,
@@ -536,7 +546,7 @@ async def _retrieve(
         if not getattr(rr, "configured", True):
             degraded.append("rerank_skipped")
         else:
-            fused = await _rerank(rr, query, fused, cfg, remaining(), degraded, timings)
+            fused = await _rerank(rr, query, fused, cfg, remaining(), degraded, timings, plan.tenant_id)
 
     # 4. token budget. Prompt-mode docs come first (capped at half the budget); the best-ranked match is always
     # returned, truncated if it has to be.
@@ -581,27 +591,43 @@ async def _retrieve(
 
 async def _rerank(
     reranker: IReranker, query: str, matches: list[VectorMatch], cfg: RetrievalConfig, time_left: float,
-    degraded: list[str], timings: dict[str, float],
+    degraded: list[str], timings: dict[str, float], tenant_id: str | None = None,
 ) -> list[VectorMatch]:
-    breaker = breakers.get("rerank", cfg)
+    # One breaker PER TENANT: a tenant whose own calls time out (a pathological agent, long documents) opens only its
+    # own. The shared provider is guarded by rerank_valve, which opens only when several distinct tenants fail.
+    breaker = breakers.get(f"rerank:{tenant_id or '-'}", cfg)
     budget = min(cfg.rerank_timeout_s, time_left)
-    if budget <= 0.005 or not breaker.allow():
+    if budget <= 0.005 or not rerank_valve.allow():
+        degraded.append("rerank_skipped")
+        return matches
+    if not breaker.allow():
+        rerank_valve.release_probe()
         degraded.append("rerank_skipped")
         return matches
     t0 = time.monotonic()
     try:
         async with asyncio.timeout(budget):
-            ordered = await reranker.rerank(query, matches)
+            ordered = (await reranker.rerank(query, matches, tenant_id=tenant_id) if getattr(reranker, "budgeted", False)
+                       else await reranker.rerank(query, matches))
     except asyncio.CancelledError:
         breaker.release_probe()
+        rerank_valve.release_probe()
         raise
-    except Exception:  # noqa: BLE001 - fused order is the fallback
-        breaker.record_failure()
-        degraded.append("rerank_skipped")
+    except Exception as exc:  # noqa: BLE001 - fused order is the fallback
+        if getattr(exc, "breaker_failure", True):
+            breaker.record_failure()
+            rerank_valve.record_failure(tenant_id or "-")
+        else:
+            breaker.release_probe()  # a quota or our own budget says nothing about the provider's health
+            rerank_valve.release_probe()
+        # Fixed reason codes only (RerankError.degraded_reason, or the stage budget); never provider text.
+        reason = "rerank_timeout" if isinstance(exc, TimeoutError) else getattr(exc, "degraded_reason", "rerank_error")
+        degraded.extend(["rerank_skipped", reason])
         return matches
     finally:
         timings["rerank"] = (time.monotonic() - t0) * 1000
     breaker.record_success()
+    rerank_valve.record_success()
     return ordered
 
 

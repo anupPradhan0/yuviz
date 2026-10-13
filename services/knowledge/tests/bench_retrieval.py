@@ -218,9 +218,17 @@ class Bench:
         await scenario("C4. dense DB statement slowed 500 ms (lexical answers)", slow_n,
                        self.call(FakeEmbedder(latency_s=0.060), FaultRepo(dense_sleep=0.5), config=no_breaker),
                        results, pool=self.pool)
-        await scenario("C5. reranker dead, rerank=true", n,
-                       self.call(FakeEmbedder(latency_s=0.060), shared_repo, rerank=True, reranker=DeadReranker(),
-                                 config=no_breaker), results, pool=self.pool)
+        # Only the agent's policy can switch rerank on (a request may only turn it off), so give the agent the flag.
+        agent_id = self.agent["id"]
+        await self.pool.execute("INSERT INTO agent_retrieval_policies (agent_id, rerank) VALUES ($1, true)", agent_id)
+        retrieval.clear_caches()
+        try:
+            await scenario("C5. reranker dead, rerank=true", n,
+                           self.call(FakeEmbedder(latency_s=0.060), shared_repo, rerank=True, reranker=DeadReranker(),
+                                     config=no_breaker), results, pool=self.pool)
+        finally:
+            await self.pool.execute("DELETE FROM agent_retrieval_policies WHERE agent_id = $1", agent_id)
+            retrieval.clear_caches()
         await scenario("C6. embedder hung AND DB slowed (typed unavailable)", slow_n,
                        self.call(FakeEmbedder(latency_s=5.0), FaultRepo(dense_sleep=0.5, lexical_sleep=0.5),
                                  config=no_breaker), results, pool=self.pool)

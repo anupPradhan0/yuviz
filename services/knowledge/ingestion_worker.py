@@ -33,7 +33,9 @@ from .chunking import Chunk, count_tokens
 from .embedding_manager import (
     EMBEDDING_DIMS, EmbeddingProviderConfig, EmbeddingProviderManager, effective_model, embed_in_batches,
 )
+from .enrichment import enrich_texts
 from .parsers import SUPPORTED_CONTENT_TYPES, ParsedDocument, ParseRejected, parse_document
+from .reembed import assert_kb_config_current
 from .storage import StorageProvider
 
 log = logging.getLogger(__name__)
@@ -284,15 +286,21 @@ async def process_one_job(
                     embedding_cfg = await _fetch_embedding_config(conn, kb_id)
             provider = await embedding_manager.get(embedding_cfg)
             embed_stats: dict[str, int] = {}
-            vectors = await embed_in_batches(provider, [c.content for c in new_chunks], stats=embed_stats)
+            # Optional contextual enrichment (off by default): only the EMBEDDED text changes, never the stored chunk.
+            embed_texts, enrich_detail = await enrich_texts(
+                pool, tenant_id, doc_row["title"], new_chunks, embed_max_tokens=embedding_cfg.extra.get("max_tokens"),
+                attempt=job["attempts"])
+            vectors = await embed_in_batches(provider, embed_texts, stats=embed_stats)
             embedding_model = effective_model(embedding_cfg)
-            stages.ok(vectors=len(vectors), **embed_stats)
+            stages.ok(vectors=len(vectors), **embed_stats, **enrich_detail)
 
         stages.begin("index")
         async with tenant_conn(pool, explicit_tenant=tenant_id, reason="kb-ingestion-job") as conn:
             if not await _still_owns_job(conn, job):
                 log.warning("Ingestion job=%s attempt=%s lost its lease; dropping results", job["id"], job["attempts"])
                 return
+            if embedding_model is not None:  # re-embed migration: never land vectors from a config the KB just left
+                await assert_kb_config_current(conn, kb_id, embedding_cfg.id, doc_row["tenant_id"])
             # The document row as it is NOW, locked: a ready document stays editable while it re-ingests, so an admin may
             # have changed usage_mode, language or title (or deleted it) since this job claimed it. Those edits win; only
             # the tiny-document auto-inline decision of a FIRST ingest may set 'prompt'.

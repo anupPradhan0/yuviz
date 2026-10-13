@@ -24,6 +24,7 @@ TOP_K = 5
 
 async def _purge(pool, tenant_id) -> None:
     await retrieval_log.flush()
+    await pool.execute("UPDATE tenants SET default_llm_config_id = NULL WHERE id = $1", tenant_id)
     for sql in (
         "DELETE FROM retrieval_logs WHERE tenant_id = $1",
         "DELETE FROM kb_chunks WHERE tenant_id = $1",
@@ -31,6 +32,7 @@ async def _purge(pool, tenant_id) -> None:
         "DELETE FROM kb_ingestion_jobs WHERE document_id IN (SELECT id FROM kb_documents WHERE tenant_id = $1)",
         "DELETE FROM audit_log WHERE tenant_id = $1",
         "DELETE FROM kb_documents WHERE tenant_id = $1",
+        "DELETE FROM agent_retrieval_policies WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = $1)",
         "DELETE FROM agent_knowledge_bases WHERE agent_id IN (SELECT id FROM agents WHERE tenant_id = $1)",
         "DELETE FROM knowledge_bases WHERE tenant_id = $1",
         "DELETE FROM agents WHERE tenant_id = $1",
@@ -40,19 +42,35 @@ async def _purge(pool, tenant_id) -> None:
         await pool.execute(sql, tenant_id)
 
 
-async def run_pipeline_eval(pool, chunker: str = "auto") -> dict:
+async def run_pipeline_eval(
+    pool, chunker: str = "auto", reranker=None, *, embedder=None, llm_config: dict | None = None,
+) -> dict:
     """Index every golden document into one KB and ask every question. Returns recall@5, MRR and
-    answer-in-context over the questions, plus the questions that missed (for the failure message)."""
+    answer-in-context over the questions, plus the questions that missed (for the failure message). With a
+    `reranker`, every question runs with rerank=True and the result also reports how many questions got a different
+    chunk order and the rerank stage's latency. `embedder` replaces the deterministic fake (real_eval.py), and
+    `llm_config` ({engine, model, api_key_ref}) gives the eval tenant an LLM provider for contextual enrichment."""
     previous = os.environ.get("KNOWLEDGE_CHUNKER")
     os.environ["KNOWLEDGE_CHUNKER"] = chunker  # read per call by the chunker
     slug = f"golden-{uuid.uuid4().hex[:8]}"
+    previous_tenants = os.environ.get("KNOWLEDGE_ENRICH_TENANTS")
+    if llm_config:  # enrichment is per-tenant opt-in: enable exactly this throwaway tenant
+        os.environ["KNOWLEDGE_ENRICH_TENANTS"] = slug
     tenant = dict(await pool.fetchrow("INSERT INTO tenants (name, slug) VALUES ($1, $1) RETURNING *", slug))
     try:
         agent = dict(await pool.fetchrow(
             "INSERT INTO agents (tenant_id, slug, name) VALUES ($1, 'golden', 'Golden') RETURNING *", tenant["id"]))
         set_caller_tenant(str(tenant["id"]))
+        if reranker is not None:  # only the agent's policy can switch rerank on
+            await pool.execute("INSERT INTO agent_retrieval_policies (agent_id, rerank) VALUES ($1, true)", agent["id"])
         kb = await make_kb(pool, tenant, agent, "golden")
-        embedder, storage = FakeEmbedder(), LocalStorageProvider()
+        if llm_config:
+            cfg_id = await pool.fetchval(
+                "INSERT INTO provider_configs (tenant_id, name, role, engine, model, api_key_ref) "
+                "VALUES ($1, 'eval-llm', 'llm', $2, $3, $4) RETURNING id", tenant["id"], llm_config["engine"],
+                llm_config.get("model"), llm_config["api_key_ref"])
+            await pool.execute("UPDATE tenants SET default_llm_config_id = $2 WHERE id = $1", tenant["id"], cfg_id)
+        embedder, storage = embedder or FakeEmbedder(), LocalStorageProvider()
         manager = make_manager(embedder)
         for name, (kind, text) in ALL_DOCS.items():
             ctype, ext = ("text/csv", "csv") if kind == "table" else ("text/markdown", "md")
@@ -67,13 +85,26 @@ async def run_pipeline_eval(pool, chunker: str = "auto") -> dict:
             "SELECT count(*) FROM kb_documents WHERE tenant_id = $1 AND status NOT IN ('ready', 'ready_degraded')",
             tenant["id"])
 
+        enrich = await pool.fetchrow(
+            "SELECT coalesce(sum((detail->>'enriched')::int), 0) AS enriched, coalesce(sum((detail->>'failed')::int), 0) AS failed "
+            "FROM kb_ingestion_events WHERE tenant_id = $1 AND stage = 'embed' AND status = 'ok'", tenant["id"])
         retrieval.clear_caches()
         repo = await get_vector_repo()
         m, missed = Metrics(), []
+        reordered, rerank_ms, degraded_seen = 0, [], set()
         for q in QUESTIONS:
             set_caller_tenant(str(tenant["id"]))
             result = await retrieval.retrieve(
-                None, repo, manager, tenant_slug=slug, agent_slug="golden", query=q.question, top_k=TOP_K)
+                None, repo, manager, tenant_slug=slug, agent_slug="golden", query=q.question, top_k=TOP_K,
+                rerank=reranker is not None or None, reranker=reranker)
+            if reranker is not None:
+                plain = await retrieval.retrieve(
+                    None, repo, manager, tenant_slug=slug, agent_slug="golden", query=q.question, top_k=TOP_K,
+                    rerank=False)
+                reordered += [c["source"]["chunk_id"] for c in result["chunks"]] != [
+                    c["source"]["chunk_id"] for c in plain["chunks"]]
+                rerank_ms.append(result["retrieval_metadata"]["timings_ms"].get("rerank", 0.0))
+                degraded_seen.update(result["degraded"])
             # Prompt-mode documents (tiny files auto-inline) come first and are always returned: an answer there
             # counts as rank 1, and they do not push the ranked matches down.
             always = result["retrieval_metadata"]["always_included"]
@@ -94,8 +125,14 @@ async def run_pipeline_eval(pool, chunker: str = "auto") -> dict:
         return {
             "n": m.n, "documents_not_ready": not_ready, "recall_at_5": m.recall_at_5 / m.n, "mrr": m.mrr / m.n,
             "answer_in_context": m.answer_in_context / m.n, "missed": missed,
+            **({"enriched_chunks": enrich["enriched"], "enrich_failed": enrich["failed"]} if llm_config else {}),
+            **({"reordered": reordered, "rerank_ms": rerank_ms, "degraded": sorted(degraded_seen)} if reranker else {}),
         }
     finally:
+        if previous_tenants is None:
+            os.environ.pop("KNOWLEDGE_ENRICH_TENANTS", None)
+        else:
+            os.environ["KNOWLEDGE_ENRICH_TENANTS"] = previous_tenants
         if previous is None:
             os.environ.pop("KNOWLEDGE_CHUNKER", None)
         else:
