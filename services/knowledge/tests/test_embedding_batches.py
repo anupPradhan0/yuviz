@@ -141,28 +141,26 @@ async def test_worker_stores_parents_children_and_embedding_metadata(tenant_agen
 
 async def test_vector_search_ignores_parent_rows(tenant_agent, pool):
     from libs.tenancy import tenant_conn
+    from services.knowledge.tests.rag_fakes import add_document, embed_text, vec_literal
     from services.knowledge.vector_repository import PgVectorRepository
 
     tenant, _ = tenant_agent
     kb = await _make_kb(tenant, "vs-kb")
-    # A direction no other test uses: the HNSW index is shared by every row in the database, and its candidate list
-    # (ef_search) is cut before the kb filter, so identical vectors from other tests could crowd this one out.
-    one_hot = [1.0 if i == 700 else 0.0 for i in range(EMBEDDING_DIMS)]
-    doc = await _ingest(pool, tenant, kb, Scripted({n: (lambda t: [one_hot for _ in t]) for n in range(1, 30)}))
+    # Rows inserted directly: this test is about which rows the search SQL admits (NOT is_parent), so it must not
+    # depend on the ingestion worker, which a background worker task left over from another test could race.
+    text = "zyxwv unique parent row probe sentence"
+    doc = await add_document(pool, tenant, kb, "Probe", [text], parent="Section: " + text + " and the rest of its section")
+    vector = embed_text(text)
     # Even a parent row that somehow carried an embedding must not be returned.
     await pool.execute(
-        "UPDATE kb_chunks SET embedding = $2::vector WHERE document_id = $1 AND is_parent",
-        doc["id"], "[" + ",".join(str(x) for x in one_hot) + "]",
-    )
+        "UPDATE kb_chunks SET embedding = $2::vector WHERE document_id = $1 AND is_parent", doc["id"], vec_literal(vector))
     async with tenant_conn(pool, explicit_tenant=str(tenant["id"]), reason="test") as conn:
-        # Exact scan inside this transaction: this test is about which rows the SQL admits (NOT is_parent), not about
-        # HNSW recall, and the approximate index is shared with every other test's rows, whose neighbours can crowd
-        # the candidate list (ef_search) before the kb filter and make the result depend on test order.
+        # Exact scan inside this transaction: the approximate HNSW index is shared with every other test's rows,
+        # whose neighbours can crowd the candidate list (ef_search) before the kb filter.
         await conn.execute("SET LOCAL enable_indexscan = off")
-        matches = await PgVectorRepository().search(conn, [str(kb["id"])], one_hot, 100, 0.0)
-    parent_ids = {str(r["id"]) for r in await pool.fetch("SELECT id FROM kb_chunks WHERE document_id = $1 AND is_parent", doc["id"])}
-    status = await pool.fetchrow("SELECT status, error FROM kb_documents WHERE id = $1", doc["id"])
-    assert matches and not ({m.chunk_id for m in matches} & parent_ids), dict(status)
+        matches = await PgVectorRepository().search(conn, [str(kb["id"])], vector, 100, 0.0)
+    assert [m.chunk_id for m in matches] == doc["chunk_ids"], "the child must be found"
+    assert doc["parent_id"] not in {m.chunk_id for m in matches}
     await _purge_tenant(pool, tenant["id"])
 
 
