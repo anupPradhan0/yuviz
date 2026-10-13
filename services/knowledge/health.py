@@ -1,6 +1,8 @@
-"""Tenant-scoped ingestion and retrieval health for the admin UI. Every query runs on tenant_conn, so RLS (not a
-WHERE clause) is what keeps another tenant's jobs and logs out of the numbers; there is deliberately no
-platform_conn here. Platform-scoped callers get the tenant named in the path, exactly like the other tenant routes."""
+"""Tenant-scoped ingestion and retrieval health for the admin UI. Every query runs on tenant_conn, so RLS is what
+keeps another tenant's jobs and logs out of the numbers, and there is deliberately no platform_conn here.
+Each query also names the tenant (app.tenant_id, set by tenant_conn): RLS does not apply to a superuser or
+table-owner connection (dev and CI databases), and a health page must not depend on the role the pool runs as.
+Platform-scoped callers get the tenant named in the path, exactly like the other tenant routes."""
 
 from __future__ import annotations
 
@@ -17,12 +19,14 @@ FAILED_DOCUMENT_LIMIT = 50
 EVENT_LIMIT = 200
 
 _QUEUE_SQL = """
-SELECT count(*) FILTER (WHERE status = 'pending')                                   AS pending,
-       count(*) FILTER (WHERE status = 'running')                                   AS running,
-       count(*) FILTER (WHERE status = 'running' AND lease_expires_at < now())      AS stuck_running,
-       count(*) FILTER (WHERE status = 'dead_letter')                               AS dead_letter,
-       extract(epoch FROM now() - min(created_at) FILTER (WHERE status = 'pending')) AS oldest_pending_age_s
-  FROM kb_ingestion_jobs
+SELECT count(*) FILTER (WHERE j.status = 'pending')                                   AS pending,
+       count(*) FILTER (WHERE j.status = 'running')                                   AS running,
+       count(*) FILTER (WHERE j.status = 'running' AND j.lease_expires_at < now())    AS stuck_running,
+       count(*) FILTER (WHERE j.status = 'dead_letter')                               AS dead_letter,
+       extract(epoch FROM now() - min(j.created_at) FILTER (WHERE j.status = 'pending')) AS oldest_pending_age_s
+  FROM kb_ingestion_jobs j
+ WHERE EXISTS (SELECT 1 FROM kb_documents d
+                WHERE d.id = j.document_id AND d.tenant_id = current_setting('app.tenant_id')::uuid)
 """
 
 # One row per document that is currently failed; the document's own error column is the reason.
@@ -32,7 +36,7 @@ SELECT d.id, d.kb_id, d.title, d.error, d.updated_at,
   FROM kb_documents d
   LEFT JOIN LATERAL (SELECT status, error_class, attempts FROM kb_ingestion_jobs
                       WHERE document_id = d.id ORDER BY created_at DESC LIMIT 1) j ON true
- WHERE d.status = 'failed' AND d.deleted_at IS NULL
+ WHERE d.status = 'failed' AND d.deleted_at IS NULL AND d.tenant_id = current_setting('app.tenant_id')::uuid
  ORDER BY d.updated_at DESC
  LIMIT $1
 """
@@ -49,13 +53,13 @@ SELECT count(*)                                                      AS total,
        percentile_cont(0.95) WITHIN GROUP (ORDER BY (timings_ms->>'total')::float8) AS p95,
        percentile_cont(0.99) WITHIN GROUP (ORDER BY (timings_ms->>'total')::float8) AS p99
   FROM retrieval_logs
- WHERE created_at >= now() - make_interval(hours => $1)
+ WHERE tenant_id = current_setting('app.tenant_id')::uuid AND created_at >= now() - make_interval(hours => $1)
 """
 
 _DEGRADED_SQL = """
 SELECT d AS reason, count(*) AS n
   FROM retrieval_logs, unnest(degraded) AS d
- WHERE created_at >= now() - make_interval(hours => $1)
+ WHERE tenant_id = current_setting('app.tenant_id')::uuid AND created_at >= now() - make_interval(hours => $1)
  GROUP BY d ORDER BY n DESC LIMIT 20
 """
 
@@ -106,7 +110,8 @@ async def document_events(document_id: Any) -> list[dict[str, Any]]:
         # Newest first, bounded; re-order oldest-first for reading.
         rows = await conn.fetch(
             "SELECT job_id, attempt, stage, status, duration_ms, detail, created_at FROM kb_ingestion_events "
-            "WHERE document_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2", document_id, EVENT_LIMIT,
+            "WHERE document_id = $1 AND tenant_id = current_setting('app.tenant_id')::uuid "
+            "ORDER BY created_at DESC, id DESC LIMIT $2", document_id, EVENT_LIMIT,
         )
     out = []
     for r in reversed(rows):
