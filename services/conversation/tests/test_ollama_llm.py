@@ -320,3 +320,18 @@ async def test_non_thinking_related_400_is_not_swallowed():
     llm = _make_llm(handler, think=False)
     with pytest.raises(httpx.HTTPStatusError):
         _ = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
+
+
+async def test_404_warns_once_per_instance_naming_the_model_and_still_raises(caplog):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, content=b'{"error":"model not found"}')
+
+    llm = _make_llm(handler)
+    with caplog.at_level("WARNING", logger="services.conversation.providers.llm.ollama"):
+        for _ in range(2):
+            with pytest.raises(httpx.HTTPStatusError):
+                _ = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
+
+    warnings = [r for r in caplog.records if "not pulled" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "llama3.2" in warnings[0].getMessage()

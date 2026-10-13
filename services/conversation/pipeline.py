@@ -33,12 +33,12 @@ from .fillers import FillerSelector
 from .i18n import t
 from .guardrails import GuardrailCounter, GuardrailDetector
 from . import language as lang_state
-from .language import LanguageTracker, reply_language_instruction, script_language, utterance_language
+from .language import LanguageTracker, fixed_language_instruction, reply_language_instruction, script_language, utterance_language
 from .metrics import IMetrics, NullMetrics
 from .provider_bundle import ProviderBundle
 from .tool_latency import ToolLatencyStore
-from .providers.interfaces import ChatMessage, SttResult
-from libs.config_sdk.languages import normalize_language
+from .providers.interfaces import ChatMessage, SttResult, with_directive
+from libs.config_sdk.languages import language_name, normalize_language
 from .session import HandlerResponse
 from .session_finalizer import FinalizationResult, SessionFinalizer
 from .tools.llm_adapter import DeterministicSpokenEvent
@@ -516,6 +516,7 @@ class PipelineConversationHandler:
             tts_language if (not self._multilingual and tts_language != providers.tts.language) else None
         )
         self._agent_language = runtime_config.agent.language
+        self._language_mode = runtime_config.agent.language_mode
         self._greeting_by_language = getattr(runtime_config.conversation, "greeting_by_language", None)
         # Spoken system strings: the session language, else an explicit agents.language.
         # Never a provider row's language, so agents without one keep their English strings.
@@ -1081,13 +1082,27 @@ class PipelineConversationHandler:
 
     # ── Workflow helpers ─────────────────────────────────────────────────
 
-    def _refresh_node_prompt(self, history: list[ChatMessage], session_id: str | None = None) -> None:
-        """Refresh history[0] with the active node's rendered prompt, plus the reply-language
-        line on the multilingual path (per turn, so it follows a language switch)."""
-        content = self._workflow.system_prompt()
+    def _reply_language_line(self, session_id: str | None) -> str:
+        """The reply-language instruction for this session; empty for legacy agents."""
         language = self._session_language(session_id) if session_id is not None else None
         if language:
-            content += reply_language_instruction(language)
+            return reply_language_instruction(language)
+        if self._language_mode == "monolingual" and self._agent_language:
+            return fixed_language_instruction(normalize_language(self._agent_language))
+        return ""
+
+    def _reply_directive(self, session_id: str | None) -> ChatMessage | None:
+        """The reply-language line again as the LAST message of every LLM request: small models
+        follow the recent turns and knowledge passages over the system prompt, and ignore a
+        trailing system message, so it goes as a user turn. Transient, never stored in history."""
+        line = self._reply_language_line(session_id).strip()
+        return ChatMessage(role="user", content=f"(Instruction, not from the caller: {line})") if line else None
+
+    def _refresh_node_prompt(self, history: list[ChatMessage], session_id: str | None = None) -> None:
+        """Refresh history[0] with the active node's rendered prompt, plus the reply-language
+        line on the multilingual path (per turn, so it follows a language switch) or the fixed
+        reply language of a monolingual-mode agent."""
+        content = self._workflow.system_prompt() + self._reply_language_line(session_id)
         prompt = ChatMessage(role="system", content=content)
         if history and history[0].role == "system":
             history[0] = prompt
@@ -1194,7 +1209,8 @@ class PipelineConversationHandler:
     ) -> AsyncGenerator[str | ToolCallStartedEvent | LocalToolCompletedEvent, None]:
         """LLM tokens + ToolCallStartedEvent filler + LocalToolCompletedEvent for bridging speech."""
         if self._tool_orchestrator is None:
-            async for token in self._llm.generate(history):
+            directive = self._reply_directive(session_id)
+            async for token in self._llm.generate(with_directive(history, directive)):
                 yield token
             return
 
@@ -1207,6 +1223,7 @@ class PipelineConversationHandler:
             caller_number=self._caller_number, called_number=self._called_number,
             call_direction=self._direction, cancel_event=cancel_event,
             local_tools=local_tools, only_tools=only_tools,
+            trailing_message=self._reply_directive(session_id),
         ):
             if isinstance(event, ToolCallStartedEvent):
                 tool_calls_made.append(event.tool_name)
@@ -1335,7 +1352,7 @@ class PipelineConversationHandler:
             query = str(arguments.get("query") or "").strip()
             if not query:
                 return ToolResult(status=ToolStatus.INVALID_ARGUMENT, error="missing_query")
-            # Not _retrieve_context(): the model must distinguish "lookup failed" from "nothing found".
+            # The model must distinguish "lookup failed" from "nothing found".
             try:
                 context = await self._knowledge.retrieve(
                     self._tenant_slug, self._agent_slug, query, RetrievalPolicy(),
@@ -1351,27 +1368,12 @@ class PipelineConversationHandler:
             }
             if context.include_citations and context.sources:
                 payload["sources"] = list(context.sources)
+            answer_in = self._session_language(session_id) or normalize_language(self._agent_language)
+            if answer_in:
+                payload["answer_in"] = language_name(answer_in)
             return ToolResult(status=ToolStatus.SUCCESS, payload=payload)
 
         return handler
-
-    async def _retrieve_context(self, query: str, session_id: str):
-        # A retrieval failure must never fail the turn.
-        try:
-            return await self._knowledge.retrieve(
-                self._tenant_slug, self._agent_slug, query, RetrievalPolicy(),
-            )
-        except Exception:
-            log.exception("Knowledge retrieval failed session=%s", session_id)
-            return None
-
-    @staticmethod
-    def _format_context(context) -> str:
-        text = "Relevant information that may help answer the caller's question:\n"
-        text += "\n\n".join(chunk.content for chunk in context.chunks)
-        if context.include_citations and context.sources:
-            text += "\n\nSources: " + ", ".join(context.sources)
-        return text
 
     async def _synthesize_sentence_stream(self, text: str, session_id: str) -> AsyncGenerator[bytes, None]:
         # Every text source reaches TTS here, so strip markdown once for all of them.
@@ -1398,7 +1400,10 @@ class PipelineConversationHandler:
         if state is None:
             state = _SessionState()
             if self._multilingual and self._default_language:
-                state.language = LanguageTracker(self._default_language, self._supported_languages)
+                state.language = LanguageTracker(
+                    self._default_language, self._supported_languages,
+                    unsupported_to_default=self._language_mode == "multilingual",
+                )
             self._sessions[session_id] = state
         return state
 

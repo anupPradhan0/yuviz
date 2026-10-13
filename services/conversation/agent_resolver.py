@@ -7,6 +7,7 @@ import logging
 
 from libs.config_sdk import ConfigUnavailableError, IConfigProvider, RuntimeConfig
 
+from .ai_provider_manager import ModelNotReadyError
 from .provider_bundle import ProviderBundle, ProviderRegistry
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,9 @@ async def resolve_handler_deps(
         return runtime_config, bundle
     except ConfigUnavailableError:
         log.warning("agent_resolver: config unavailable tenant=%s agent=%s", tenant_slug, agent_slug)
+        return None
+    except ModelNotReadyError as exc:
+        log.warning("agent_resolver: %s — falling back to legacy config", exc)
         return None
     except Exception:
         log.exception(

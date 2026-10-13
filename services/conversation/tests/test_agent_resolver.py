@@ -6,11 +6,12 @@ and fake provider registry (no I/O).
 from __future__ import annotations
 
 import dataclasses
+import logging
 
 from libs.config_sdk.providers.mock_provider import MockConfigProvider
 
 from ..agent_resolver import resolve_handler_deps
-from ..ai_provider_manager import AIProviderManager, ProviderConfig
+from ..ai_provider_manager import AIProviderManager, ModelNotReadyError, ProviderConfig
 from ..provider_bundle import ProviderRegistry
 
 
@@ -116,3 +117,22 @@ async def test_inactive_agent_returns_none_falls_back_to_legacy():
 
     result = await resolve_handler_deps("acme", "sup", _registry(), mock)
     assert result is None
+
+
+async def test_model_not_ready_returns_none_with_one_warning_naming_the_model(caplog):
+    async def not_ready_factory(cfg: ProviderConfig, api_key: str | None):
+        raise ModelNotReadyError("fake_tts", "af_heart")
+
+    manager = AIProviderManager(
+        FakeSecretResolver(), registry={**FAKE_REGISTRY, ("tts", "fake_tts"): not_ready_factory}
+    )
+
+    with caplog.at_level(logging.WARNING, logger="services.conversation.agent_resolver"):
+        result = await resolve_handler_deps(
+            "acme", "sup", ProviderRegistry(manager), _fully_configured_mock()
+        )
+
+    assert result is None
+    assert len(caplog.records) == 1
+    assert "af_heart" in caplog.records[0].getMessage()
+    assert "acme" not in caplog.records[0].getMessage()

@@ -832,3 +832,29 @@ async def test_local_tool_lookup_uses_definition_name_not_dict_key():
     assert calls == [{}]
     assert LocalToolCompletedEvent(tool_name="caller_verified") in events
     assert TokenEvent(text="Thanks!") in events
+
+
+async def test_trailing_message_ends_every_llm_call_and_never_enters_history():
+    llm = _ScriptedLLM([
+        [ToolCallEvent(tool_call_id="c1", tool_name="execute_api", arguments={"api_name": "x"})],
+        [TokenEvent(text="Done.")],
+    ])
+    executor = _FixedExecutor(ToolResult(status=ToolStatus.SUCCESS, payload={"ok": True}))
+    registry = ExecutorRegistry()
+    registry.register("execute_api", lambda provider: executor)
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([_policy()]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=registry,
+    )
+    directive = ChatMessage(role="user", content="(Instruction, not from the caller: Reply only in English.)")
+    history = [ChatMessage(role="user", content="book it")]
+
+    _ = [e async for e in orchestrator.run_turn("agent1", "t1", "c1", "s1", history, trailing_message=directive)]
+
+    # First call: folded into the caller's turn; after the tool result: its own user turn.
+    first, after_tool = llm.seen_messages
+    assert first[-1].role == "user" and first[-1].content == f"book it\n\n{directive.content}"
+    assert after_tool[-1] == directive and after_tool[-2].role == "tool"
+    assert directive not in history and history[0].content == "book it" and len(history) == 3

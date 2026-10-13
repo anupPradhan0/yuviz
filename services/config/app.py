@@ -22,6 +22,7 @@ from libs.ratelimit import FixedWindowCounter
 from . import cache, db, email, invites
 from . import agents as agents_service
 from . import number_sync
+from .model_downloads import ModelDownloads
 from . import phone_numbers as phone_numbers_service
 from . import provider_configs as provider_configs_service
 from . import telephony_configs as telephony_configs_service
@@ -29,7 +30,7 @@ from . import tenants as tenants_service
 from .routers import (
     agent_tool_policies, agents, audit_log, auth, call_flows, calls, carriers,
     invites as invites_router,
-    live_calls, phone_numbers, provider_configs, telephony_configs, tenants, tool_catalog,
+    live_calls, local_models, phone_numbers, provider_configs, telephony_configs, tenants, tool_catalog,
     tool_provider_configs, users,
 )
 
@@ -159,8 +160,12 @@ async def lifespan(app: FastAPI):
         log.exception("Sealing plaintext telephony credentials failed; they stay masked in responses")
     await _prewarm_routes(overwrite=True)
     watchdog = asyncio.create_task(_reload_routes_when_redis_empties())
+    app.state.model_downloads = ModelDownloads(
+        ollama_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
+    )
     yield
     watchdog.cancel()
+    await app.state.model_downloads.aclose()
     await db.close_pool()
     await cache.close()
     email.close_smtp_executor()
@@ -219,6 +224,7 @@ app.include_router(telephony_configs.router)
 app.include_router(telephony_configs.providers_router)
 app.include_router(audit_log.router)
 app.include_router(live_calls.router)
+app.include_router(local_models.router)
 
 
 @app.exception_handler(LookupError)

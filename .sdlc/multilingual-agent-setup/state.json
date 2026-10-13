@@ -1,0 +1,151 @@
+{
+ "slug": "multilingual-agent-setup",
+ "base": "c0df980558227129b3c28016d1f6f48a6d11c655",
+ "stage": "ship",
+ "status": "gate_ship",
+ "started_at": "2026-10-13T02:22:37Z",
+ "stages": {
+  "security_design": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "GREEN",
+   "out_tokens": {
+    "opus": 6433
+   },
+   "artifact_written": true,
+   "findings_path": ".sdlc/multilingual-agent-setup/02-security.md",
+   "controls_verified": 8,
+   "agents": []
+  },
+  "prd": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "AMBER",
+   "out_tokens": {
+    "sonnet": 26507,
+    "opus": 20886
+   },
+   "artifact_written": true,
+   "findings_path": ".sdlc/multilingual-agent-setup/01-prd.review.md",
+   "controls_verified": 9,
+   "agents": []
+  },
+  "_state_writes": {
+   "status": "pending",
+   "rounds": 0,
+   "verdict": null,
+   "out_tokens": {
+    "haiku": 74771
+   },
+   "agents": []
+  },
+  "design": {
+   "status": "passed",
+   "rounds": 2,
+   "verdict": "GREEN",
+   "out_tokens": {
+    "opus": 44500
+   },
+   "artifact_written": true,
+   "findings_path": ".sdlc/multilingual-agent-setup/02-design.review.md",
+   "controls_verified": 9,
+   "agents": []
+  },
+  "plan": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "AMBER",
+   "out_tokens": {
+    "opus": 83794
+   },
+   "artifact_written": true,
+   "findings_path": ".sdlc/multilingual-agent-setup/03-tasks.review.md",
+   "controls_verified": 6,
+   "agents": []
+  },
+  "build": {
+   "status": "passed",
+   "rounds": 0,
+   "verdict": "GREEN",
+   "out_tokens": {
+    "haiku": 42700,
+    "sonnet": 209333
+   },
+   "agents": []
+  },
+  "review": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "GREEN",
+   "out_tokens": {
+    "sonnet": 22332,
+    "opus": 58558
+   },
+   "agents": [
+    "review:size",
+    "review:backend",
+    "review:admin-ui",
+    "review:fanin:r1",
+    "review:fanin-fix",
+    "review:fanin:2"
+   ],
+   "started_at": "2026-10-13T06:04:08Z"
+  },
+  "security_code": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "GREEN",
+   "out_tokens": {},
+   "agents": [],
+   "findings_path": ".sdlc/multilingual-agent-setup/05-security.md",
+   "started_at": "2026-10-13T06:04:08Z",
+   "controls_verified": 10
+  },
+  "test": {
+   "status": "passed",
+   "verdict": "GREEN"
+  }
+ },
+ "open": [
+  {
+   "stage": "security_code",
+   "severity": "low",
+   "finding": "Any tenant admin can start host-wide model downloads (allowlisted, cap 2, 1h Ollama timeout); no disk-free check."
+  },
+  {
+   "stage": "build",
+   "severity": "minor",
+   "finding": "Japanese Kokoro voices are downloadable but never offered in the UI (no Japanese language code in the registry)."
+  }
+ ],
+ "retro_sources": [
+  ".sdlc/multilingual-agent-setup/05-review-backend.md",
+  ".sdlc/multilingual-agent-setup/05-review-admin-ui.md",
+  ".sdlc/multilingual-agent-setup/05-review-admin-ui.md"
+ ],
+ "gates": {
+  "prd": "approved",
+  "ship": "paused_by_user"
+ },
+ "build_phase_done": "Phase 8: Review fixes",
+ "known_preexisting_failures": "Verified by launcher with POSTGRES_DSN set (now in .env): full pytest = 3098 passed, 6 failed. All 6 are outside this diff and pre-existing/environmental: services/knowledge/tests/test_ingestion_worker.py (2), services/knowledge/tests/test_retrieval.py (3; the live knowledge worker from the running local stack and real Ollama embeddings), tests/test_env_catalogue.py (dynamic env reads in services/toolexec/oauth.py and services/conversation/language.py, neither changed by this diff's env reads). npm/node live in /opt/homebrew/bin.",
+ "verify": {
+  "result": "failed",
+  "command": "set -a; source .env; set +a; ./venv/bin/python -m pytest -q  (admin-ui lint/test not run: npm not found on PATH)",
+  "failures": [
+   "pytest: 110 failed, 2901 passed, 1 skipped, 93 errors (305s)",
+   "ERROR services/config/tests/test_signup.py (56) and test_google_oauth.py (14), services/toolexec/tests/test_reencrypt_tenant_refs.py (23): FileNotFoundError 'psql' missing, environmental",
+   "FAILED services/toolexec/tests: test_preset_execution 42, test_chain_execution 27, test_executor_crm 18, test_crm_lifecycle 5, test_oauth 4, test_admission 4, test_auth_schemes_tenant_bound 3, test_connector_preset_routes 2, test_routes_auth 1, test_oauth_routes 1 (toolexec, outside the diff, likely DB/psql related)",
+   "FAILED services/conversation/tests/test_ai_provider_manager.py::TestRealOllamaFactory::test_real_ollama_generates_a_token_stream (diff touches ai_provider_manager.py and ollama.py; possibly no live Ollama)",
+   "FAILED services/conversation/tests/test_startup_load.py::test_stt_env_fallback_default_is_the_cached_english_model",
+   "FAILED services/conversation/tests/test_startup_load.py::test_prewarm_survives_a_corrupt_call_flow",
+   "admin-ui lint and npm test NOT RUN: npm command not found in this shell, so admin-ui is unverified",
+   "Full pytest output saved at /private/tmp/claude-502/pt.txt"
+  ],
+  "changed_lines": 2139,
+  "backend": 41,
+  "admin_ui": 10
+ },
+ "updated_at": "2026-10-13T06:21:52Z",
+ "checkpoint": "Committed 65964a1 on feature/multilingual-agent-setup, rebased onto origin/redesign af52dc4. Full pytest 3113 passed; admin-ui build ok, lint 0 errors, npm test 7/7. Independent final review AMBER -> 3 findings fixed and re-verified."
+}

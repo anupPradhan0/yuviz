@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { Check, ChevronDown, Circle, Mars, Venus } from "lucide-react";
 import { ApiError, ProviderConfig, createProvider } from "@/lib/api";
-import { VOICES_BY_ENGINE, VoiceGender } from "@/lib/engineCatalog";
+import { VOICES_BY_ENGINE, VoiceGender, VoiceOption } from "@/lib/engineCatalog";
+import { useLocalModels } from "@/lib/useLocalModels";
 
 const ENGINE_LABELS: Record<string, string> = {
   macos: "Basic voice",
@@ -51,10 +52,23 @@ export function LocalVoicePicker({
   const [genderFilter, setGenderFilter] = useState<VoiceGender | "all">("all");
 
   const selected = providers.find((p) => p.id === value);
-  const voices = VOICES_BY_ENGINE[engine] ?? [];
+  // Voice ids come from the server catalogue; gender, sample and language tag are the UI's own data for them.
+  const { models } = useLocalModels();
+  const known = new Map(VOICES_BY_ENGINE[engine]?.map((v) => [v.id, v]));
+  const fromCatalogue: VoiceOption[] = models
+    .filter((m) => m.engine === engine && m.role === "tts")
+    .map((m) => ({
+      id: m.name,
+      label: m.label,
+      gender: known.get(m.name)?.gender ?? "neutral",
+      language: known.get(m.name)?.language ?? m.languages?.[0] ?? "",
+      sampleUrl: known.get(m.name)?.sampleUrl,
+    }));
+  // While the catalogue loads, or if it failed, the built-in list keeps the picker usable.
+  const voices = fromCatalogue.length ? fromCatalogue : VOICES_BY_ENGINE[engine] ?? [];
   const selectedVoice = voices.find((v) => selected?.engine === engine && selected?.voice === v.id);
 
-  const handlePick = async (voiceId: string, language: string) => {
+  const handlePick = async (voiceId: string, language?: string) => {
     setError(null);
     setCreatingId(voiceId);
     try {
@@ -66,7 +80,7 @@ export function LocalVoicePicker({
         onProviderCreated(created);
         onChange(created.id);
       }
-      onLanguageDetected(language);
+      if (language) onLanguageDetected(language);
       setExpanded(false);
     } catch (e) {
       setError(e instanceof ApiError ? e.detail : String(e));

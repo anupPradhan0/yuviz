@@ -382,35 +382,11 @@ async def soft_delete_provider_config(
 
 
 _ELEVENLABS_VOICES_URL = "https://api.elevenlabs.io/v1/voices"
+_CARTESIA_VOICES_URL = "https://api.cartesia.ai/voices"
+_CARTESIA_API_VERSION = "2024-06-10"  # keep equal to services/conversation/providers/tts/cartesia.py
 
 
-async def list_elevenlabs_voices(provider_id: Any, *, secret_resolver: SecretResolver) -> list[dict[str, Any]]:
-    """Lists ElevenLabs voices server-side; the resolved key is never returned to the caller."""
-    cfg = await get_provider_config(provider_id)
-    if cfg is None:
-        raise LookupError(f"provider_config {provider_id} not found")
-    if cfg["role"] != "tts" or cfg["engine"] != "elevenlabs":
-        raise ValueError(
-            f"provider_config {provider_id} is role={cfg['role']!r} engine={cfg['engine']!r}, "
-            "expected role='tts' engine='elevenlabs'"
-        )
-    if not cfg["api_key_ref"]:
-        raise ValueError(f"provider_config {provider_id} has no api_key_ref configured")
-
-    api_key = await secret_resolver.resolve(cfg["api_key_ref"])
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(_ELEVENLABS_VOICES_URL, headers={"xi-api-key": api_key})
-    except httpx.RequestError as exc:
-        raise ValueError(f"could not reach the ElevenLabs Voices API: {exc.__class__.__name__}") from exc
-    if resp.status_code != 200:
-        # Log the upstream body but don't forward it in the 400 detail.
-        log.warning(
-            "ElevenLabs Voices API returned %s for provider_config %s: %s",
-            resp.status_code, provider_id, resp.text[:200],
-        )
-        raise ValueError(f"ElevenLabs Voices API returned {resp.status_code}")
-
+def _elevenlabs_voices(resp: httpx.Response) -> list[dict[str, Any]]:
     return [
         {
             "voice_id": v["voice_id"],
@@ -423,3 +399,55 @@ async def list_elevenlabs_voices(provider_id: Any, *, secret_resolver: SecretRes
         }
         for v in resp.json().get("voices", [])
     ]
+
+
+def _cartesia_voices(resp: httpx.Response) -> list[dict[str, Any]]:
+    return [
+        {
+            "voice_id": v["id"],
+            "name": v["name"],
+            "category": None,
+            "labels": {},
+            "preview_url": None,
+            # Cartesia voices carry a single language code.
+            "verified_languages": [v["language"]] if v.get("language") else [],
+        }
+        for v in resp.json()
+    ]
+
+
+async def list_provider_voices(provider_id: Any, *, secret_resolver: SecretResolver) -> list[dict[str, Any]]:
+    """Lists ElevenLabs or Cartesia voices server-side; the resolved key is never returned to the caller."""
+    cfg = await get_provider_config(provider_id)
+    if cfg is None:
+        raise LookupError(f"provider_config {provider_id} not found")
+    engine = cfg["engine"]
+    if cfg["role"] != "tts" or engine not in ("elevenlabs", "cartesia"):
+        raise ValueError(
+            f"provider_config {provider_id} is role={cfg['role']!r} engine={engine!r}, "
+            "expected role='tts' engine='elevenlabs' or 'cartesia'"
+        )
+    if not cfg["api_key_ref"]:
+        raise ValueError(f"provider_config {provider_id} has no api_key_ref configured")
+
+    api_key = await secret_resolver.resolve(cfg["api_key_ref"])
+    if engine == "elevenlabs":
+        label, url, headers = "ElevenLabs", _ELEVENLABS_VOICES_URL, {"xi-api-key": api_key}
+    else:
+        label, url, headers = "Cartesia", _CARTESIA_VOICES_URL, {
+            "X-API-Key": api_key, "Cartesia-Version": _CARTESIA_API_VERSION,
+        }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, headers=headers)
+    except httpx.RequestError as exc:
+        raise ValueError(f"could not reach the {label} Voices API: {exc.__class__.__name__}") from exc
+    if resp.status_code != 200:
+        # Log the upstream body but don't forward it in the 400 detail.
+        log.warning(
+            "%s Voices API returned %s for provider_config %s: %s",
+            label, resp.status_code, provider_id, resp.text[:200],
+        )
+        raise ValueError(f"{label} Voices API returned {resp.status_code}")
+
+    return _elevenlabs_voices(resp) if engine == "elevenlabs" else _cartesia_voices(resp)

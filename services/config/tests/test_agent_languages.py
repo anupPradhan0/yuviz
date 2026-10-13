@@ -334,7 +334,7 @@ async def test_revalidation_names_the_agent_a_provider_edit_would_break():
     agent_row = {
         "name": "Clinic bot", "language": "en", "supported_languages": ["en", "hi"],
         "tts_config_by_language": json.dumps({"hi": hi_id}), "greeting_by_language": None,
-        "tts_config_id": base_id, "stt_config_id": None,
+        "language_mode": None, "tts_config_id": base_id, "stt_config_id": None,
     }
     conn = FakeConn({base_id: base, hi_id: hi}, agents=[agent_row])
     with pytest.raises(ValueError, match=r"'Clinic bot'.*Hindi"):
@@ -348,7 +348,7 @@ async def test_revalidation_covers_agents_falling_back_to_the_tenant_default():
     agent_row = {
         "name": "Default-voice bot", "language": "en", "supported_languages": ["en", "hi"],
         "tts_config_by_language": None, "greeting_by_language": None,
-        "tts_config_id": None, "stt_config_id": None,
+        "language_mode": None, "tts_config_id": None, "stt_config_id": None,
     }
     conn = FakeConn({aura_id: aura}, default_tts=aura_id, agents=[agent_row])
     with pytest.raises(ValueError, match="'Default-voice bot'"):
@@ -363,7 +363,7 @@ async def test_revalidation_passes_when_agents_still_work():
     agent_row = {
         "name": "Clinic bot", "language": "en", "supported_languages": ["en", "hi"],
         "tts_config_by_language": None, "greeting_by_language": None,
-        "tts_config_id": base_id, "stt_config_id": None,
+        "language_mode": None, "tts_config_id": base_id, "stt_config_id": None,
     }
     await agents.revalidate_multilingual_agents(FakeConn({base_id: base}, agents=[agent_row]), TENANT, provider_id=base_id)
 
@@ -406,7 +406,7 @@ async def test_revalidation_matches_ids_regardless_of_case():
     agent_row = {
         "name": "Clinic bot", "language": "en", "supported_languages": ["en", "hi"],
         "tts_config_by_language": json.dumps({"hi": hi_id.upper()}), "greeting_by_language": None,
-        "tts_config_id": base_id, "stt_config_id": None,
+        "language_mode": None, "tts_config_id": base_id, "stt_config_id": None,
     }
     conn = FakeConn({base_id: base, hi_id: hi, hi_id.upper(): hi}, agents=[agent_row])
     with pytest.raises(ValueError, match="'Clinic bot'"):
@@ -463,7 +463,71 @@ async def test_revalidation_reads_tenant_defaults_without_a_lock():
     conn = FakeConn({cartesia_id: cartesia}, default_tts=cartesia_id, agents=[{
         "name": "Bot", "language": "en", "supported_languages": ["en", "hi"],
         "tts_config_by_language": None, "greeting_by_language": None,
-        "tts_config_id": None, "stt_config_id": None,
+        "language_mode": None, "tts_config_id": None, "stt_config_id": None,
     }])
     await agents.revalidate_multilingual_agents(conn, TENANT, default_roles=("tts",))
     assert len(conn.default_reads) == 1 and "FOR SHARE" not in conn.default_reads[0]
+
+
+# ── Language modes: STT/TTS coverage and revalidation ───────────────────────
+
+async def test_monolingual_hindi_rejects_english_only_whisper():
+    cartesia_id, cartesia = _tts("cartesia")
+    whisper_id, whisper = _stt("faster_whisper", "small.en")
+    with pytest.raises(ValueError, match=r"small\.en.*Hindi"):
+        await agents._validate_languages(
+            FakeConn({cartesia_id: cartesia, whisper_id: whisper}), TENANT,
+            {"language": "hi", "language_mode": "monolingual",
+             "tts_config_id": cartesia_id, "stt_config_id": whisper_id},
+            requested=frozenset({"language_mode"}),
+        )
+
+
+async def test_monolingual_english_rejects_a_voice_that_cannot_speak_english():
+    # The old `lang == "en"` exemption would have let this through.
+    alpha_id, alpha = _tts("kokoro", voice="hf_alpha")
+    with pytest.raises(ValueError, match=r"English \(en\).*can't be spoken"):
+        await agents._validate_languages(
+            FakeConn({alpha_id: alpha}), TENANT,
+            {"language": "en", "language_mode": "monolingual", "tts_config_id": alpha_id},
+            requested=frozenset({"language_mode"}),
+        )
+
+
+def _moded_agent_row(base_id, **overrides):
+    return {
+        "name": "Moded bot", "language": "hi", "supported_languages": None,
+        "tts_config_by_language": None, "greeting_by_language": None,
+        "language_mode": "monolingual", "tts_config_id": base_id, "stt_config_id": None,
+    } | overrides
+
+
+async def test_revalidation_breaks_a_monolingual_agent_on_an_stt_row_edit():
+    base_id, base = _tts("cartesia")
+    whisper_id, whisper = _stt("faster_whisper", "small.en")
+    conn = FakeConn(
+        {base_id: base, whisper_id: whisper},
+        agents=[_moded_agent_row(base_id, stt_config_id=whisper_id)],
+    )
+    with pytest.raises(ValueError, match=r"monolingual agent 'Moded bot'.*Hindi"):
+        await agents.revalidate_multilingual_agents(conn, TENANT, provider_id=whisper_id)
+
+
+async def test_revalidation_breaks_a_monolingual_agent_on_a_tenant_default_stt_change():
+    base_id, base = _tts("cartesia")
+    whisper_id, whisper = _stt("faster_whisper", "small.en")
+    conn = FakeConn(
+        {base_id: base, whisper_id: whisper}, default_stt=whisper_id,
+        agents=[_moded_agent_row(base_id)],
+    )
+    with pytest.raises(ValueError, match="'Moded bot'"):
+        await agents.revalidate_multilingual_agents(conn, TENANT, default_roles=("stt",))
+
+
+async def test_revalidation_keeps_a_moded_multilingual_agent_on_an_unrelated_edit():
+    base_id, base = _tts("cartesia")
+    conn = FakeConn({base_id: base}, agents=[_moded_agent_row(
+        base_id, language="en", supported_languages=["en", "hi"], language_mode="multilingual",
+    )])
+    await agents.revalidate_multilingual_agents(conn, TENANT, provider_id=base_id)
+    await agents.revalidate_multilingual_agents(conn, TENANT, provider_id=str(uuid.uuid4()))

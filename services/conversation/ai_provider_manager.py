@@ -6,15 +6,31 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable
+
+from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import LocalEntryNotFoundError
 
 from libs.config_sdk.languages import KOKORO_DEFAULT_VOICE
 
 from .secret_resolver import SecretResolver
 
 log = logging.getLogger(__name__)
+
+KOKORO_REPO = "hexgrad/Kokoro-82M"
+
+
+class ModelNotReadyError(RuntimeError):
+    """A local model is not on this host's disk yet (still downloading, or never fetched)."""
+
+    def __init__(self, engine: str, model: str):
+        super().__init__(f"{engine} model {model!r} is not downloaded on this host")
+        self.engine = engine
+        self.model = model
+
 
 # TTS speed multiplier from extra["speed"]; range matches ElevenLabs. Invalid -> default.
 VOICE_SPEED_MIN     = 0.7
@@ -100,7 +116,10 @@ async def _make_faster_whisper(cfg: ProviderConfig, _api_key: str | None) -> Any
         compute_type=cfg.extra.get("compute_type", "int8"),
         language=cfg.language,
     )
-    await inst.load()
+    try:
+        await inst.load()
+    except LocalEntryNotFoundError as exc:
+        raise ModelNotReadyError("faster_whisper", inst._model_size) from exc
     return inst
 
 
@@ -111,7 +130,7 @@ async def _make_ollama(cfg: ProviderConfig, _api_key: str | None) -> Any:
         model=_model_or_default(cfg, "llama3.2"),
         system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
         temperature=cfg.extra.get("temperature", 0.7),
-        base_url=cfg.extra.get("base_url", "http://localhost:11434"),
+        base_url=cfg.extra.get("base_url") or os.environ.get("VOICEAI_LLM_URL") or "http://localhost:11434",
         timeout_s=cfg.extra.get("timeout_s", 30.0),
         think=_think_flag(cfg),
     )
@@ -129,8 +148,15 @@ async def _make_macos_tts(cfg: ProviderConfig, _api_key: str | None) -> Any:
 async def _make_kokoro_tts(cfg: ProviderConfig, _api_key: str | None) -> Any:
     from .providers.tts.kokoro import KokoroTTS
 
+    voice = cfg.voice or KOKORO_DEFAULT_VOICE
+    # KPipeline would fetch missing files lazily mid-call; fail here instead.
+    try:
+        for filename in ("config.json", "kokoro-v1_0.pth", f"voices/{voice}.pt"):
+            await asyncio.to_thread(hf_hub_download, KOKORO_REPO, filename, local_files_only=True)
+    except LocalEntryNotFoundError as exc:
+        raise ModelNotReadyError("kokoro", voice) from exc
     return KokoroTTS(
-        voice=cfg.voice or KOKORO_DEFAULT_VOICE,
+        voice=voice,
         speed=voice_speed(cfg),
         lang_code=cfg.extra.get("lang_code", "a"),
     )

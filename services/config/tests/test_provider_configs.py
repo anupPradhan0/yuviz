@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from services.config import cache, provider_configs
@@ -101,3 +102,78 @@ async def test_audit_log_redacts_api_key_ref(test_tenant, scoped, pool):
     import json
     new_value = json.loads(row["new_value"])
     assert new_value["api_key_ref"] == "[redacted]"
+
+
+class _FakeResolver:
+    async def resolve(self, ref):
+        return "secret-key"
+
+
+class _FakeAsyncClient:
+    """Stands in for httpx.AsyncClient; records the request and returns a canned response."""
+
+    calls: list[tuple[str, dict]] = []
+    payload: object = None
+
+    def __init__(self, **_):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url, headers):
+        type(self).calls.append((url, headers))
+        return httpx.Response(200, json=type(self).payload, request=httpx.Request("GET", url))
+
+
+@pytest.fixture
+def fake_http(monkeypatch):
+    _FakeAsyncClient.calls = []
+    monkeypatch.setattr(provider_configs.httpx, "AsyncClient", _FakeAsyncClient)
+    return _FakeAsyncClient
+
+
+def _tts_config(monkeypatch, engine):
+    cfg = {"id": "p1", "role": "tts", "engine": engine, "api_key_ref": "k8s:voiceai/key"}
+
+    async def fake_get(provider_id):
+        return cfg
+
+    monkeypatch.setattr(provider_configs, "get_provider_config", fake_get)
+    return cfg
+
+
+async def test_list_provider_voices_elevenlabs_shape_unchanged(monkeypatch, fake_http):
+    fake_http.payload = {"voices": [{
+        "voice_id": "v1", "name": "Rachel", "category": "premade", "labels": {"accent": "us"},
+        "preview_url": "https://x/p.mp3", "verified_languages": ["en"],
+    }]}
+    cfg = _tts_config(monkeypatch, "elevenlabs")
+
+    voices = await provider_configs.list_provider_voices(cfg["id"], secret_resolver=_FakeResolver())
+
+    assert voices == [{
+        "voice_id": "v1", "name": "Rachel", "category": "premade", "labels": {"accent": "us"},
+        "preview_url": "https://x/p.mp3", "verified_languages": ["en"],
+    }]
+    assert fake_http.calls == [("https://api.elevenlabs.io/v1/voices", {"xi-api-key": "secret-key"})]
+
+
+async def test_list_provider_voices_cartesia_maps_language(monkeypatch, fake_http):
+    fake_http.payload = [
+        {"id": "c1", "name": "Katie", "language": "en"},
+        {"id": "c2", "name": "Sin idioma"},
+    ]
+    cfg = _tts_config(monkeypatch, "cartesia")
+
+    voices = await provider_configs.list_provider_voices(cfg["id"], secret_resolver=_FakeResolver())
+
+    assert [(v["voice_id"], v["name"], v["verified_languages"]) for v in voices] == [
+        ("c1", "Katie", ["en"]), ("c2", "Sin idioma", []),
+    ]
+    url, headers = fake_http.calls[0]
+    assert url == "https://api.cartesia.ai/voices"
+    assert headers["X-API-Key"] == "secret-key"

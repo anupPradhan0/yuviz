@@ -50,6 +50,19 @@ class ChatMessage:
     tool_call_id: str | None = field(default=None)
 
 
+def with_directive(messages: list[ChatMessage], directive: ChatMessage | None) -> list[ChatMessage]:
+    """A copy of messages for one LLM request with a transient user-role directive last.
+
+    Folded into the final user turn when there is one, so strict chat templates that require
+    user/assistant alternation still accept it; a separate turn only after a tool result."""
+    if directive is None:
+        return messages
+    last = messages[-1] if messages else None
+    if last is not None and last.role == "user" and not last.tool_calls and last.tool_call_id is None:
+        return [*messages[:-1], ChatMessage(role="user", content=f"{last.content}\n\n{directive.content}")]
+    return [*messages, directive]
+
+
 class ISTT(Protocol):
     """Transcribe accumulated PCM audio to text.
 

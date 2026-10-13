@@ -66,11 +66,18 @@ class OllamaLLM:
         self._think       = think
         # Set after a 400 rejecting `think`, so later turns stop sending it.
         self._think_unsupported = False
+        self._warned_not_pulled = False
         self._client      = httpx.AsyncClient(
             base_url=self._base_url,
             timeout=self._timeout,
         )
         log.info("OllamaLLM model=%s base_url=%s think=%s", model, self._base_url, think)
+
+    def _raise_for_status(self, resp: httpx.Response) -> None:
+        if resp.status_code == 404 and not self._warned_not_pulled:
+            self._warned_not_pulled = True
+            log.warning("OllamaLLM: model=%s not pulled on this host", self._model)
+        resp.raise_for_status()
 
     async def _stream_chat_lines(self, payload: dict[str, Any]) -> AsyncGenerator[str, None]:
         """POST /api/chat; on a 400 rejecting `think`, retry without it and remember."""
@@ -78,7 +85,7 @@ class OllamaLLM:
             payload = {k: v for k, v in payload.items() if k != "think"}
         if "think" not in payload:
             async with self._client.stream("POST", "/api/chat", json=payload) as resp:
-                resp.raise_for_status()
+                self._raise_for_status(resp)
                 async for line in resp.aiter_lines():
                     yield line
             return
@@ -91,7 +98,7 @@ class OllamaLLM:
                 if not rejected:
                     resp.raise_for_status()
             else:
-                resp.raise_for_status()
+                self._raise_for_status(resp)
             if not rejected:
                 async for line in resp.aiter_lines():
                     yield line
@@ -105,7 +112,7 @@ class OllamaLLM:
             self._think_unsupported = True
             fallback = {k: v for k, v in payload.items() if k != "think"}
             async with self._client.stream("POST", "/api/chat", json=fallback) as resp2:
-                resp2.raise_for_status()
+                self._raise_for_status(resp2)
                 async for line in resp2.aiter_lines():
                     yield line
 

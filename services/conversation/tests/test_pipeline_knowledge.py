@@ -184,3 +184,34 @@ async def test_knowledge_retrieval_exception_degrades_to_no_context_not_a_failed
 
     assert responses  # the turn still completes normally
     assert [m.role for m in calls[0]] == ["system", "user"]
+
+
+async def _search_payload(**handler_kwargs) -> tuple:
+    knowledge = MockKnowledgeProvider()
+    knowledge.add_chunk("test", "test-agent", "Refunds take 30 days.", score=0.9, document_title="Refunds")
+    tts = _make_tts()
+    tts.prewarm = None  # a MagicMock prewarm would not be awaitable on the multilingual path
+    handler = _make_handler(
+        _make_stt(), _make_llm(), tts, knowledge=knowledge, node_knowledge=["kb1"], **handler_kwargs,
+    )
+    _defn, invoke = handler._local_tools([], None, "s1")["search_knowledge"]
+    return handler, (await invoke({"query": "refund"})).payload
+
+
+async def test_search_knowledge_answer_in_is_the_agent_language_when_monolingual():
+    _handler, payload = await _search_payload(agent_language="hi", language_mode="monolingual")
+    assert payload["answer_in"] == "Hindi"
+
+
+async def test_search_knowledge_answer_in_follows_the_session_language_after_a_switch():
+    handler, _ = await _search_payload(
+        agent_language="en", language_mode="multilingual", supported_languages=("en", "hi"),
+    )
+    handler._session("s1").language.current = "hi"
+    _defn, invoke = handler._local_tools([], None, "s1")["search_knowledge"]
+    assert (await invoke({"query": "refund"})).payload["answer_in"] == "Hindi"
+
+
+async def test_search_knowledge_has_no_answer_in_for_an_agent_without_a_language():
+    _handler, payload = await _search_payload()
+    assert "answer_in" not in payload

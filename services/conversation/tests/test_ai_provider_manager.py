@@ -11,7 +11,17 @@ import json
 import httpx
 import pytest
 
-from ..ai_provider_manager import AIProviderManager, ProviderConfig, _make_ollama
+from huggingface_hub.errors import LocalEntryNotFoundError
+
+from .. import ai_provider_manager
+from ..ai_provider_manager import (
+    AIProviderManager,
+    ModelNotReadyError,
+    ProviderConfig,
+    _make_faster_whisper,
+    _make_kokoro_tts,
+    _make_ollama,
+)
 
 
 class FakeSecretResolver:
@@ -215,7 +225,9 @@ async def _first_available_ollama_model() -> str | None:
             models = resp.json().get("models", [])
     except (httpx.HTTPError, ValueError):
         return None
-    return models[0]["name"] if models else None
+    # Embedding models (nomic-embed-text, used by the knowledge base) can't chat.
+    chat = [m["name"] for m in models if "embed" not in m["name"]]
+    return chat[0] if chat else None
 
 
 class TestRealOllamaFactory:
@@ -404,6 +416,51 @@ class TestRealMacosTtsFactory:
 
         audio = await tts.synthesize("Testing.", sample_rate=16_000)
         assert len(audio) > 0
+
+
+# ── Local models not on disk ──────────────────────────────────────────────────
+
+class TestModelNotReady:
+    async def test_kokoro_missing_voice_raises_without_constructing_tts(self, monkeypatch):
+        def fake_download(repo, filename, local_files_only):
+            if filename == "voices/af_heart.pt":
+                raise LocalEntryNotFoundError("not cached")
+            return "/cache/" + filename
+
+        from ..providers.tts import kokoro as kokoro_module
+
+        constructed = []
+        monkeypatch.setattr(ai_provider_manager, "hf_hub_download", fake_download)
+        monkeypatch.setattr(kokoro_module, "KokoroTTS", lambda **kw: constructed.append(kw))
+        cfg = ProviderConfig(id="tts-1", role="tts", engine="kokoro", voice="af_heart")
+
+        with pytest.raises(ModelNotReadyError) as exc:
+            await _make_kokoro_tts(cfg, None)
+
+        assert (exc.value.engine, exc.value.model) == ("kokoro", "af_heart")
+        assert constructed == []
+
+    async def test_faster_whisper_missing_model_raises(self, monkeypatch):
+        from ..providers.stt.faster_whisper import FasterWhisperSTT
+
+        async def missing(self):
+            raise LocalEntryNotFoundError("not cached")
+
+        monkeypatch.setattr(FasterWhisperSTT, "load", missing)
+        cfg = ProviderConfig(id="stt-1", role="stt", engine="faster_whisper", model="small")
+
+        with pytest.raises(ModelNotReadyError) as exc:
+            await _make_faster_whisper(cfg, None)
+
+        assert (exc.value.engine, exc.value.model) == ("faster_whisper", "small")
+
+    async def test_ollama_base_url_defaults_to_env(self, monkeypatch):
+        monkeypatch.setenv("VOICEAI_LLM_URL", "http://ollama:11434")
+        cfg = ProviderConfig(id="llm-1", role="llm", engine="ollama", model="llama3.2")
+
+        llm = await _make_ollama(cfg, None)
+
+        assert llm._base_url == "http://ollama:11434"
 
 
 # ── Cloud engine registry — construction only, no network ─────────────────────
