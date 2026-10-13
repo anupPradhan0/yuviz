@@ -1330,3 +1330,51 @@ def test_the_guard_starts_exactly_one_thread_and_privileges_start_none():
             "_worker._start_memory_guard(100000)\nn2 = threading.active_count()\nprint(n0, n1, n2)" % sandbox._REPO_ROOT)
     r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
     assert r.stdout.split() == ["1", "1", "2"], (r.stdout, r.stderr[-300:])
+
+
+# ── native thread pools in the parsing child (first real Linux CI run: every XLSX parse died with SIGINT) ───────
+
+def test_the_child_refuses_numpy_and_caps_native_thread_pools():
+    """openpyxl does `import numpy` when numpy is installed; numpy's OpenBLAS then tries to start threads and, with
+    RLIMIT_NPROC=1 in the child, kills the process with SIGINT. The child must never load numpy, and must cap every
+    native thread pool. Runs the real function in a clean interpreter."""
+    import subprocess
+    import sys
+    code = "\n".join([
+        "import os, sys",
+        f"sys.path.insert(0, {str(_repo_root())!r})",
+        "from services.knowledge.parsers import _worker",
+        "_worker.limit_native_threads()",
+        "assert all(os.environ[n] == '1' for n in _worker._THREAD_POOL_ENV)",
+        "try:",
+        "    import numpy",
+        "except ImportError:",
+        "    print('numpy refused')",
+        "else:",
+        "    print('numpy LOADED')",
+        "    sys.exit(1)",
+    ])
+    out = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0 and "numpy refused" in out.stdout, (out.stdout, out.stderr[-400:])
+
+
+def test_an_xlsx_parses_in_the_real_child_with_numpy_refused():
+    """End to end through the real sandbox: the same XLSX parse that failed on Linux, with numpy installed on the host."""
+    import asyncio
+    import io
+
+    import openpyxl
+    from services.knowledge.parsers import parse_document
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "refund window"
+    wb.active["B1"] = "thirty days"
+    buf = io.BytesIO()
+    wb.save(buf)
+    doc = asyncio.run(parse_document(
+        buf.getvalue(), hint="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", language=None))
+    assert "refund window" in doc.text() and "thirty days" in doc.text()
+
+
+def _repo_root():
+    import pathlib
+    return pathlib.Path(__file__).resolve().parents[3]

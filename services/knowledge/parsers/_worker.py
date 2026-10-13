@@ -104,6 +104,23 @@ def block_native_xml() -> None:
         sys.modules[name] = None
 
 
+# Native thread pools (OpenBLAS inside numpy, OpenMP, MKL) start their worker threads when the library loads. This
+# child runs with RLIMIT_NPROC=1 on Linux, so that start fails, and numpy's OpenBLAS answers by killing the process with
+# SIGINT (found by the first real GitHub CI run: openpyxl does `import numpy` when numpy is installed, and numpy is
+# installed because the platform's requirements pull it in via torch; every XLSX parse died with exit -2).
+_THREAD_POOL_ENV = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+                    "VECLIB_MAXIMUM_THREADS", "BLIS_NUM_THREADS")
+
+
+def limit_native_threads() -> None:
+    """The parsers do no numeric work: refuse numpy outright (openpyxl, Pillow and others treat a missing numpy as
+    normal) and cap every native thread pool at one thread in case something else loads one. Must run before any
+    library import; the environment is read when the library loads."""
+    for name in _THREAD_POOL_ENV:
+        os.environ[name] = "1"
+    sys.modules["numpy"] = None  # `import numpy` raises ImportError, which every optional-numpy caller already handles
+
+
 def rss_mb_from_statm(statm: str, page_size: int) -> float:
     """Resident set from /proc/<pid>/statm ("size resident shared ..." in pages), in MB."""
     return int(statm.split()[1]) * page_size / (1024 * 1024)
@@ -162,6 +179,7 @@ def _start_memory_guard(limit_mb: int) -> None:
 
 def main() -> int:
     args = json.loads(sys.argv[1])
+    limit_native_threads()  # before anything imports openpyxl/pptx/Pillow, which may pull in numpy
     # Order matters: unshare(CLONE_NEWUSER) needs a single-threaded process, and RLIMIT_NPROC would forbid a new thread.
     harden_privileges()
     _start_memory_guard(args["limits"]["memory_mb"])
