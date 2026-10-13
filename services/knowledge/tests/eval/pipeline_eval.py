@@ -13,13 +13,51 @@ from libs.tenancy import set_caller_tenant, set_target_tenant
 from services.knowledge import documents as documents_service
 from services.knowledge import retrieval, retrieval_log
 from services.knowledge.ingestion_worker import process_one_job
-from services.knowledge.runtime import get_vector_repo
+from services.knowledge.resilience import RetrievalConfig
+from services.knowledge.vector_repository import PgVectorRepository
 from services.knowledge.storage import LocalStorageProvider
 from services.knowledge.tests.eval.golden import ALL_DOCS, QUESTIONS
 from services.knowledge.tests.eval.harness import Metrics, _norm
 from services.knowledge.tests.rag_fakes import FakeEmbedder, make_kb, make_manager
 
 TOP_K = 5
+_BENIGN = frozenset({"plan_cache_miss", "prompt_docs_trimmed"})  # not fallbacks: a cold plan, and tiny prompt-mode docs
+# The default minimum_score (0.3) is a cosine threshold tuned for real embedding models; the bag-of-words fake scores
+# lower, so under it the dense branch returned nothing and the eval was lexical-only, where equal ts_rank scores
+# tie in arbitrary order (one golden question flipped between runs). With no floor both branches rank and RRF
+# fusion breaks the ties.
+MINIMUM_SCORE = 0.0
+# This eval measures answer quality, not latency. Under the production budget (120 ms per branch) a loaded machine
+# times a branch out now and then, the answer silently becomes lexical-only or dense-only, and one question flips
+# between runs. Generous timeouts make a run depend on the data and the code only; the result also reports any
+# degraded answer so a real fallback cannot hide inside the numbers.
+QUALITY_CONFIG = RetrievalConfig(
+    embed_timeout_s=10.0, dense_timeout_s=10.0, lexical_timeout_s=10.0, rerank_timeout_s=10.0, deadline_s=30.0,
+    queue_wait_s=10.0, acquire_timeout_s=10.0, breaker_failures=10**9)
+
+
+class ExactRepo(PgVectorRepository):
+    """Dense search by exact scan, and a total order on equal scores, so a run depends on the data and the code only.
+
+    Two things made the same golden set score 0.72, 0.69 or 0.67 in different runs: the approximate HNSW index keeps
+    dead entries from every earlier insert and delete until a VACUUM, and the templated distractor documents contain
+    identical chunks whose equal scores (cosine distance, ts_rank_cd) come back in physical row order, which differs on
+    a database other tests have churned. Exact scan fixes the first; fetching a wider candidate list and ordering ties
+    by (title, content) fixes the second. This eval measures the pipeline, not index health or tie order."""
+
+    _WIDE = 200
+
+    @staticmethod
+    def _stable(matches, limit):
+        return sorted(matches, key=lambda m: (-m.score, m.document_title, m.child_content or m.content))[:limit]
+
+    async def search(self, conn, kb_ids, embedding, top_k, minimum_score):
+        await conn.execute("SET LOCAL enable_indexscan = off")
+        return self._stable(await super().search(conn, kb_ids, embedding, max(top_k, self._WIDE), minimum_score), top_k)
+
+    async def lexical_search(self, conn, kb_ids, query, limit, minimum_score, *args, **kwargs):
+        wide = await super().lexical_search(conn, kb_ids, query, max(limit, self._WIDE), minimum_score, *args, **kwargs)
+        return self._stable(wide, limit)
 
 
 async def _purge(pool, tenant_id) -> None:
@@ -89,18 +127,19 @@ async def run_pipeline_eval(
             "SELECT coalesce(sum((detail->>'enriched')::int), 0) AS enriched, coalesce(sum((detail->>'failed')::int), 0) AS failed "
             "FROM kb_ingestion_events WHERE tenant_id = $1 AND stage = 'embed' AND status = 'ok'", tenant["id"])
         retrieval.clear_caches()
-        repo = await get_vector_repo()
-        m, missed = Metrics(), []
+        repo = ExactRepo()
+        m, missed, degraded = Metrics(), [], []
         reordered, rerank_ms, degraded_seen = 0, [], set()
         for q in QUESTIONS:
             set_caller_tenant(str(tenant["id"]))
             result = await retrieval.retrieve(
                 None, repo, manager, tenant_slug=slug, agent_slug="golden", query=q.question, top_k=TOP_K,
+                minimum_score=MINIMUM_SCORE, config=QUALITY_CONFIG,
                 rerank=reranker is not None or None, reranker=reranker)
             if reranker is not None:
                 plain = await retrieval.retrieve(
                     None, repo, manager, tenant_slug=slug, agent_slug="golden", query=q.question, top_k=TOP_K,
-                    rerank=False)
+                    minimum_score=MINIMUM_SCORE, config=QUALITY_CONFIG, rerank=False)
                 reordered += [c["source"]["chunk_id"] for c in result["chunks"]] != [
                     c["source"]["chunk_id"] for c in plain["chunks"]]
                 rerank_ms.append(result["retrieval_metadata"]["timings_ms"].get("rerank", 0.0))
@@ -108,6 +147,7 @@ async def run_pipeline_eval(
             # Prompt-mode documents (tiny files auto-inline) come first and are always returned: an answer there
             # counts as rank 1, and they do not push the ranked matches down.
             always = result["retrieval_metadata"]["always_included"]
+            degraded += [d for d in result["degraded"] if d not in _BENIGN]
             chunks = result["chunks"][:always + TOP_K]
             answer = _norm(q.answer)
 
@@ -124,9 +164,9 @@ async def run_pipeline_eval(
                 missed.append(q.question)
         return {
             "n": m.n, "documents_not_ready": not_ready, "recall_at_5": m.recall_at_5 / m.n, "mrr": m.mrr / m.n,
-            "answer_in_context": m.answer_in_context / m.n, "missed": missed,
+            "answer_in_context": m.answer_in_context / m.n, "missed": missed, "degraded": degraded,
             **({"enriched_chunks": enrich["enriched"], "enrich_failed": enrich["failed"]} if llm_config else {}),
-            **({"reordered": reordered, "rerank_ms": rerank_ms, "degraded": sorted(degraded_seen)} if reranker else {}),
+            **({"reordered": reordered, "rerank_ms": rerank_ms, "rerank_degraded": sorted(degraded_seen)} if reranker else {}),
         }
     finally:
         if previous_tenants is None:

@@ -201,8 +201,7 @@ SELECT pg_size_pretty(pg_total_relation_size('retrieval_logs')), (SELECT min(cre
   (including `production (auto)`, the worker's default chunker), and the whole pipeline on Postgres once per chunker
   mode: `auto` (the shipped default, fixed windows for headed prose) and `structure` (the opt-in parent/child path,
   gated so it cannot rot). Baselines are what this code measured, with fake embedders, so they catch regressions rather
-  than predict real-model scores. The pipeline numbers move by one question (0.026) between identical runs, which the
-  tolerance absorbs; the baseline records the lower value. With the bag-of-words embedder the default `auto` scores
+  than predict real-model scores. The pipeline eval is deterministic: it uses exact dense search, generous stage timeouts, no score floor and a total order on equal scores (identical templated chunks otherwise come back in physical row order, which differs on a database other tests have churned). With the bag-of-words embedder the default `auto` scores
   below `structure` through the pipeline (recall@5 0.77 vs 0.87), the opposite of Phase 4's hash-embedder sweep: neither
   predicts the real model, which is why the choice is per-deployment (`KNOWLEDGE_CHUNKER`).
 - Refresh the baseline deliberately (a model change, a chunking change or a corpus change legitimately moves it):
