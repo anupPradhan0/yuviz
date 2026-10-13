@@ -1,14 +1,18 @@
 """Hosted rerankers behind retrieval's IReranker hook (Cohere v2 rerank, Voyage rerank).
 
-OFF unless an operator sets KNOWLEDGE_RERANKER=cohere|voyage; even then an agent's policy flag `rerank` must be true
-for a call to reach it. Privacy: when on, the caller's query and the TEXT of up to KNOWLEDGE_RERANK_TOP_N candidate
-chunks (each cut to KNOWLEDGE_RERANK_DOC_CHARS, all together to KNOWLEDGE_RERANK_MAX_PAYLOAD_CHARS) leave the platform
-for the provider. Nothing else is sent (no ids, no tenant or document names), and no query or chunk text is logged.
-The provider key is platform-level (an env/secret ref), never a tenant's.
+OFF unless an operator sets KNOWLEDGE_RERANKER=cohere|voyage; even then only an agent whose retrieval policy has
+rerank=true reaches it (a request can turn rerank off for a call, never on). Privacy: when on, the caller's query and
+the TEXT of up to KNOWLEDGE_RERANK_TOP_N candidate chunks (each cut to KNOWLEDGE_RERANK_DOC_CHARS, all together to
+KNOWLEDGE_RERANK_MAX_PAYLOAD_CHARS) leave the platform for the provider. Nothing else is sent (no ids, no tenant or
+document names), and no query or chunk text is logged.
+
+The provider key is PLATFORM-WIDE: one key, one quota, shared by every tenant whose agent has the flag. Per-tenant
+call budgets (TenantBudget) are what stop one tenant spending everyone's quota, and quota 429s and budget refusals
+do not open the shared breaker (only timeouts, 5xx and transport errors do).
 
 Failure never costs the caller: a timeout, 429, 5xx, malformed or wrong-sized answer raises RerankError, which
-retrieval turns into the fused order plus degraded ['rerank_skipped', <reason>] and a breaker failure. No retries:
-the stage budget (120 ms) has no room for one."""
+retrieval turns into the fused order plus degraded ['rerank_skipped', <reason>]. No retries: the stage budget
+(120 ms) has no room for one."""
 
 from __future__ import annotations
 
@@ -16,12 +20,15 @@ import asyncio
 import logging
 import math
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 from . import ops_metrics
+from .envparse import env_float, env_int
 from .secret_resolver import CompositeSecretResolver, SecretResolver
 from .vector_repository import VectorMatch
 
@@ -29,18 +36,13 @@ log = logging.getLogger(__name__)
 
 
 class RerankError(RuntimeError):
-    """The provider could not be used for this call. `degraded_reason` is a fixed code (never provider text)."""
+    """The provider could not be used for this call. `degraded_reason` is a fixed code (never provider text).
+    `breaker_failure=False` for outcomes that say nothing about the provider's health (a quota 429, our own budget)."""
 
-    def __init__(self, degraded_reason: str) -> None:
+    def __init__(self, degraded_reason: str, *, breaker_failure: bool = True) -> None:
         super().__init__(degraded_reason)
         self.degraded_reason = degraded_reason
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name) or default)
-    except ValueError:
-        return default
+        self.breaker_failure = breaker_failure
 
 
 @dataclass(frozen=True)
@@ -49,34 +51,61 @@ class RerankConfig:
     doc_chars: int = 1200            # per-candidate text cap
     max_payload_chars: int = 20000   # all candidate text together
     http_timeout_s: float = 0.095    # under the 120 ms stage budget, so the adapter fails before the stage cuts it
-    # Decisive: the top hit has dense AND lexical support, a dense cosine >= decisive_score, and leads the runner-up
-    # by >= decisive_gap. Reranking cannot plausibly change a clear winner, so the provider call is saved.
+    # Decisive: the top hit has dense support with cosine >= decisive_score and leads the BEST OTHER dense candidate
+    # by >= decisive_gap. Reordering a clear winner is unlikely to help and costs a provider call.
     decisive_score: float = 0.85
     decisive_gap: float = 0.10
+    # Per-tenant budget on provider calls (the key is platform-wide: this is what keeps one tenant from spending
+    # everyone's quota). Token bucket: `tenant_rate` calls/s sustained, `tenant_burst` at once.
+    tenant_rate: float = 5.0
+    tenant_burst: int = 10
 
     @classmethod
     def from_env(cls) -> "RerankConfig":
         d = cls()
         return cls(
-            top_n=max(2, int(_env_float("KNOWLEDGE_RERANK_TOP_N", d.top_n))),
-            doc_chars=max(100, int(_env_float("KNOWLEDGE_RERANK_DOC_CHARS", d.doc_chars))),
-            max_payload_chars=max(1000, int(_env_float("KNOWLEDGE_RERANK_MAX_PAYLOAD_CHARS", d.max_payload_chars))),
-            http_timeout_s=_env_float("KNOWLEDGE_RERANK_HTTP_TIMEOUT_MS", d.http_timeout_s * 1000) / 1000,
-            decisive_score=_env_float("KNOWLEDGE_RERANK_DECISIVE_SCORE", d.decisive_score),
-            decisive_gap=_env_float("KNOWLEDGE_RERANK_DECISIVE_GAP", d.decisive_gap),
+            top_n=env_int("KNOWLEDGE_RERANK_TOP_N", d.top_n, lo=2, hi=200),
+            doc_chars=env_int("KNOWLEDGE_RERANK_DOC_CHARS", d.doc_chars, lo=100, hi=20000),
+            max_payload_chars=env_int("KNOWLEDGE_RERANK_MAX_PAYLOAD_CHARS", d.max_payload_chars, lo=1000, hi=200000),
+            http_timeout_s=env_float("KNOWLEDGE_RERANK_HTTP_TIMEOUT_MS", d.http_timeout_s * 1000, lo=5, hi=1000) / 1000,
+            decisive_score=env_float("KNOWLEDGE_RERANK_DECISIVE_SCORE", d.decisive_score, lo=0, hi=1),
+            decisive_gap=env_float("KNOWLEDGE_RERANK_DECISIVE_GAP", d.decisive_gap, lo=0, hi=1),
+            tenant_rate=env_float("KNOWLEDGE_RERANK_TENANT_RATE", d.tenant_rate, lo=0.01, hi=1000),
+            tenant_burst=env_int("KNOWLEDGE_RERANK_TENANT_BURST", d.tenant_burst, lo=1, hi=1000),
         )
+
+
+class TenantBudget:
+    """Per-tenant token buckets for provider calls. In-process (each worker process has its own budget, so the
+    effective ceiling is rate x processes); bounded memory."""
+
+    def __init__(self, rate: float, burst: int, clock=time.monotonic, max_tenants: int = 10000) -> None:
+        self._rate, self._burst, self._clock, self._max = rate, float(burst), clock, max_tenants
+        self._buckets: dict[str, tuple[float, float]] = {}  # tenant id -> (tokens, last refill)
+
+    def allow(self, tenant_id: str) -> bool:
+        now = self._clock()
+        tokens, last = self._buckets.get(tenant_id, (self._burst, now))
+        tokens = min(self._burst, tokens + (now - last) * self._rate)
+        ok = tokens >= 1.0
+        self._buckets[tenant_id] = (tokens - 1.0 if ok else tokens, now)
+        if len(self._buckets) > self._max:  # forget the idlest half: a full bucket is the default anyway
+            for stale in sorted(self._buckets, key=lambda k: self._buckets[k][1])[: self._max // 2]:
+                del self._buckets[stale]
+        return ok
 
 
 def is_decisive(matches: list[VectorMatch], cfg: RerankConfig) -> bool:
     """True when the fused winner is clear enough that reranking is skipped (documented in docs/knowledge-phase7.md).
-    Only a hit found by both branches can be decisive; a lone hit with that support counts as decisive too."""
+    Compared on the DENSE cosine only (a lexical score is another scale): the top hit must have dense support and
+    lead the best OTHER dense candidate anywhere in the list, not just the next item in fused order."""
     if not matches:
         return True
     top = matches[0]
-    if "dense" not in top.found_by or "lexical" not in top.found_by or top.score < cfg.decisive_score:
+    if "dense" not in top.found_by or top.score < cfg.decisive_score:
         return False
-    second = matches[1] if len(matches) > 1 else None
-    return second is None or (top.score - second.score) >= cfg.decisive_gap
+    others = [m.score for m in matches[1:] if "dense" in m.found_by]
+    return not others or (top.score - max(others)) >= cfg.decisive_gap
 
 
 def _documents(candidates: list[VectorMatch], cfg: RerankConfig) -> tuple[list[VectorMatch], list[str]]:
@@ -106,15 +135,22 @@ class HostedReranker:
     def __init__(
         self, *, model: str | None = None, url: str | None = None, key_ref: str | None = None,
         config: RerankConfig | None = None, resolver: SecretResolver | None = None,
-        transport: httpx.AsyncBaseTransport | None = None,
+        transport: httpx.AsyncBaseTransport | None = None, allowed_hosts: frozenset[str] | None = None,
+        allow_insecure_for_tests: bool = False, verify: Any = True,
     ) -> None:
         self._model = model or self.default_model
         self._url = url or self.default_url
+        self._allow_insecure = allow_insecure_for_tests
+        validate_url(self._url, allowed_hosts or default_hosts(self.default_url), allow_insecure_for_tests)
         self._key_ref = key_ref or self.default_key_ref
         self.config = config or RerankConfig.from_env()
         self._resolver = resolver or CompositeSecretResolver()
         self._key: str | None = None
-        self._client = httpx.AsyncClient(transport=transport, timeout=self.config.http_timeout_s)
+        self.budget = TenantBudget(self.config.tenant_rate, self.config.tenant_burst)
+        # One long-lived client: connections are kept alive, so the 95 ms budget is not spent on a TLS handshake.
+        self._client = httpx.AsyncClient(
+            transport=transport, timeout=self.config.http_timeout_s, verify=verify,
+            limits=httpx.Limits(max_keepalive_connections=10, keepalive_expiry=120.0))
 
     # -- provider specifics
     def _request(self, query: str, docs: list[str]) -> dict[str, Any]:
@@ -132,7 +168,18 @@ class HostedReranker:
                 raise RerankError("rerank_not_configured") from None
         return self._key
 
-    async def rerank(self, query: str, matches: list[VectorMatch]) -> list[VectorMatch]:
+    async def warm(self) -> None:
+        """Open the connection ahead of the first call (TLS handshake, DNS). Sends no key, query or text: a HEAD to
+        the endpoint's origin. Best effort."""
+        parts = urlsplit(self._url)
+        try:
+            await self._client.head(f"{parts.scheme}://{parts.netloc}/", timeout=2.0)
+        except Exception as exc:  # noqa: BLE001
+            log.info("reranker warm-up failed (%s); the first call pays the connection", type(exc).__name__)
+
+    budgeted = True  # retrieval passes the tenant so the per-tenant budget applies
+
+    async def rerank(self, query: str, matches: list[VectorMatch], tenant_id: str | None = None) -> list[VectorMatch]:
         cfg = self.config
         if len(matches) < 2:
             return matches
@@ -142,6 +189,8 @@ class HostedReranker:
         sent, docs = _documents(matches, cfg)
         if len(sent) < 2:
             return matches
+        if tenant_id is not None and not self.budget.allow(tenant_id):
+            raise RerankError("rerank_budget", breaker_failure=False)  # the key is platform-wide: cap each tenant
         key = await self._api_key()
         try:
             async with asyncio.timeout(cfg.http_timeout_s):
@@ -152,7 +201,7 @@ class HostedReranker:
         except httpx.HTTPError:
             raise RerankError("rerank_provider_error") from None
         if resp.status_code == 429:
-            raise RerankError("rerank_rate_limited")
+            raise RerankError("rerank_rate_limited", breaker_failure=False)  # a quota, not an unhealthy provider
         if resp.status_code != 200:
             raise RerankError("rerank_provider_error")
         try:
@@ -210,8 +259,27 @@ class VoyageReranker(HostedReranker):
         return body["data"]
 
 
+def default_hosts(url: str) -> frozenset[str]:
+    return frozenset({urlsplit(url).hostname or ""})
+
+
+def validate_url(url: str, allowed_hosts: frozenset[str], allow_insecure: bool = False) -> None:
+    """The platform key goes in an Authorization header: https only, and only to a host the operator allowed (the
+    vendor's by default). Raises ValueError, which refuses to start the service rather than send a key elsewhere."""
+    parts = urlsplit(url)
+    if not allow_insecure and parts.scheme != "https":
+        raise ValueError("KNOWLEDGE_RERANK_URL must be an https URL: the provider key is sent in a header")
+    if not parts.hostname or (not allow_insecure and parts.hostname not in allowed_hosts):
+        raise ValueError(
+            f"KNOWLEDGE_RERANK_URL host {parts.hostname!r} is not allowed; set KNOWLEDGE_RERANK_ALLOWED_HOSTS to "
+            "list it explicitly")
+    if parts.username or parts.password:
+        raise ValueError("KNOWLEDGE_RERANK_URL must not contain credentials")
+
+
 def build_reranker(env: dict[str, str] | None = None) -> HostedReranker | None:
-    """KNOWLEDGE_RERANKER = none (default) | cohere | voyage. An unknown value is logged and treated as none."""
+    """KNOWLEDGE_RERANKER = none (default) | cohere | voyage. An unknown value is logged and treated as none. A
+    KNOWLEDGE_RERANK_URL that is not https, or whose host is not allowed, raises ValueError."""
     env = os.environ if env is None else env
     choice = (env.get("KNOWLEDGE_RERANKER") or "none").strip().lower()
     classes = {"cohere": CohereReranker, "voyage": VoyageReranker}
@@ -221,5 +289,7 @@ def build_reranker(env: dict[str, str] | None = None) -> HostedReranker | None:
     if cls is None:
         log.warning("KNOWLEDGE_RERANKER=%r is not one of none|cohere|voyage; reranking stays off", choice[:20])
         return None
+    extra = frozenset(h.strip() for h in (env.get("KNOWLEDGE_RERANK_ALLOWED_HOSTS") or "").split(",") if h.strip())
     return cls(model=env.get("KNOWLEDGE_RERANK_MODEL") or None, url=env.get("KNOWLEDGE_RERANK_URL") or None,
-               key_ref=env.get("KNOWLEDGE_RERANK_API_KEY_REF") or None)
+               key_ref=env.get("KNOWLEDGE_RERANK_API_KEY_REF") or None,
+               allowed_hosts=(default_hosts(cls.default_url) | extra))

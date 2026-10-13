@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
 import time
 
 import httpx
@@ -12,7 +13,7 @@ import pytest
 
 from services.knowledge import ops_metrics, resilience, retrieval
 from services.knowledge.reranker import (
-    CohereReranker, RerankConfig, RerankError, VoyageReranker, build_reranker, is_decisive,
+    CohereReranker, RerankConfig, RerankError, TenantBudget, VoyageReranker, build_reranker, is_decisive,
 )
 from services.knowledge.resilience import RetrievalConfig
 from services.knowledge.vector_repository import VectorMatch
@@ -140,10 +141,29 @@ def test_decisive_rule():
     cfg = RerankConfig()
     both = ("dense", "lexical")
     assert is_decisive([_m(0, 0.9, both), _m(1, 0.6, both)], cfg)
-    assert not is_decisive([_m(0, 0.9, both), _m(1, 0.85, both)], cfg)   # runner-up too close
-    assert not is_decisive([_m(0, 0.8, both), _m(1, 0.3, both)], cfg)    # winner not strong enough
-    assert not is_decisive([_m(0, 0.95, ("dense",)), _m(1, 0.3)], cfg)   # no lexical support
+    assert is_decisive([_m(0, 0.9, ("dense",)), _m(1, 0.6)], cfg)           # lexical support is not required
+    assert not is_decisive([_m(0, 0.9, both), _m(1, 0.85, both)], cfg)      # runner-up too close
+    assert not is_decisive([_m(0, 0.8, both), _m(1, 0.3, both)], cfg)       # winner not strong enough
     assert is_decisive([_m(0, 0.9, both)], cfg)
+
+
+def test_a_result_without_dense_support_is_never_decisive():
+    cfg = RerankConfig()
+    assert not is_decisive([_m(0, 0.99, ("lexical",)), _m(1, 0.2)], cfg)    # a lexical score is another scale
+    assert not is_decisive([_m(0, 0.99, ("lexical",))], cfg)
+
+
+def test_a_lexical_only_runner_up_is_not_compared_on_its_score():
+    cfg = RerankConfig()
+    # fused order puts a lexical-only hit second; its 0.95 is a ts_rank score, not a cosine, and must not count
+    assert is_decisive([_m(0, 0.9, ("dense", "lexical")), _m(1, 0.95, ("lexical",)), _m(2, 0.5)], cfg)
+
+
+def test_a_near_tied_dense_candidate_in_third_place_defeats_decisiveness():
+    cfg = RerankConfig()
+    ms = [_m(0, 0.9, ("dense", "lexical")), _m(1, 0.5, ("lexical",)), _m(2, 0.88, ("dense",))]
+    assert not is_decisive(ms, cfg)
+    assert not is_decisive([_m(0, 0.9, ("dense",)), _m(1, 0.3), _m(2, 0.95, ("dense",))], cfg)  # a better dense one behind
 
 
 async def test_decisive_top_hit_skips_the_provider_call():
@@ -153,7 +173,7 @@ async def test_decisive_top_hit_skips_the_provider_call():
         calls.append(1)
         return _cohere_ok([0.1, 0.2])(request)
 
-    ms = [_m(0, 0.95, ("dense", "lexical")), _m(1, 0.3)]
+    ms = [_m(0, 0.95, ("dense", "lexical")), _m(1, 0.3, ("dense",))]
     before = ops_metrics.snapshot()["rerank_decisive_skip"]
     out = await _cohere(handler).rerank(QUERY, ms)
     assert out == ms and not calls and ops_metrics.snapshot()["rerank_decisive_skip"] == before + 1
@@ -164,7 +184,7 @@ async def test_decisive_thresholds_are_env_tunable(monkeypatch):
     monkeypatch.setenv("KNOWLEDGE_RERANK_TOP_N", "7")
     cfg = RerankConfig.from_env()
     assert cfg.decisive_score == 0.99 and cfg.top_n == 7
-    assert not is_decisive([_m(0, 0.95, ("dense", "lexical")), _m(1, 0.3)], cfg)
+    assert not is_decisive([_m(0, 0.95, ("dense", "lexical")), _m(1, 0.3, ("dense",))], cfg)
 
 
 # --- failure modes: fused order kept, fixed reason, bounded time --------------------------------------------
@@ -310,3 +330,203 @@ def test_runtime_default_reranker_is_the_unconfigured_noop(monkeypatch):
     runtime.set_reranker(None)
     assert runtime.get_reranker().configured is True
     runtime.set_reranker(None)
+
+
+# --- per-tenant budget, quota responses and the shared breaker ---------------------------------------------------------
+
+def test_tenant_budget_is_a_per_tenant_token_bucket():
+    now = [0.0]
+    b = TenantBudget(rate=2.0, burst=3, clock=lambda: now[0])
+    assert [b.allow("a") for _ in range(4)] == [True, True, True, False]  # burst of 3, then refused
+    assert b.allow("b")                                                    # another tenant is unaffected
+    now[0] += 1.0                                                          # 2 tokens refill
+    assert [b.allow("a") for _ in range(3)] == [True, True, False]
+
+
+async def test_a_tenant_over_budget_is_skipped_without_calling_the_provider_or_opening_the_breaker():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return _cohere_ok([0.1, 0.2, 0.3])(request)
+
+    rr = _cohere(handler, config=RerankConfig(tenant_rate=0.01, tenant_burst=2))
+    ms = _matches(3)
+    cfg = RetrievalConfig(breaker_failures=2, breaker_cooldown_s=60)
+    outcomes = []
+    for _ in range(6):
+        degraded = []
+        await retrieval._rerank(rr, QUERY, ms, cfg, 0.4, degraded, {}, "tenant-a")
+        outcomes.append(degraded)
+    assert len(calls) == 2 and outcomes[2:] == [["rerank_skipped", "rerank_budget"]] * 4
+    assert resilience.breakers.get("rerank", cfg).state == "closed"  # four refusals did not open it for everyone
+    degraded = []
+    await retrieval._rerank(rr, QUERY, ms, cfg, 0.4, degraded, {}, "tenant-b")  # other tenants still get through
+    assert degraded == [] and len(calls) == 3
+    resilience.breakers.clear()
+
+
+async def test_decisive_skips_do_not_spend_the_tenants_budget():
+    rr = _cohere(_cohere_ok([0.1, 0.2]), config=RerankConfig(tenant_rate=0.01, tenant_burst=1))
+    decisive = [_m(0, 0.95, ("dense",)), _m(1, 0.3)]
+    for _ in range(5):
+        assert await rr.rerank(QUERY, decisive, tenant_id="t") == decisive
+    assert rr.budget.allow("t")  # the single token is still there
+
+
+async def test_quota_429s_never_open_the_shared_breaker_but_5xx_do():
+    cfg = RetrievalConfig(breaker_failures=2, breaker_cooldown_s=60)
+    for status, state in ((429, "closed"), (500, "open")):
+        resilience.breakers.clear()
+        rr = _cohere(_status(status))
+        for _ in range(4):
+            await retrieval._rerank(rr, QUERY, _matches(), cfg, 0.4, [], {}, "t")
+        assert resilience.breakers.get("rerank", cfg).state == state
+    resilience.breakers.clear()
+
+
+# --- URL safety ---------------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("url", [
+    "http://api.cohere.com/v2/rerank",              # cleartext key
+    "https://evil.example/v2/rerank",               # host not allowed
+    "https://api.cohere.com.evil.example/v2/rerank",
+    "https://user:pw@api.cohere.com/v2/rerank",
+    "ftp://api.cohere.com/x", "api.cohere.com/v2/rerank", "",
+])
+def test_unsafe_rerank_urls_are_refused(url):
+    env = {"KNOWLEDGE_RERANKER": "cohere", "KNOWLEDGE_RERANK_URL": url}
+    if url == "":
+        assert isinstance(build_reranker(env), CohereReranker)  # empty = the vendor default
+        return
+    with pytest.raises(ValueError):
+        build_reranker(env)
+
+
+def test_a_custom_https_host_needs_an_explicit_allow_list():
+    env = {"KNOWLEDGE_RERANKER": "voyage", "KNOWLEDGE_RERANK_URL": "https://rerank.eu.example.com/v1/rerank"}
+    with pytest.raises(ValueError):
+        build_reranker(env)
+    ok = build_reranker({**env, "KNOWLEDGE_RERANK_ALLOWED_HOSTS": "rerank.eu.example.com, other.example.com"})
+    assert isinstance(ok, VoyageReranker)
+
+
+def test_the_service_refuses_to_start_on_an_unsafe_url_and_get_reranker_never_raises(monkeypatch):
+    from services.knowledge import runtime
+    monkeypatch.setenv("KNOWLEDGE_RERANKER", "cohere")
+    monkeypatch.setenv("KNOWLEDGE_RERANK_URL", "http://api.cohere.com/v2/rerank")
+    runtime.set_reranker(None)
+    with pytest.raises(RuntimeError, match="https"):
+        runtime.init_reranker()
+    runtime.set_reranker(None)
+    rr = runtime.get_reranker()  # a retrieval must never see the construction error
+    assert rr.configured is True and runtime.get_reranker() is rr  # built once
+    with pytest.raises(RerankError) as err:
+        asyncio.run(rr.rerank(QUERY, _matches()))
+    assert err.value.degraded_reason == "rerank_not_configured" and err.value.breaker_failure is False
+    runtime.set_reranker(None)
+
+
+# --- garbage environment ---------------------------------------------------------------------------------------------
+
+GARBAGE = ["inf", "-inf", "nan", "-5", "", "abc", "1e999", "0x10", " "]
+
+
+@pytest.mark.parametrize("value", GARBAGE)
+def test_garbage_rerank_env_falls_back_to_defaults(monkeypatch, caplog, value):
+    from services.knowledge import envparse
+    envparse._warned.clear()
+    for name in ("TOP_N", "DOC_CHARS", "MAX_PAYLOAD_CHARS", "HTTP_TIMEOUT_MS", "DECISIVE_SCORE", "DECISIVE_GAP",
+                 "TENANT_RATE", "TENANT_BURST"):
+        monkeypatch.setenv(f"KNOWLEDGE_RERANK_{name}", value)
+    cfg = RerankConfig.from_env()
+    assert cfg == RerankConfig()
+    warned = [r for r in caplog.records if "KNOWLEDGE_RERANK" in r.getMessage()]
+    assert len(warned) == 8 and all(value not in r.getMessage() or value in ("", " ") for r in warned)
+    RerankConfig.from_env()  # the second read warns no more
+    assert len([r for r in caplog.records if "KNOWLEDGE_RERANK" in r.getMessage()]) == 8
+
+
+async def test_garbage_env_does_not_take_retrieval_down(monkeypatch):
+    from services.knowledge import runtime
+    monkeypatch.setenv("KNOWLEDGE_RERANKER", "cohere")
+    monkeypatch.setenv("KNOWLEDGE_RERANK_TOP_N", "inf")
+    runtime.set_reranker(None)
+    rr = runtime.get_reranker()
+    assert isinstance(rr, CohereReranker) and rr.config.top_n == 20
+    runtime.set_reranker(None)
+
+
+# --- a warm connection ---------------------------------------------------------------------------------------------------
+
+async def _tls_server(tmp_path):
+    """A local TLS server speaking minimal keep-alive HTTP/1.1 that counts accepted connections."""
+    import shutil
+    import ssl
+    import subprocess
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl not available")
+    cert, key = tmp_path / "c.pem", tmp_path / "k.pem"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(key), "-out", str(cert),
+                    "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"],
+                   check=True, capture_output=True)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert, key)
+    state = {"connections": 0, "requests": 0}
+
+    async def handle(reader, writer):
+        state["connections"] += 1
+        try:
+            while True:
+                head = await reader.readuntil(b"\r\n\r\n")
+                length = 0
+                for line in head.split(b"\r\n"):
+                    if line.lower().startswith(b"content-length:"):
+                        length = int(line.split(b":")[1])
+                body = await reader.readexactly(length) if length else b""
+                state["requests"] += 1
+                payload = json.dumps({"results": [{"index": i, "relevance_score": 1.0 - i / 10}
+                                                  for i in range(len(json.loads(body)["documents"]))]}).encode() if body else b"{}"
+                is_head = head.startswith(b"HEAD ")
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: keep-alive\r\n"
+                             b"Content-Length: " + str(len(payload)).encode() + b"\r\n\r\n" + (b"" if is_head else payload))
+                await writer.drain()
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=ctx)
+    return server, server.sockets[0].getsockname()[1], cert, state
+
+
+async def test_the_client_is_kept_warm_so_calls_reuse_one_connection(tmp_path):
+    server, port, cert, state = await _tls_server(tmp_path)
+    try:
+        url = f"https://localhost:{port}/v2/rerank"
+        rr = CohereReranker(resolver=_Resolver(), url=url, allowed_hosts=frozenset({"localhost"}), verify=ssl.create_default_context(cafile=str(cert)),
+                            config=RerankConfig(http_timeout_s=0.5))
+        t0 = time.monotonic()
+        await rr.warm()
+        warm_up = time.monotonic() - t0
+        assert state["connections"] == 1 and state["requests"] == 1  # the warm-up opened it and sent no text
+        times = []
+        for _ in range(3):
+            t0 = time.monotonic()
+            out = await rr.rerank(QUERY, _matches(5))
+            times.append(time.monotonic() - t0)
+            assert [m.chunk_id for m in out] == [f"c{i}" for i in range(5)]
+        assert state["connections"] == 1 and state["requests"] == 4  # three calls, zero new handshakes
+        cold = CohereReranker(resolver=_Resolver(), url=url, allowed_hosts=frozenset({"localhost"}), verify=ssl.create_default_context(cafile=str(cert)),
+                              config=RerankConfig(http_timeout_s=0.5))
+        t0 = time.monotonic()
+        await cold.rerank(QUERY, _matches(5))
+        cold_s = time.monotonic() - t0
+        print(f"\nlocal TLS, no network RTT: warm-up/handshake {warm_up * 1000:.1f} ms, cold first call "
+              f"{cold_s * 1000:.1f} ms, warm calls {[round(t * 1000, 1) for t in times]} ms")
+        assert state["connections"] == 2  # the un-warmed client paid its own connection
+        await rr.aclose()
+        await cold.aclose()
+    finally:
+        server.close()
+        await server.wait_closed()

@@ -22,7 +22,7 @@ from .routers import (
     agent_kb, documents, knowledge_bases, ops, prewarm, retrieval_policies, retrieve,
 )
 from .routers import health as tenant_health
-from .runtime import get_embedding_manager, get_vector_repo
+from .runtime import get_embedding_manager, get_vector_repo, init_reranker
 
 log = logging.getLogger(__name__)
 
@@ -33,10 +33,15 @@ async def lifespan(app: FastAPI):
     await db.get_pool()
     await get_vector_repo()
     get_embedding_manager()
+    reranker = init_reranker()  # refuses to start on an unsafe KNOWLEDGE_RERANK_URL
+    warm_task = asyncio.create_task(reranker.warm()) if hasattr(reranker, "warm") else None
     plans.startup()
     purge_task = asyncio.create_task(retrieval_log.purge_loop())
     legacy_task = asyncio.create_task(cache.purge_legacy_keys())
     yield
+    if warm_task is not None:
+        warm_task.cancel()
+        await asyncio.gather(warm_task, return_exceptions=True)
     purge_task.cancel()
     try:
         await purge_task

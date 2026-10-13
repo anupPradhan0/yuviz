@@ -540,7 +540,7 @@ async def _retrieve(
         if not getattr(rr, "configured", True):
             degraded.append("rerank_skipped")
         else:
-            fused = await _rerank(rr, query, fused, cfg, remaining(), degraded, timings)
+            fused = await _rerank(rr, query, fused, cfg, remaining(), degraded, timings, plan.tenant_id)
 
     # 4. token budget. Prompt-mode docs come first (capped at half the budget); the best-ranked match is always
     # returned, truncated if it has to be.
@@ -585,7 +585,7 @@ async def _retrieve(
 
 async def _rerank(
     reranker: IReranker, query: str, matches: list[VectorMatch], cfg: RetrievalConfig, time_left: float,
-    degraded: list[str], timings: dict[str, float],
+    degraded: list[str], timings: dict[str, float], tenant_id: str | None = None,
 ) -> list[VectorMatch]:
     breaker = breakers.get("rerank", cfg)
     budget = min(cfg.rerank_timeout_s, time_left)
@@ -595,12 +595,16 @@ async def _rerank(
     t0 = time.monotonic()
     try:
         async with asyncio.timeout(budget):
-            ordered = await reranker.rerank(query, matches)
+            ordered = (await reranker.rerank(query, matches, tenant_id=tenant_id) if getattr(reranker, "budgeted", False)
+                       else await reranker.rerank(query, matches))
     except asyncio.CancelledError:
         breaker.release_probe()
         raise
     except Exception as exc:  # noqa: BLE001 - fused order is the fallback
-        breaker.record_failure()
+        if getattr(exc, "breaker_failure", True):
+            breaker.record_failure()
+        else:
+            breaker.release_probe()  # a quota or our own budget says nothing about the provider's health
         # Fixed reason codes only (RerankError.degraded_reason, or the stage budget); never provider text.
         reason = "rerank_timeout" if isinstance(exc, TimeoutError) else getattr(exc, "degraded_reason", "rerank_error")
         degraded.extend(["rerank_skipped", reason])
