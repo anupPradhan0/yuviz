@@ -35,10 +35,17 @@ STORED_SENTINEL = "[stored]"
 _POINTER_SCHEMES = ("env:", "k8s:")
 
 
-def require_safe_embedding_url(role: str, extra: dict[str, Any] | None) -> None:
-    """An embedding config's base_url is fetched by the Knowledge service, so it is vetted at write time too (the
-    service re-checks when it builds the client and again at connect). A 400 that says what to change."""
-    if role != "embedding" or not isinstance(extra, dict) or extra.get("base_url") in (None, ""):
+def tenant_fetches_url(role: str, engine: str) -> bool:
+    """The (role, engine) pairs whose adapter honours extra.base_url (greped: embedding/ollama in the Knowledge service,
+    llm/ollama in the Conversation service). Any new engine that reads a tenant URL must be added here."""
+    return role == "embedding" or (role == "llm" and engine == "ollama")
+
+
+def require_safe_embedding_url(role: str, engine: str, extra: dict[str, Any] | None) -> None:
+    """A tenant-set base_url is fetched by the Knowledge service (embedding) or the Conversation service (llm/ollama),
+    so it is vetted at write time too (they re-check when they build the client and again at connect). A 400 that
+    says what to change. Other engines use fixed vendor URLs and ignore extra.base_url."""
+    if not tenant_fetches_url(role, engine) or not isinstance(extra, dict) or extra.get("base_url") in (None, ""):
         return
     try:
         validate_base_url(extra["base_url"])
@@ -189,7 +196,7 @@ async def create_provider_config(
     import json as _json
 
     api_key_ref = resolve_api_key_input(api_key, api_key_ref, allow_pointer_schemes=allow_pointer_schemes)
-    require_safe_embedding_url(role, extra)
+    require_safe_embedding_url(role, engine, extra)
 
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
@@ -248,7 +255,10 @@ async def update_provider_config(
             raise LookupError(f"provider_config {provider_id} not found")
         old = dict(old_row)
         old["extra"] = db.json_col(old["extra"])
-        require_safe_embedding_url(old["role"], new_extra)
+        # The row as it will be: a changed engine re-checks the stored extra, a changed extra is checked as sent.
+        if "extra" in fields or "engine" in fields:
+            require_safe_embedding_url(
+                old["role"], fields.get("engine", old["engine"]), new_extra if "extra" in fields else old["extra"])
 
         # After the FOR UPDATE fetch, so "[stored]" and the byte-identical
         # round-trip are compared with the row this transaction holds.

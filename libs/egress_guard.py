@@ -202,3 +202,26 @@ def guarded_client(*, timeout: float = 30.0) -> httpx.AsyncClient:
         ssl_context=httpx.create_ssl_context(), network_backend=_GuardedBackend(),
     )
     return httpx.AsyncClient(transport=transport, timeout=timeout, follow_redirects=False, trust_env=False)
+
+
+# 408/425/429 are the 4xx codes worth retrying; the rest of 4xx, and redirects (never followed), will not change on retry.
+_RETRYABLE_4XX = frozenset({408, 425, 429})
+
+
+def failure_code(exc: BaseException) -> tuple[str, bool] | None:
+    """(fixed code, permanent) for what an HTTP call to a tenant-chosen origin can raise; None for anything else.
+
+    The code is all that may be stored, returned or logged where a tenant can read it: exception text carries the
+    status line, host and port. Every connection-level failure (refused, timeout, DNS, TLS, guard refusal) is ONE code,
+    so a tenant cannot read a port's state back. Only 401/403 are named, because the owner must fix the key."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status in (401, 403):
+            return "provider_auth_failed", True
+        if status == 429:
+            return "provider_rate_limited", False
+        permanent = 300 <= status < 500 and status not in _RETRYABLE_4XX
+        return "provider_error", permanent
+    if isinstance(exc, httpx.TransportError):
+        return "provider_unreachable", False
+    return None
