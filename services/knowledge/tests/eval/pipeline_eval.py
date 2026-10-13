@@ -53,6 +53,9 @@ async def run_pipeline_eval(
     previous = os.environ.get("KNOWLEDGE_CHUNKER")
     os.environ["KNOWLEDGE_CHUNKER"] = chunker  # read per call by the chunker
     slug = f"golden-{uuid.uuid4().hex[:8]}"
+    previous_tenants = os.environ.get("KNOWLEDGE_ENRICH_TENANTS")
+    if llm_config:  # enrichment is per-tenant opt-in: enable exactly this throwaway tenant
+        os.environ["KNOWLEDGE_ENRICH_TENANTS"] = slug
     tenant = dict(await pool.fetchrow("INSERT INTO tenants (name, slug) VALUES ($1, $1) RETURNING *", slug))
     try:
         agent = dict(await pool.fetchrow(
@@ -126,6 +129,10 @@ async def run_pipeline_eval(
             **({"reordered": reordered, "rerank_ms": rerank_ms, "degraded": sorted(degraded_seen)} if reranker else {}),
         }
     finally:
+        if previous_tenants is None:
+            os.environ.pop("KNOWLEDGE_ENRICH_TENANTS", None)
+        else:
+            os.environ["KNOWLEDGE_ENRICH_TENANTS"] = previous_tenants
         if previous is None:
             os.environ.pop("KNOWLEDGE_CHUNKER", None)
         else:
