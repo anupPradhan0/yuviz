@@ -253,3 +253,11 @@ Caveats, read before quoting these:
 - Sequential callers except the 8-way row. This is latency of one call, not throughput.
 - The C2/C6 scenarios answer `unavailable` by design (every branch lost, no prompt-mode content to fall back on): the
   point is that they say so inside the deadline instead of hanging.
+
+## Dense search returns nothing after a bulk delete
+
+The dense leg reads the shared HNSW index on `kb_chunks`. After a large delete (re-ingest of a big document, removing a
+knowledge base) the index still holds the dead entries until vacuum runs; a filtered search can then exhaust
+`hnsw.max_scan_tuples` inside dead entries and return zero rows, so hybrid retrieval silently falls back to the lexical leg.
+The schema sets an aggressive autovacuum on `kb_chunks` (2% scale factor). After a very large delete, run
+`VACUUM (ANALYZE) kb_chunks;` by hand rather than waiting.

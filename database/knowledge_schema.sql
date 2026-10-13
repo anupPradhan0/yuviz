@@ -386,3 +386,7 @@ BEGIN
       FOREIGN KEY (embedding_config_id, tenant_id) REFERENCES provider_configs(id, tenant_id)$sql$;
   END IF;
 END $$;
+
+-- Dense search on the shared HNSW index returns nothing once dead entries pile up past hnsw.max_scan_tuples, so a bulk
+-- delete (re-ingest, KB removal) must be vacuumed promptly rather than at the 20% default.
+ALTER TABLE kb_chunks SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 500);
