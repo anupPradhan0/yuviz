@@ -1,10 +1,15 @@
 # Knowledge document parsing: what the sandbox is and is not
 
-> **Do not enable PDF or Office parsing (PDF, DOCX, PPTX, XLSX) for untrusted tenants in production until parsing runs in
-> the contained service described under "Real containment" below.** Set `KNOWLEDGE_BINARY_PARSERS=0` to turn it off. The
-> default is on, which is acceptable for a trusted single-tenant or dev setup only.
+> **PDF and Office parsing (PDF, DOCX, PPTX, XLSX) is OFF by default.** The security audit and two independent reviews
+> concluded it must not run in the same-uid, uncontained child for untrusted tenants. An operator turns it on with
+> `KNOWLEDGE_BINARY_PARSERS=1` (also `true`, `yes`, `on`) once the contained-worker deployment under "Real containment"
+> below exists, or after accepting the risk in writing. Any other value is OFF and logs one warning. The switch is read in
+> one place (`parsers/limits.py: binary_parsers_enabled()`) by the parser, the upload route and the worker. When off, a
+> PDF/Office upload is refused at the route with 415 and "PDF and Office documents are not enabled on this deployment", and
+> an already-stored one fails in the worker with the same reason. The test suite sets it to 1 in `tests/conftest.py`; CI must
+> export `KNOWLEDGE_BINARY_PARSERS=1` for the knowledge test step if it does not run the suite through that conftest.
 >
-> | | `KNOWLEDGE_BINARY_PARSERS=1` (default) | `=0` |
+> | | `KNOWLEDGE_BINARY_PARSERS=1` (opt in) | unset or `=0` (default) |
 > |---|---|---|
 > | PDF, DOCX, PPTX, XLSX | parsed (pypdf, python-docx, python-pptx, openpyxl, Pillow, optional `tesseract`) | refused with "PDF and Office documents are not enabled on this deployment" |
 > | HTML | BeautifulSoup on **lxml/libxml2** | BeautifulSoup on the pure-Python `html.parser`; same hidden-content stripping and limits |
