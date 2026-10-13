@@ -11,6 +11,7 @@ import pytest
 
 from services.knowledge.parsers import BINARY_DISABLED_REASON, Limits, ParseRejected, detect, formats, parse_document, sandbox
 from services.knowledge.tests import test_parser_hardening as H
+from services.knowledge.tests.test_parser_hardening import hang_guard  # noqa: F401  (fixture used by the reused tests)
 from services.knowledge.tests.corpus import builders as B
 
 
@@ -23,12 +24,13 @@ def _pure_python_mode(monkeypatch):
 _REUSED = [n for n in dir(H) if n.startswith("test_") and any(k in n for k in (
     "html", "stylesheet", "stray_close", "zero_size", "children_inheriting", "sizes_that", "tiny_sizes", "unknown_offsets",
     "white_text", "collapsed", "deeply_nested", "unclosed_optional", "keep_collapsed"))
+    and not any(x in n for x in ("docx", "pptx", "xlsx", "pdf"))
     and "kill_switch" not in n and "upload_route" not in n and "rejected_not_leaked" not in n]
 globals().update({n: getattr(H, n) for n in _REUSED})
 
 
 def test_the_reused_html_tests_were_collected():
-    assert len(_REUSED) >= 25
+    assert len(_REUSED) >= 18
 
 
 async def test_pdf_and_office_are_refused_and_the_child_never_starts_for_them():
