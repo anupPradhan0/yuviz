@@ -29,6 +29,16 @@ pytestmark = pytest.mark.usefixtures("fast_retries")
 TEXTS = [f"Policy number {i} says that widget class {i} ships within {i + 2} days of the order" for i in range(7)]
 
 
+@pytest_asyncio.fixture(loop_scope="session", scope="module", autouse=True)
+async def _vacuum_after_module():
+    """The swap rewrites every vector, leaving dead entries in the HNSW graph until vacuum; with them still there the
+    approximate search of a LATER module can return fewer rows than exist (the same effect docs/knowledge-phase7.md
+    tells operators to clear with a REINDEX after a big swap)."""
+    yield
+    from services.knowledge import db
+    await (await db.get_pool()).execute("VACUUM kb_chunks")
+
+
 @pytest.fixture
 def fast_retries(monkeypatch):
     monkeypatch.setattr(embedding_manager, "EMBED_RETRY_BASE_S", 0.0)
@@ -687,3 +697,59 @@ async def test_batches_are_paced(pool, mig, monkeypatch):
 
 _DOC = (b"Warranty claims for the Zephyr line are handled within 14 days. Replacement parts ship free of charge. "
         b"Contact the service desk with the serial number printed under the base of the unit. ") * 3
+
+
+# --- a stale plan after the swap --------------------------------------------------------------------------------------
+
+async def _stale_plan_after_swap(pool, mig, spaces):
+    """The residual window: another process did the swap, and this process still holds the plan from before it."""
+    from services.knowledge import cache
+    set_caller_tenant(str(mig["tenant"]["id"]))
+    warm = await retrieval.retrieve(None, PgVectorRepository(), _manager(spaces), tenant_slug=mig["tenant"]["slug"],
+                                    agent_slug="sup", query=TEXTS[1], minimum_score=0.3)
+    assert warm["status"] == "ok"
+    key = cache.plan_key(mig["tenant"]["slug"], "sup")
+    stale = retrieval_plan_cache().get(key)
+    assert stale is not None and mig["a"] in stale.groups
+    assert (await _run(pool, mig, "b", spaces)).swapped
+    retrieval_plan_cache().set(key, stale)  # the swap invalidated this process's cache; put the old plan back
+    return stale
+
+
+def retrieval_plan_cache():
+    from services.knowledge import retrieval_plan
+    return retrieval_plan._plans
+
+
+async def test_a_stale_plan_never_searches_new_vectors_with_an_old_model_query_and_says_so(pool, mig):
+    spaces = _spaces(mig)
+    await _stale_plan_after_swap(pool, mig, spaces)
+    set_caller_tenant(str(mig["tenant"]["id"]))
+    for hybrid in (False, True):
+        r = await retrieval.retrieve(None, PgVectorRepository(), _manager(spaces), tenant_slug=mig["tenant"]["slug"],
+                                     agent_slug="sup", query=TEXTS[1], minimum_score=0.3, hybrid_search=hybrid)
+        assert "embedding_model_mismatch" in r["degraded"]          # visible, not an ordinary ok
+        assert r["retrieval_metadata"]["dense_candidates"] == 0     # no old-model query met a new-model vector
+        if hybrid:
+            assert r["status"] == "ok" and any(TEXTS[1] in c["content"] for c in r["chunks"])  # lexical still answers
+
+
+async def test_a_new_plan_after_the_swap_has_no_mismatch_and_a_genuine_no_match_is_not_flagged(pool, mig):
+    spaces = _spaces(mig)
+    assert (await _run(pool, mig, "b", spaces)).swapped
+    retrieval.clear_caches()
+    set_caller_tenant(str(mig["tenant"]["id"]))
+    ok = await retrieval.retrieve(None, PgVectorRepository(), _manager(spaces), tenant_slug=mig["tenant"]["slug"],
+                                  agent_slug="sup", query=TEXTS[2], minimum_score=0.3)
+    assert ok["status"] == "ok" and "embedding_model_mismatch" not in ok["degraded"]
+    nothing = await retrieval.retrieve(None, PgVectorRepository(), _manager(spaces), tenant_slug=mig["tenant"]["slug"],
+                                       agent_slug="sup", query="completely unrelated zebra quantum", minimum_score=0.3)
+    assert "embedding_model_mismatch" not in nothing["degraded"]
+
+
+async def test_chunks_without_a_recorded_model_stay_searchable(pool, mig):
+    await pool.execute("UPDATE kb_chunks SET embedding_model = NULL WHERE kb_id = $1", mig["kb"]["id"])
+    set_caller_tenant(str(mig["tenant"]["id"]))
+    r = await retrieval.retrieve(None, PgVectorRepository(), _manager(_spaces(mig)), tenant_slug=mig["tenant"]["slug"],
+                                 agent_slug="sup", query=TEXTS[3], minimum_score=0.3, hybrid_search=False)
+    assert r["status"] == "ok" and "embedding_model_mismatch" not in r["degraded"]

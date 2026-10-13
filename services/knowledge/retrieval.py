@@ -44,7 +44,7 @@ from libs.tenancy import TenantScopeConflict, tenant_conn
 
 from . import cache, db, ops_metrics, retrieval_log
 from . import retrieval_plan as plans
-from .embedding_manager import EmbeddingProviderManager
+from .embedding_manager import EmbeddingProviderManager, effective_model
 from .resilience import (
     BoundedPool, PoolOverloaded, RetrievalConfig, RetrievalUnavailable, admission, breakers,
 )
@@ -241,8 +241,13 @@ async def _dense_branch(
         matches: list[VectorMatch] = []
         async with asyncio.timeout(max(min(cfg.dense_timeout_s, remaining()), 0.001)):
             async with _branch_conn(held, bpool, plan.tenant_id) as conn:
+                dense_notes: list[str] = []
                 for cid, vector in usable:
-                    matches.extend(await vector_repo.search(conn, plan.groups[cid], vector, limit, minimum_score))
+                    matches.extend(await vector_repo.search(
+                        conn, plan.groups[cid], vector, limit, minimum_score,
+                        model=effective_model(plan.embedding_configs[cid]), notes=dense_notes))
+                if dense_notes:
+                    branch.notes = list(dict.fromkeys([*(branch.notes or []), *dense_notes]))
         matches.sort(key=lambda m: m.score, reverse=True)
         branch.matches = matches[:limit]
         timings["dense"] = (time.monotonic() - t1) * 1000

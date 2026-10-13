@@ -254,7 +254,7 @@ async def test_selective_kb_filter_still_returns_top_k_through_hnsw(pool, tenant
     tenant, agent = tenant_agent
     set_caller_tenant(str(tenant["id"]))
     big, small = await _selective_world(pool, tenant, agent, 1500 if mode != "fallback" else 300)
-    args = (vec_literal(embed_text("alpha beta gamma")), [str(small["id"])], 5, vr.SEARCHABLE_STATUSES, -1.0)
+    args = (vec_literal(embed_text("alpha beta gamma")), [str(small["id"])], 5, vr.SEARCHABLE_STATUSES, -1.0, None)
 
     async with _hnsw_forced(pool) as conn:
         # Premise 1: the repository's own SQL is driven by the HNSW index here.
