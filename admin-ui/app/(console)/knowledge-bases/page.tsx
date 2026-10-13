@@ -368,7 +368,7 @@ export default function KnowledgeBasesPage() {
                     <td className="mono">{s.byte_size != null ? `${(s.byte_size / 1024).toFixed(1)} KB` : "—"}</td>
                     <td>
                       <span className={`badge ${STATUS_BADGE[s.status] ?? "gray"}`}>{s.status}</span>
-                      {(s.status === "failed" || s.status === "ready_degraded") && s.error && (
+                      {(s.status === "failed" || s.status === "ready_degraded" || s.error?.startsWith("re-index failed:")) && s.error && (
                         <div className="kb-source-sub" style={{ marginTop: 4, maxWidth: 260 }} title={s.error}>
                           {s.error}
                         </div>
@@ -390,7 +390,7 @@ export default function KnowledgeBasesPage() {
                     <td>
                       {canManage && (
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          {s.status === "failed" && (
+                          {(s.status === "failed" || (s.error?.startsWith("re-index failed:") ?? false)) && (
                             <>
                               <button
                                 className="btn btn-ghost btn-sm"

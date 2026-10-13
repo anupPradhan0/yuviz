@@ -53,6 +53,17 @@ PER_TENANT_RUNNING_CAP = int(os.environ.get("KB_INGEST_PER_TENANT_CAP", "2"))
 
 _PERMANENT_ERRORS = (ValueError, FileNotFoundError)
 
+# A ready document keeps its status (and its old chunks stay searchable) through a failed, retried, dead-lettered or
+# reaped RE-ingest; first-time ingests keep pending -> processing -> ready/failed.
+REINDEX_FAILED_PREFIX = "re-index failed: "
+
+
+FAILED_SQL, PENDING_SQL = "'failed'", "'pending'"
+
+
+def _keep_serving(new: str) -> str:
+    return f"CASE WHEN status IN ('ready', 'ready_degraded') THEN status ELSE {new} END"
+
 
 def classify_error(exc: BaseException) -> str:
     """'permanent' = retrying cannot help (bad type, empty doc, missing config/file); else 'transient'."""
@@ -205,7 +216,12 @@ async def process_one_job(
             job = dict(await conn.fetchrow(_MARK_RUNNING_SQL, job["id"], lease_s))
         doc_row = await conn.fetchrow("SELECT * FROM kb_documents WHERE id = $1", document_id)
         if doc_row is not None:
-            await conn.execute("UPDATE kb_documents SET status = 'processing' WHERE id = $1", document_id)
+            # A document that is already ready keeps serving its old chunks while it re-ingests: only a first-time
+            # (or retried-after-failure) ingest shows as 'processing'.
+            await conn.execute(
+                "UPDATE kb_documents SET status = 'processing' WHERE id = $1 AND status NOT IN ('ready', 'ready_degraded')",
+                document_id,
+            )
         else:
             await conn.execute(
                 "UPDATE kb_ingestion_jobs SET status = 'failed', error_class = 'permanent', "
@@ -347,8 +363,12 @@ async def _record_failure(
             log.warning("Ingestion job=%s attempt=%s lost its lease; dropping failure", job["id"], job["attempts"])
             return
         await _write_events(conn, job, doc_row["tenant_id"], stages.events)
+        # A failed RE-ingest must not take a ready document offline: it keeps its status and old chunks, and the
+        # reason is recorded on the document (the console shows it) and in the job and its events.
         await conn.execute(
-            "UPDATE kb_documents SET status = $2, error = $3 WHERE id = $1", doc_row["id"], doc_status, error,
+            f"UPDATE kb_documents SET status = {_keep_serving('$2')}, "
+            f"error = CASE WHEN status IN ('ready', 'ready_degraded') THEN $4 || $3 ELSE $3 END WHERE id = $1",
+            doc_row["id"], doc_status, error, REINDEX_FAILED_PREFIX,
         )
         await conn.execute(
             "UPDATE kb_ingestion_jobs SET status = $2, error = $3, error_class = $4, stage = $5, "
@@ -417,7 +437,9 @@ async def reap_expired_leases(pool: asyncpg.Pool) -> int:
                     row["id"], message,
                 )
                 await conn.execute(
-                    "UPDATE kb_documents SET status = 'failed', error = $2 WHERE id = $1", row["document_id"], message,
+                    f"UPDATE kb_documents SET status = {_keep_serving(FAILED_SQL)}, "
+                    "error = CASE WHEN status IN ('ready', 'ready_degraded') THEN $3 || $2 ELSE $2 END WHERE id = $1",
+                    row["document_id"], message, REINDEX_FAILED_PREFIX,
                 )
                 event_status = "dead_letter"
             else:
@@ -429,7 +451,9 @@ async def reap_expired_leases(pool: asyncpg.Pool) -> int:
                     row["id"], message, delay,
                 )
                 await conn.execute(
-                    "UPDATE kb_documents SET status = 'pending', error = $2 WHERE id = $1", row["document_id"], message,
+                    f"UPDATE kb_documents SET status = {_keep_serving(PENDING_SQL)}, "
+                    "error = CASE WHEN status IN ('ready', 'ready_degraded') THEN $3 || $2 ELSE $2 END WHERE id = $1",
+                    row["document_id"], message, REINDEX_FAILED_PREFIX,
                 )
                 event_status = "lease_expired"
             await conn.execute(

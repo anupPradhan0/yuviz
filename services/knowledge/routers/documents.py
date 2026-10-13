@@ -145,7 +145,7 @@ async def retry_document(
         user_id=current_user.id, user_email=current_user.email,
     )
     if retried is None:
-        raise HTTPException(status_code=409, detail="only a failed document can be retried")
+        raise HTTPException(status_code=409, detail="only a failed document (or one whose re-index failed) can be retried")
     return retried
 
 
