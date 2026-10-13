@@ -27,6 +27,21 @@ def _fresh_retrieval_caches():
     yield
 
 
+# Dead HNSW entries (rows earlier tests deleted, not yet vacuumed) count against hnsw.max_scan_tuples (default 20000),
+# and a filtered dense search that exhausts it returns NOTHING even though a matching row exists. All tests share one
+# database, so before each test vacuum kb_chunks once the dead-tuple count nears that budget. (On the CI runner the
+# count reached 36,541 and test_vector_search_ignores_parent_rows and a hosted-embedder dense-hit test found no rows.)
+_DEAD_TUPLE_LIMIT = 5000
+
+
+@pytest_asyncio.fixture(autouse=True, loop_scope="session")
+async def _keep_the_hnsw_index_vacuumed(pool):
+    dead = await pool.fetchval("SELECT n_dead_tup FROM pg_stat_user_tables WHERE relname = 'kb_chunks'")
+    if dead and dead > _DEAD_TUPLE_LIMIT:
+        await pool.execute("VACUUM kb_chunks")
+    yield
+
+
 @pytest_asyncio.fixture(loop_scope="session")
 async def pool():
     p = await db.get_pool()

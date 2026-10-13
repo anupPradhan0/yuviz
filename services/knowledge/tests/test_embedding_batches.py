@@ -155,9 +155,12 @@ async def test_vector_search_ignores_parent_rows(tenant_agent, pool):
     await pool.execute(
         "UPDATE kb_chunks SET embedding = $2::vector WHERE document_id = $1 AND is_parent", doc["id"], vec_literal(vector))
     async with tenant_conn(pool, explicit_tenant=str(tenant["id"]), reason="test") as conn:
-        # Exact scan inside this transaction: the approximate HNSW index is shared with every other test's rows,
-        # whose neighbours can crowd the candidate list (ef_search) before the kb filter.
+        # Exact scan, and not through a cached plan: the dense statement is prepared once per pooled connection and
+        # after five runs PostgreSQL may switch to a generic plan, which was built when index scans were allowed and
+        # ignores a SET LOCAL made later. That plan walks the shared HNSW index, whose dead entries (rows other
+        # tests deleted, not yet vacuumed) can use up hnsw.max_scan_tuples before it reaches this test's row.
         await conn.execute("SET LOCAL enable_indexscan = off")
+        await conn.execute("SET LOCAL plan_cache_mode = force_custom_plan")
         matches = await PgVectorRepository().search(conn, [str(kb["id"])], vector, 100, 0.0)
     assert [m.chunk_id for m in matches] == doc["chunk_ids"], "the child must be found"
     assert doc["parent_id"] not in {m.chunk_id for m in matches}
