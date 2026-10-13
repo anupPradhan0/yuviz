@@ -1134,3 +1134,37 @@ async def test_keep_collapsed_flag_indexes_closed_disclosures_but_never_plain_hi
     doc = await parse_document(_page(_COLLAPSED + f'<div style="display:none">{PAYLOAD}-attack</div>'), limits=Limits.from_env())
     assert f"{PAYLOAD}-details answer" in doc.text() and f"{PAYLOAD}-panel answer" in doc.text()
     assert f"{PAYLOAD}-attack" not in doc.text()
+
+
+# ── watchdog cost: adaptive polling, /proc on Linux ─────────────────────
+
+async def test_the_watchdog_polls_slowly_while_memory_is_small_and_flat(monkeypatch):
+    calls = []
+    real = sandbox._group_rss_mb
+
+    async def counted(pgid):
+        calls.append(time.monotonic())
+        return await real(pgid)
+
+    monkeypatch.setattr(sandbox, "_group_rss_mb", counted)
+    t0 = time.monotonic()
+    with pytest.raises(ParseRejected):
+        await _probe("import time, json, sys\ntime.sleep(3)\nsys.stdout.write(json.dumps({'ok': False, 'reason': 'x'}))", Limits(memory_mb=4096))
+    elapsed = time.monotonic() - t0
+    assert len(calls) < elapsed / sandbox._RSS_POLL_MIN_S / 3, (len(calls), elapsed)   # fixed 20 ms polling would be ~150
+    gaps = [b - a for a, b in zip(calls, calls[1:])]
+    assert max(gaps) > 0.2                                                           # it backed off
+
+
+async def test_the_watchdog_still_reacts_fast_when_memory_grows():
+    code = ("import time\nchunks = []\nfor _ in range(40):\n    chunks.append(b'x' * (20 << 20)); time.sleep(0.05)\ntime.sleep(30)")
+    t0 = time.time()
+    with pytest.raises(ParseRejected, match="more memory"):
+        await _probe(code, Limits(memory_mb=300, timeout_s=60))
+    assert time.time() - t0 < 10
+
+
+@pytest.mark.skipif(not LINUX, reason="/proc is Linux-only (UNVERIFIED on macOS)")
+def test_linux_group_rss_comes_from_proc_without_spawning_ps():
+    import os as _os
+    assert sandbox._group_rss_proc(_os.getpgrp()) > 5
