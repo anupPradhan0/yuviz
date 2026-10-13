@@ -40,7 +40,7 @@ async def requeue_documents(
 ) -> list[str]:
     """Document ids re-queued (or that would be, with dry_run). `except_version` skips documents already at that
     chunker_version, so switching to fixed windows does not redo documents that are already fixed-v1."""
-    async with tenant_conn(pool, explicit_tenant=str(tenant_id), reason="kb-reingest") as conn:
+    async with tenant_conn(pool, explicit_tenant=str(tenant_id), reason="kb-ingestion-job") as conn:
         if dry_run:
             rows = await conn.fetch(_DUE_SQL, tenant_id, kb_id, except_version)
             return [str(r["id"]) for r in rows]
