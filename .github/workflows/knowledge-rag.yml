@@ -48,7 +48,6 @@ jobs:
           --health-retries 12
 
     env:
-      POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/yuviz
       REDIS_URL: redis://localhost:6379/0
       JWT_SECRET: ci-only-jwt-secret-not-used-anywhere-else-0123456789abcdef
       PGPASSWORD: postgres
@@ -61,8 +60,11 @@ jobs:
       - uses: actions/checkout@v4
 
       # The runner context is not available in job-level env, so the storage root is set from the step environment.
-      - name: Set the knowledge storage root
-        run: echo "KNOWLEDGE_STORAGE_ROOT=${RUNNER_TEMP}/knowledge-storage" >> "$GITHUB_ENV"
+      - name: Set the knowledge storage root and the database URL
+        # The DSN is assembled from PGPASSWORD so no URL with an embedded password is committed (tests/test_env_catalogue.py).
+        run: |
+          echo "KNOWLEDGE_STORAGE_ROOT=${RUNNER_TEMP}/knowledge-storage" >> "$GITHUB_ENV"
+          echo "POSTGRES_DSN=postgresql://postgres:${PGPASSWORD}@localhost:5432/yuviz" >> "$GITHUB_ENV"
 
       - uses: actions/setup-python@v5
         with:

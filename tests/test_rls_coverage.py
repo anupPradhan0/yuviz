@@ -250,6 +250,9 @@ _BYPASS_REASONS = {
     "agents-by-id", "call-flow-by-id", "carriers-by-id", "phone-numbers-by-id", "phone-numbers-did-lookup",
     "provider-configs-by-id", "telephony-configs-by-id", "tool-provider-configs-by-id",
     "calls-platform-read", "audit-log-platform-read",
+    # Platform-scoped, read-only export of calls (services/config/calls.py export_calls with tenant_slug=None);
+    # added by the call-export change on redesign, registered here so the walker matches the code.
+    "calls-platform-export",
     "campaign-by-id", "dnc-by-id", "campaign-worker-scan",
     "kb-by-id", "kb-admin-by-id", "agent-kb-by-id", "kb-ingestion-job-claim",
     # Retention purge of retrieval_logs: deletes rows older than N days across every tenant, in small batches,
