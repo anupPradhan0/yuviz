@@ -27,7 +27,11 @@ take retrieval or ingestion down.
 | `KNOWLEDGE_RERANK_MODEL` | `rerank-v3.5` / `rerank-2` | Provider model name. |
 | `KNOWLEDGE_RERANK_URL` | provider default | Override the endpoint. Must be `https` and its host must be the vendor's or listed in `KNOWLEDGE_RERANK_ALLOWED_HOSTS`; otherwise the service REFUSES TO START (the key goes in a header). |
 | `KNOWLEDGE_RERANK_ALLOWED_HOSTS` | none | Comma-separated extra hosts allowed for the URL. |
-| `KNOWLEDGE_RERANK_TENANT_RATE` / `_BURST` | `5` / `10` | Per-tenant provider calls per second (sustained / burst), in-process. Over budget = skipped with `rerank_budget`. |
+| `KNOWLEDGE_RERANK_PLATFORM_RATE` | `10` | Calls per second the platform rerank key may make in total (your vendor quota, below its real limit). |
+| `KNOWLEDGE_RERANK_PROCESSES` | `4` | Knowledge-service processes sharing that quota. **Set this to the real count.** |
+| `KNOWLEDGE_RERANK_TENANT_SHARE` | `0.25` | The share of the quota one tenant may use. |
+| `KNOWLEDGE_RERANK_TENANT_RATE` / `_BURST` | derived / `5` | Per-tenant calls per second per process. Default = platform rate x tenant share / processes (0.625 with the defaults); an explicit value overrides. Over budget = skipped with `rerank_budget`. |
+| `KNOWLEDGE_RERANK_VALVE_TENANTS` / `_WINDOW_S` / `_COOLDOWN_S` | `3` / `30` / `20` | The global safety valve: opens only when this many DISTINCT tenants fail within the window. |
 | `KNOWLEDGE_RERANK_TOP_N` | `20` | Candidates sent. The rest keep fused order behind them. |
 | `KNOWLEDGE_RERANK_DOC_CHARS` | `1200` | Per-candidate text cap. |
 | `KNOWLEDGE_RERANK_MAX_PAYLOAD_CHARS` | `20000` | Total candidate text per call. |
@@ -63,10 +67,17 @@ error bodies are never stored or logged. A key ref that fails to resolve is neve
 a construction failure never fails a retrieval, it reports `rerank_not_configured`).
 
 - **The provider key is platform-wide.** One key, one vendor quota, shared by every tenant whose agent has the flag.
-  The mitigation is a per-tenant call budget (token bucket, 5/s sustained, burst 10 by default; in-process, so the real
-  ceiling is the rate times the number of processes). Over budget = the call is skipped with `rerank_skipped` +
-  `rerank_budget`. Quota 429s and budget refusals do NOT count toward the shared breaker, so one tenant cannot open it
-  for everyone; only timeouts, 5xx and transport errors do.
+  Three layers protect it. (1) Each tenant has its own call budget (token bucket). (2) The whole process is capped at
+  its share of the quota (platform rate / processes), so no mix of tenants can push the shared key into 429 for
+  everyone; both over-budget cases skip with `rerank_skipped` + `rerank_budget`. (3) Breakers: each tenant has its OWN
+  breaker (`rerank:<tenant id>`, in a bounded table that evicts closed breakers first), so a tenant whose own calls time
+  out (a pathological agent, long documents) opens only its own. A separate global valve opens only when 3 distinct
+  tenants fail within 30 s (a platform-wide vendor outage), lets one probe through after 20 s, and closes on a success.
+  Quota 429s and budget refusals count toward no breaker; timeouts, 5xx and transport errors do.
+  **Sizing:** set `KNOWLEDGE_RERANK_PLATFORM_RATE` to your vendor quota in calls/s (leave headroom),
+  `KNOWLEDGE_RERANK_PROCESSES` to the number of knowledge-service processes, and `KNOWLEDGE_RERANK_TENANT_SHARE` to the
+  largest share one tenant may take. The budgets are per process, so they are an upper bound only as good as the
+  process count you declare.
 - **Who can switch it on.** Only the agent's retrieval policy (`rerank: true`). A request's `rerank` value can turn it
   OFF for that call, never ON: a viewer sending `rerank: true` to an agent whose flag is off reaches no provider.
   With `KNOWLEDGE_RERANKER=none` (default) a flagged agent gets `degraded: ['rerank_skipped']` as before.
@@ -135,6 +146,12 @@ python -m services.knowledge.reembed --tenant <uuid> --kb <uuid> --abandon      
 7. After a large swap run `REINDEX INDEX CONCURRENTLY idx_kb_chunks_embedding_hnsw` in a quiet period: the HNSW index
    stays correct through the update but accumulates dead entries until vacuum/reindex, and until then approximate
    searches can return fewer rows than exist.
+
+**One migration per KB.** A transaction-scoped advisory lock on a connection held for the whole fill and swap makes a
+second run for the same KB, and `--abandon` during a run, refuse with "a migration of knowledge base ... is already
+running" before any provider call (a crash releases it). Other KBs are unaffected. The long-swap size check is repeated
+under the KB lock right before the swap, so uploads during a long fill cannot push it past the limit unnoticed (the
+shadow vectors are kept; re-run with `--allow-long-swap`).
 
 **Soft-deleted documents.** Their chunks are not re-embedded (their text is not sent out again). The swap clears their
 vectors rather than leave old-space ones in a KB on the new model. There is no restore path; re-ingest if needed.

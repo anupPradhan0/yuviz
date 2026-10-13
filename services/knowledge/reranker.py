@@ -57,8 +57,14 @@ class RerankConfig:
     decisive_gap: float = 0.10
     # Per-tenant budget on provider calls (the key is platform-wide: this is what keeps one tenant from spending
     # everyone's quota). Token bucket: `tenant_rate` calls/s sustained, `tenant_burst` at once.
-    tenant_rate: float = 5.0
-    tenant_burst: int = 10
+    tenant_rate: float = 0.625       # derived, see from_env: platform_rate x tenant_share / processes
+    tenant_burst: int = 5
+    # Sizing: the vendor quota (platform_rate calls/s for the one platform key) is split across `processes` knowledge
+    # service processes, and one tenant may use `tenant_share` of it. The whole process is also capped at its share
+    # (platform_rate / processes), so no mix of tenants can push the shared key into 429 for everyone.
+    platform_rate: float = 10.0
+    processes: int = 4
+    tenant_share: float = 0.25
 
     @classmethod
     def from_env(cls) -> "RerankConfig":
@@ -70,9 +76,28 @@ class RerankConfig:
             http_timeout_s=env_float("KNOWLEDGE_RERANK_HTTP_TIMEOUT_MS", d.http_timeout_s * 1000, lo=5, hi=1000) / 1000,
             decisive_score=env_float("KNOWLEDGE_RERANK_DECISIVE_SCORE", d.decisive_score, lo=0, hi=1),
             decisive_gap=env_float("KNOWLEDGE_RERANK_DECISIVE_GAP", d.decisive_gap, lo=0, hi=1),
-            tenant_rate=env_float("KNOWLEDGE_RERANK_TENANT_RATE", d.tenant_rate, lo=0.01, hi=1000),
+            tenant_rate=_derived_tenant_rate(d),
             tenant_burst=env_int("KNOWLEDGE_RERANK_TENANT_BURST", d.tenant_burst, lo=1, hi=1000),
+            platform_rate=env_float("KNOWLEDGE_RERANK_PLATFORM_RATE", d.platform_rate, lo=0.1, hi=100000),
+            processes=env_int("KNOWLEDGE_RERANK_PROCESSES", d.processes, lo=1, hi=10000),
+            tenant_share=env_float("KNOWLEDGE_RERANK_TENANT_SHARE", d.tenant_share, lo=0.01, hi=1),
         )
+
+    @property
+    def process_rate(self) -> float:
+        return self.platform_rate / self.processes
+
+
+def _derived_tenant_rate(d: "RerankConfig") -> float:
+    """KNOWLEDGE_RERANK_TENANT_RATE wins when it is a usable number; else platform quota x one tenant's share /
+    processes (so a garbage value falls back to the derived rate, not to a constant)."""
+    platform = env_float("KNOWLEDGE_RERANK_PLATFORM_RATE", d.platform_rate, lo=0.1, hi=100000)
+    processes = env_int("KNOWLEDGE_RERANK_PROCESSES", d.processes, lo=1, hi=10000)
+    share = env_float("KNOWLEDGE_RERANK_TENANT_SHARE", d.tenant_share, lo=0.01, hi=1)
+    derived = max(platform * share / processes, 0.01)
+    if os.environ.get("KNOWLEDGE_RERANK_TENANT_RATE", "").strip():
+        return env_float("KNOWLEDGE_RERANK_TENANT_RATE", derived, lo=0.01, hi=1000)
+    return derived
 
 
 class TenantBudget:
@@ -147,6 +172,8 @@ class HostedReranker:
         self._resolver = resolver or CompositeSecretResolver()
         self._key: str | None = None
         self.budget = TenantBudget(self.config.tenant_rate, self.config.tenant_burst)
+        # The whole process's share of the platform quota, across every tenant.
+        self.process_budget = TenantBudget(self.config.process_rate, max(10, int(self.config.process_rate * 2)))
         # One long-lived client: connections are kept alive, so the 95 ms budget is not spent on a TLS handshake.
         self._client = httpx.AsyncClient(
             transport=transport, timeout=self.config.http_timeout_s, verify=verify,
@@ -191,6 +218,8 @@ class HostedReranker:
             return matches
         if tenant_id is not None and not self.budget.allow(tenant_id):
             raise RerankError("rerank_budget", breaker_failure=False)  # the key is platform-wide: cap each tenant
+        if tenant_id is not None and not self.process_budget.allow("*"):
+            raise RerankError("rerank_budget", breaker_failure=False)  # and the process as a whole
         key = await self._api_key()
         try:
             async with asyncio.timeout(cfg.http_timeout_s):

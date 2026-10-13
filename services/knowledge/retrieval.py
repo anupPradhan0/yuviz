@@ -46,7 +46,7 @@ from . import cache, db, ops_metrics, retrieval_log
 from . import retrieval_plan as plans
 from .embedding_manager import EmbeddingProviderManager, effective_model
 from .resilience import (
-    BoundedPool, PoolOverloaded, RetrievalConfig, RetrievalUnavailable, admission, breakers,
+    BoundedPool, PoolOverloaded, RetrievalConfig, RetrievalUnavailable, admission, breakers, rerank_valve,
 )
 from .vector_repository import IVectorRepository, VectorMatch
 
@@ -65,6 +65,7 @@ def clear_caches() -> None:
     plans.startup()  # re-open background refreshes after a lifespan shutdown
     _embeddings.clear()
     breakers.clear()
+    rerank_valve.clear()
 
 
 class IReranker(Protocol):
@@ -592,9 +593,15 @@ async def _rerank(
     reranker: IReranker, query: str, matches: list[VectorMatch], cfg: RetrievalConfig, time_left: float,
     degraded: list[str], timings: dict[str, float], tenant_id: str | None = None,
 ) -> list[VectorMatch]:
-    breaker = breakers.get("rerank", cfg)
+    # One breaker PER TENANT: a tenant whose own calls time out (a pathological agent, long documents) opens only its
+    # own. The shared provider is guarded by rerank_valve, which opens only when several distinct tenants fail.
+    breaker = breakers.get(f"rerank:{tenant_id or '-'}", cfg)
     budget = min(cfg.rerank_timeout_s, time_left)
-    if budget <= 0.005 or not breaker.allow():
+    if budget <= 0.005 or not rerank_valve.allow():
+        degraded.append("rerank_skipped")
+        return matches
+    if not breaker.allow():
+        rerank_valve.release_probe()
         degraded.append("rerank_skipped")
         return matches
     t0 = time.monotonic()
@@ -604,12 +611,15 @@ async def _rerank(
                        else await reranker.rerank(query, matches))
     except asyncio.CancelledError:
         breaker.release_probe()
+        rerank_valve.release_probe()
         raise
     except Exception as exc:  # noqa: BLE001 - fused order is the fallback
         if getattr(exc, "breaker_failure", True):
             breaker.record_failure()
+            rerank_valve.record_failure(tenant_id or "-")
         else:
             breaker.release_probe()  # a quota or our own budget says nothing about the provider's health
+            rerank_valve.release_probe()
         # Fixed reason codes only (RerankError.degraded_reason, or the stage budget); never provider text.
         reason = "rerank_timeout" if isinstance(exc, TimeoutError) else getattr(exc, "degraded_reason", "rerank_error")
         degraded.extend(["rerank_skipped", reason])
@@ -617,6 +627,7 @@ async def _rerank(
     finally:
         timings["rerank"] = (time.monotonic() - t0) * 1000
     breaker.record_success()
+    rerank_valve.record_success()
     return ordered
 
 

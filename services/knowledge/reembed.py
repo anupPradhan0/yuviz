@@ -39,11 +39,11 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import sys
 import time
 import uuid
 from dataclasses import dataclass
+from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable
 
 import asyncpg
@@ -51,6 +51,7 @@ import asyncpg
 from libs.tenancy import tenant_conn
 
 from . import audit, db
+from .envparse import env_int
 from . import retrieval_plan as plans
 from .embedding_manager import (
     EMBEDDING_DIMS, EmbeddingProviderConfig, EmbeddingProviderManager, effective_model, embed_in_batches,
@@ -73,7 +74,7 @@ _PENDING = (
 )
 # The swap is one transaction over every chunk of the KB; past this many it holds locks for over a minute on an
 # HNSW-indexed table (measured by the reviewer: ~70 s per 20k chunks), so it needs --allow-long-swap.
-MAX_SWAP_CHUNKS = int(os.environ.get("KNOWLEDGE_REEMBED_MAX_SWAP_CHUNKS", "20000") or 20000)
+MAX_SWAP_CHUNKS = env_int("KNOWLEDGE_REEMBED_MAX_SWAP_CHUNKS", 20000, lo=1, hi=10**9)
 
 
 class KbConfigChanged(RuntimeError):
@@ -154,7 +155,9 @@ async def _write_batch(
             await asyncio.sleep(0.05 * (attempt + 1))
 
 
-async def swap(pool: asyncpg.Pool, tenant_id: str, kb_id: Any, cfg: EmbeddingProviderConfig) -> tuple[bool, str]:
+async def swap(
+    pool: asyncpg.Pool, tenant_id: str, kb_id: Any, cfg: EmbeddingProviderConfig, allow_long_swap: bool = False,
+) -> tuple[bool, str]:
     """The atomic step. Returns (swapped, reason)."""
     model = effective_model(cfg)
     async with tenant_conn(pool, explicit_tenant=tenant_id, reason=_REASON) as conn:
@@ -171,6 +174,13 @@ async def swap(pool: asyncpg.Pool, tenant_id: str, kb_id: Any, cfg: EmbeddingPro
         pending = await conn.fetchval(f"SELECT count(*) FROM kb_chunks WHERE {_PENDING}", kb_id, model, tenant_id)
         if pending:
             return False, "incomplete"
+        if not allow_long_swap:
+            # Re-checked here, under the lock: uploads during a long fill can push the KB over the threshold.
+            size = await conn.fetchval(
+                "SELECT count(*) FROM kb_chunks WHERE kb_id = $1 AND tenant_id = $2 AND embedding IS NOT NULL",
+                kb_id, tenant_id)
+            if size > MAX_SWAP_CHUNKS:
+                return False, "swap_too_large"
         live = await conn.fetchval(
             "SELECT 1 FROM provider_configs WHERE id = $1 AND tenant_id = $2 AND role = 'embedding' AND deleted_at IS NULL",
             cfg.id, tenant_id)
@@ -201,10 +211,21 @@ async def swap(pool: asyncpg.Pool, tenant_id: str, kb_id: Any, cfg: EmbeddingPro
     return True, ""
 
 
+@asynccontextmanager
+async def _migration_lock(pool: asyncpg.Pool, tenant_id: str, kb_id: str):
+    """One migration per KB. A transaction-scoped advisory lock on a connection held for the whole run (so a crash
+    releases it with the connection); a second run for the same KB, and --abandon, refuse instead of racing it.
+    The lock key is derived from the KB id only, and the connection is tenant-scoped like every other statement."""
+    async with tenant_conn(pool, explicit_tenant=tenant_id, reason=_REASON) as conn:
+        if not await conn.fetchval("SELECT pg_try_advisory_xact_lock(hashtextextended($1::text, 0))", f"reembed:{kb_id}"):
+            raise ValueError(f"a migration of knowledge base {kb_id} is already running")
+        yield
+
+
 async def abandon(pool: asyncpg.Pool, tenant_id: str, kb_id: Any) -> int:
     """Drop a half-done migration: the KB was never changed, so this only clears the shadow columns."""
     tenant_id, kb_id = _uid(tenant_id, "tenant"), _uid(kb_id, "kb")
-    async with tenant_conn(pool, explicit_tenant=tenant_id, reason=_REASON) as conn:
+    async with _migration_lock(pool, tenant_id, kb_id), tenant_conn(pool, explicit_tenant=tenant_id, reason=_REASON) as conn:
         owned = await conn.fetchval(
             "SELECT 1 FROM knowledge_bases WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL", kb_id, tenant_id)
         if owned is None:
@@ -249,32 +270,37 @@ async def reembed_kb(
             f"the swap would rewrite {report.swap_chunks} chunks in one transaction (limit {MAX_SWAP_CHUNKS}); "
             "run in a quiet period with --allow-long-swap")
 
-    provider = await manager.get(cfg)
-    pace = max(sleep_s, 60.0 / max_batches_per_minute if max_batches_per_minute else 0.0)
-    for _round in range(MAX_SWAP_ROUNDS):
-        while True:
-            if max_batches is not None and report.batches >= max_batches:
-                report.reason = "stopped"
-                return report
-            t0 = time.monotonic()
-            async with tenant_conn(pool, explicit_tenant=tenant_id, reason=_REASON) as conn:
-                rows = await conn.fetch(
-                    f"SELECT id, content FROM kb_chunks WHERE {_PENDING} ORDER BY id LIMIT $4", kb_id, model, tenant_id, batch)
-            if not rows:
+    async with _migration_lock(pool, tenant_id, kb_id):
+        provider = await manager.get(cfg)
+        pace = max(sleep_s, 60.0 / max_batches_per_minute if max_batches_per_minute else 0.0)
+        for _round in range(MAX_SWAP_ROUNDS):
+            while True:
+                if max_batches is not None and report.batches >= max_batches:
+                    report.reason = "stopped"
+                    return report
+                t0 = time.monotonic()
+                async with tenant_conn(pool, explicit_tenant=tenant_id, reason=_REASON) as conn:
+                    rows = await conn.fetch(
+                        f"SELECT id, content FROM kb_chunks WHERE {_PENDING} ORDER BY id LIMIT $4", kb_id, model, tenant_id, batch)
+                if not rows:
+                    break
+                # No connection is held while the provider works. embed_in_batches validates count, 768 dims, finite, non-zero.
+                vectors = await embed_in_batches(provider, [r["content"] for r in rows])
+                await _write_batch(pool, tenant_id, kb_id, model, [r["id"] for r in rows], vectors)
+                report.batches += 1
+                report.embedded += len(rows)
+                if progress:
+                    progress(report)
+                if pace:
+                    await asyncio.sleep(max(pace - (time.monotonic() - t0), 0.0))
+            report.swapped, report.reason = await swap(pool, tenant_id, kb_id, cfg, allow_long_swap)
+            if report.reason == "swap_too_large":  # grew past the limit during the fill; the shadow is kept for a re-run
+                raise ValueError(
+                    f"the KB grew past {MAX_SWAP_CHUNKS} chunks during the fill; the swap needs --allow-long-swap "
+                    "(the shadow vectors are kept: re-run to continue)")
+            if report.swapped or report.reason != "incomplete":
                 break
-            # No connection is held while the provider works. embed_in_batches validates count, 768 dims, finite, non-zero.
-            vectors = await embed_in_batches(provider, [r["content"] for r in rows])
-            await _write_batch(pool, tenant_id, kb_id, model, [r["id"] for r in rows], vectors)
-            report.batches += 1
-            report.embedded += len(rows)
-            if progress:
-                progress(report)
-            if pace:
-                await asyncio.sleep(max(pace - (time.monotonic() - t0), 0.0))
-        report.swapped, report.reason = await swap(pool, tenant_id, kb_id, cfg)
-        if report.swapped or report.reason != "incomplete":
-            break
-    return report
+        return report
 
 
 def _parse(argv: list[str] | None) -> argparse.Namespace:

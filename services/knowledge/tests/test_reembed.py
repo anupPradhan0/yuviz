@@ -208,7 +208,7 @@ async def test_readers_always_find_chunks_with_consistent_vectors_while_migratin
             set_caller_tenant(str(mig["tenant"]["id"]))
             r = await retrieval.retrieve(
                 None, PgVectorRepository(), _manager(spaces), tenant_slug=mig["tenant"]["slug"], agent_slug="sup",
-                query=TEXTS[i % 7], hybrid_search=False, minimum_score=0.0, top_k=1)
+                query=TEXTS[i % 7], minimum_score=0.0, top_k=1)  # hybrid: lexical covers a reader caught mid-swap
             outcomes.append((r["status"], r["chunks"][0]["content"] if r["chunks"] else ""))
             await asyncio.sleep(0.005)
 
@@ -753,3 +753,84 @@ async def test_chunks_without_a_recorded_model_stay_searchable(pool, mig):
     r = await retrieval.retrieve(None, PgVectorRepository(), _manager(_spaces(mig)), tenant_slug=mig["tenant"]["slug"],
                                  agent_slug="sup", query=TEXTS[3], minimum_score=0.3, hybrid_search=False)
     assert r["status"] == "ok" and "embedding_model_mismatch" not in r["degraded"]
+
+
+# --- startup safety, the swap-size recheck and one migration per KB -----------------------------------------------------------
+
+@pytest.mark.parametrize("value", ["inf", "-1", "nan", "", "abc", "1e999", "0"])
+def test_a_malformed_swap_limit_cannot_crash_the_ingestion_worker_at_import(value):
+    import subprocess
+    import sys
+    env = {**os.environ, "KNOWLEDGE_REEMBED_MAX_SWAP_CHUNKS": value, "KNOWLEDGE_RERANK_TOP_N": value,
+           "KNOWLEDGE_ENRICH_CONCURRENCY": value}
+    out = subprocess.run(
+        [sys.executable, "-c", "import services.knowledge.ingestion_worker as w, services.knowledge.reembed as r; print(r.MAX_SWAP_CHUNKS)"],
+        env=env, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr[-400:]
+    assert out.stdout.strip() == "20000"  # the documented default
+
+
+async def test_the_swap_size_is_rechecked_under_the_lock_after_a_long_fill(pool, mig, monkeypatch):
+    spaces = _spaces(mig)
+    grew = {"done": False}
+
+    async def upload_many():  # uploads land during the fill and push the KB over the limit
+        if not grew["done"]:
+            grew["done"] = True
+            await add_document(pool, mig["tenant"], mig["kb"], "bulk", [f"bulk chunk {i}" for i in range(6)])
+
+    spaces[mig["b"]].hook = upload_many
+    monkeypatch.setattr(reembed, "MAX_SWAP_CHUNKS", 8)  # 7 chunks at the start: under the limit at the pre-check
+    with pytest.raises(ValueError, match="grew past"):
+        await _run(pool, mig, "b", spaces, batch=100)
+    cfg, chunks = await _state(pool, mig)
+    assert cfg == mig["a"]                                   # nothing swapped
+    assert sum(c["has_next"] for c in chunks) >= 7           # the shadow is kept for the re-run
+    ok = await _run(pool, mig, "b", spaces, allow_long_swap=True)
+    assert ok.swapped and (await _state(pool, mig))[0] == mig["b"]
+
+
+async def test_two_concurrent_migrations_of_one_kb_refuse_cleanly_and_leave_no_chunk_without_a_vector(pool, mig):
+    gate = asyncio.Event()
+    started = asyncio.Event()
+    v2 = Space("v2")
+
+    async def hold():
+        started.set()
+        await gate.wait()
+    v2.hook = hold
+    first = asyncio.create_task(_run(pool, mig, "b", _spaces(mig, v2), batch=100))
+    await asyncio.wait_for(started.wait(), 5)
+    second_provider = Space("v3")
+    with pytest.raises(ValueError, match="already running"):
+        await _run(pool, mig, "c", _spaces(mig, v3=second_provider))
+    assert second_provider.calls == 0                       # refused before any provider call
+    with pytest.raises(ValueError, match="already running"):
+        await reembed.abandon(pool, str(mig["tenant"]["id"]), mig["kb"]["id"])  # and --abandon cannot clear it mid-run
+    gate.set()
+    assert (await first).swapped
+    _, chunks = await _state(pool, mig)
+    assert all(c["emb"] is not None for c in chunks if not c["is_parent"])      # no chunk lost its vector
+    assert all(_in_space(v2, c) for c in chunks if not c["is_parent"])
+    assert (await _run(pool, mig, "c")).swapped              # the lock was released: a later migration works
+
+
+async def test_a_different_kb_is_not_blocked_by_a_running_migration(pool, mig):
+    other = await make_kb(pool, mig["tenant"], mig["agent"], "second")
+    await add_document(pool, mig["tenant"], other, "d", ["another kb chunk"])
+    gate, started = asyncio.Event(), asyncio.Event()
+    v2 = Space("v2")
+
+    async def hold():
+        started.set()
+        await gate.wait()
+    v2.hook = hold
+    first = asyncio.create_task(_run(pool, mig, "b", _spaces(mig, v2)))
+    await asyncio.wait_for(started.wait(), 5)
+    set_caller_tenant(None)
+    cfg_b2 = await _config(mig["tenant"], "Embed-B2", "m-b2")
+    report = await reembed.reembed_kb(pool, _manager({str(cfg_b2["id"]): Space("v4")}), tenant_id=str(mig["tenant"]["id"]),
+                                      kb_id=other["id"], to_config=cfg_b2["id"], dry_run=True)
+    assert report.reason == "dry_run"
+    gate.set()
+    await first
