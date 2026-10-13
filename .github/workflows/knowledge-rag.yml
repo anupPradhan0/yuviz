@@ -1,0 +1,94 @@
+name: Knowledge RAG
+
+# The RAG pipeline's regression net: end-to-end ingestion and retrieval against a real Postgres (pgvector) and
+# Redis, the retrieval deadline / typed-status / no-leak gates, the golden-set recall gates, the conversation-side
+# tool envelope, and the RLS coverage tripwires. Everything embeds with a deterministic fake model: no Ollama.
+
+on:
+  pull_request:
+    branches: [redesign, main]
+  push:
+    branches: [redesign, main]
+
+concurrency:
+  group: knowledge-rag-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    services:
+      postgres:
+        # pgvector >= 0.8 is required: the filtered HNSW scan relies on hnsw.iterative_scan.
+        image: pgvector/pgvector:0.8.0-pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: yuviz
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/yuviz
+      REDIS_URL: redis://localhost:6379/0
+      JWT_SECRET: ci-only-jwt-secret-not-used-anywhere-else-0123456789abcdef
+      KNOWLEDGE_STORAGE_ROOT: ${{ runner.temp }}/knowledge-storage
+      PGPASSWORD: postgres
+      PGHOST: localhost
+      PGUSER: postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        env:
+          # requirements.txt pins torch; the default Linux wheel drags in several GB of CUDA libraries.
+          # With the CPU index added, pip picks 2.12.1+cpu (a local version of the same release).
+          PIP_EXTRA_INDEX_URL: https://download.pytorch.org/whl/cpu
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest pytest-asyncio
+
+      - name: Apply database schema
+        run: |
+          command -v psql >/dev/null || sudo apt-get install -y --no-install-recommends postgresql-client
+          psql -d yuviz -c 'SELECT extversion FROM pg_available_extensions WHERE name = $$vector$$'
+          for f in schema knowledge_schema telephony_schema; do
+            psql -d yuviz -q -v ON_ERROR_STOP=1 -f "database/$f.sql"
+          done
+          psql -d yuviz -q -v ON_ERROR_STOP=1 -v yuviz_app_password=ci-app-password -f database/rls.sql
+
+      - name: Knowledge, conversation, toolexec and SDK tests, RLS coverage
+        run: |
+          python -m pytest \
+            services/knowledge/tests \
+            services/conversation/tests \
+            libs/knowledge_sdk \
+            services/toolexec/tests \
+            tests/test_rls_coverage.py \
+            -q -ra --durations=15

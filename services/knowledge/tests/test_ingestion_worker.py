@@ -10,8 +10,10 @@ from services.knowledge.embedding_manager import EmbeddingProviderManager
 from services.knowledge.ingestion_worker import process_one_job
 from services.knowledge.secret_resolver import CompositeSecretResolver
 from services.knowledge.storage import LocalStorageProvider
+from services.knowledge.tests.ollama_gate import requires_ollama_embeddings
 
 
+@requires_ollama_embeddings
 async def test_process_one_job_success_produces_ready_document_and_chunks(tenant_agent, pool):
     tenant, _ = tenant_agent
     set_caller_tenant(str(tenant["id"]))
@@ -85,6 +87,7 @@ async def test_tiny_document_auto_inlines_and_skips_embedding(tenant_agent, pool
     assert chunks[0]["content"] == "We are closed on Sundays."
 
 
+@requires_ollama_embeddings
 async def test_manual_prompt_override_survives_reingestion_of_large_document(tenant_agent, pool):
     tenant, _ = tenant_agent
     set_caller_tenant(str(tenant["id"]))

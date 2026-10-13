@@ -42,7 +42,7 @@ import asyncpg
 
 from libs.tenancy import TenantScopeConflict, tenant_conn
 
-from . import cache, db, retrieval_log
+from . import cache, db, ops_metrics, retrieval_log
 from . import retrieval_plan as plans
 from .embedding_manager import EmbeddingProviderManager
 from .resilience import (
@@ -382,6 +382,7 @@ async def retrieve(
     query = query[: cfg.max_query_chars]
     wait = min(cfg.queue_wait_s, max(cfg.deadline_s - (time.monotonic() - started), 0.0))
     if not await admission.acquire(tenant_slug, cfg, wait):
+        ops_metrics.inc("retrieval_overloaded")
         raise RetrievalUnavailable("retrieval overloaded", degraded=["overloaded"], trace_id=trace_id)
     try:
         return await _retrieve(
@@ -418,12 +419,14 @@ async def _retrieve(
     except TenantScopeConflict:
         raise
     except PoolOverloaded as exc:
+        ops_metrics.inc("retrieval_overloaded")
         raise RetrievalUnavailable("retrieval overloaded", degraded=["overloaded"], trace_id=trace_id) from exc
     except Exception as exc:  # noqa: BLE001
         raise RetrievalUnavailable(
             f"retrieval plan unavailable: {type(exc).__name__}", degraded=["plan_unavailable"], trace_id=trace_id,
         ) from exc
     timings["plan"] = (time.monotonic() - started) * 1000
+    ops_metrics.inc("plan_cache_hit" if was_cached else "plan_cache_miss")
     if not was_cached:
         degraded.append("plan_cache_miss")
 
