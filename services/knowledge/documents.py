@@ -16,8 +16,8 @@ _UPDATABLE_FIELDS = {"title", "language", "tags", "usage_mode"}
 # document, or a ready one whose last re-index failed, and in both cases no job already pending or running (an automatic
 # transient retry is a pending job).
 RETRYABLE_SQL = (
-    "((d.status = 'failed' OR (d.status IN ('ready', 'ready_degraded') AND d.error LIKE 're-index failed:%')) "
-    "AND NOT EXISTS (SELECT 1 FROM kb_ingestion_jobs j WHERE j.document_id = d.id AND j.status IN ('pending', 'running')))"
+    "COALESCE((d.status = 'failed' OR (d.status IN ('ready', 'ready_degraded') AND d.error LIKE 're-index failed:%')) "
+    "AND NOT EXISTS (SELECT 1 FROM kb_ingestion_jobs j WHERE j.document_id = d.id AND j.status IN ('pending', 'running')), false)"
 )
 
 
