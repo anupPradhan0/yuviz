@@ -6,17 +6,20 @@ A document that exploits lxml, Pillow or pypdf gets code execution as the SAME O
 in-process steps below only raise the bar. Full containment needs a separate uid or container with a read-only
 filesystem, no network and none of the service's secrets; see docs/knowledge-parser-sandbox.md.
 
-What the child gets:
-  - `python -I`: no cwd, script dir, PYTHONPATH or user site on sys.path
-  - cwd = a fresh empty temp dir, removed afterwards; close_fds; its own session and process group
-  - an environment of PATH and LANG only (no DB DSN, no JWT secret)
-  - wall-clock timeout, output byte cap and an RSS watchdog (polls `ps`, so it works on macOS and Linux); any breach
-    SIGKILLs the whole process group, so an OCR grandchild dies with it
-  - in the child (Linux, best effort, see _worker.harden): RLIMIT_CPU/FSIZE/CORE/NOFILE/AS/NPROC, no_new_privs,
-    non-dumpable, and a private (empty) network namespace when the kernel allows it
-Not covered: the child can still read any file the worker's uid can read, and (where unshare is refused) use the
-network. The worker process itself is made non-dumpable at startup (hardening.py) so the child cannot read its
-environment or memory through /proc."""
+What the child gets (details and measured limits: docs/knowledge-parser-sandbox.md):
+  - `python -I`; cwd = a fresh empty temp dir, removed afterwards; close_fds; its own session and process group
+  - an environment of PATH, LANG and a per-run log nonce (not the parent's environment variables)
+  - wall-clock timeout, output byte cap, and two memory guards that work on macOS and Linux: the parent polls the RSS of the
+    whole process group every 20 ms, and the child exits itself when its own peak RSS passes the limit; any breach
+    SIGKILLs the process group
+  - in the child, Linux only and best effort (see _worker.harden): rlimits, no_new_privs, non-dumpable, and an attempt at
+    unshare(CLONE_NEWUSER|CLONE_NEWNET) then CLONE_NEWNET to drop the network
+NOT covered, measured on macOS and reasoned for Linux: the child runs as the same user, so it can read every file that user can
+(all tenants' stored documents, .env files), reach the database and the internet wherever the namespace unshare is refused
+(which is most deployments), and read the environment of any same-user process: the worker's only on Linux (PR_SET_DUMPABLE,
+hardening.py), the API's never, and on macOS the parent's too. A child can also escape the group kill with fork()+setsid().
+Do not enable PDF/Office parsing for untrusted tenants without the separate-container deployment; KNOWLEDGE_BINARY_PARSERS=0
+turns it off."""
 
 from __future__ import annotations
 
