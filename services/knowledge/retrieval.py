@@ -62,6 +62,7 @@ _embeddings = cache.TTLCache(ttl_s=600.0, max_entries=4096)
 def clear_caches() -> None:
     """Drop the plan and query-embedding caches and breaker state (tests, admin reset)."""
     plans.clear_cache()
+    plans.startup()  # re-open background refreshes after a lifespan shutdown
     _embeddings.clear()
     breakers.clear()
 
@@ -266,8 +267,11 @@ async def _lexical_branch(
         # Every stage, fallbacks included, gets min(its own timeout, what is left of the deadline).
         async with asyncio.timeout(max(min(cfg.lexical_timeout_s, remaining()), 0.001)):
             async with _branch_conn(held, bpool, plan.tenant_id) as conn:
+                notes: list[str] = []
                 branch.matches = await vector_repo.lexical_search(
-                    conn, plan.kb_ids, query, limit, cfg.lexical_min_score, approx_chunks=plan.chunk_count)
+                    conn, plan.kb_ids, query, limit, cfg.lexical_min_score, approx_chunks=plan.chunk_count,
+                    notes=notes)
+                branch.notes = notes or None
         timings["lexical"] = (time.monotonic() - t0) * 1000
     except (asyncio.CancelledError, TenantScopeConflict):
         raise

@@ -15,7 +15,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from . import db, retrieval_log
+from . import cache, db, retrieval_log
+from .body_limit import BodyLimitMiddleware
+from . import retrieval_plan as plans
 from .routers import agent_kb, documents, knowledge_bases, prewarm, retrieval_policies, retrieve
 from .runtime import get_embedding_manager, get_vector_repo
 
@@ -28,18 +30,25 @@ async def lifespan(app: FastAPI):
     await db.get_pool()
     await get_vector_repo()
     get_embedding_manager()
+    plans.startup()
     purge_task = asyncio.create_task(retrieval_log.purge_loop())
+    legacy_task = asyncio.create_task(cache.purge_legacy_keys())
     yield
     purge_task.cancel()
     try:
         await purge_task
     except asyncio.CancelledError:
         pass
+    legacy_task.cancel()
+    await asyncio.gather(legacy_task, return_exceptions=True)
+    await plans.shutdown()  # background plan refreshes use the pool: stop them before it closes
     await retrieval_log.shutdown()  # before close_pool: the writer uses the pool
     await db.close_pool()
 
 
 app = FastAPI(title="Voice AI Platform — Knowledge Service", lifespan=lifespan)
+
+app.add_middleware(BodyLimitMiddleware)  # 413 for oversized /internal/retrieve and /internal/prewarm bodies
 
 # Admin UI is the only browser client.
 app.add_middleware(

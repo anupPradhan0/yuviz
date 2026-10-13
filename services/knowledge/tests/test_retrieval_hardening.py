@@ -215,7 +215,7 @@ async def test_pool_acquire_timeout_is_classified_as_overload_not_a_silent_branc
         await tiny.close()
 
 
-async def test_limiter_enforces_global_and_per_tenant_caps_fifo_and_leaks_nothing():
+async def test_limiter_enforces_global_and_per_tenant_caps_and_leaks_nothing():
     lim = AdmissionLimiter()
     cfg = RetrievalConfig(max_inflight=2, tenant_max_inflight=1)
     assert await lim.acquire("a", cfg, 0)
@@ -228,7 +228,156 @@ async def test_limiter_enforces_global_and_per_tenant_caps_fifo_and_leaks_nothin
     assert await waiter
     lim.release("b")
     lim.release("c")
-    assert lim.in_flight == 0 and lim._per == {} and lim._waiters == []
+    _assert_limiter_idle(lim)
+
+
+def _assert_limiter_idle(lim):
+    assert lim.in_flight == 0 and lim._per == {} and lim._queues == {} and not lim._order
+
+
+async def test_cancel_before_the_slot_is_handed_over_leaks_nothing():
+    lim = AdmissionLimiter()
+    cfg = RetrievalConfig(max_inflight=1, tenant_max_inflight=1)
+    assert await lim.acquire("a", cfg, 0)
+    waiter = asyncio.create_task(lim.acquire("b", cfg, 5.0))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    lim.release("a")
+    assert lim.in_flight == 0
+    _assert_limiter_idle(lim)
+
+
+async def test_cancel_after_the_slot_was_handed_over_gives_it_back():
+    """release() hands the slot to the queued waiter synchronously; the waiter is cancelled before its task runs."""
+    lim = AdmissionLimiter()
+    cfg = RetrievalConfig(max_inflight=1, tenant_max_inflight=1)
+    assert await lim.acquire("a", cfg, 0)
+    waiter = asyncio.create_task(lim.acquire("b", cfg, 5.0))
+    await asyncio.sleep(0)
+    lim.release("a")  # grant: in_flight == 1, owned by the (not yet resumed) waiter
+    assert lim.in_flight == 1
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert lim.in_flight == 0  # the permit came back; before the fix it stayed at 1 forever
+    _assert_limiter_idle(lim)
+    assert await lim.acquire("c", cfg, 0)  # and the limiter still works
+    lim.release("c")
+
+
+async def test_limiter_never_leaks_under_1000_random_interleavings_of_grant_expiry_and_cancel():
+    import random
+    rng = random.Random(1234)
+    lim = AdmissionLimiter()
+    for _ in range(1000):
+        cfg = RetrievalConfig(max_inflight=rng.randint(1, 3), tenant_max_inflight=rng.randint(1, 2))
+
+        async def worker(key, hold, wait):
+            if await lim.acquire(key, cfg, wait):
+                try:
+                    await asyncio.sleep(hold)
+                finally:
+                    lim.release(key)
+
+        tasks = [asyncio.create_task(worker(rng.choice("abc"), rng.choice([0, 0, 0.001, 0.003]),
+                                            rng.choice([0, 0.001, 0.004, 0.02]))) for _ in range(rng.randint(2, 8))]
+        for task in tasks:  # cancel some at random points: before grant, on the grant boundary, while holding
+            if rng.random() < 0.5:
+                await asyncio.sleep(rng.choice([0, 0, 0.0005, 0.002]))
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        _assert_limiter_idle(lim)
+
+
+async def test_noisy_tenant_does_not_block_other_tenants_while_global_slots_are_free():
+    lim = AdmissionLimiter()
+    cfg = RetrievalConfig(max_inflight=5, tenant_max_inflight=3, queue_wait_s=0.15)
+    for _ in range(3):
+        assert await lim.acquire("noisy", cfg, 0)  # tenant A at its cap of 3
+    queued = [asyncio.create_task(lim.acquire("noisy", cfg, 1.0)) for _ in range(10)]
+    await asyncio.sleep(0.01)  # A has waiters queued
+    t0 = time.monotonic()
+    for other in "BCDEFGH"[:2]:  # 2 global slots remain
+        assert await lim.acquire(other, cfg, 0)  # admitted immediately, no queueing behind A's waiters
+    assert time.monotonic() - t0 < 0.01
+    assert not await lim.acquire("H", cfg, 0)  # now the global cap is the limit, not A's queue
+    for task in queued:
+        task.cancel()
+    await asyncio.gather(*queued, return_exceptions=True)
+    for _ in range(3):
+        lim.release("noisy")
+    for other in "BC":
+        lim.release(other)
+    _assert_limiter_idle(lim)
+
+
+async def test_freed_slots_are_shared_round_robin_across_tenants():
+    lim = AdmissionLimiter()
+    cfg = RetrievalConfig(max_inflight=2, tenant_max_inflight=5)
+    held = ["a", "a"]
+    for key in held:
+        assert await lim.acquire(key, cfg, 0)
+    granted = []
+
+    async def want(key):
+        if await lim.acquire(key, cfg, 1.0):
+            granted.append(key)
+
+    tasks = [asyncio.create_task(want(k)) for k in ("a", "a", "b", "c")]
+    await asyncio.sleep(0.01)
+    for _ in range(3):
+        lim.release(held.pop(0))
+        await asyncio.sleep(0.01)
+        held.append(granted[-1])
+    assert granted[:3] == ["a", "b", "c"], granted  # plain FIFO would give a, a, b: a's backlog may not crowd out c
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    for key in held + granted[3:]:
+        lim.release(key)
+    _assert_limiter_idle(lim)
+
+
+def test_default_caps_follow_the_pool_size(monkeypatch):
+    monkeypatch.delenv("KNOWLEDGE_RETRIEVAL_MAX_INFLIGHT", raising=False)
+    monkeypatch.delenv("KNOWLEDGE_RETRIEVAL_TENANT_MAX_INFLIGHT", raising=False)
+    monkeypatch.setenv("KNOWLEDGE_DB_POOL_MAX", "20")
+    cfg = RetrievalConfig.from_env()
+    assert (cfg.max_inflight, cfg.tenant_max_inflight) == (9, 3)  # (20 - 2) // 2 and a third of it
+    monkeypatch.setenv("KNOWLEDGE_DB_POOL_MAX", "4")
+    cfg = RetrievalConfig.from_env()
+    assert (cfg.max_inflight, cfg.tenant_max_inflight) == (2, 1)
+    monkeypatch.setenv("KNOWLEDGE_RETRIEVAL_MAX_INFLIGHT", "7")
+    monkeypatch.setenv("KNOWLEDGE_RETRIEVAL_TENANT_MAX_INFLIGHT", "5")
+    cfg = RetrievalConfig.from_env()
+    assert (cfg.max_inflight, cfg.tenant_max_inflight) == (7, 5)
+
+
+async def test_prewarm_goes_through_admission_and_a_bounded_acquire(world):
+    t, a = world["tenant"], world["agent"]
+    set_caller_tenant(str(t["id"]))
+    cfg = RetrievalConfig(max_inflight=1, tenant_max_inflight=1, queue_wait_s=0.01)
+    from services.knowledge.resilience import admission
+    assert await admission.acquire("someone", cfg, 0)  # the only slot is taken
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(RetrievalUnavailable) as exc:
+            await plans.prewarm(t["slug"], a["slug"], config=cfg)
+        assert time.monotonic() - t0 < 0.1 and exc.value.degraded == ["overloaded"]
+    finally:
+        admission.release("someone")
+    tiny = await asyncpg.create_pool(os.environ["POSTGRES_DSN"], min_size=1, max_size=1)
+    try:
+        async with tiny.acquire():  # pool exhausted: the acquire is bounded, not unbounded
+            with pytest.raises(RetrievalUnavailable):
+                await plans.prewarm(t["slug"], a["slug"], pool=tiny,
+                                    config=RetrievalConfig(acquire_timeout_s=0.02))
+    finally:
+        await tiny.close()
+    from services.knowledge.resilience import admission as adm
+    assert adm.in_flight == 0
 
 
 # === 3. query length cap (MEDIUM) ===============================================================================
@@ -365,7 +514,7 @@ async def test_stale_plan_is_served_while_one_background_refresh_runs(world, mon
     assert all("plan_cache_miss" not in r["degraded"] for r in results)  # nobody paid for a cold plan
     await asyncio.sleep(0.2)
     assert len(loads) == 1  # a single bounded refresh, not one per request
-    assert time.monotonic() - plans._loaded_at[key] < 1.0 and not plans._refreshing
+    assert time.monotonic() - plans._loaded_at[key] < 1.0 and not plans._refresh_tasks
 
 
 async def test_invalidation_during_a_refresh_is_not_overwritten_by_the_stale_load(world, monkeypatch):
@@ -493,7 +642,7 @@ async def test_terms_too_common_in_a_big_kb_are_dropped_before_ranking(pool, wor
                                                 approx_chunks=100000)
         small_kb = await repo.lexical_search(conn, [str(kb["id"])], "widget boilerplate", 10, 0.0, approx_chunks=100)
     assert [m.document_title for m in mixed] == ["Rare"]  # 'widget' (df 9 >= 5) dropped, 'zorblax' kept
-    assert only_common == []  # nothing discriminating: dense answers such queries
+    assert [m.document_title for m in only_common] != []  # all-common query: its 2 rarest terms, ANDed, are kept
     assert len(small_kb) >= 8  # small KBs are not probed: ranking them is cheap
 
 
@@ -581,3 +730,210 @@ async def test_a_lone_oversized_prompt_doc_is_truncated_not_dropped_and_the_top_
     assert len(texts[0].split()) == 10  # prompt doc cut to half the budget
     assert len(texts) == 2 and texts[1].startswith("Refunds processed") and len(texts[1].split()) == 10  # truncated, not dropped
     assert result["token_count"] <= 20
+
+
+# === round 3 ===================================================================================================
+
+# --- 5. Redis flag namespace ---------------------------------------------------------------------------------
+
+async def test_redis_flag_uses_a_new_namespace_has_a_ttl_and_legacy_keys_are_purged():
+    client = cache.get_client()
+    suffix = uuid.uuid4().hex[:6]
+    tenant, agent = f"4{suffix}", "acme:bot"
+    legacy = f"agent_kb:{tenant}:{agent}"
+    try:
+        await client.set(legacy, "1")  # what the old writer left behind, no TTL
+        new_key = cache._agent_kb_key(f"acme{suffix}", "bot")
+        assert not new_key.startswith("agent_kb:")  # the old tenant/agent pair can never be byte-identical now
+        await cache.set_has_enabled_kb(f"acme{suffix}", "bot", True)
+        assert await cache.get_has_enabled_kb(f"acme{suffix}", "bot") is True
+        assert 0 < await client.ttl(new_key) <= 7 * 24 * 3600
+        assert await cache.get_has_enabled_kb(tenant, agent) is None  # the legacy key is never read
+        assert await cache.purge_legacy_keys() >= 1
+        assert await client.exists(legacy) == 0
+    finally:
+        await client.delete(legacy, cache._agent_kb_key(f"acme{suffix}", "bot"))
+
+
+# --- 6. redaction ------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw", [
+    "call 415.555.0199 now", "call 415,555,0199 now", "call 415/555/0199", "call 415_555_0199", "call 415  555  0199",
+    "call 415 - 555 - 0199", "card 4111-1111-1111-1111", "card 4111 1111 1111 1111",
+    "digits ４１５５５５０１９９",  # fullwidth
+    "number ९८७६५४३२१०",  # Devanagari
+    "it is four one five five five five zero one nine nine", "four, one, five, five, five, zero",
+])
+def test_redaction_catches_other_separators_unicode_digits_and_spoken_digits(raw):
+    out = retrieval_log.redact_query(raw)
+    assert "[digits]" in out, out
+    assert not any(ch.isdigit() for ch in out.replace("[digits]", "")), out
+
+
+def test_redaction_keeps_ordinary_numbers_and_words():
+    for text in ("I need 3 tickets", "room twenty one", "one two three", "call at 5 to 6 pm"):
+        assert retrieval_log.redact_query(text) == text
+
+
+# --- 7. body size cap --------------------------------------------------------------------------------------
+
+async def test_oversized_bodies_get_413_without_echo_by_header_and_while_streaming():
+    from services.knowledge.app import app
+    big = '{"tenant_slug":"t","agent_slug":"a","query":"' + "SECRETQUERY" * 20000 + '"}'
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for path in ("/internal/retrieve", "/internal/prewarm"):
+            by_header = await client.post(path, content=big, headers={"content-type": "application/json"})
+            assert by_header.status_code == 413 and "SECRETQUERY" not in by_header.text
+
+            async def stream():
+                for i in range(0, len(big), 8192):
+                    yield big[i:i + 8192].encode()
+            streamed = await client.post(path, content=stream(), headers={"content-type": "application/json"})
+            assert streamed.status_code == 413 and "SECRETQUERY" not in streamed.text
+        small = await client.post("/internal/retrieve", json={"tenant_slug": "t", "agent_slug": "a", "query": "q"})
+        assert small.status_code in (401, 403)  # reaches the endpoint (and auth), not the size cap
+
+
+# --- 8. purge index ----------------------------------------------------------------------------------------
+
+async def test_purge_query_can_use_the_created_at_index(pool):
+    async with pool.acquire() as conn:
+        tx = conn.transaction()
+        await tx.start()
+        try:
+            await conn.execute("SELECT set_config('enable_seqscan', 'off', true)")
+            plan = "\n".join(r[0] for r in await conn.fetch(
+                "EXPLAIN SELECT id FROM retrieval_logs WHERE created_at < now() - make_interval(days => 30) LIMIT 1000"))
+        finally:
+            await tx.rollback()
+    assert "idx_retrieval_logs_created" in plan, plan
+
+
+def test_log_bucket_defaults_bound_volume_to_5_rows_a_second_burst_20():
+    assert retrieval_log._RATE_PER_S == 5.0 and retrieval_log._BURST == 20.0
+
+
+# --- 9/10. lexical term cache and the common-words fallback ------------------------------------------------
+
+async def _fill_common(pool, t, kb, n=8):
+    for i in range(n):
+        await add_document(pool, t, kb, f"Common {i}", [f"widget gadget notes number {i}"], embed=False)
+
+
+async def test_absent_and_present_term_probes_are_cached(pool, world, monkeypatch):
+    t, kb = world["tenant"], world["kb"]
+    await _fill_common(pool, t, kb)
+    repo = PgVectorRepository()
+    probes = []
+    original = asyncpg.Connection.fetch
+
+    async def spy(self, query, *args, **kw):
+        if "unnest($1::text[])" in query:
+            probes.append(args[0])
+        return await original(self, query, *args, **kw)
+    monkeypatch.setattr(asyncpg.Connection, "fetch", spy)
+    async with tenant_conn(pool) as conn:
+        for _ in range(3):
+            await repo.lexical_search(conn, [str(kb["id"])], "widget qqqabsent", 5, 0.0, approx_chunks=100000)
+    assert len(probes) == 1 and set(probes[0]) == {"widget", "qqqabsent"}  # df 0 is cached too (short TTL)
+    key = f"df:{kb['id']}:qqqabsent"
+    assert repo._df_absent.get(key) == 0 and repo._df.get(key) is None
+
+
+async def test_a_query_of_only_common_words_falls_back_to_the_two_rarest_anded_and_says_so(pool, world, monkeypatch):
+    t, a, kb = world["tenant"], world["agent"], world["kb"]
+    monkeypatch.setattr(vr, "_MAX_TERM_DF", 5)
+    monkeypatch.setattr(vr, "_SMALL_KB_CHUNKS", 0)  # probe even this small KB
+    await _fill_common(pool, t, kb)
+    repo = PgVectorRepository()
+    notes = []
+    async with tenant_conn(pool) as conn:
+        found = await repo.lexical_search(conn, [str(kb["id"])], "widget gadget notes", 10, 0.0,
+                                          approx_chunks=100000, notes=notes)
+    assert len(found) == 8 and notes == ["lexical_terms_dropped"]
+    # Embedder down: before this fix such a question got no chunks at all.
+    result = await _run(t, a, FakeEmbedder(fail=True), "widget gadget notes", repo=PgVectorRepository())
+    assert result["status"] == "partial" and len(result["chunks"]) >= 1
+    assert {"lexical_only", "lexical_terms_dropped"} <= set(result["degraded"])
+    # Dense up: not mislabelled no_match.
+    result = await _run(t, a, world["embedder"], "widget gadget notes", repo=PgVectorRepository())
+    assert result["status"] == "ok" and "lexical_terms_dropped" in result["degraded"]
+
+
+# --- 11. prompt documents are ordered deterministically -----------------------------------------------------
+
+async def test_prompt_docs_surviving_the_half_budget_cap_are_the_oldest_every_time(pool, world):
+    t, a, kb = world["tenant"], world["agent"], world["kb"]
+    docs = []
+    for i in range(4):  # inserted newest-first, so heap order is the reverse of age
+        docs.append(await add_document(pool, t, kb, f"P{i}", [" ".join(f"p{i}w{j}" for j in range(30))],
+                                       usage_mode="prompt", embed=False))
+    for age, doc in enumerate(docs):  # P0 is the youngest, P3 the oldest
+        await pool.execute("UPDATE kb_documents SET created_at = now() - make_interval(days => $1) WHERE id = $2",
+                           age + 1, doc["id"])
+    for _ in range(3):
+        plans.clear_cache()
+        result = await _run(t, a, world["embedder"], "refunds processed days", max_tokens=70)
+        kept = [c["source"]["document_title"] for c in result["chunks"] if c["source"]["document_title"].startswith("P")]
+        assert kept == ["P3"], kept  # cap 35 tokens: only the oldest 30-token document fits
+
+
+# --- 12. background refresh tasks are tracked and stopped before the pool closes ------------------------------
+
+async def test_shutdown_cancels_background_refreshes_and_blocks_new_ones(world, monkeypatch):
+    t, a = world["tenant"], world["agent"]
+    await _run(t, a, world["embedder"], "refunds processed days")
+    key = cache.plan_key(t["slug"], a["slug"])
+    plans._loaded_at[key] = time.monotonic() - plans._PLAN_TTL_S
+    release = asyncio.Event()
+
+    async def hanging(conn, *args):
+        await release.wait()
+
+    monkeypatch.setattr(plans, "load_plan", hanging)
+    await _run(t, a, world["embedder"], "refunds processed days")  # starts the refresh
+    await asyncio.sleep(0.05)
+    task = plans._refresh_tasks[key]
+    assert not task.done()
+    try:
+        await plans.shutdown()
+        assert task.done() and plans._refresh_tasks == {}
+        plans._loaded_at[key] = time.monotonic() - plans._PLAN_TTL_S
+        await _run(t, a, world["embedder"], "refunds processed days")
+        assert plans._refresh_tasks == {}  # closed: no new refresh may start (it could reopen the pool)
+    finally:
+        plans.startup()
+
+
+# --- 13. invalidation is per tenant -------------------------------------------------------------------------
+
+async def test_one_tenants_document_edit_leaves_other_tenants_plans_cached(pool, world):
+    t, a, kb = world["tenant"], world["agent"], world["kb"]
+    other_t, other_a, cleanup = await _make_tenant(pool, f"other-{uuid.uuid4().hex[:6]}", "bot", "OTHER-PROMPT")
+    try:
+        doc = await add_document(pool, t, kb, "Edit me", ["x"], usage_mode="prompt", embed=False)
+        for tenant, agent in ((t, a), (other_t, other_a)):
+            set_caller_tenant(str(tenant["id"]))
+            await retrieve(None, PgVectorRepository(), make_manager(FakeEmbedder()), tenant_slug=tenant["slug"],
+                           agent_slug=agent["slug"], query="anything")
+        set_caller_tenant(None)
+        assert plans.cached_plan(t["slug"], a["slug"]) is not None
+        assert plans.cached_plan(other_t["slug"], other_a["slug"]) is not None
+        set_caller_tenant(str(t["id"]))
+        await documents_service.update_document(doc["id"], title="Edited")
+        set_caller_tenant(None)
+        assert plans.cached_plan(t["slug"], a["slug"]) is None  # the editing tenant's plan is evicted...
+        assert plans.cached_plan(other_t["slug"], other_a["slug"]) is not None  # ...nobody else's
+    finally:
+        set_caller_tenant(None)
+        await cleanup()
+
+
+# --- 14. the prewarm route keeps authorising the tenant -----------------------------------------------------
+
+def test_prewarm_route_still_authorises_the_tenant_before_doing_anything():
+    import inspect
+    from services.knowledge.routers import prewarm
+    src = inspect.getsource(prewarm.prewarm)
+    assert "assert_tenant_access(body.tenant_slug, current_user)" in src
+    assert src.index("assert_tenant_access") < src.index("set_target_tenant") < src.index("retrieval_plan.prewarm")

@@ -10,7 +10,8 @@ import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -45,9 +46,11 @@ class RetrievalConfig:
     # A top hit supported only by lexical evidence is low_confidence unless it scores at least this much
     # (about three matching terms in a 12-word chunk). minimum_score applies to dense similarity only.
     lexical_confident_score: float = 0.3
-    # Admission: in-flight retrievals per process, and per tenant. A retrieval holds up to 3 pool connections
-    # when the caller keeps one, so the default is (pool_max - 4) // 3, well below pool_max / 2.
-    max_inflight: int = 5
+    # Admission: in-flight retrievals per process, and per tenant. With conn=None a retrieval holds 2 pool
+    # connections (a caller that keeps its own connection makes the search sequential: 0 extra). Global default =
+    # max(2, (pool_max - 2) // 2) leaves 2 connections for plan loads, the log writer and admin traffic; the
+    # per-tenant default is a third of that (min 1) so one tenant cannot take every slot.
+    max_inflight: int = 9
     tenant_max_inflight: int = 3
     queue_wait_s: float = 0.150
     acquire_timeout_s: float = 0.060  # waiting longer than this for a pool connection means overload
@@ -56,6 +59,8 @@ class RetrievalConfig:
     @classmethod
     def from_env(cls) -> "RetrievalConfig":
         d = cls()
+        max_inflight = int(_env_float(
+            "KNOWLEDGE_RETRIEVAL_MAX_INFLIGHT", max(2, (_env_float("KNOWLEDGE_DB_POOL_MAX", 20) - 2) // 2)))
         return cls(
             embed_timeout_s=_env_float("KNOWLEDGE_EMBED_TIMEOUT_MS", d.embed_timeout_s * 1000) / 1000,
             dense_timeout_s=_env_float("KNOWLEDGE_DENSE_TIMEOUT_MS", d.dense_timeout_s * 1000) / 1000,
@@ -68,9 +73,8 @@ class RetrievalConfig:
             low_confidence_gap=_env_float("KNOWLEDGE_LOW_CONFIDENCE_GAP", d.low_confidence_gap),
             lexical_min_score=_env_float("KNOWLEDGE_LEXICAL_MIN_SCORE", d.lexical_min_score),
             lexical_confident_score=_env_float("KNOWLEDGE_LEXICAL_CONFIDENT_SCORE", d.lexical_confident_score),
-            max_inflight=int(_env_float(
-                "KNOWLEDGE_RETRIEVAL_MAX_INFLIGHT", max(2, (_env_float("KNOWLEDGE_DB_POOL_MAX", 20) - 4) // 3))),
-            tenant_max_inflight=int(_env_float("KNOWLEDGE_RETRIEVAL_TENANT_MAX_INFLIGHT", d.tenant_max_inflight)),
+            max_inflight=max_inflight,
+            tenant_max_inflight=int(_env_float("KNOWLEDGE_RETRIEVAL_TENANT_MAX_INFLIGHT", max(1, max_inflight // 3))),
             queue_wait_s=_env_float("KNOWLEDGE_RETRIEVAL_QUEUE_WAIT_MS", d.queue_wait_s * 1000) / 1000,
             acquire_timeout_s=_env_float("KNOWLEDGE_POOL_ACQUIRE_TIMEOUT_MS", d.acquire_timeout_s * 1000) / 1000,
             max_query_chars=int(_env_float("KNOWLEDGE_RETRIEVAL_MAX_QUERY_CHARS", d.max_query_chars)),
@@ -188,23 +192,34 @@ class _BoundedAcquire:
         return await self._cm.__aexit__(*exc_info)
 
 
-@dataclass
+@dataclass(eq=False)
 class _Waiter:
     key: str
     max_inflight: int
     tenant_max: int
-    fut: "asyncio.Future[None]" = field(default_factory=lambda: asyncio.get_running_loop().create_future())
+    fut: "asyncio.Future[bool]"
+    granted: bool = False
 
 
 class AdmissionLimiter:
-    """In-process cap on concurrent retrievals, overall and per tenant, FIFO with a short bounded wait.
+    """In-process cap on concurrent retrievals, overall and per tenant, with a short bounded wait.
     It protects the DB pool: past the cap a caller gets a typed 'overloaded' answer quickly instead of every
-    request fighting for connections and timing out."""
+    request fighting for connections and timing out.
+
+    Admission: a new arrival is admitted at once whenever a global slot is free and its own tenant is under its
+    cap, whatever other tenants have queued; a tenant at its cap queues only itself. Waiters queue per tenant and
+    freed slots are handed out round-robin across tenants, so one tenant's backlog cannot starve the others.
+
+    Ownership: a slot has exactly one owner at every instant. A grant (counters incremented, waiter.granted set,
+    future resolved) transfers ownership to the waiter; if the waiter is cancelled or fails after that, the
+    except-path in acquire() returns the slot. Nothing here relies on wait_for/shield semantics, which differ
+    between Python 3.11 and 3.12+."""
 
     def __init__(self) -> None:
         self._total = 0
         self._per: dict[str, int] = {}
-        self._waiters: list[_Waiter] = []
+        self._queues: dict[str, deque[_Waiter]] = {}
+        self._order: deque[str] = deque()  # tenants with a queue, in round-robin order
 
     def _fits(self, key: str, max_inflight: int, tenant_max: int) -> bool:
         return self._total < max_inflight and self._per.get(key, 0) < tenant_max
@@ -214,25 +229,46 @@ class AdmissionLimiter:
         self._per[key] = self._per.get(key, 0) + 1
 
     async def acquire(self, key: str, cfg: RetrievalConfig, wait_s: float) -> bool:
-        if not self._waiters and self._fits(key, cfg.max_inflight, cfg.tenant_max_inflight):
+        if self._fits(key, cfg.max_inflight, cfg.tenant_max_inflight):
             self._take(key)
             return True
         if wait_s <= 0:
             return False
-        waiter = _Waiter(key, cfg.max_inflight, cfg.tenant_max_inflight)
-        self._waiters.append(waiter)
+        loop = asyncio.get_running_loop()
+        waiter = _Waiter(key, cfg.max_inflight, cfg.tenant_max_inflight, loop.create_future())
+        if key not in self._queues:
+            self._queues[key] = deque()
+            self._order.append(key)
+        self._queues[key].append(waiter)
+        timer = loop.call_later(wait_s, self._expire, waiter)
         try:
-            await asyncio.wait_for(asyncio.shield(waiter.fut), timeout=wait_s)
-            return True
-        except asyncio.TimeoutError:
-            if waiter.fut.done() and not waiter.fut.cancelled():  # a slot was handed over as we timed out
-                self.release(key)
-            return False
+            return await waiter.fut
+        except BaseException:  # cancelled (or anything else) while queued or just granted
+            if waiter.granted:
+                self.release(key)  # the slot was handed over before we could use it: give it back
+            raise
         finally:
-            if waiter in self._waiters:
-                self._waiters.remove(waiter)
-            if not waiter.fut.done():
-                waiter.fut.cancel()
+            timer.cancel()
+            self._discard(waiter)
+
+    def _expire(self, waiter: _Waiter) -> None:
+        if not waiter.fut.done():
+            waiter.fut.set_result(False)
+            self._discard(waiter)
+
+    def _discard(self, waiter: _Waiter) -> None:
+        queue = self._queues.get(waiter.key)
+        if queue is not None:
+            try:
+                queue.remove(waiter)
+            except ValueError:
+                pass
+            if not queue:
+                del self._queues[waiter.key]
+                try:
+                    self._order.remove(waiter.key)
+                except ValueError:
+                    pass
 
     def release(self, key: str) -> None:
         self._total -= 1
@@ -241,13 +277,36 @@ class AdmissionLimiter:
             self._per.pop(key, None)
         else:
             self._per[key] = left
-        for waiter in list(self._waiters):
-            if waiter.fut.done():
-                self._waiters.remove(waiter)
-            elif self._fits(waiter.key, waiter.max_inflight, waiter.tenant_max):
-                self._waiters.remove(waiter)
-                self._take(waiter.key)
-                waiter.fut.set_result(None)
+        self._wake()
+
+    def _wake(self) -> None:
+        """Hand freed slots to queued waiters, round-robin across tenants, skipping tenants at their cap."""
+        while self._order:
+            granted = False
+            for key in list(self._order):
+                queue = self._queues.get(key)
+                while queue and queue[0].fut.done():  # cancelled or expired while queued
+                    queue.popleft()
+                if not queue:
+                    self._queues.pop(key, None)
+                    self._order.remove(key)
+                    continue
+                head = queue[0]
+                if self._fits(key, head.max_inflight, head.tenant_max):
+                    queue.popleft()
+                    if not queue:
+                        del self._queues[key]
+                        self._order.remove(key)
+                    else:
+                        self._order.remove(key)
+                        self._order.append(key)  # next freed slot goes to the next tenant
+                    self._take(key)
+                    head.granted = True
+                    head.fut.set_result(True)
+                    granted = True
+                    break
+            if not granted:
+                return
 
     @property
     def in_flight(self) -> int:

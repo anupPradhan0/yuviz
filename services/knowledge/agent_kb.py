@@ -145,4 +145,5 @@ async def has_enabled_kb(tenant_slug: str, agent_slug: str) -> bool:
             ") AS has_kb",
             tenant_slug, agent_slug,
         )
+    await cache.set_has_enabled_kb(tenant_slug, agent_slug, bool(row["has_kb"]))  # refill after an expiry
     return bool(row["has_kb"])

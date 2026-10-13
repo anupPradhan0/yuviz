@@ -270,6 +270,8 @@ CREATE TABLE IF NOT EXISTS retrieval_logs (
 
 CREATE INDEX IF NOT EXISTS idx_retrieval_logs_tenant_time ON retrieval_logs(tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_retrieval_logs_trace ON retrieval_logs(trace_id);
+-- The retention purge filters on created_at across every tenant; the index above leads with tenant_id.
+CREATE INDEX IF NOT EXISTS idx_retrieval_logs_created ON retrieval_logs(created_at);
 
 -- knowledge_base_ids is default-deny: give the start node the agent's enabled KBs
 -- when no node in the graph lists any.

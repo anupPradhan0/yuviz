@@ -1,5 +1,5 @@
 """Caches for Knowledge Service.
-Redis: write-through, no TTL: agent_kb:{len}:{tenant}:{agent} -> "1"/"0"; an outage degrades to a cache miss (Postgres).
+Redis: write-through, expiring (7 d; a miss re-reads Postgres and refills): kbflag2:{len}:{tenant}:{agent} -> "1"/"0"; an outage degrades to a cache miss (Postgres).
 In-process (TTLCache): the resolved retrieval plan and query embeddings, both on the retrieval hot path. Every
 key carries the tenant (slug prefix or tenant/config UUID) so tests/test_rls_coverage.py's tripwire holds."""
 
@@ -36,15 +36,34 @@ async def close() -> None:
         _client = None
 
 
+# New namespace: the legacy "agent_kb:{tenant}:{agent}" keys are not injective (tenant "4" + agent "acme:bot"
+# is byte-identical to the length-prefixed key for acme/bot), so nothing ever reads or writes that prefix again;
+# purge_legacy_keys() deletes what is left.
+_LEGACY_PREFIX = "agent_kb:"
+_FLAG_TTL_S = int(os.environ.get("KNOWLEDGE_AGENT_KB_FLAG_TTL_S", str(7 * 24 * 3600)))
+
+
 def _agent_kb_key(tenant_slug: str, agent_slug: str) -> str:
-    # Injective (see slug_key): the old agent_kb:{t}:{a} shape could collide across tenants. Old keys are
-    # orphaned and read as a miss, which falls back to Postgres.
-    return slug_key("agent_kb", tenant_slug, agent_slug)
+    return slug_key("kbflag2", tenant_slug, agent_slug)
+
+
+async def purge_legacy_keys(batch: int = 500) -> int:
+    """Best-effort SCAN + DELETE of the pre-injective keys (they have no TTL). Returns how many were deleted."""
+    deleted = 0
+    try:
+        client = get_client()
+        keys = [k async for k in client.scan_iter(match=_LEGACY_PREFIX + "*", count=batch)]
+        for i in range(0, len(keys), batch):
+            deleted += await client.delete(*keys[i:i + batch])
+    except redis.RedisError:
+        log.warning("cache.purge_legacy_keys: Redis unreachable, skipping")
+    return deleted
 
 
 async def set_has_enabled_kb(tenant_slug: str, agent_slug: str, enabled: bool) -> None:
     try:
-        await get_client().set(_agent_kb_key(tenant_slug, agent_slug), "1" if enabled else "0")
+        await get_client().set(
+            _agent_kb_key(tenant_slug, agent_slug), "1" if enabled else "0", ex=_FLAG_TTL_S)
     except redis.RedisError:
         log.warning(
             "cache.set_has_enabled_kb: Redis unreachable, skipping write "
@@ -92,6 +111,10 @@ class TTLCache:
 
     def delete(self, key: str) -> None:
         self._data.pop(key, None)
+
+    def delete_where(self, predicate: Callable[[Any], bool]) -> None:
+        for key in [k for k, (_, v) in self._data.items() if predicate(v)]:
+            del self._data[key]
 
     def delete_prefix(self, prefix: str) -> None:
         for key in [k for k in self._data if k.startswith(prefix)]:

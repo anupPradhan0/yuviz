@@ -62,6 +62,7 @@ class IVectorRepository(Protocol):
         limit: int,
         minimum_score: float,
         approx_chunks: int | None = None,
+        notes: list[str] | None = None,
     ) -> list[VectorMatch]: ...
 
 
@@ -85,12 +86,12 @@ def query_terms(query: str) -> list[str]:
     return terms
 
 
-def tsquery_from_terms(terms: list[str]) -> str | None:
+def tsquery_from_terms(terms: list[str], op: str = " | ") -> str | None:
     """OR of the terms as a to_tsquery('simple', ...) string; None if there are none.
     OR, not plainto_tsquery's AND: a spoken question rarely contains every word of the passage that answers it,
     and ts_rank_cd already prefers the chunks that match more of the terms. Tokens are \\w+ only, so quoting
     them is enough to keep user text out of tsquery syntax."""
-    return " | ".join(f"'{t}'" for t in terms) if terms else None
+    return op.join(f"'{t}'" for t in terms) if terms else None
 
 
 def build_tsquery(query: str) -> str | None:
@@ -99,13 +100,17 @@ def build_tsquery(query: str) -> str | None:
 
 # On a KB bigger than _SMALL_KB_CHUNKS a term found in >= _MAX_TERM_DF (2000) chunks is too common to discriminate and
 # ranking every chunk it matches costs more than the lexical budget (a common-word query on 100k chunks took
-# 0.4-2.7 s). Such terms are dropped, the rarest _MAX_LEXICAL_TERMS of the rest are kept, and a query made only
-# of common words contributes nothing lexically (dense still answers it).
+# 0.4-2.7 s). Such terms are dropped and the rarest _MAX_LEXICAL_TERMS of the rest are kept. A query made only of
+# common words keeps its 2 rarest (longest on a tie, document frequencies are capped) and ANDs them over at most
+# _FALLBACK_CANDIDATES arbitrary matches, so the cost stays bounded; the caller is told via the
+# "lexical_terms_dropped" note whenever any term was dropped.
 _SMALL_KB_CHUNKS = 3000
 _MAX_TERM_DF = int(os.environ.get("KNOWLEDGE_LEXICAL_MAX_TERM_DF", "2000"))
 _MAX_LEXICAL_TERMS = 4
 _MAX_TOTAL_DF = 6000  # bound on the rows ranked: the kept terms' document frequencies sum to at most this
 _DF_TTL_S = 600.0
+_DF_ABSENT_TTL_S = 60.0  # df == 0: re-check soon, a document containing the word may be ingested any minute
+_FALLBACK_CANDIDATES = 2000
 
 _DF_SQL = """
     SELECT t AS term, (SELECT count(*) FROM (
@@ -155,6 +160,13 @@ _LEXICAL_SQL = f"""
 """
 
 
+_LEXICAL_CAPPED_SQL = _LEXICAL_SQL.replace(
+    "WHERE c.kb_id = ANY($2::uuid[]) AND NOT c.is_parent AND c.tsv @@ q.tsq\n    )",
+    "WHERE c.kb_id = ANY($2::uuid[]) AND NOT c.is_parent AND c.tsv @@ q.tsq\n        LIMIT $6\n    )",
+)
+assert "LIMIT $6" in _LEXICAL_CAPPED_SQL
+
+
 def _to_match(row: asyncpg.Record, found_by: str) -> VectorMatch:
     has_parent = row["parent_content"] is not None
     content = row["parent_content"] if has_parent else row["child_content"]
@@ -189,6 +201,7 @@ class PgVectorRepository:
 
         # Capped document frequency per (KB set, term). The key carries the KB UUIDs, so it is tenant-scoped.
         self._df = TTLCache(ttl_s=_DF_TTL_S, max_entries=20000)
+        self._df_absent = TTLCache(ttl_s=_DF_ABSENT_TTL_S, max_entries=20000)
         # None = not probed; "session" = iterative scan already on for every connection (db.get_pool sets it
         # as a startup parameter, so it survives asyncpg's RESET ALL); "local" = set it per transaction;
         # "fallback" = pgvector < 0.8, widen ef_search instead.
@@ -215,24 +228,30 @@ class PgVectorRepository:
         elif self._hnsw_mode == "fallback":
             await conn.execute("SELECT set_config('hnsw.ef_search', $1, true)", str(_HNSW_FALLBACK_EF_SEARCH))
 
-    async def _discriminating_terms(self, conn: asyncpg.Connection, kb_ids: list[str], terms: list[str]) -> list[str]:
-        scope = ",".join(sorted(kb_ids))
+    async def _discriminating_terms(
+        self, conn: asyncpg.Connection, kb_ids: list[str], terms: list[str],
+    ) -> tuple[list[str], bool, int]:
+        """(terms to search, True if they must be ANDed over a capped candidate set, how many were dropped)."""
+        scope = ",".join(sorted(kb_ids))  # KB UUIDs: the key is tenant-scoped
         known: dict[str, int] = {}
         unknown: list[str] = []
         for term in terms:
+            if self._df_absent.get(f"df:{scope}:{term}") is not None:
+                known[term] = 0
+                continue
             df = self._df.get(f"df:{scope}:{term}")
             if df is None:
                 unknown.append(term)
             else:
                 known[term] = df
-        if unknown:  # one statement for all unseen terms; later queries hit the cache
+        if unknown:  # one statement for all unseen terms; later queries hit the caches
             rows = await conn.fetch(_DF_SQL, unknown, kb_ids, _MAX_TERM_DF)
             for row in rows:
                 known[row["term"]] = row["df"]
-                if row["df"] > 0:  # a term nobody has used yet may be ingested any minute: never cache "absent"
-                    self._df.set(f"df:{scope}:{row['term']}", row["df"])
-        usable = [t for t in terms if 0 < known.get(t, _MAX_TERM_DF) < _MAX_TERM_DF]
-        usable.sort(key=lambda t: (known[t], -len(t)))
+                (self._df if row["df"] > 0 else self._df_absent).set(f"df:{scope}:{row['term']}", row["df"])
+        present = [t for t in terms if known.get(t, 0) > 0]  # df 0 matches nothing: no need to search it
+        present.sort(key=lambda t: (known[t], -len(t)))
+        usable = [t for t in present if known[t] < _MAX_TERM_DF]
         kept: list[str] = []
         total = 0
         for term in usable[:_MAX_LEXICAL_TERMS]:
@@ -240,7 +259,11 @@ class PgVectorRepository:
                 break
             kept.append(term)
             total += known[term]
-        return kept
+        if kept:
+            return kept, False, len(present) - len(kept)
+        if present:  # only common words: AND the 2 rarest over a capped candidate set instead of searching nothing
+            return present[:2], True, len(present) - min(2, len(present))
+        return [], False, 0
 
     async def search(
         self,
@@ -270,12 +293,21 @@ class PgVectorRepository:
         limit: int,
         minimum_score: float,
         approx_chunks: int | None = None,
+        notes: list[str] | None = None,
     ) -> list[VectorMatch]:
         terms = query_terms(query)
+        capped_and = False
+        dropped = 0
         if kb_ids and terms and (approx_chunks is None or approx_chunks > _SMALL_KB_CHUNKS):
-            terms = await self._discriminating_terms(conn, kb_ids, terms)
-        tsquery = tsquery_from_terms(terms)
+            terms, capped_and, dropped = await self._discriminating_terms(conn, kb_ids, terms)
+        if dropped and notes is not None:
+            notes.append("lexical_terms_dropped")
+        tsquery = tsquery_from_terms(terms, " & " if capped_and else " | ")
         if not kb_ids or tsquery is None:  # nothing searchable in the query: no round trip
             return []
-        rows = await conn.fetch(_LEXICAL_SQL, tsquery, kb_ids, limit, SEARCHABLE_STATUSES, minimum_score)
+        if capped_and:
+            rows = await conn.fetch(_LEXICAL_CAPPED_SQL, tsquery, kb_ids, limit, SEARCHABLE_STATUSES, minimum_score,
+                                    _FALLBACK_CANDIDATES)
+        else:
+            rows = await conn.fetch(_LEXICAL_SQL, tsquery, kb_ids, limit, SEARCHABLE_STATUSES, minimum_score)
         return [_to_match(row, "lexical") for row in rows]

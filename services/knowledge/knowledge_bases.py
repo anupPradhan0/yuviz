@@ -106,7 +106,7 @@ async def update_knowledge_base(
             conn, entity_type="knowledge_base", entity_id=kb_id, action="updated",
             user_id=user_id, user_email=user_email, old_value=old, new_value=new,
         )
-    plans.clear_cache()  # a KB edit can change any agent's resolved retrieval plan
+    plans.invalidate_tenant_id(old["tenant_id"])  # a KB edit can change any of the tenant's agents' plans
     return new
 
 
@@ -134,4 +134,4 @@ async def soft_delete_knowledge_base(
             conn, entity_type="knowledge_base", entity_id=kb_id, action="deleted",
             user_id=user_id, user_email=user_email, old_value=old,
         )
-    plans.clear_cache()
+    plans.invalidate_tenant_id(old["tenant_id"])
