@@ -22,7 +22,7 @@ network. Measured on macOS with the production `spawn()` and `harden()`, a compr
   the limit (default 1024 MB, minimum 256 MB; a lower `KB_PARSE_MEMORY_MB` is raised with a warning). A long C call that holds the
   GIL delays the child guard; the parent still covers it. Any breach SIGKILLs the process group
 - size pre-checks before anything is built: decompressed bytes, XLSX declared cells, CSV columns and cells, DOCX/PPTX paragraphs, a
-  general cap on total XML/HTML elements, HTML nesting depth, PDF page content and repeated shared streams, characters
+  per-format element caps (DOCX/PPTX 2.5M XML elements, XLSX 3x its 2M-cell cap, HTML 500k; ordinary 1,000-page documents and 30k-row spreadsheets are far below them), HTML nesting depth (real open-tag nesting) and stylesheet size/rules/selectors/time, PDF page content and repeated shared streams, characters
 - child stderr is never logged verbatim: only lines carrying this run's nonce are logged (escaped, capped), and a failure logs the
   return code or signal and the final exception class only
 - Linux only, best effort, each failure reported and parsing continues: `RLIMIT_CPU/FSIZE/CORE/NOFILE/AS`, `RLIMIT_NPROC=1` (only when no
@@ -77,8 +77,14 @@ services:
 Until this is in place, treat PDF/Office parsing as untrusted-code execution on the worker host: keep `KNOWLEDGE_BINARY_PARSERS=0` for any tenant you do not
 trust, and get the risk accepted in writing for any tenant you do.
 
+PDF pages heavier than `KB_PARSE_PDF_PAGE_BYTES` (2 MB of decoded content), pages sharing a large stream, and extraction past `KB_PARSE_PDF_BUDGET_S` (25 s) are skipped
+rather than rejected: the rest of the document is kept and marked `ready_degraded` with the reason (a PDF with nothing readable still fails). The memory watchdog polls
+fast only while memory is large or growing and backs off to 0.5 s when it is small and flat (reading `/proc` on Linux, `ps` elsewhere), because the child's own guard is the
+fast backstop; polling `ps` every 20 ms cost about half a core per parse on the test host.
+
 ## Content that is dropped on purpose
 Hidden or invisible content is removed by default and counted in the `extract` ingestion event (`hidden_removed`). This is best effort, not a guarantee:
+- **HTML (collapsed content):** closed `<details>`, `aria-expanded=false` panels, Bootstrap `.collapse` panels and hidden tab panels are dropped by default and counted as `html_collapsed`, separately from `html_hidden_elements`. This is a policy choice: a FAQ answer behind an accordion is real content, but collapsing is also the classic way to hide injected text. Set `KNOWLEDGE_KEEP_COLLAPSED_CONTENT=1` to index them (plain `display:none` text is still dropped).
 - **HTML:** `hidden`, `aria-hidden`, `<input type=hidden>`; inline styles and `<style>` rules (matched with CSS selectors, specificity not modelled, `@media` ignored) for
   `display:none`, `visibility:hidden`, near-zero `opacity`, tiny or zero `font-size`, `color:transparent`, `clip`/`clip-path`, large negative offsets and `text-indent`, zero-size with
   `overflow:hidden`, and white text where no ancestor paints a non-white background. There is no tag-stripping fallback (it cannot see CSS and would index exactly this text): a page the
