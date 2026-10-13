@@ -2,8 +2,29 @@
 
 from __future__ import annotations
 
+import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+log = logging.getLogger(__name__)
+_WARNED_GARBAGE = False
+_TRUE = ("1", "true", "yes", "on")
+_FALSE = ("", "0", "false", "no", "off")
+
+
+def binary_parsers_enabled() -> bool:
+    """THE one place KNOWLEDGE_BINARY_PARSERS is read (Limits, the parser entry point, the upload route and the worker
+    all call this). PDF/Office parsing is OFF unless the operator sets it to 1/true/yes/on: it runs libraries that handle
+    hostile files in a child that is not contained (docs/knowledge-parser-sandbox.md), so an operator opts in once the
+    contained-worker deployment exists or the risk is accepted in writing. A value that is neither is OFF, with one warning."""
+    global _WARNED_GARBAGE
+    raw = os.environ.get("KNOWLEDGE_BINARY_PARSERS", "0").strip().lower()
+    if raw in _TRUE:
+        return True
+    if raw not in _FALSE and not _WARNED_GARBAGE:
+        _WARNED_GARBAGE = True
+        log.warning("KNOWLEDGE_BINARY_PARSERS=%r is not one of 1/true/yes/on or 0/false/no/off; PDF/Office parsing stays OFF", raw[:40])
+    return False
 
 
 def _env(name: str, default: float) -> float:
@@ -27,7 +48,7 @@ class Limits:
     pdf_budget_s: float = 25.0                  # wall clock for PDF text extraction across pages; extraction stops there
     timeout_s: float = 60.0                     # wall clock for the whole parse subprocess
     memory_mb: int = 1024                       # RSS cap enforced by the parent's watchdog (all platforms)
-    binary_parsers: bool = True                 # KNOWLEDGE_BINARY_PARSERS: False = no PDF/Office, HTML via pure-Python html.parser, no lxml
+    binary_parsers: bool = field(default_factory=binary_parsers_enabled)   # KNOWLEDGE_BINARY_PARSERS: False = no PDF/Office, HTML via pure-Python html.parser, no lxml
     keep_collapsed: bool = False                # HTML closed disclosures (details, collapsed panels) are dropped; 1 keeps them
     index_speaker_notes: bool = False           # PPTX notes are internal; off unless KNOWLEDGE_INDEX_SPEAKER_NOTES=1
 
@@ -49,7 +70,7 @@ class Limits:
             pdf_budget_s=_env("KB_PARSE_PDF_BUDGET_S", d.pdf_budget_s),
             timeout_s=_env("KB_PARSE_TIMEOUT_S", d.timeout_s),
             memory_mb=int(_env("KB_PARSE_MEMORY_MB", d.memory_mb)),
-            binary_parsers=os.environ.get("KNOWLEDGE_BINARY_PARSERS", "1").strip().lower() not in ("0", "false", "no", "off"),
+            binary_parsers=binary_parsers_enabled(),
             keep_collapsed=os.environ.get("KNOWLEDGE_KEEP_COLLAPSED_CONTENT", "").lower() in ("1", "true", "yes"),
             index_speaker_notes=os.environ.get("KNOWLEDGE_INDEX_SPEAKER_NOTES", "").lower() in ("1", "true", "yes"),
         )

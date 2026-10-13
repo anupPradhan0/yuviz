@@ -7,7 +7,7 @@ import dataclasses
 import os
 
 from .detect import DOCX, EMPTY, PDF, PPTX, SUPPORTED_CONTENT_TYPES, XLSX, detect_content_type
-from .limits import Limits
+from .limits import Limits, binary_parsers_enabled
 from .model import Block, ParsedDocument, ParseRejected
 from .sandbox import run_parse
 
@@ -17,14 +17,10 @@ _UNSUPPORTED_REASONS = {
 }
 
 
-# PDF and Office parsing is where the complex, exploitable libraries are. KNOWLEDGE_BINARY_PARSERS=0 turns it off (text,
-# markdown, HTML and CSV keep working) until parsing runs in a separate, contained service (docs/knowledge-parser-sandbox.md).
+# PDF and Office parsing is where the complex, exploitable libraries are. it is OFF by default; KNOWLEDGE_BINARY_PARSERS=1 turns it on (text,
+# markdown, HTML and CSV always work) until parsing runs in a separate, contained service (docs/knowledge-parser-sandbox.md).
 BINARY_TYPES = frozenset({PDF, DOCX, PPTX, XLSX})
 from .formats import BINARY_DISABLED_REASON  # noqa: E402  (one string, defined where the child can also use it)
-
-
-def binary_parsers_enabled() -> bool:
-    return os.environ.get("KNOWLEDGE_BINARY_PARSERS", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
 def unsupported_reason(detected: str) -> str:

@@ -727,11 +727,55 @@ async def test_binary_parsers_kill_switch_refuses_pdf_and_office_but_keeps_text_
     assert (await _parse(B.CSV_DATA)).parser_used == "csv"
 
 
-async def test_binary_parsers_are_on_by_default(monkeypatch):
-    monkeypatch.delenv("KNOWLEDGE_BINARY_PARSERS", raising=False)
-    assert (await _parse(B.docx_with_tables())).parser_used == "python-docx"
-    monkeypatch.setenv("KNOWLEDGE_BINARY_PARSERS", "1")
-    assert (await _parse(B.text_pdf())).parser_used == "pypdf"
+def test_the_shipped_default_is_off_in_a_clean_environment():
+    """The test session opts in (conftest); a fresh interpreter with no KNOWLEDGE_BINARY_PARSERS must be OFF."""
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": sandbox._REPO_ROOT}
+    code = ("from services.knowledge.parsers import binary_parsers_enabled, Limits, parse_document\nimport asyncio\n"
+            "print(binary_parsers_enabled(), Limits.from_env().binary_parsers, Limits().binary_parsers)\n"
+            "from services.knowledge.tests.corpus.builders import text_pdf\n"
+            "try:\n    asyncio.run(parse_document(text_pdf()))\n    print('parsed')\nexcept Exception as e:\n    print(type(e).__name__)")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, cwd=sandbox._REPO_ROOT, timeout=60)
+    assert r.stdout.split() == ["False", "False", "False", "ParseRejected"], (r.stdout, r.stderr[-400:])
+
+
+@pytest.mark.parametrize("value,expected", [("1", True), ("true", True), ("YES", True), (" on ", True),
+                                            ("0", False), ("false", False), ("", False), ("no", False)])
+def test_the_switch_values(monkeypatch, value, expected):
+    from services.knowledge.parsers import limits as L
+    monkeypatch.setenv("KNOWLEDGE_BINARY_PARSERS", value)
+    assert L.binary_parsers_enabled() is expected and L.Limits.from_env().binary_parsers is expected
+
+
+def test_garbage_values_fall_back_to_off_with_one_warning(monkeypatch, caplog):
+    from services.knowledge.parsers import limits as L
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(L, "_WARNED_GARBAGE", False)
+    monkeypatch.setenv("KNOWLEDGE_BINARY_PARSERS", "enabled-please")
+    assert L.binary_parsers_enabled() is False and L.binary_parsers_enabled() is False
+    assert len([r for r in caplog.records if "KNOWLEDGE_BINARY_PARSERS" in r.getMessage()]) == 1
+
+
+def test_there_is_one_reader_of_the_switch():
+    import pathlib
+    hits = [p.name for p in pathlib.Path(sandbox._REPO_ROOT, "services/knowledge").rglob("*.py")
+            if "tests" not in p.parts and 'environ.get("KNOWLEDGE_BINARY_PARSERS"' in p.read_text()]
+    assert hits == ["limits.py"]
+
+
+async def test_the_worker_fails_a_pdf_with_the_plain_reason_when_off(tenant_agent, pool, monkeypatch):
+    from services.knowledge.ingestion_worker import process_one_job
+    from services.knowledge.parsers import BINARY_DISABLED_REASON
+    from services.knowledge.storage import LocalStorageProvider
+    from services.knowledge.tests.test_ingestion_queue import _FakeProvider, _make_kb, _manager, _purge_tenant, _upload
+    monkeypatch.setenv("KNOWLEDGE_BINARY_PARSERS", "0")
+    tenant, _ = tenant_agent
+    kb = await _make_kb(tenant, "off-worker-kb")
+    doc = await _upload(tenant, kb, "pdf", content=B.text_pdf(), content_type="application/pdf")
+    job = dict(await pool.fetchrow("SELECT * FROM kb_ingestion_jobs WHERE id = $1", doc["ingestion_job_id"]))
+    await process_one_job(pool, LocalStorageProvider(), _manager(_FakeProvider()), job)
+    row = dict(await pool.fetchrow("SELECT status, error FROM kb_documents WHERE id = $1", doc["id"]))
+    assert row["status"] == "failed" and row["error"] == BINARY_DISABLED_REASON
+    await _purge_tenant(pool, tenant["id"])
 
 
 async def test_upload_route_refuses_binary_types_when_the_kill_switch_is_off(test_tenant, test_admin, pool, monkeypatch):
