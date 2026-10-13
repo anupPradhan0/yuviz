@@ -171,3 +171,24 @@ async def test_batch_limits_each_run_and_repeated_runs_walk_through_every_docume
     assert sorted(seen) == sorted(str(i) for i in ids)
     assert len(await requeue_documents(pool, tenant["id"], batch=10, dry_run=True)) == 0     # all have active jobs
     await _purge_tenant(pool, tenant["id"])
+
+
+async def test_a_second_run_waits_for_the_first_and_then_sees_its_jobs(tenant_agent, pool):
+    """Deterministic version of the race: run 1 is held open mid-transaction holding the tenant's re-ingest lock."""
+    import asyncio
+
+    from libs.tenancy import tenant_conn
+    tenant, _ = tenant_agent
+    await _drain_pending(pool)
+    kb = await _make_kb(tenant, "lock-kb")
+    a, b = await _bulk_documents(pool, tenant, kb, 2)
+    set_caller_tenant(None)
+    async with tenant_conn(pool, explicit_tenant=str(tenant["id"]), reason="kb-ingestion-job") as conn:
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended('kb-reingest:' || $1::text, 0))", str(tenant["id"]))
+        await conn.execute("INSERT INTO kb_ingestion_jobs (document_id, kb_id, stage) VALUES ($1, $2, 'reingest-queued')", a, kb["id"])
+        second = asyncio.create_task(requeue_documents(pool, tenant["id"], batch=0))
+        await asyncio.sleep(0.4)
+        assert not second.done(), "the second run did not wait for the first"
+    queued = await asyncio.wait_for(second, 10)
+    assert queued == [str(b)]          # `a` was queued by the first run and is skipped
+    await _purge_tenant(pool, tenant["id"])
