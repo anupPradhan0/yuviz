@@ -413,3 +413,21 @@ async def test_an_unsafe_config_already_in_the_database_fails_with_the_url_code(
     with pytest.raises(ProviderUrlRejected) as e:
         await EmbeddingProviderManager(CompositeSecretResolver()).get(cfg)
     assert str(e.value) == "provider_url_invalid" and worker.classify_error(e.value) == "permanent"
+
+
+async def test_the_ollama_providers_long_lived_client_is_the_guarded_one(monkeypatch):
+    """The persistent keep-alive client (kept across calls for latency) must still be the guarded client: pinned
+    connects validated per connection, no redirects, no proxy or environment trust. A plain httpx client here would
+    silently remove the whole SSRF defence while every other test kept passing."""
+    from services.knowledge.embedding_manager import OllamaEmbeddingProvider
+
+    monkeypatch.delenv(eg.ALLOWED_HOSTS_ENV, raising=False)
+    provider = OllamaEmbeddingProvider(base_url="http://localhost:11434")
+    client = provider._http()
+    try:
+        assert client.follow_redirects is False
+        assert client.trust_env is False
+        assert isinstance(client._transport._pool._network_backend, eg._GuardedBackend)
+        assert provider._http() is client  # and it is reused, not rebuilt per call
+    finally:
+        await provider.aclose()

@@ -27,8 +27,10 @@ REFUND = "Refunds are processed within 30 days of the return request."
 
 
 @pytest_asyncio.fixture(loop_scope="session")
-async def server():
+async def server(monkeypatch):
     srv = await FakeEmbedServer().start()
+    # The Ollama provider only talks to the operator's own endpoint (libs/egress_guard); this fake is the "operator's".
+    monkeypatch.setenv("KNOWLEDGE_PROVIDER_ALLOWED_HOSTS", f"127.0.0.1:{srv.port}")
     yield srv
     await srv.stop()
 

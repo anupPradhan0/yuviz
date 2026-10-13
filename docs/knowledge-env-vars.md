@@ -30,15 +30,15 @@ The hot-path budget. Each stage has its own timeout under one hard deadline; a s
 
 | Variable | Default | Type | Meaning | Read at |
 |---|---|---|---|---|
-| `KNOWLEDGE_BREAKER_COOLDOWN_S` | `20` | float | Seconds an open breaker waits before one half-open probe. | `services/knowledge/resilience.py:73` |
-| `KNOWLEDGE_BREAKER_FAILURES` | `5` | float | Consecutive failures before a dependency's circuit breaker opens (per embedding config, and rerank). | `services/knowledge/resilience.py:72` |
-| `KNOWLEDGE_DENSE_TIMEOUT_MS` | `120` | float | Vector search timeout. | `services/knowledge/resilience.py:68` |
-| `KNOWLEDGE_EMBED_TIMEOUT_MS` | `150` | float | Query-embedding timeout; on a miss retrieval continues lexical-only (`embedding_unavailable`). | `services/knowledge/resilience.py:67` |
-| `KNOWLEDGE_LEXICAL_TIMEOUT_MS` | `120` | float | Lexical (full-text) search timeout. | `services/knowledge/resilience.py:69` |
+| `KNOWLEDGE_BREAKER_COOLDOWN_S` | `20` | float | Seconds an open breaker waits before one half-open probe. | `services/knowledge/resilience.py:78` |
+| `KNOWLEDGE_BREAKER_FAILURES` | `5` | float | Consecutive failures before a dependency's circuit breaker opens (per embedding config, and rerank). | `services/knowledge/resilience.py:77` |
+| `KNOWLEDGE_DENSE_TIMEOUT_MS` | `120` | float | Vector search timeout. | `services/knowledge/resilience.py:73` |
+| `KNOWLEDGE_EMBED_TIMEOUT_MS` | `None` | str | Query-embedding timeout; on a miss retrieval continues lexical-only (`embedding_unavailable`). | `services/knowledge/resilience.py:72` |
+| `KNOWLEDGE_LEXICAL_TIMEOUT_MS` | `120` | float | Lexical (full-text) search timeout. | `services/knowledge/resilience.py:74` |
 | `KNOWLEDGE_MAX_BODY_BYTES` | `65536` | int | Request-body cap for `/internal/retrieve` and `/internal/prewarm` (413 above it). | `services/knowledge/body_limit.py:13` |
-| `KNOWLEDGE_RERANK_TIMEOUT_MS` | `120` | float | Stage budget for reranking inside the retrieval deadline. | `services/knowledge/resilience.py:70` |
-| `KNOWLEDGE_RETRIEVAL_DEADLINE_MS` | `400` | float | Hard deadline for one retrieval (the design's p99 target); stages are cancelled at it. | `services/knowledge/resilience.py:71` |
-| `KNOWLEDGE_RETRIEVAL_MAX_QUERY_CHARS` | `1000` | float | Queries are cut to this many characters before anything touches them. | `services/knowledge/resilience.py:82` |
+| `KNOWLEDGE_RERANK_TIMEOUT_MS` | `120` | float | Stage budget for reranking inside the retrieval deadline. | `services/knowledge/resilience.py:75` |
+| `KNOWLEDGE_RETRIEVAL_DEADLINE_MS` | `400` | float | Hard deadline for one retrieval (the design's p99 target); stages are cancelled at it. | `services/knowledge/resilience.py:76` |
+| `KNOWLEDGE_RETRIEVAL_MAX_QUERY_CHARS` | `1000` | float | Queries are cut to this many characters before anything touches them. | `services/knowledge/resilience.py:87` |
 | `KNOWLEDGE_RETRIEVE_TIMEOUT_S` | `_DEFAULT_RETRIEVE_TIMEOUT_S` | float | Outer guard on `/internal/retrieve`, above the stage deadlines; on expiry the service answers `unavailable` itself. | `services/knowledge/routers/retrieve.py:37` |
 
 ## Admission limiter and connection pool
@@ -48,13 +48,13 @@ Protects the database pool: past the caps a caller gets a typed `unavailable` qu
 | Variable | Default | Type | Meaning | Read at |
 |---|---|---|---|---|
 | `KNOWLEDGE_DB_POOL_IDLE_S` | `0` | float | Close connections idle this long; 0 keeps them (asyncpg's own idle close is disabled). | `services/knowledge/db.py:24` |
-| `KNOWLEDGE_DB_POOL_MAX` | `20` | int | Maximum pooled Postgres connections for the knowledge service. | `services/knowledge/db.py:13`, `services/knowledge/resilience.py:65` |
+| `KNOWLEDGE_DB_POOL_MAX` | `20` | int | Maximum pooled Postgres connections for the knowledge service. | `services/knowledge/db.py:13`, `services/knowledge/resilience.py:70` |
 | `KNOWLEDGE_DB_POOL_MIN` | `10` | int | Warm connections kept open (clamped to the maximum), so a burst does not open connections inside the acquire bound. | `services/knowledge/db.py:18` |
 | `KNOWLEDGE_HNSW_MAX_SCAN_TUPLES` | `20000` | int | pgvector `hnsw.max_scan_tuples` for the filtered vector scan (pgvector 0.8+ iterative scan). | `services/knowledge/db.py:30`, `services/knowledge/vector_repository.py:19` |
-| `KNOWLEDGE_POOL_ACQUIRE_TIMEOUT_MS` | `60` | float | Waiting longer than this for a pool connection counts as overload, not a slow dependency. | `services/knowledge/resilience.py:81` |
-| `KNOWLEDGE_RETRIEVAL_MAX_INFLIGHT` | `derived (see code)` | float | Retrievals admitted at once per process; default derives from the pool size. | `services/knowledge/resilience.py:64` |
-| `KNOWLEDGE_RETRIEVAL_QUEUE_WAIT_MS` | `150` | float | How long a refused arrival may queue for a slot before getting `overloaded`. | `services/knowledge/resilience.py:80` |
-| `KNOWLEDGE_RETRIEVAL_TENANT_MAX_INFLIGHT` | `max(1, max_inflight // 3)` | float | Admitted retrievals per tenant (default a third of the process cap), so one tenant cannot take every slot. | `services/knowledge/resilience.py:79` |
+| `KNOWLEDGE_POOL_ACQUIRE_TIMEOUT_MS` | `60` | float | Waiting longer than this for a pool connection counts as overload, not a slow dependency. | `services/knowledge/resilience.py:86` |
+| `KNOWLEDGE_RETRIEVAL_MAX_INFLIGHT` | `derived (see code)` | float | Retrievals admitted at once per process; default derives from the pool size. | `services/knowledge/resilience.py:69` |
+| `KNOWLEDGE_RETRIEVAL_QUEUE_WAIT_MS` | `150` | float | How long a refused arrival may queue for a slot before getting `overloaded`. | `services/knowledge/resilience.py:85` |
+| `KNOWLEDGE_RETRIEVAL_TENANT_MAX_INFLIGHT` | `max(1, max_inflight // 3)` | float | Admitted retrievals per tenant (default a third of the process cap), so one tenant cannot take every slot. | `services/knowledge/resilience.py:84` |
 
 ## Plan cache, query and embedding caches
 
@@ -72,11 +72,11 @@ Scoring thresholds and the lexical branch's term selection.
 
 | Variable | Default | Type | Meaning | Read at |
 |---|---|---|---|---|
-| `KNOWLEDGE_LEXICAL_CONFIDENT_SCORE` | `0.3` | float | A top hit supported only by lexical evidence is `low_confidence` unless it scores at least this. | `services/knowledge/resilience.py:77` |
+| `KNOWLEDGE_LEXICAL_CONFIDENT_SCORE` | `0.3` | float | A top hit supported only by lexical evidence is `low_confidence` unless it scores at least this. | `services/knowledge/resilience.py:82` |
 | `KNOWLEDGE_LEXICAL_MAX_TERM_DF` | `2000` | int | Terms present in more chunks than this are treated as common words and not searched alone. | `services/knowledge/vector_repository.py:110` |
-| `KNOWLEDGE_LEXICAL_MIN_SCORE` | `0.05` | float | Lexical hits scoring below this are dropped. | `services/knowledge/resilience.py:76` |
-| `KNOWLEDGE_LOW_CONFIDENCE_GAP` | `0.02` | float | Gap between the top two scores below which a weak top hit is `low_confidence`. | `services/knowledge/resilience.py:75` |
-| `KNOWLEDGE_LOW_CONFIDENCE_TOP` | `0.5` | float | Top score below this (and a small gap) marks the answer `low_confidence`. | `services/knowledge/resilience.py:74` |
+| `KNOWLEDGE_LEXICAL_MIN_SCORE` | `0.05` | float | Lexical hits scoring below this are dropped. | `services/knowledge/resilience.py:81` |
+| `KNOWLEDGE_LOW_CONFIDENCE_GAP` | `0.02` | float | Gap between the top two scores below which a weak top hit is `low_confidence`. | `services/knowledge/resilience.py:80` |
+| `KNOWLEDGE_LOW_CONFIDENCE_TOP` | `0.5` | float | Top score below this (and a small gap) marks the answer `low_confidence`. | `services/knowledge/resilience.py:79` |
 
 ## Rerank (opt-in)
 
@@ -100,9 +100,9 @@ Off unless `KNOWLEDGE_RERANKER` names a provider and an agent turns `rerank` on.
 | `KNOWLEDGE_RERANK_TENANT_SHARE` | `0.25` | float | Fraction of the platform quota one tenant may use. | `services/knowledge/reranker.py:96`, `services/knowledge/reranker.py:83` |
 | `KNOWLEDGE_RERANK_TOP_N` | `20` | int | Candidates sent to the reranker. | `services/knowledge/reranker.py:73` |
 | `KNOWLEDGE_RERANK_URL` | `(see code)` | str | Override the provider endpoint; must be https, carry no credentials and be an allowed host. **[SECURITY]** | `services/knowledge/reranker.py:322` |
-| `KNOWLEDGE_RERANK_VALVE_COOLDOWN_S` | `20` | float | How long the valve stays open before one probe. | `services/knowledge/resilience.py:221` |
-| `KNOWLEDGE_RERANK_VALVE_TENANTS` | `3` | int | Distinct tenants failing within the window that opens the platform-wide rerank valve. | `services/knowledge/resilience.py:219` |
-| `KNOWLEDGE_RERANK_VALVE_WINDOW_S` | `30` | float | Window for counting failing tenants. | `services/knowledge/resilience.py:220` |
+| `KNOWLEDGE_RERANK_VALVE_COOLDOWN_S` | `20` | float | How long the valve stays open before one probe. | `services/knowledge/resilience.py:254` |
+| `KNOWLEDGE_RERANK_VALVE_TENANTS` | `3` | int | Distinct tenants failing within the window that opens the platform-wide rerank valve. | `services/knowledge/resilience.py:252` |
+| `KNOWLEDGE_RERANK_VALVE_WINDOW_S` | `30` | float | Window for counting failing tenants. | `services/knowledge/resilience.py:253` |
 
 ## Logging and retention
 
@@ -121,7 +121,7 @@ The Postgres-backed ingestion queue and the worker process.
 
 | Variable | Default | Type | Meaning | Read at |
 |---|---|---|---|---|
-| `KB_INGEST_PER_TENANT_CAP` | `2` | int | Ingestion jobs one tenant may have running at once. | `services/knowledge/ingestion_worker.py:54` |
+| `KB_INGEST_PER_TENANT_CAP` | `2` | int | Ingestion jobs one tenant may have running at once. | `services/knowledge/ingestion_worker.py:55` |
 | `KNOWLEDGE_MAX_UPLOAD_BYTES` | `10485760` | int | Upload size cap (413 above it). | `services/knowledge/routers/documents.py:25` |
 | `KNOWLEDGE_STORAGE_ROOT` | `'./data/knowledge_documents'` | str | Directory for uploaded files (local storage, single node). | `services/knowledge/storage.py:26` |
 
@@ -141,25 +141,25 @@ Parsing runs in a contained child process with hard resource limits; `KB_PARSE_*
 
 | Variable | Default | Type | Meaning | Read at |
 |---|---|---|---|---|
-| `KB_PARSE_MAX_BYTES` | `52428800` | int | Largest file the parser will open. | `services/knowledge/parsers/limits.py:38` |
-| `KB_PARSE_MAX_CELLS` | `2000000` | int | Table cell cap (rows x columns, padding included), checked before building. | `services/knowledge/parsers/limits.py:43` |
-| `KB_PARSE_MAX_CHARS` | `10000000` | int | Extracted-text cap. | `services/knowledge/parsers/limits.py:41` |
-| `KB_PARSE_MAX_COLUMNS` | `2000` | int | Columns per table row (a wide file is rejected before padding rows). | `services/knowledge/parsers/limits.py:44` |
-| `KB_PARSE_MAX_DECOMPRESSED` | `268435456` | int | Decompressed-size cap (zip-bomb guard). | `services/knowledge/parsers/limits.py:40` |
-| `KB_PARSE_MAX_ELEMENTS` | `500000` | int | HTML element cap. | `services/knowledge/parsers/limits.py:46` |
-| `KB_PARSE_MAX_OOXML_ELEMENTS` | `2500000` | int | XML element cap inside Office packages. | `services/knowledge/parsers/limits.py:47` |
-| `KB_PARSE_MAX_PAGES` | `500` | int | Page cap. | `services/knowledge/parsers/limits.py:39` |
-| `KB_PARSE_MAX_PARAGRAPHS` | `800000` | int | Paragraph elements in DOCX/PPTX, counted by streaming before parsing. | `services/knowledge/parsers/limits.py:45` |
-| `KB_PARSE_MAX_TABLE_ROWS` | `200000` | int | Table row cap. | `services/knowledge/parsers/limits.py:42` |
-| `KB_PARSE_MEMORY_MB` | `1024` | int | RSS cap for the parse child, enforced by the parent's watchdog on every platform (plus RLIMIT_AS on Linux). | `services/knowledge/parsers/limits.py:51` |
+| `KB_PARSE_MAX_BYTES` | `52428800` | int | Largest file the parser will open. | `services/knowledge/parsers/limits.py:59` |
+| `KB_PARSE_MAX_CELLS` | `2000000` | int | Table cell cap (rows x columns, padding included), checked before building. | `services/knowledge/parsers/limits.py:64` |
+| `KB_PARSE_MAX_CHARS` | `10000000` | int | Extracted-text cap. | `services/knowledge/parsers/limits.py:62` |
+| `KB_PARSE_MAX_COLUMNS` | `2000` | int | Columns per table row (a wide file is rejected before padding rows). | `services/knowledge/parsers/limits.py:65` |
+| `KB_PARSE_MAX_DECOMPRESSED` | `268435456` | int | Decompressed-size cap (zip-bomb guard). | `services/knowledge/parsers/limits.py:61` |
+| `KB_PARSE_MAX_ELEMENTS` | `500000` | int | HTML element cap. | `services/knowledge/parsers/limits.py:67` |
+| `KB_PARSE_MAX_OOXML_ELEMENTS` | `2500000` | int | XML element cap inside Office packages. | `services/knowledge/parsers/limits.py:68` |
+| `KB_PARSE_MAX_PAGES` | `500` | int | Page cap. | `services/knowledge/parsers/limits.py:60` |
+| `KB_PARSE_MAX_PARAGRAPHS` | `800000` | int | Paragraph elements in DOCX/PPTX, counted by streaming before parsing. | `services/knowledge/parsers/limits.py:66` |
+| `KB_PARSE_MAX_TABLE_ROWS` | `200000` | int | Table row cap. | `services/knowledge/parsers/limits.py:63` |
+| `KB_PARSE_MEMORY_MB` | `1024` | int | RSS cap for the parse child, enforced by the parent's watchdog on every platform (plus RLIMIT_AS on Linux). | `services/knowledge/parsers/limits.py:72` |
 | `KB_PARSE_NONCE` | `''` | str | Internal: per-run nonce the parent passes to the child to tell its diagnostics from document text. Not for operators. | `services/knowledge/parsers/_worker.py:22` |
-| `KB_PARSE_NPROC_LIMIT` | `1` | int | Process-count limit applied to the sandbox child (Linux). | `services/knowledge/parsers/sandbox.py:205` |
-| `KB_PARSE_PDF_BUDGET_S` | `25` | int | Time budget for the PDF text pass. | `services/knowledge/parsers/limits.py:49` |
-| `KB_PARSE_PDF_PAGE_BYTES` | `2097152` | int | Per-page content-stream cap for PDFs. | `services/knowledge/parsers/limits.py:48` |
-| `KB_PARSE_TIMEOUT_S` | `60` | int | Wall-clock limit for the whole parse child process; it is killed after this. | `services/knowledge/parsers/limits.py:50` |
-| `KNOWLEDGE_BINARY_PARSERS` | `1` | int | Default off; set 1 to enable PDF/Office parsing, see docs/knowledge-parser-sandbox.md. Text, markdown, HTML and CSV always work. **[SECURITY]** | `services/knowledge/parsers/__init__.py:27`, `services/knowledge/parsers/limits.py:52` |
-| `KNOWLEDGE_INDEX_SPEAKER_NOTES` | `''` | str | Opt in to indexing PPTX speaker notes (dropped by default: a common place to hide instructions). **[SECURITY]** | `services/knowledge/parsers/limits.py:54` |
-| `KNOWLEDGE_KEEP_COLLAPSED_CONTENT` | `''` | str | HTML closed disclosures (details, collapsed panels) are dropped by default; set 1 to keep them. **[SECURITY]** | `services/knowledge/parsers/limits.py:53` |
+| `KB_PARSE_NPROC_LIMIT` | `1` | int | Process-count limit applied to the sandbox child (Linux). | `services/knowledge/parsers/sandbox.py:218` |
+| `KB_PARSE_PDF_BUDGET_S` | `25` | int | Time budget for the PDF text pass. | `services/knowledge/parsers/limits.py:70` |
+| `KB_PARSE_PDF_PAGE_BYTES` | `2097152` | int | Per-page content-stream cap for PDFs. | `services/knowledge/parsers/limits.py:69` |
+| `KB_PARSE_TIMEOUT_S` | `60` | int | Wall-clock limit for the whole parse child process; it is killed after this. | `services/knowledge/parsers/limits.py:71` |
+| `KNOWLEDGE_BINARY_PARSERS` | `0` | int | Default off; set 1 to enable PDF/Office parsing, see docs/knowledge-parser-sandbox.md. Text, markdown, HTML and CSV always work. **[SECURITY]** | `services/knowledge/parsers/limits.py:21` |
+| `KNOWLEDGE_INDEX_SPEAKER_NOTES` | `''` | str | Opt in to indexing PPTX speaker notes (dropped by default: a common place to hide instructions). **[SECURITY]** | `services/knowledge/parsers/limits.py:75` |
+| `KNOWLEDGE_KEEP_COLLAPSED_CONTENT` | `''` | str | HTML closed disclosures (details, collapsed panels) are dropped by default; set 1 to keep them. **[SECURITY]** | `services/knowledge/parsers/limits.py:74` |
 | `PATH` | `''` | str | Passed through to the parse child (and used to find optional OCR binaries); the child gets no other parent environment. | `services/knowledge/parsers/sandbox.py:68` |
 
 ## Enrichment (opt-in)
@@ -205,8 +205,10 @@ Where services find each other, and the secrets they share.
 | `CONFIG_SERVICE_PASSWORD` | `''` | str | Service-account password. **[SECURITY]** | `services/conversation/__main__.py:285`, `services/conversation/__main__.py:299`, `services/conversation/tools/provider_manager.py:28` |
 | `CONFIG_SERVICE_URL` | `'http://localhost:8000'` | str | Config service base URL (Conversation's login and config fetch). | `services/conversation/__main__.py:283`, `services/conversation/__main__.py:297`, `services/conversation/tools/provider_manager.py:26` |
 | `JWT_SECRET` | `''` | str | HMAC secret for access tokens; required at import. **[SECURITY]** **[SET ON BOTH CONFIG AND KNOWLEDGE]** | `services/config/auth.py:12` |
+| `KNOWLEDGE_PROVIDER_ALLOWED_HOSTS` | `None` | str | Allowed hosts for tenant-configured provider URLs (egress guard, when present). **[SECURITY]** | `libs/egress_guard.py:89` |
 | `KNOWLEDGE_SERVICE_URL` | `'http://localhost:8100'` | str | Where the Conversation service reaches the knowledge service. | `services/conversation/__main__.py:296` |
 | `LISTEN_HOST` | `'127.0.0.1'` | str | Bind address of the Conversation gRPC server. | `services/conversation/__main__.py:469` |
+| `OLLAMA_BASE_URL` | `None` | str | Base URL of the Ollama embedding server (when read by the code). | `libs/egress_guard.py:92` |
 | `POSTGRES_DSN` | `(unset)` | str | Postgres connection string; production runs the pool as the RLS-enforced `yuviz_app` role. **[SECURITY]** **[SET ON BOTH CONFIG AND KNOWLEDGE]** | `services/knowledge/db.py:39`, `services/conversation/__main__.py:316`, `services/conversation/__main__.py:227` (+1) |
 | `REDIS_URL` | `'redis://localhost:6379/0'` | str | Redis for the agent-KB flag cache and shared caches. **[SET ON BOTH CONFIG AND KNOWLEDGE]** | `services/knowledge/cache.py:27`, `services/conversation/__main__.py:272`, `services/conversation/__main__.py:277` (+2) |
 | `SECRET_ENCRYPTION_KEY` | `''` | str | Fernet key for provider API keys stored in the database. **[SECURITY]** **[SET ON BOTH CONFIG AND KNOWLEDGE]** | `libs/config_sdk/secrets.py:43`, `libs/config_sdk/secrets.py:103` |
@@ -245,6 +247,14 @@ Read by `services/conversation`; listed so the reference is complete.
 | `VOICEAI_TTS_LANG_CODE` | `(unset)` | str | Kokoro language code. | `services/conversation/pipeline_config.py:99` |
 | `VOICEAI_TTS_MACOS_WPM` | `180` | int | macOS TTS words per minute. | `services/conversation/pipeline_config.py:100` |
 | `VOICEAI_TTS_VOICE` | `(unset)` | str | Dev override: TTS voice. | `services/conversation/pipeline_config.py:98` |
+
+## Other
+
+Variables with no hand-written group yet.
+
+| Variable | Default | Type | Meaning | Read at |
+|---|---|---|---|---|
+| `KNOWLEDGE_OPENAI_BASE_URL` | `None` | str | (undocumented) | `services/knowledge/embedding_manager.py:262` |
 
 ## Test and CI only
 
