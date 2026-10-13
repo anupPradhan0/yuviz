@@ -21,6 +21,7 @@ GOOD = [0.1] * EMBEDDING_DIMS
 @pytest.fixture(autouse=True)
 def _fast_retries(monkeypatch):
     monkeypatch.setattr(em, "EMBED_RETRY_BASE_S", 0.0)
+    monkeypatch.setenv("KNOWLEDGE_CHUNKER", "structure")  # these tests check parents/children/section_path
 
 
 class Scripted:
