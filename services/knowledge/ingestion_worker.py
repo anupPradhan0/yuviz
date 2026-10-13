@@ -253,10 +253,12 @@ async def process_one_job(
         parents: list[Chunk] = []
         strategy = "inline"
         embedding_model: str | None = None
+        inline = False
+        first_ingest = doc_row["status"] not in ("ready", "ready_degraded")  # read before the claim flipped it
         if len(raw) < AUTO_INLINE_THRESHOLD_BYTES:
             new_chunks: list[Chunk] = [Chunk(content=text, token_count=count_tokens(text, doc_row["language"]))]
             vectors: list[list[float] | None] = [None]
-            new_usage_mode = "prompt"
+            inline = True
             stages.ok(chunks=1, inline=True)
         else:
             try:  # the model's token limit sizes the chunks; a missing config is reported by the embed stage below
@@ -284,8 +286,6 @@ async def process_one_job(
             embed_stats: dict[str, int] = {}
             vectors = await embed_in_batches(provider, [c.content for c in new_chunks], stats=embed_stats)
             embedding_model = effective_model(embedding_cfg)
-            # Preserve an admin's manual usage_mode across re-ingestion.
-            new_usage_mode = doc_row["usage_mode"]
             stages.ok(vectors=len(vectors), **embed_stats)
 
         stages.begin("index")
@@ -293,9 +293,27 @@ async def process_one_job(
             if not await _still_owns_job(conn, job):
                 log.warning("Ingestion job=%s attempt=%s lost its lease; dropping results", job["id"], job["attempts"])
                 return
+            # The document row as it is NOW, locked: a ready document stays editable while it re-ingests, so an admin may
+            # have changed usage_mode, language or title (or deleted it) since this job claimed it. Those edits win; only
+            # the tiny-document auto-inline decision of a FIRST ingest may set 'prompt'.
+            cur = await conn.fetchrow(
+                "SELECT usage_mode, language, version, deleted_at FROM kb_documents WHERE id = $1 FOR UPDATE", document_id,
+            )
+            if cur is None or cur["deleted_at"] is not None:
+                log.warning("Ingestion job=%s: document=%s was deleted while it was being processed; not indexing", job["id"], document_id)
+                stages.add("index", "error", error_class="permanent", error="document was deleted during ingestion")
+                await _write_events(conn, job, doc_row["tenant_id"], stages.events)
+                await conn.execute(
+                    "UPDATE kb_ingestion_jobs SET status = 'failed', error = 'document was deleted during ingestion', "
+                    "error_class = 'permanent', stage = 'index', lease_expires_at = NULL, finished_at = now(), "
+                    "updated_at = now() WHERE id = $1", job["id"],
+                )
+                return
+            language = cur["language"]
+            usage_mode = "prompt" if inline and first_ingest else cur["usage_mode"]
             # The queuer owns the version (retry_document bumps it); this swap is one transaction,
             # so readers see the old chunks until commit and the new ones after, never a gap.
-            version = doc_row["version"]
+            version = cur["version"]
             await conn.execute("DELETE FROM kb_chunks WHERE document_id = $1", document_id)
             # Parents first (chunk_index = -1 - ordinal, never colliding with a child's index); children point at them.
             parent_ids: list[Any] = []
@@ -306,7 +324,7 @@ async def process_one_job(
                     " version, is_parent, section_path) "
                     "VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, $9, true, $10) RETURNING id",
                     document_id, kb_id, doc_row["tenant_id"], -1 - ordinal, parent.content, parent.token_count,
-                    parent.page, doc_row["language"], version, parent.section_path,
+                    parent.page, language, version, parent.section_path,
                 ))
             for i, (chunk, vector) in enumerate(zip(new_chunks, vectors)):
                 vector_literal = None if vector is None else "[" + ",".join(repr(float(x)) for x in vector) + "]"
@@ -316,7 +334,7 @@ async def process_one_job(
                     " version, parent_id, section_path, embedding_model, dims) "
                     "VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8, $9, $10, $11, $12, $13, $14)",
                     document_id, kb_id, doc_row["tenant_id"], i, chunk.content, vector_literal, chunk.token_count,
-                    chunk.page, doc_row["language"], version,
+                    chunk.page, language, version,
                     None if chunk.parent is None else parent_ids[chunk.parent], chunk.section_path,
                     embedding_model if vector is not None else None, EMBEDDING_DIMS if vector is not None else None,
                 )
@@ -324,7 +342,7 @@ async def process_one_job(
             await conn.execute(
                 "UPDATE kb_documents SET status = $4, error = $5, version = $2, usage_mode = $3, "
                 "parser_used = $6, quality_score = $7, chunker_version = $8, updated_at = now() WHERE id = $1",
-                document_id, version, new_usage_mode,
+                document_id, version, usage_mode,
                 "ready_degraded" if parsed.degraded else "ready",
                 "; ".join(parsed.warnings)[:1000] if parsed.degraded else None,
                 parsed.parser_used, parsed.quality_score, chunker_version(strategy) if strategy != "inline" else "inline",
@@ -336,7 +354,7 @@ async def process_one_job(
                 "error_class = NULL, lease_expires_at = NULL, finished_at = now(), updated_at = now() WHERE id = $1",
                 job["id"],
             )
-        log.info("Ingested document=%s kb=%s chunks=%d usage_mode=%s", document_id, kb_id, len(new_chunks), new_usage_mode)
+        log.info("Ingested document=%s kb=%s chunks=%d usage_mode=%s", document_id, kb_id, len(new_chunks), usage_mode)
 
     except Exception as exc:
         log.exception("Ingestion failed document=%s kb=%s stage=%s attempt=%s", document_id, kb_id, stages.stage, job["attempts"])
