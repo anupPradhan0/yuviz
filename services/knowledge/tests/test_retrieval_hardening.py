@@ -163,8 +163,8 @@ async def test_router_shape_with_24_concurrent_retrievals_is_not_mostly_partial(
         await _run(t, a, embedder, q, repo=repo)
     await retrieval_log.flush()
 
-    # Generous queue and deadline: this checks pool starvation (no partial), not how fast this machine is.
-    cfg = RetrievalConfig(queue_wait_s=2.0, deadline_s=5.0)
+    # Generous waits and stage timeouts; acquire_timeout stays at production so pool starvation still shows as partial.
+    cfg = RetrievalConfig(queue_wait_s=2.0, deadline_s=5.0, dense_timeout_s=2.0, lexical_timeout_s=2.0)
 
     async def router_call(i):
         set_caller_tenant(str(t["id"]))
