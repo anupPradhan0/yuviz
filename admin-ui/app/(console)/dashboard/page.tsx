@@ -69,7 +69,8 @@ const toChartPoint = (label: string, inbound: number, outbound: number, ended: n
   label,
   inbound,
   outbound,
-  aiPct: ended === 0 ? 0 : ((ended - escalated) / ended) * 100,
+  // null = calls in progress, nothing measured yet; 0 only when there were no calls at all.
+  aiPct: inbound + outbound === 0 ? 0 : ended === 0 ? null : ((ended - escalated) / ended) * 100,
 });
 
 function TrendChart({ points }: { points: ChartPoint[] }) {
@@ -89,6 +90,9 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
   const inXy = series[0].xy;
   const aiXy = points.flatMap((p, i) => (p.aiPct == null ? [] : [[xAt(i), yAt(p.aiPct / 100), i]]));
   const calls = (n: number) => `${n} call${n === 1 ? "" : "s"}`;
+  const aiText = (p: ChartPoint) => (p.aiPct == null ? "—" : `${Math.round(p.aiPct)}%`);
+  const summary = (p: ChartPoint) =>
+    `${p.label}: inbound ${calls(p.inbound)}, outbound ${calls(p.outbound)}, handled by AI ${aiText(p)}`;
   const colW = points.length === 1 ? 100 : 100 / (points.length - 1);
   const pctX = (i: number) => (xAt(i) / w) * 100;
   const ticks = points.length <= 6 ? points.map((_, i) => i) : [0, Math.floor((points.length - 1) / 2), points.length - 1];
@@ -124,16 +128,21 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
             style={{ left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%` }}
           />
         ))}
-        {points.map((_, i) => {
+        {points.map((p, i) => {
           const left = Math.max(0, pctX(i) - colW / 2);
           const right = Math.min(100, pctX(i) + colW / 2);
+          const clear = () => setHover((cur) => (cur === i ? null : cur));
           return (
             <span
               key={`hover-${i}`}
               className="d-hover"
+              tabIndex={0}
+              aria-label={summary(p)}
               style={{ left: `${left}%`, width: `${right - left}%` }}
               onMouseEnter={() => setHover(i)}
-              onMouseLeave={() => setHover((cur) => (cur === i ? null : cur))}
+              onMouseLeave={clear}
+              onFocus={() => setHover(i)}
+              onBlur={clear}
             />
           );
         })}
@@ -149,7 +158,7 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
             <b>{points[hover].label}</b>
             <span><i style={{ background: "var(--chart-inbound)" }} />Inbound: {calls(points[hover].inbound)}</span>
             <span><i style={{ background: "var(--chart-outbound)" }} />Outbound: {calls(points[hover].outbound)}</span>
-            <span><i style={{ background: "var(--green)" }} />Handled by AI: {Math.round(points[hover].aiPct ?? 0)}%</span>
+            <span><i style={{ background: "var(--green)" }} />Handled by AI: {aiText(points[hover])}</span>
           </div>
         )}
       </div>
@@ -486,7 +495,9 @@ export default function DashboardPage() {
         </div>
         <div className="d-card">
           <div className="kpi-l">Handled by AI</div>
-          <div className="kpi-v">{kpi ? `${Math.round(kpi.aiPct ?? 0)}%` : "—"}</div>
+          <div className="kpi-v">
+            {kpi && stats ? (kpi.aiPct != null ? `${Math.round(kpi.aiPct)}%` : stats.total_calls === 0 ? "0%" : "—") : "—"}
+          </div>
           <div className={`kpi-d ${(kpi?.aiDeltaPt ?? 0) >= 0 ? "up" : "down"}`}>
             {kpi?.aiDeltaPt != null
               ? `${kpi.aiDeltaPt >= 0 ? "▲" : "▼"} ${Math.abs(kpi.aiDeltaPt).toFixed(1)} pts`
@@ -495,7 +506,9 @@ export default function DashboardPage() {
         </div>
         <div className="d-card">
           <div className="kpi-l">Avg call length</div>
-          <div className="kpi-v">{kpi ? fmtDuration(kpi.aht ?? 0) : "—"}</div>
+          <div className="kpi-v">
+            {kpi && stats ? (kpi.aht != null ? fmtDuration(kpi.aht) : stats.total_calls === 0 ? "0s" : "—") : "—"}
+          </div>
           <div className={`kpi-d ${(kpi?.ahtDeltaSec ?? 0) <= 0 ? "up" : "down"}`}>
             {kpi?.ahtDeltaSec != null && Math.round(kpi.ahtDeltaSec) !== 0
               ? `${kpi.ahtDeltaSec < 0 ? "▼" : "▲"} ${Math.abs(Math.round(kpi.ahtDeltaSec))}s ${kpi.ahtDeltaSec < 0 ? "faster" : "slower"}`
