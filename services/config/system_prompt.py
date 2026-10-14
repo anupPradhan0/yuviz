@@ -259,9 +259,13 @@ def _meta_prompt(inputs: dict[str, Any]) -> str:
         "soften them):\n"
         f"1. Under {HEADING_GUARDRAILS}: {_GUARDRAILS}\n"
         f"2. Under {HEADING_SPEAK}: {HUMAN_SPEECH_VOICE}\n"
-        + ("3. If a knowledge base is attached, add one sentence requiring every factual claim "
-           "to be grounded in it, and to admit not knowing rather than improvising when it "
-           "doesn't cover the question.\n" if inputs["has_knowledge_base"] else "")
+        + ("3. A knowledge base is attached, so the agent has a search_knowledge tool. Under "
+           f"{HEADING_WANTS} add a rule that for EVERY factual question about the business or "
+           "its subject it must call search_knowledge first, before answering and before "
+           "saying it does not know, and answer only from what the tool returns (in the "
+           "caller's language). If the tool returns nothing relevant it must say so plainly and "
+           "offer a next step, never answer from memory or improvise.\n"
+           if inputs["has_knowledge_base"] else "")
         + (f"4. When it doesn't know something, it must say, verbatim: \"{inputs['fallback_response']}\"\n"
            if inputs.get("fallback_response") else "")
         + (f"5. It must always follow these rules, verbatim: {inputs['compliance_instructions']}\n"

@@ -517,3 +517,18 @@ def test_shared_blocks_are_plain_text_lines_that_never_look_like_headings():
         assert len(lines) >= 9
         assert not set(sp._HEADINGS) & {ln.strip() for ln in lines}
         assert not any(ln.lstrip().startswith(("#", "*", "-", "|")) for ln in lines)
+
+
+# --- knowledge grounding in the generation brief ----------------------------
+
+def test_generation_brief_tells_a_knowledge_agent_to_call_search_knowledge_first():
+    from services.config.system_prompt import _meta_prompt
+    brief = _meta_prompt({**_inputs(), "has_knowledge_base": True})
+    assert "search_knowledge" in brief
+    assert "call search_knowledge first" in brief
+    assert "never answer from memory" in brief
+
+
+def test_generation_brief_has_no_knowledge_rule_without_a_knowledge_base():
+    from services.config.system_prompt import _meta_prompt
+    assert "search_knowledge" not in _meta_prompt({**_inputs(), "has_knowledge_base": False})
