@@ -108,8 +108,8 @@ class CampaignWorker:
         campaign_id = str(campaign["id"])
         now = time.monotonic()
 
-        last = self._last_attempt_at.get(campaign_id, 0.0)
-        if now - last < campaign["pacing_seconds"]:
+        last = self._last_attempt_at.get(campaign_id)
+        if last is not None and now - last < campaign["pacing_seconds"]:
             return  # too soon since the last dial for this campaign
 
         in_flight = self._in_flight.get(campaign_id, 0)

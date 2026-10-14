@@ -36,7 +36,7 @@ jobs:
           --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 5s --health-retries 10
       ollama:
-        image: ollama/ollama:latest
+        image: ollama/ollama:0.24.0
         ports: ["11434:11434"]
         options: >-
           --health-cmd "ollama list"
@@ -87,10 +87,14 @@ jobs:
       - name: Seed the conversation-service account
         run: python scripts/create_service_account.py conversation-service@internal.yuviz.ai ci-only-password-not-a-real-credential
 
-      - name: Pull the embedding model
+      # /api/pull answers 200 even on failure; only a final "success" status means the model landed.
+      - name: Pull the Ollama models
         run: |
-          curl -sf http://localhost:11434/api/pull -X POST -H 'Content-Type: application/json' -d '{"model": "nomic-embed-text"}'
-          sleep 5
+          for model in nomic-embed-text qwen2.5:0.5b; do
+            curl -sf http://localhost:11434/api/pull -X POST -H 'Content-Type: application/json' \
+              -d "{\"model\": \"${model}\", \"stream\": false}" | tee /tmp/pull.json
+            grep -q '"status":"success"' /tmp/pull.json
+          done
 
       - name: Run tests
         run: python -m pytest -q -p no:cacheprovider -rfE
@@ -98,6 +102,14 @@ jobs:
   gateway:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # tests/config_test.cpp's guarded-lookup test skips without Redis, and a skip fails this job.
+    services:
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
