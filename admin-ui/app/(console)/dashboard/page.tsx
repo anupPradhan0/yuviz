@@ -73,6 +73,7 @@ const toChartPoint = (label: string, inbound: number, outbound: number, ended: n
 });
 
 function TrendChart({ points }: { points: ChartPoint[] }) {
+  const [hover, setHover] = useState<number | null>(null);
   if (points.length === 0) return <div className="d-empty">No calls in this period yet.</div>;
   const w = 400;
   const h = 110;
@@ -87,11 +88,9 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
   const pts = (xy: readonly (readonly number[])[]) => xy.map(([x, y]) => `${x},${y}`).join(" ");
   const inXy = series[0].xy;
   const aiXy = points.flatMap((p, i) => (p.aiPct == null ? [] : [[xAt(i), yAt(p.aiPct / 100), i]]));
-  // One combined tooltip per point: at zero all three dots overlap, so each must carry every value.
-  const tip = (i: number) => {
-    const p = points[i];
-    return `${p.label} · Inbound: ${p.inbound} call${p.inbound === 1 ? "" : "s"} · Outbound: ${p.outbound} call${p.outbound === 1 ? "" : "s"} · Handled by AI: ${Math.round(p.aiPct ?? 0)}%`;
-  };
+  const calls = (n: number) => `${n} call${n === 1 ? "" : "s"}`;
+  const colW = points.length === 1 ? 100 : 100 / (points.length - 1);
+  const pctX = (i: number) => (xAt(i) / w) * 100;
   const ticks = points.length <= 6 ? points.map((_, i) => i) : [0, Math.floor((points.length - 1) / 2), points.length - 1];
   return (
     <>
@@ -116,7 +115,6 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
             key={`${s.key}-${i}`}
             className="d-dot"
             style={{ left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, background: s.color }}
-            title={tip(i)}
           />
         )))}
         {aiXy.map(([x, y, i]) => (
@@ -124,9 +122,36 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
             key={`ai-${i}`}
             className="d-dot ai"
             style={{ left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%` }}
-            title={tip(i)}
           />
         ))}
+        {points.map((_, i) => {
+          const left = Math.max(0, pctX(i) - colW / 2);
+          const right = Math.min(100, pctX(i) + colW / 2);
+          return (
+            <span
+              key={`hover-${i}`}
+              className="d-hover"
+              style={{ left: `${left}%`, width: `${right - left}%` }}
+              onMouseEnter={() => setHover(i)}
+              onMouseLeave={() => setHover((cur) => (cur === i ? null : cur))}
+            />
+          );
+        })}
+        {hover !== null && points[hover] && (
+          <div
+            className="d-tip"
+            role="tooltip"
+            style={{
+              left: `${pctX(hover)}%`,
+              transform: `translateX(${pctX(hover) < 20 ? "0" : pctX(hover) > 80 ? "-100%" : "-50%"})`,
+            }}
+          >
+            <b>{points[hover].label}</b>
+            <span><i style={{ background: "var(--chart-inbound)" }} />Inbound: {calls(points[hover].inbound)}</span>
+            <span><i style={{ background: "var(--chart-outbound)" }} />Outbound: {calls(points[hover].outbound)}</span>
+            <span><i style={{ background: "var(--green)" }} />Handled by AI: {Math.round(points[hover].aiPct ?? 0)}%</span>
+          </div>
+        )}
       </div>
       <div className="d-legend">
         {shown.map((s) => <span key={s.key}><i style={{ background: s.color }} />{s.label}</span>)}
