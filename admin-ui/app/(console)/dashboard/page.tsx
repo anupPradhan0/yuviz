@@ -69,10 +69,12 @@ const toChartPoint = (label: string, inbound: number, outbound: number, ended: n
   label,
   inbound,
   outbound,
-  aiPct: ended === 0 ? null : ((ended - escalated) / ended) * 100,
+  // null = calls in progress, nothing measured yet; 0 only when there were no calls at all.
+  aiPct: inbound + outbound === 0 ? 0 : ended === 0 ? null : ((ended - escalated) / ended) * 100,
 });
 
 function TrendChart({ points }: { points: ChartPoint[] }) {
+  const [hover, setHover] = useState<number | null>(null);
   if (points.length === 0) return <div className="d-empty">No calls in this period yet.</div>;
   const w = 400;
   const h = 110;
@@ -83,11 +85,16 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
     { key: "inbound", label: "Inbound", color: "var(--chart-inbound)", xy: points.map((p, i) => [xAt(i), yAt(p.inbound / max)]) },
     { key: "outbound", label: "Outbound", color: "var(--chart-outbound)", xy: points.map((p, i) => [xAt(i), yAt(p.outbound / max)]) },
   ] as const;
-  const hasOutbound = points.some((p) => p.outbound > 0);
-  const shown = hasOutbound ? series : series.slice(0, 1);
+  const shown = series;
   const pts = (xy: readonly (readonly number[])[]) => xy.map(([x, y]) => `${x},${y}`).join(" ");
   const inXy = series[0].xy;
   const aiXy = points.flatMap((p, i) => (p.aiPct == null ? [] : [[xAt(i), yAt(p.aiPct / 100), i]]));
+  const calls = (n: number) => `${n} call${n === 1 ? "" : "s"}`;
+  const aiText = (p: ChartPoint) => (p.aiPct == null ? "—" : `${Math.round(p.aiPct)}%`);
+  const summary = (p: ChartPoint) =>
+    `${p.label}: inbound ${calls(p.inbound)}, outbound ${calls(p.outbound)}, handled by AI ${aiText(p)}`;
+  const colW = points.length === 1 ? 100 : 100 / (points.length - 1);
+  const pctX = (i: number) => (xAt(i) / w) * 100;
   const ticks = points.length <= 6 ? points.map((_, i) => i) : [0, Math.floor((points.length - 1) / 2), points.length - 1];
   return (
     <>
@@ -95,16 +102,16 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
         <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img" aria-label="Inbound and outbound calls over time">
           <path d={`M0 ${h * 0.25}H${w}M0 ${h * 0.5}H${w}M0 ${h * 0.75}H${w}`} stroke="var(--border)" strokeWidth="1" />
           <path d={`M${inXy[0][0]} ${h} L${pts(inXy).replaceAll(" ", " L")} L${inXy[inXy.length - 1][0]} ${h}Z`} fill="var(--chart-inbound)" opacity="0.12" />
+          {shown.map((s) => (
+            <polyline key={s.key} points={pts(s.xy)} fill="none" stroke={s.color} strokeWidth="2"
+              strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+          ))}
           {aiXy.length > 1 && (
             <polyline
               points={pts(aiXy)} fill="none" stroke="var(--green)" strokeWidth="1.5" opacity="0.7"
               strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke"
             />
           )}
-          {shown.map((s) => (
-            <polyline key={s.key} points={pts(s.xy)} fill="none" stroke={s.color} strokeWidth="2"
-              strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
-          ))}
         </svg>
         {/* HTML dots: SVG circles would stretch under the non-uniform viewBox scaling. */}
         {shown.flatMap((s) => s.xy.map(([x, y], i) => (
@@ -112,7 +119,6 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
             key={`${s.key}-${i}`}
             className="d-dot"
             style={{ left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, background: s.color }}
-            title={`${points[i].label}: ${points[i][s.key]} ${s.label.toLowerCase()} call${points[i][s.key] === 1 ? "" : "s"}`}
           />
         )))}
         {aiXy.map(([x, y, i]) => (
@@ -120,9 +126,41 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
             key={`ai-${i}`}
             className="d-dot ai"
             style={{ left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%` }}
-            title={`${points[i].label}: ${Math.round(points[i].aiPct!)}% handled by AI`}
           />
         ))}
+        {points.map((p, i) => {
+          const left = Math.max(0, pctX(i) - colW / 2);
+          const right = Math.min(100, pctX(i) + colW / 2);
+          const clear = () => setHover((cur) => (cur === i ? null : cur));
+          return (
+            <span
+              key={`hover-${i}`}
+              className="d-hover"
+              tabIndex={0}
+              aria-label={summary(p)}
+              style={{ left: `${left}%`, width: `${right - left}%` }}
+              onMouseEnter={() => setHover(i)}
+              onMouseLeave={clear}
+              onFocus={() => setHover(i)}
+              onBlur={clear}
+            />
+          );
+        })}
+        {hover !== null && points[hover] && (
+          <div
+            className="d-tip"
+            role="tooltip"
+            style={{
+              left: `${pctX(hover)}%`,
+              transform: `translateX(${pctX(hover) < 20 ? "0" : pctX(hover) > 80 ? "-100%" : "-50%"})`,
+            }}
+          >
+            <b>{points[hover].label}</b>
+            <span><i style={{ background: "var(--chart-inbound)" }} />Inbound: {calls(points[hover].inbound)}</span>
+            <span><i style={{ background: "var(--chart-outbound)" }} />Outbound: {calls(points[hover].outbound)}</span>
+            <span><i style={{ background: "var(--green)" }} />Handled by AI: {aiText(points[hover])}</span>
+          </div>
+        )}
       </div>
       <div className="d-legend">
         {shown.map((s) => <span key={s.key}><i style={{ background: s.color }} />{s.label}</span>)}
@@ -208,7 +246,6 @@ export default function DashboardPage() {
       listAllDashboardStats(targetTenants, range.hours),
       range.days
         ? listAllUsageTrend(targetTenants, range.days).then((pts) => {
-            if (pts.length === 0) return [];
             // API omits zero-call days; draw every day of the range so today is always the last point.
             const byDate = new Map(pts.map((p) => [p.date.slice(0, 10), p]));
             const dense: ChartPoint[] = [];
@@ -225,7 +262,6 @@ export default function DashboardPage() {
             return dense;
           })
         : listAllTodaysActivity(targetTenants).then((pts) => {
-            if (pts.length === 0) return [];
             // API omits zero-call hours; draw every hour from midnight up to now.
             const byHour = new Map(pts.map((p) => [p.hour, p]));
             const hours = pts.map((p) => p.hour);
@@ -459,7 +495,9 @@ export default function DashboardPage() {
         </div>
         <div className="d-card">
           <div className="kpi-l">Handled by AI</div>
-          <div className="kpi-v">{kpi?.aiPct == null ? "—" : `${Math.round(kpi.aiPct)}%`}</div>
+          <div className="kpi-v">
+            {kpi && stats ? (kpi.aiPct != null ? `${Math.round(kpi.aiPct)}%` : stats.total_calls === 0 ? "0%" : "—") : "—"}
+          </div>
           <div className={`kpi-d ${(kpi?.aiDeltaPt ?? 0) >= 0 ? "up" : "down"}`}>
             {kpi?.aiDeltaPt != null
               ? `${kpi.aiDeltaPt >= 0 ? "▲" : "▼"} ${Math.abs(kpi.aiDeltaPt).toFixed(1)} pts`
@@ -468,7 +506,9 @@ export default function DashboardPage() {
         </div>
         <div className="d-card">
           <div className="kpi-l">Avg call length</div>
-          <div className="kpi-v">{fmtDuration(kpi?.aht ?? null)}</div>
+          <div className="kpi-v">
+            {kpi && stats ? (kpi.aht != null ? fmtDuration(kpi.aht) : stats.total_calls === 0 ? "0s" : "—") : "—"}
+          </div>
           <div className={`kpi-d ${(kpi?.ahtDeltaSec ?? 0) <= 0 ? "up" : "down"}`}>
             {kpi?.ahtDeltaSec != null && Math.round(kpi.ahtDeltaSec) !== 0
               ? `${kpi.ahtDeltaSec < 0 ? "▼" : "▲"} ${Math.abs(Math.round(kpi.ahtDeltaSec))}s ${kpi.ahtDeltaSec < 0 ? "faster" : "slower"}`
