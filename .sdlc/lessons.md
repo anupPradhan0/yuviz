@@ -416,7 +416,10 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
     *Earned: PR #103's `ModelNotReadyError` for a Kokoro voice not on disk reached
     `resolve_handler_deps` → None → `RejectionHandler(UNAVAILABLE)` on routed calls, which hung up callers,
     where Kokoro used to fetch the voice lazily. The promised Ollama "not pulled" fallback never existed;
-    the model 404'd mid-call. External reviewers caught both after four internal rounds passed them.*
+    the model 404'd mid-call. External reviewers caught both after four internal rounds passed them.
+    A recovery path is new attack surface too: the background download added to "recover" a missing Whisper
+    model let any tenant admin make the shared call host fetch any HF repo. Gate every download a tenant value
+    can name on the registry allowlist, at the download site and on write.*
 
 50. [critic][tester][approver] A suite run that errors at import, fixture setup or connection (missing
     binary, blank DSN, unreachable DB, `command not found`) is an environment failure, not a test result.

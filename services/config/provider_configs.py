@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from libs.egress_guard import UnsafeProviderUrl, validate_base_url
+from libs.config_sdk.local_models import find_local_model
 from libs.config_sdk.secrets import ENCRYPTED_PREFIX, QUARANTINED as _QUARANTINED, encrypt_secret
 from libs.tenancy import platform_conn, tenant_conn
 
@@ -51,6 +52,36 @@ def require_safe_embedding_url(role: str, engine: str, extra: dict[str, Any] | N
         validate_base_url(extra["base_url"])
     except UnsafeProviderUrl as exc:
         raise ValueError(f"extra.base_url rejected: {exc}") from None
+
+
+# What ctranslate2 accepts; a tenant-chosen value outside these is an error at load time, and the
+# Conversation service keys its model downloads on neither, so they are checked on write.
+_WHISPER_EXTRA_VALUES = {
+    "device": {"cpu", "cuda", "auto"},
+    "compute_type": {
+        "default", "auto", "int8", "int8_float16", "int8_float32", "int8_bfloat16",
+        "int16", "float16", "bfloat16", "float32",
+    },
+}
+
+
+def require_supported_whisper(
+    engine: str, model: str | None, extra: dict[str, Any] | None, old: dict[str, Any] | None = None,
+) -> None:
+    """The Conversation service downloads a missing faster-whisper model on first use, so a tenant may
+    only name one from the local-model registry (else it could make the shared host fetch any repo),
+    and device/compute_type must be values ctranslate2 knows. `old` is the stored row on an update:
+    only what changed is checked, so rows saved before these checks still load and can be edited."""
+    if engine != "faster_whisper":
+        return
+    if (old is None or (old["engine"], old["model"]) != (engine, model)) and model \
+            and find_local_model(engine, model) is None:
+        raise ValueError(f"model {model!r} is not a supported faster_whisper model")
+    old_extra = (old or {}).get("extra") or {}
+    for key, allowed in _WHISPER_EXTRA_VALUES.items():
+        value = (extra or {}).get(key)
+        if value is not None and value != old_extra.get(key) and value not in allowed:
+            raise ValueError(f"extra.{key} {value!r} is not supported; use one of {sorted(allowed)}")
 
 
 def ref_mask_required(user: CurrentUser) -> bool:
@@ -197,6 +228,7 @@ async def create_provider_config(
 
     api_key_ref = resolve_api_key_input(api_key, api_key_ref, allow_pointer_schemes=allow_pointer_schemes)
     require_safe_embedding_url(role, engine, extra)
+    require_supported_whisper(engine, model, extra)
 
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
@@ -259,6 +291,11 @@ async def update_provider_config(
         if "extra" in fields or "engine" in fields:
             require_safe_embedding_url(
                 old["role"], fields.get("engine", old["engine"]), new_extra if "extra" in fields else old["extra"])
+
+        require_supported_whisper(
+            fields.get("engine", old["engine"]), fields.get("model", old["model"]),
+            new_extra if "extra" in fields else old["extra"], old=old,
+        )
 
         # After the FOR UPDATE fetch, so "[stored]" and the byte-identical
         # round-trip are compared with the row this transaction holds.

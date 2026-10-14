@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-import sys
 import time
 from typing import Any
 
@@ -20,6 +19,7 @@ import numpy as np
 
 from libs.config_sdk.languages import LANGUAGES, normalize_language
 
+from ... import model_downloads
 from ...language import MIN_CONFIDENCE
 from ..interfaces import INSTANCE_LANGUAGE, SttResult
 
@@ -106,22 +106,21 @@ class FasterWhisperSTT:
                 log.exception("FasterWhisper model=%s download/load failed", self._model_size)
 
     async def _download(self) -> None:
-        """Fetch the model in a subprocess: unlike an executor thread, stop_download() can kill it."""
-        proc = await asyncio.create_subprocess_exec(sys.executable, "-c", _DOWNLOAD_SCRIPT, self._model_size)
+        """Fetch the model in a subprocess shared by every instance of it (see model_downloads)."""
+        # Keyed on the repo the name resolves to, so aliases (large / large-v3) share one download.
         try:
-            code = await proc.wait()
-        finally:
-            if proc.returncode is None:  # cancelled at shutdown
-                proc.kill()
-                await proc.wait()
-        if code:
-            raise RuntimeError(f"model download exited {code}")
+            from faster_whisper.utils import _MODELS
+        except ImportError:  # stubbed in tests
+            _MODELS = {}
+        repo = _MODELS.get(self._model_size, self._model_size)
+        await model_downloads.fetch(("faster_whisper", repo), _DOWNLOAD_SCRIPT, self._model_size)
 
     async def stop_download(self) -> None:
-        """Stop a background download."""
+        """At shutdown: stop the background download."""
         if self._load_task is not None:
             self._load_task.cancel()
             await asyncio.gather(self._load_task, return_exceptions=True)
+        await model_downloads.stop_downloads()
 
     @property
     def loaded(self) -> bool:

@@ -14,8 +14,9 @@ import pytest
 
 from huggingface_hub.errors import LocalEntryNotFoundError
 
-from .. import ai_provider_manager
+from .. import ai_provider_manager, model_downloads
 from ..ai_provider_manager import (
+    close_not_ready_providers,
     AIProviderManager,
     ModelNotReadyError,
     ProviderConfig,
@@ -29,9 +30,11 @@ from ..ai_provider_manager import (
 def _no_not_ready_instances_carried_between_tests():
     ai_provider_manager._not_ready_whisper.clear()
     ai_provider_manager._not_ready_kokoro.clear()
+    model_downloads._done.clear()
     yield
     ai_provider_manager._not_ready_whisper.clear()
     ai_provider_manager._not_ready_kokoro.clear()
+    model_downloads._done.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -628,6 +631,22 @@ class TestModelNotReady:
         assert again.value.provider is exc.value.provider
         assert started == [exc.value.provider] * 2
 
+    async def test_a_whisper_model_outside_the_registry_is_never_downloaded(self, monkeypatch):
+        from ..providers.stt.faster_whisper import FasterWhisperSTT
+
+        async def missing(self, **kw):
+            raise LocalEntryNotFoundError("not cached")
+
+        monkeypatch.setattr(FasterWhisperSTT, "load", missing)
+        started = []
+        monkeypatch.setattr(FasterWhisperSTT, "load_when_needed", lambda self: started.append(self))
+        cfg = ProviderConfig(id="stt-1", role="stt", engine="faster_whisper", model="someone/huge-model")
+
+        with pytest.raises(LocalEntryNotFoundError):  # local-only load fails as it always did
+            await _make_faster_whisper(cfg, None)
+
+        assert started == [] and ai_provider_manager._not_ready_whisper == {}
+
     async def test_a_not_ready_whisper_is_not_handed_to_a_row_with_another_language(self, monkeypatch):
         from ..providers.stt.faster_whisper import FasterWhisperSTT
 
@@ -777,3 +796,130 @@ class TestCloudEngineRegistry:
 
         with pytest.raises(ValueError, match="no api_key_ref configured"):
             await manager.get_stt(cfg)
+
+
+class TestKokoroDownloadShutdown:
+    async def test_shutdown_kills_an_in_flight_kokoro_download_without_waiting_for_it(self, monkeypatch):
+        import sys
+        import types
+
+        monkeypatch.setitem(sys.modules, "kokoro", types.SimpleNamespace(KPipeline=object))
+        from ..providers.tts import kokoro as kokoro_module
+
+        started = asyncio.Event()
+        spawned = []
+
+        class _Proc:
+            returncode = None
+            exited = asyncio.Event()
+
+            async def wait(self):
+                started.set()
+                await self.exited.wait()  # a download that only ends when killed
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+                self.exited.set()
+
+        async def spawn(*argv):
+            spawned.append(argv)
+            return _Proc()
+
+        def not_cached(*a, **kw):
+            raise LocalEntryNotFoundError("not cached")
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        monkeypatch.setattr(kokoro_module, "hf_hub_download", not_cached)
+        tts = kokoro_module.KokoroTTS(voice="af_sarah", defer_load=True)
+        ai_provider_manager._not_ready_kokoro[("af_sarah", 1.0, "a")] = tts
+        synth = asyncio.create_task(tts.synthesize("hello", 16000))
+        await started.wait()
+
+        await asyncio.wait_for(close_not_ready_providers(), timeout=2)
+
+        with pytest.raises(RuntimeError):
+            await synth
+        assert len(spawned) == 1 and spawned[0][-2:] == ("config.json", "kokoro-v1_0.pth")
+
+    async def test_load_with_weights_on_disk_never_fetches_the_voice(self, monkeypatch):
+        # Call setup must not wait on (or fail with) a voice download: the voice is fetched on synthesis.
+        import sys
+        import types
+
+        monkeypatch.setitem(sys.modules, "kokoro", types.SimpleNamespace(KPipeline=lambda *a, **kw: object()))
+        from ..providers.tts import kokoro as kokoro_module
+
+        fetched = []
+
+        async def fetch(key, *args):
+            fetched.append(key)
+
+        def cached_except_voice(repo, filename, local_files_only):
+            if filename.startswith("voices/"):
+                raise LocalEntryNotFoundError("not cached")
+            return "/cache/" + filename
+
+        monkeypatch.setattr(kokoro_module, "hf_hub_download", cached_except_voice)
+        monkeypatch.setattr(kokoro_module.model_downloads, "fetch", fetch)
+        tts = kokoro_module.KokoroTTS(voice="af_sarah", defer_load=True)
+
+        await tts.load()
+
+        assert fetched == [] and tts.loaded
+
+    async def test_a_failed_voice_fetch_is_left_to_kpipeline_and_backs_off(self, monkeypatch):
+        import sys
+        import types
+
+        monkeypatch.setitem(sys.modules, "kokoro", types.SimpleNamespace(KPipeline=lambda *a, **kw: object()))
+        from ..providers.tts import kokoro as kokoro_module
+
+        attempts = []
+
+        async def failing_fetch(key, *args):
+            attempts.append(key)
+            raise RuntimeError("model download exited 1")
+
+        def cached_except_voice(repo, filename, local_files_only):
+            if filename.startswith("voices/"):
+                raise LocalEntryNotFoundError("not cached")
+            return "/cache/" + filename
+
+        monkeypatch.setattr(kokoro_module, "hf_hub_download", cached_except_voice)
+        monkeypatch.setattr(kokoro_module.model_downloads, "fetch", failing_fetch)
+        tts = kokoro_module.KokoroTTS(voice="af_sarah", defer_load=True)
+        await tts.load()
+
+        await tts._fetch_files(voice=True)  # does not raise: KPipeline's own lazy fetch remains
+        await tts._fetch_files(voice=True)  # within the back-off: no second subprocess
+
+        assert attempts == [("kokoro", "af_sarah")]
+
+    async def test_only_registry_voices_are_fetched(self, monkeypatch):
+        import sys
+        import types
+
+        monkeypatch.setitem(sys.modules, "kokoro", types.SimpleNamespace(KPipeline=object))
+        from ..providers.tts import kokoro as kokoro_module
+
+        spawned = []
+
+        class _Proc:
+            returncode = 0
+
+            async def wait(self):
+                return 0
+
+        async def spawn(*argv):
+            spawned.append(argv)
+            return _Proc()
+
+        def not_cached(*a, **kw):
+            raise LocalEntryNotFoundError("not cached")
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        monkeypatch.setattr(kokoro_module, "hf_hub_download", not_cached)
+        await kokoro_module.KokoroTTS(voice="../../evil", defer_load=True)._fetch_files(voice=True)
+
+        assert len(spawned) == 1 and spawned[0][-2:] == ("config.json", "kokoro-v1_0.pth")

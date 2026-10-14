@@ -15,12 +15,12 @@ from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import LocalEntryNotFoundError
 
 from libs.config_sdk.languages import KOKORO_DEFAULT_VOICE
+from libs.config_sdk.local_models import find_local_model
 
+from .providers.tts.kokoro import KOKORO_REPO
 from .secret_resolver import SecretResolver
 
 log = logging.getLogger(__name__)
-
-KOKORO_REPO = "hexgrad/Kokoro-82M"
 
 
 class ModelNotReadyError(RuntimeError):
@@ -135,6 +135,8 @@ async def _make_faster_whisper(cfg: ProviderConfig, _api_key: str | None) -> Any
         try:
             await inst.load()
         except LocalEntryNotFoundError:
+            if find_local_model("faster_whisper", model_size) is None:
+                raise  # only registry models are downloaded: the name is tenant-chosen
             # Pre-check behaviour: the model downloads on its first use. Until it has, the instance
             # transcribes nothing, so a caller with a better provider is given that one.
             inst.load_when_needed()
@@ -146,7 +148,7 @@ async def _make_faster_whisper(cfg: ProviderConfig, _api_key: str | None) -> Any
 
 async def close_not_ready_providers() -> None:
     """At shutdown: stop the background model downloads of instances no call has taken over."""
-    for inst in _not_ready_whisper.values():
+    for inst in (*_not_ready_whisper.values(), *_not_ready_kokoro.values()):
         await inst.stop_download()
 
 

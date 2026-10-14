@@ -53,8 +53,10 @@ _KOKORO_VOICES = (
 
 LOCAL_MODELS: tuple[LocalModel, ...] = (
     *(_stt("faster_whisper", n) for n in (
-        "tiny", "base", "small", "medium", "large-v3",
+        "tiny", "base", "small", "medium", "large-v1", "large-v2", "large-v3", "large",
+        "large-v3-turbo", "turbo",
         "tiny.en", "base.en", "small.en", "medium.en",
+        "distil-large-v2", "distil-large-v3", "distil-large-v3.5", "distil-medium.en", "distil-small.en",
     )),
     *(_llm("ollama", n) for n in (
         "llama3.2", "llama3", "qwen2.5", "mistral", "phi3", "gemma3:4b", "gemma4:e2b",

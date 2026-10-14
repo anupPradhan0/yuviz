@@ -316,12 +316,33 @@ async def test_voice_template_create_is_monolingual(pool, test_tenant, test_admi
         "llm_config_id": await _llm_config(pool, test_tenant["id"]), "stt_config_id": stt,
         "tts_config_id": await _cartesia(test_tenant["id"]),
     }
-    resp = await _post_template(pool, test_tenant, test_admin, "inbound-triage", configs)
+    resp = await _post_template(pool, test_tenant, test_admin, "inbound-triage", configs, language="en")
     assert resp.status_code == 201, resp.text
     row = await _agent_row(pool, uuid.UUID(resp.json()["id"]))
     assert row["language_mode"] == "monolingual"
     assert row["language"] == "en"
     assert row["supported_languages"] is None
+
+
+async def test_voice_template_without_a_language_stores_none_and_accepts_a_non_english_voice(
+    pool, test_tenant, test_admin, scoped,
+):
+    # Easy flow "Choose automatically" sends language null: it must not become "en" + a mode, which
+    # would 400 a tenant whose voice is Hindi.
+    hindi_voice = str((await provider_configs.create_provider_config(
+        tenant_id=test_tenant["id"], name="Kokoro hi", role="tts", engine="kokoro", voice="hf_alpha",
+        allow_pointer_schemes=False,
+    ))["id"])
+    configs = {
+        "llm_config_id": await _llm_config(pool, test_tenant["id"]),
+        "stt_config_id": await _deepgram_stt(pool, test_tenant["id"]),
+        "tts_config_id": hindi_voice,
+    }
+    resp = await _post_template(pool, test_tenant, test_admin, "inbound-triage", configs, language=None)
+    assert resp.status_code == 201, resp.text
+    row = await _agent_row(pool, uuid.UUID(resp.json()["id"]))
+    assert row["language"] is None
+    assert row["language_mode"] is None
 
 
 @pytest.mark.parametrize("language", ["nl-BE", "en-US", "hi"])

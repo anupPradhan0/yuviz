@@ -368,3 +368,33 @@ async def test_model_pulled_treats_an_unreachable_ollama_as_pulled():
         raise httpx.ConnectError("refused")
 
     assert await _make_llm(down).model_pulled() is True
+
+
+@pytest.mark.asyncio
+async def test_model_pulled_stops_reading_an_oversized_tag_list_and_logs_a_fixed_code(caplog):
+    chunks_sent = []
+
+    async def body():
+        for _ in range(100):  # 100 MB offered; only ~1 MB may be read
+            chunks_sent.append(1)
+            yield b"x" * 1_000_000
+
+    llm = _make_llm(lambda request: httpx.Response(200, content=body()))
+    with caplog.at_level("WARNING"):
+        assert await llm.model_pulled() is True
+    assert len(chunks_sent) < 5
+    assert "provider_response_too_large" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_model_pulled_asks_for_an_uncompressed_list_and_refuses_a_compressed_one(caplog):
+    seen = {}
+
+    def handler(request):
+        seen["accept"] = request.headers["Accept-Encoding"]
+        return httpx.Response(200, headers={"Content-Encoding": "gzip"}, content=b"\x1f\x8b")
+
+    with caplog.at_level("WARNING"):
+        assert await _make_llm(handler).model_pulled() is True
+    assert seen["accept"] == "identity"
+    assert "provider_response_encoded" in caplog.text

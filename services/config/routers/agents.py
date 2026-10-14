@@ -205,10 +205,9 @@ async def create_agent_from_template(
     greeting, system_prompt = agent_templates.render(
         template, name=body.name, business_name=body.business_name, facts=body.business_facts,
     )
-    language = body.language or "en"
-    # Only a registry language on a voice template gets a mode (and so STT/TTS coverage checks);
-    # any other tag, or a chat template that never speaks, is stored as it always was.
-    mode = "monolingual" if language in LANGUAGES and {"stt", "tts"} <= template.needs else None
+    # Only an exact registry code on a voice template gets a mode (and so STT/TTS coverage checks);
+    # no language, any other tag, or a chat template that never speaks is stored as it always was.
+    mode = "monolingual" if body.language in LANGUAGES and {"stt", "tts"} <= template.needs else None
     try:
         return await agents_service.create_agent(
             tenant_id=tenant["id"],
@@ -220,7 +219,7 @@ async def create_agent_from_template(
             llm_config_id=body.llm_config_id,
             tts_config_id=body.tts_config_id,
             workflow=None,
-            language=language,
+            language=body.language,
             language_mode=mode,
             status="inactive",
             template_id=template.id,

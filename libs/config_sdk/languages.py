@@ -137,8 +137,9 @@ def stt_languages(engine: str, model: str | None) -> frozenset[str]:
     so a new engine must be added here before a multilingual agent can use it."""
     engine = (engine or "").lower()
     if engine == "faster_whisper":
-        # Whisper's '*.en' checkpoints are English-only; the rest auto-detect.
-        return frozenset({"en"}) if (model or "").lower().endswith(".en") else frozenset(LANGUAGES)
+        # Whisper's '*.en' checkpoints and the distil-* ones are English-only; the rest auto-detect.
+        name = (model or "").lower()
+        return frozenset({"en"}) if name.endswith(".en") or name.startswith("distil-") else frozenset(LANGUAGES)
     if engine == "deepgram":
         return frozenset(LANGUAGES)
     return frozenset({"en"})

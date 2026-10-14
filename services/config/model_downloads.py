@@ -171,7 +171,11 @@ class ModelDownloads:
             resp.raise_for_status()
         except httpx.HTTPError:
             return set()  # Ollama down: nothing is pulled as far as this host can tell
-        return {m["name"] for m in resp.json().get("models", [])}
+        try:
+            return {m["name"] for m in resp.json().get("models", [])}
+        except (ValueError, KeyError, TypeError, AttributeError):
+            log.warning("ollama_tags_unrecognised")  # not Ollama's /api/tags (a proxy, an HTML page)
+            return set()
 
     async def _on_disk(self, model: LocalModel, ollama_tags: set[str] | None = None) -> bool:
         if model.engine == "faster_whisper":

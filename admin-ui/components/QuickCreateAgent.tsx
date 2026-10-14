@@ -129,8 +129,6 @@ export function QuickCreateAgent({ initialTemplate, onStepByStep }: {
         stt_config_id: pick("stt", account.default_stt_config_id),
         llm_config_id: llmId,
         tts_config_id: await defaultVoiceId(account.id, account.default_tts_config_id),
-        language: "en",
-        language_mode: "monolingual",
         status: "inactive",
       });
       router.push(`/agents/${account.slug}/${agent.slug}?new=1`);

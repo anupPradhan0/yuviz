@@ -26,6 +26,9 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "http://localhost:11434"
 
+# A real /api/tags is a few KB; the URL is tenant-chosen, so a longer body is not read to the end.
+_MAX_TAGS_BYTES = 1_000_000
+
 # Ollama evicts idle models after 5m by default; a reload costs ~15s on the next first turn.
 _KEEP_ALIVE = "30m"
 
@@ -98,8 +101,18 @@ class OllamaLLM:
         """Whether Ollama has this model. An unreachable Ollama reads as pulled: the first turn
         reports the real error, as it always did."""
         try:
-            resp = await self._client.get("/api/tags")
-            resp.raise_for_status()
+            # Uncompressed only, so the size cap below bounds what is decoded, not just what is sent.
+            async with self._client.stream("GET", "/api/tags", headers={"Accept-Encoding": "identity"}) as resp:
+                resp.raise_for_status()
+                if resp.headers.get("Content-Encoding", "identity").lower() != "identity":
+                    log.warning("OllamaLLM: model list is compressed (provider_response_encoded) model=%s", self._model)
+                    return True
+                body = b""
+                async for chunk in resp.aiter_bytes():
+                    body += chunk
+                    if len(body) > _MAX_TAGS_BYTES:
+                        log.warning("OllamaLLM: model list too large (provider_response_too_large) model=%s", self._model)
+                        return True
         except httpx.HTTPError as exc:
             # Fixed code only: exception text from a tenant-chosen URL must not reach the log (libs.egress_guard).
             coded = _coded(exc)
@@ -107,7 +120,7 @@ class OllamaLLM:
                         coded.code if coded else "provider_error", self._model)
             return True
         try:
-            tags = {m["name"] for m in resp.json().get("models", [])}
+            tags = {m["name"] for m in json.loads(body).get("models", [])}
         except (ValueError, KeyError, TypeError, AttributeError):
             # Not Ollama's /api/tags (a proxy, an HTML page): the first turn reports the real error.
             log.warning("OllamaLLM: unrecognised model list (provider_error) model=%s", self._model)

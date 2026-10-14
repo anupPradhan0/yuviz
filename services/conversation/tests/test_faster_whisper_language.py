@@ -359,3 +359,21 @@ def test_whisper_has_no_aclose_for_the_bundle_to_call():
     from services.conversation.providers.stt.faster_whisper import FasterWhisperSTT
 
     assert not hasattr(FasterWhisperSTT, "aclose") and hasattr(FasterWhisperSTT, "stop_download")
+
+
+async def test_whisper_aliases_share_one_download_key(whisper_cls, monkeypatch):
+    from services.conversation.providers.stt import faster_whisper as fw
+
+    keys = []
+
+    async def fetch(key, *args):
+        keys.append(key)
+
+    monkeypatch.setattr(fw.model_downloads, "fetch", fetch)
+    utils = type(sys)("faster_whisper.utils")
+    utils._MODELS = {"large": "Systran/faster-whisper-large-v3", "large-v3": "Systran/faster-whisper-large-v3"}
+    monkeypatch.setitem(sys.modules, "faster_whisper.utils", utils)
+    for name in ("large", "large-v3"):
+        await _stt(whisper_cls, None, model_size=name)._download()
+
+    assert keys[0] == keys[1] == ("faster_whisper", "Systran/faster-whisper-large-v3")

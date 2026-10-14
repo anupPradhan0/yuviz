@@ -10,6 +10,7 @@ import time
 import uuid
 
 import pytest
+import httpx
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
@@ -317,3 +318,30 @@ async def test_failed_pull_surfaces_ollamas_own_error_and_logs(monkeypatch, capl
     assert entry["error"] == "ollama pull failed: pull model manifest: file does not exist"
     assert any("engine=ollama name=llama3.2" in r.getMessage() for r in caplog.records)
     await d.aclose()
+
+
+@pytest.mark.parametrize("response", [
+    httpx.Response(200, text="<html>welcome</html>"),
+    httpx.Response(200, json=["llama3.2"]),
+    httpx.Response(200, json={"models": [{"model": "llama3.2"}]}),
+], ids=["html", "top-level-list", "entry-without-name"])
+async def test_a_non_ollama_tag_list_reads_as_no_models_present(response):
+    d = ModelDownloads(ollama_url="http://ollama.invalid")
+    d._http = httpx.AsyncClient(base_url="http://ollama.invalid", transport=httpx.MockTransport(lambda r: response))
+    assert await d._ollama_tags() == set()
+    await d.aclose()
+
+
+async def test_the_seed_script_refuses_an_unsupported_stt_model_without_a_traceback(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[3] / "scripts" / "seed_default_config.py"
+    spec = importlib.util.spec_from_file_location("seed_default_config", path)
+    seed = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(seed)
+    monkeypatch.setattr(seed, "STT_MODEL", "my-finetune")
+
+    with pytest.raises(SystemExit) as exc:
+        await seed.main()
+    assert "my-finetune" in str(exc.value) and "large-v3-turbo" in str(exc.value)
