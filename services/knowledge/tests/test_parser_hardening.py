@@ -261,10 +261,16 @@ def _children_maxrss_mb() -> float:
     return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
 
 
+def _self_maxrss_mb() -> float:
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
+
+
 def _bounded_since(before: float, ceiling: float = 400) -> bool:
     """ru_maxrss of children is a high-water mark over every child this process has waited for, so another test's
-    big child must not fail this one: the peak may not have grown past the ceiling because of THIS test."""
-    return _children_maxrss_mb() <= max(before, ceiling)
+    big child must not fail this one: the peak may not have grown past the ceiling because of THIS test.
+    On Linux a child's maxrss also counts the pytest image it held before exec, so pytest's own peak is allowed."""
+    return _children_maxrss_mb() <= max(before, ceiling, _self_maxrss_mb())
 
 
 async def test_declared_huge_xlsx_is_rejected_fast_and_cheaply():
