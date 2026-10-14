@@ -63,8 +63,8 @@ async def test_retrieve_end_to_end_with_real_ollama_embeddings(pool, tenant_agen
     await agent_kb_service.assign(agent["id"], kb["id"])
 
     document = dict(await pool.fetchrow(
-        "INSERT INTO kb_documents (kb_id, tenant_id, title, source_ref, content_type) "
-        "VALUES ($1, $2, 'Refund Policy', 'inline', 'text/plain') RETURNING *",
+        "INSERT INTO kb_documents (kb_id, tenant_id, title, source_ref, content_type, status) "
+        "VALUES ($1, $2, 'Refund Policy', 'inline', 'text/plain', 'ready') RETURNING *",
         kb["id"], tenant["id"],
     ))
 

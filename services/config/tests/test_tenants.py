@@ -68,7 +68,8 @@ async def test_concurrent_updates_do_not_produce_stale_audit_old_value(test_tena
 
     audit_rows = await pool.fetch(
         "SELECT * FROM audit_log WHERE entity_type = 'tenant' AND entity_id = $1 "
-        "AND action = 'updated' ORDER BY changed_at",
+        # Not changed_at: now() is transaction start, so the update that waited on the lock can sort first.
+        "AND action = 'updated' ORDER BY id",
         test_tenant["id"],
     )
     assert len(audit_rows) == 2
