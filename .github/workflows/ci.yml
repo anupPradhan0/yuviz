@@ -14,8 +14,14 @@ concurrency:
 
 jobs:
   python-tests:
+    name: python-tests (${{ matrix.group }}/4)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
+    # pytest-split balances the groups by .test_durations; every test lands in exactly one group.
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4]
     services:
       postgres:
         image: pgvector/pgvector:0.8.0-pg14
@@ -130,7 +136,9 @@ jobs:
           done
 
       - name: Run tests
-        run: python -m pytest -q -p no:cacheprovider -rfEs
+        env:
+          GROUP: ${{ matrix.group }}
+        run: python -m pytest -q -p no:cacheprovider -rfEs --splits 4 --group "$GROUP" --durations-path .test_durations
 
   gateway:
     runs-on: ubuntu-latest
