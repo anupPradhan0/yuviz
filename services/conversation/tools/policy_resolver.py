@@ -35,6 +35,9 @@ class ResolvedToolPolicy:
     max_chain_depth:         int | None = None
     # execute_api only — sensitive caller-param names across the agent's enabled APIs.
     sensitive_arg_keys:      frozenset[str] = frozenset()
+    # execute_api only — lower-cased names of offered APIs whose whole chain is read-only
+    # (custom_apis.side_effecting = false). Anything not listed is treated as a write.
+    read_only_apis:          frozenset[str] = frozenset()
 
 
 class ToolPolicyResolver:
@@ -127,14 +130,17 @@ class ToolPolicyResolver:
             if specialized is None:
                 del resolved[i]
             else:
-                defn, sensitive_arg_keys = specialized
-                resolved[i] = replace(policy, definition=defn, sensitive_arg_keys=sensitive_arg_keys)
+                defn, sensitive_arg_keys, read_only_apis = specialized
+                resolved[i] = replace(
+                    policy, definition=defn, sensitive_arg_keys=sensitive_arg_keys, read_only_apis=read_only_apis,
+                )
             return
 
     async def _specialize_execute_api(
         self, defn: ToolDefinition, agent_id: str, tenant_slug: str,
-    ) -> tuple[ToolDefinition, frozenset[str]] | None:
-        """Return (defn with api_name enum + param docs, sensitive caller-param names), or None if no APIs.
+    ) -> tuple[ToolDefinition, frozenset[str], frozenset[str]] | None:
+        """Return (defn with api_name enum + param docs, sensitive caller-param names, read-only API names),
+        or None if no APIs.
         Upstream-only APIs are hidden and caller params are gathered across each API's whole chain;
         the agent/API tenant join is the runtime tenant fence."""
         async with tenant_conn(
@@ -176,6 +182,12 @@ class ToolPolicyResolver:
                            SELECT 1 FROM chain c2
                            WHERE c2.api_id = e.id AND c2.root_id <> e.id
                        ) AS is_intermediate,
+                       -- A chain is a write if any API in it is; the column defaults to true.
+                       EXISTS (
+                           SELECT 1 FROM chain c3
+                           JOIN custom_apis ca3 ON ca3.id = c3.api_id
+                           WHERE c3.root_id = e.id AND ca3.side_effecting
+                       ) AS chain_side_effecting,
                        p.name        AS param_name,
                        p.description AS param_description,
                        p.json_type, p.required,
@@ -202,10 +214,14 @@ class ToolPolicyResolver:
 
         apis: dict[str, dict[str, Any]] = {}
         sensitive_arg_keys: set[str] = set()
+        read_only_apis: set[str] = set()
         for row in rows:
             if row["name"] not in offerable:
                 continue
             api = apis.setdefault(row["name"], {"description": row["description"], "params": {}})
+            # .get: a row without the column is treated as a write (fail closed).
+            if not row.get("chain_side_effecting", True):
+                read_only_apis.add(row["name"].lower())
             # Dedup: a diamond in the chain reaches the same leaf twice.
             if row["param_name"] is not None and row["param_name"] not in api["params"]:
                 api["params"][row["param_name"]] = row
@@ -231,7 +247,7 @@ class ToolPolicyResolver:
                 },
             },
         )
-        return specialized, frozenset(sensitive_arg_keys)
+        return specialized, frozenset(sensitive_arg_keys), frozenset(read_only_apis)
 
 
 def _narrow(

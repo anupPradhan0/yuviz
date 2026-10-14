@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 
@@ -10,8 +11,11 @@ from services.config.auth import CurrentUser
 from services.config.deps import assert_tenant_access, get_current_user, is_platform_scoped, require_role
 
 from .. import documents as documents_service
+from .. import health as health_service
 from .. import knowledge_bases as kb_service
-from ..ingestion_worker import SUPPORTED_CONTENT_TYPES
+from ..parsers import (
+    BINARY_DISABLED_REASON, BINARY_TYPES, SUPPORTED_CONTENT_TYPES, binary_parsers_enabled, detect_content_type, unsupported_reason,
+)
 from ..schemas import DocumentUpdate
 from ..storage import LocalStorageProvider
 
@@ -81,13 +85,18 @@ async def upload_document(
 ):
     kb = await _authorize_kb(kb_id, current_user)
 
-    content_type = (file.content_type or "").split(";")[0].strip().lower()
-    if content_type not in SUPPORTED_CONTENT_TYPES:
-        raise HTTPException(
-            status_code=415,
-            detail=f"unsupported content_type {content_type!r} — supported: {sorted(SUPPORTED_CONTENT_TYPES)}",
-        )
+    # The declared type is only a hint: the bytes decide, so a PDF sent as text/plain (or octet-stream) is
+    # accepted and an image renamed .txt is not.
     content = await _read_capped(file)
+    if not content:
+        raise HTTPException(status_code=400, detail="file is empty")
+    declared = (file.content_type or "").split(";")[0].strip().lower()
+    # Zip inspection and charset detection are CPU work (a crafted 10 MB zip costs ~0.3 s): keep it off the event loop.
+    content_type = await asyncio.to_thread(detect_content_type, content, declared)
+    if content_type not in SUPPORTED_CONTENT_TYPES:
+        raise HTTPException(status_code=415, detail=unsupported_reason(content_type))
+    if content_type in BINARY_TYPES and not binary_parsers_enabled():
+        raise HTTPException(status_code=415, detail=BINARY_DISABLED_REASON)
     return await documents_service.upload_document(
         tenant_id=kb["tenant_id"],
         kb_id=kb_id,
@@ -106,6 +115,13 @@ async def upload_document(
 @router.get("/documents/{document_id}")
 async def get_document(document_id: str, current_user: CurrentUser = Depends(get_current_user)):
     return await _authorize_document(document_id, current_user)
+
+
+@router.get("/documents/{document_id}/events")
+async def list_document_events(document_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    """The ingestion trail (stage, outcome, retry/dead-letter markers) for one document, oldest first."""
+    await _authorize_document(document_id, current_user)
+    return await health_service.document_events(document_id)
 
 
 @router.patch("/documents/{document_id}")
@@ -141,7 +157,7 @@ async def retry_document(
         user_id=current_user.id, user_email=current_user.email,
     )
     if retried is None:
-        raise HTTPException(status_code=409, detail="only a failed document can be retried")
+        raise HTTPException(status_code=409, detail="only a failed document (or one whose re-index failed) can be retried")
     return retried
 
 

@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from services.conversation.providers.interfaces import ChatMessage
-from services.conversation.providers.llm.ollama import OllamaLLM
+from services.conversation.providers.llm.ollama import OllamaLLM, OllamaProviderError
 from services.conversation.tools.llm_adapter import ToolCallEvent, TokenEvent
 
 
@@ -318,7 +318,7 @@ async def test_non_thinking_related_400_is_not_swallowed():
         return httpx.Response(400, content=b'{"error":"model not found"}')
 
     llm = _make_llm(handler, think=False)
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(OllamaProviderError, match="^provider_error$"):  # a fixed code, never the response body
         _ = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
 
 
@@ -329,7 +329,7 @@ async def test_404_warns_once_per_instance_naming_the_model_and_still_raises(cap
     llm = _make_llm(handler)
     with caplog.at_level("WARNING", logger="services.conversation.providers.llm.ollama"):
         for _ in range(2):
-            with pytest.raises(httpx.HTTPStatusError):
+            with pytest.raises(OllamaProviderError, match="^provider_error$"):
                 _ = [tok async for tok in llm.generate([ChatMessage(role="user", content="hi")])]
 
     warnings = [r for r in caplog.records if "not pulled" in r.getMessage()]

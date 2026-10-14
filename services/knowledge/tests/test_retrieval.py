@@ -13,6 +13,7 @@ from services.knowledge.retrieval import _resolve_policy, retrieve
 from services.knowledge.secret_resolver import CompositeSecretResolver
 from services.knowledge.storage import LocalStorageProvider
 from services.knowledge.vector_repository import PgVectorRepository
+from services.knowledge.tests.ollama_gate import requires_ollama_embeddings
 
 
 async def test_resolve_policy_uses_system_default_when_nothing_set(pool, tenant_agent):
@@ -48,6 +49,7 @@ async def test_resolve_policy_call_override_wins_over_agent_row(pool, tenant_age
     assert resolved["top_k"] == 3  # explicit call override beats the agent's configured 15
 
 
+@requires_ollama_embeddings
 async def test_retrieve_end_to_end_with_real_ollama_embeddings(pool, tenant_agent):
     tenant, agent = tenant_agent
     set_caller_tenant(str(tenant["id"]))
@@ -85,7 +87,7 @@ async def test_retrieve_end_to_end_with_real_ollama_embeddings(pool, tenant_agen
             tenant_slug=tenant["slug"], agent_slug=agent["slug"], query="How long until I get my money back?",
         )
 
-    assert result is not None
+    assert result["status"] == "ok"
     assert result["chunks"][0]["content"] == "Refunds are processed within 30 days."
     assert result["sources"] == ["Refund Policy"]
     assert result["retrieval_metadata"]["top_k"] == 5  # system default, nothing overrode it
@@ -117,11 +119,12 @@ async def test_prompt_mode_document_always_included_regardless_of_query_relevanc
             query="What is the weather like on Mars?",  # completely unrelated
         )
 
-    assert result is not None
+    assert result["status"] == "ok"
     assert result["chunks"][0]["content"] == "We are closed on all public holidays."
     assert result["retrieval_metadata"]["always_included"] == 1
 
 
+@requires_ollama_embeddings
 async def test_prompt_mode_document_coexists_with_vector_search_results(pool, tenant_agent):
     tenant, agent = tenant_agent
     set_caller_tenant(str(tenant["id"]))
@@ -169,13 +172,14 @@ async def test_prompt_mode_document_coexists_with_vector_search_results(pool, te
             tenant_slug=tenant["slug"], agent_slug=agent["slug"], query="How long until I get my money back?",
         )
 
-    assert result is not None
+    assert result["status"] == "ok"
     contents = [c["content"] for c in result["chunks"]]
     assert "Escalate unresolved issues to manager@acme.example." in contents  # always-include, unconditional
     assert "Refunds are processed within 30 days." in contents  # relevant vector match
     assert result["retrieval_metadata"]["always_included"] == 1
 
 
+@requires_ollama_embeddings
 async def test_prompt_mode_document_excluded_from_ordinary_vector_search(pool, tenant_agent):
     tenant, agent = tenant_agent
     set_caller_tenant(str(tenant["id"]))
@@ -233,5 +237,5 @@ async def test_agent_with_prompt_only_kb_and_no_embedding_provider_still_retriev
             tenant_slug=tenant["slug"], agent_slug=agent["slug"], query="anything at all",
         )
 
-    assert result is not None
+    assert result["status"] == "ok"
     assert result["chunks"][0]["content"] == "Office closes early on Fridays."

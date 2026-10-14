@@ -22,7 +22,8 @@ class LocalStorageProvider:
     """Local filesystem storage at {root}/{tenant_id}/{kb_id}/{uuid}-{filename} (single-node only)."""
 
     def __init__(self, root: str | None = None) -> None:
-        self._root = Path(root or os.environ.get("KNOWLEDGE_STORAGE_ROOT", "./data/knowledge_documents"))
+        # Absolute at startup: a relative root would follow the process cwd and put tenant files wherever it points.
+        self._root = Path(root or os.environ.get("KNOWLEDGE_STORAGE_ROOT", "./data/knowledge_documents")).resolve()
 
     async def save(self, tenant_id: str, kb_id: str, filename: str, content: bytes) -> str:
         directory = self._root / tenant_id / kb_id

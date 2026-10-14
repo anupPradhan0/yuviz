@@ -54,8 +54,8 @@ from .servicer import ConversationServicer
 from .session import AgentUnavailable, RoutingStatus, SessionContext
 from .tools.executor_registry import ExecutorRegistry
 from .tools.executors.api_exec_executor import ApiExecExecutor
+from .tools.factory import orchestrator_factory
 from .tools.llm_adapter import LLMAdapter
-from .tools.orchestrator import ToolCallOrchestrator
 from .tools.policy_resolver import ToolPolicyResolver
 from .tools.provider_manager import ToolProviderManager
 from .tools.registry import ToolRegistry
@@ -324,6 +324,11 @@ async def serve(port: int, args: argparse.Namespace) -> None:
     tool_policy_resolver = await ToolPolicyResolver.connect(
         os.environ.get("POSTGRES_DSN"), tool_registry,
     )
+    # Process-scoped breaker board and last-good cache, shared by every per-call orchestrator (see tools/factory.py).
+    build_tool_orchestrator = orchestrator_factory(
+        policy_resolver=tool_policy_resolver, provider_manager=tool_provider_manager,
+        executor_registry=executor_registry, latency_store=tool_latency_store,
+    )
 
     # Providers (STT/LLM/TTS) are shared across streams because they are stateless
     # or internally thread-safe. Only the handler (which holds per-session history
@@ -365,13 +370,7 @@ async def serve(port: int, args: argparse.Namespace) -> None:
             *, initial_variables: dict | None = None,
         ) -> PipelineConversationHandler:
             """Build a pipeline handler; shared by direct calls and call-flow handoffs."""
-            tool_orchestrator = ToolCallOrchestrator(
-                llm_adapter=LLMAdapter(bundle.llm),
-                policy_resolver=tool_policy_resolver,
-                provider_manager=tool_provider_manager,
-                executor_registry=executor_registry,
-                latency_store=tool_latency_store,
-            )
+            tool_orchestrator = build_tool_orchestrator(LLMAdapter(bundle.llm))
 
             # "Can act" (gates caller-ID prompt block and booking-claim guard) means execute_api is enabled.
             enabled_policies = await tool_policy_resolver.enabled_tools(

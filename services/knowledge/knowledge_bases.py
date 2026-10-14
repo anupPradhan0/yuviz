@@ -8,6 +8,7 @@ from typing import Any
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import audit, db
+from . import retrieval_plan as plans
 
 _UPDATABLE_FIELDS = {"name", "description", "embedding_config_id", "status"}
 
@@ -105,6 +106,7 @@ async def update_knowledge_base(
             conn, entity_type="knowledge_base", entity_id=kb_id, action="updated",
             user_id=user_id, user_email=user_email, old_value=old, new_value=new,
         )
+    plans.invalidate_tenant_id(old["tenant_id"])  # a KB edit can change any of the tenant's agents' plans
     return new
 
 
@@ -132,3 +134,4 @@ async def soft_delete_knowledge_base(
             conn, entity_type="knowledge_base", entity_id=kb_id, action="deleted",
             user_id=user_id, user_email=user_email, old_value=old,
         )
+    plans.invalidate_tenant_id(old["tenant_id"])

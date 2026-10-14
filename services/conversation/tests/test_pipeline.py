@@ -2076,8 +2076,10 @@ class _FakeToolOrchestrator:
     async def run_turn(
         self, agent_id, tenant_id, call_id, session_id, history,
         caller_number="", called_number="", call_direction="", cancel_event=None, force_tool_name=None,
-        phone_number_confirmed=False, local_tools=None, only_tools=None, trailing_message=None,
+        phone_number_confirmed=False, local_tools=None, only_tools=None, carry_taint=False,
+        trailing_message=None,
     ):
+        self.seen_carry_taint = carry_taint
         self.seen_trailing_message = trailing_message
         self.seen_force_tool_name = force_tool_name
         self.seen_phone_number_confirmed = phone_number_confirmed

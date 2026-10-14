@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class KnowledgeBaseCreate(BaseModel):
@@ -41,7 +41,7 @@ class AgentKnowledgeBaseUpdate(BaseModel):
 class RetrieveRequest(BaseModel):
     tenant_slug: str
     agent_slug: str
-    query: str
+    query: str = Field(max_length=4000)  # retrieve() cuts it further to KNOWLEDGE_RETRIEVAL_MAX_QUERY_CHARS
     # None = no override (falls back to the agent's policy, then system default).
     top_k: int | None = None
     max_tokens: int | None = None

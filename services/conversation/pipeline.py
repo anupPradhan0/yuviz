@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -46,6 +47,7 @@ from .tools.llm_adapter import LocalToolCompletedEvent
 from .tools.llm_adapter import TokenEvent as ToolTokenEvent
 from .tools.llm_adapter import ToolCallStartedEvent
 from .tools.orchestrator import ToolCallOrchestrator
+from .tools.envelope import UNTRUSTED_NOTICE, cap_passages, defang, visible_degraded, wrap_untrusted
 from .tools.registry import SEARCH_KNOWLEDGE
 from .tools.types import ToolResult, ToolStatus
 from .transcript_builder import TranscriptBuilder, TurnLatency
@@ -236,6 +238,12 @@ _MAX_DURATION_GOODBYE = t("max_duration_goodbye", "en")
 _FALLBACK_LLM_ERROR = t("fallback_llm_error", "en")
 
 _TOOL_CALL_FILLER_MIN_GAP_S = 4.0
+# Hard ceiling on retrieved text handed to the LLM, in the knowledge service's own token unit (words).
+# The agent's token budget is enforced server-side (prompt-mode documents get at most half of it); this
+# ceiling is the backstop for what a word count cannot bound and for a service with a larger budget.
+_KNOWLEDGE_TOOL_MAX_TOKENS = int(os.environ.get("KNOWLEDGE_TOOL_MAX_TOKENS", "1500"))
+# Words are no bound for CJK, minified JSON or base64 (no spaces), so characters are capped as well.
+_KNOWLEDGE_TOOL_MAX_CHARS = int(os.environ.get("KNOWLEDGE_TOOL_MAX_CHARS", "6000"))
 
 # Masks turn-1 LLM latency; generic so it fits any first utterance.
 _FIRST_TURN_FILLER = t("first_turn_filler", "en")
@@ -431,6 +439,7 @@ class PipelineConversationHandler:
         self._tenant_slug = runtime_config.tenant.slug
         self._agent_slug  = runtime_config.agent.slug
         self._knowledge = knowledge
+        self._background_tasks: set[asyncio.Task] = set()
         self._session_finalizer = SessionFinalizer(transcripts, metrics)
         self._metrics = metrics if metrics is not None else NullMetrics()
         # None means plain self._llm.generate().
@@ -545,6 +554,19 @@ class PipelineConversationHandler:
                 or log.error("TTS language prewarm failed", exc_info=done.exception())
             )
 
+    def _prewarm_knowledge(self) -> None:
+        """Warm the Knowledge Service's retrieval plan during the greeting, so the first search of the
+        call does not pay for it. Fire and forget: a failure only costs that first search some latency."""
+        prewarm = getattr(self._knowledge, "prewarm", None)
+        if prewarm is None or not self._workflow.knowledge_enabled():
+            return
+        try:
+            task = asyncio.get_running_loop().create_task(prewarm(self._tenant_slug, self._agent_slug))
+        except RuntimeError:
+            return
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     def _greeting_text(self) -> str | None:
         """The per-language greeting for the starting language when the agent has one,
         rendered like the workflow's; otherwise the workflow start node's greeting."""
@@ -596,6 +618,7 @@ class PipelineConversationHandler:
                 self._direction or "inbound", self._caller_number, self._called_number,
                 self._agent_id, self._agent_config_version,
             )
+        self._prewarm_knowledge()
         # Speaking the instant the line opens gets the first syllable
         # clipped on some outbound carriers — the start node can hold off.
         if self._workflow.delayed_start_ms > 0:
@@ -1025,6 +1048,9 @@ class PipelineConversationHandler:
         try:
             async for chunk, tts_audio, _end_call in self._llm_to_tts(
                 messages_for_llm, cancel_event, session_id, directives, store=history,
+                # Not a caller utterance: retrieved text read earlier is still in context, so a planted
+                # passage cannot use a failed transfer to get a clean turn for its write.
+                carry_taint=True,
             ):
                 full_response.append(chunk)
                 if tts_audio:
@@ -1206,6 +1232,7 @@ class PipelineConversationHandler:
         cancel_event: asyncio.Event,
         tool_calls_made: list[str],
         store: list[ChatMessage] | None = None,
+        carry_taint: bool = False,
     ) -> AsyncGenerator[str | ToolCallStartedEvent | LocalToolCompletedEvent, None]:
         """LLM tokens + ToolCallStartedEvent filler + LocalToolCompletedEvent for bridging speech."""
         if self._tool_orchestrator is None:
@@ -1222,11 +1249,12 @@ class PipelineConversationHandler:
             self._agent_id or "", self._tenant_id, self._call_id, session_id, history,
             caller_number=self._caller_number, called_number=self._called_number,
             call_direction=self._direction, cancel_event=cancel_event,
-            local_tools=local_tools, only_tools=only_tools,
+            local_tools=local_tools, only_tools=only_tools, carry_taint=carry_taint,
             trailing_message=self._reply_directive(session_id),
         ):
             if isinstance(event, ToolCallStartedEvent):
-                tool_calls_made.append(event.tool_name)
+                if not event.filler_only:
+                    tool_calls_made.append(event.tool_name)
                 yield event
                 continue
             if isinstance(event, LocalToolCompletedEvent):
@@ -1249,6 +1277,7 @@ class PipelineConversationHandler:
         directives:   list[Directive],
         tool_calls_made: list[str] | None = None,
         store:        list[ChatMessage] | None = None,
+        carry_taint:  bool = False,
     ) -> AsyncGenerator[tuple[str, bytes, bool], None]:
         """Stream LLM tokens and synthesize per sentence, yielding (raw_token, tts_bytes, end_call).
         Directives are stripped before TTS and appended to `directives` in place."""
@@ -1260,7 +1289,7 @@ class PipelineConversationHandler:
         end_call = False
         try:
             async for item in self._token_stream(
-                history, session_id, cancel_event, tool_calls_made, store,
+                history, session_id, cancel_event, tool_calls_made, store, carry_taint,
             ):
                 if cancel_event.is_set():
                     self._workflow.pending_speech = None
@@ -1360,18 +1389,56 @@ class PipelineConversationHandler:
             except Exception:
                 log.exception("search_knowledge retrieval failed session=%s", session_id)
                 return ToolResult(status=ToolStatus.FAILED, error="knowledge_unavailable")
+            if context is not None and context.status != "ok":
+                # trace_id, never the query: the caller's words are not logged.
+                log.warning(
+                    "search_knowledge: status=%s chunks=%d degraded=%s trace_id=%s session=%s",
+                    context.status, len(context.chunks), context.degraded, context.trace_id, session_id,
+                )
+            if context is not None and context.status == "unavailable":
+                # Whatever the degraded codes (overloaded, deadline, dense_failed ...) the service has already
+                # spent its budget or is shedding load: a retry only adds load and doubles the caller's wait.
+                # (A lookup that raised is different and is still retried once, by FAILED.)
+                if "timeout" in context.degraded:
+                    return ToolResult(status=ToolStatus.TIMEOUT, error="timeout")
+                return ToolResult(status=ToolStatus.UNAVAILABLE, error="knowledge_unavailable")
+            if context is not None and not context.chunks and context.status == "partial":
+                # A branch was lost and the rest found nothing: that is "could not fully check", never "no match".
+                return ToolResult(
+                    status=ToolStatus.UNAVAILABLE, error="knowledge_incomplete",
+                    payload={"found": None, "incomplete": True, "degraded": visible_degraded(context.degraded)},
+                )
             if context is None or not context.chunks:
-                return ToolResult(status=ToolStatus.SUCCESS, payload={"found": False, "passages": []})
+                return ToolResult(
+                    status=ToolStatus.SUCCESS, outcome="no_match", payload={"found": False, "passages": []},
+                )
+            # Retrieved text is tenant-uploaded, so it is data to quote, never instructions to follow.
+            # Prompt-mode documents come first (retrieval_metadata.always_included); capping them apart keeps
+            # the matches that answer the question from being dropped.
+            kept, truncated = cap_passages(
+                [c.content for c in context.chunks],
+                int(context.retrieval_metadata.get("always_included") or 0),
+                _KNOWLEDGE_TOOL_MAX_TOKENS, _KNOWLEDGE_TOOL_MAX_CHARS,
+            )
             payload: dict[str, Any] = {
                 "found": True,
-                "passages": [chunk.content for chunk in context.chunks],
+                "untrusted_notice": UNTRUSTED_NOTICE,
+                "passages": [wrap_untrusted(text) for text in kept],
             }
+            degraded = visible_degraded([*context.degraded, *(["truncated_to_token_budget"] if truncated else [])])
+            if degraded:
+                payload["degraded"] = degraded
+            if context.low_confidence:
+                payload["low_confidence"] = True
             if context.include_citations and context.sources:
-                payload["sources"] = list(context.sources)
+                payload["sources"] = [defang(title)[:120] for title in context.sources]
             answer_in = self._session_language(session_id) or normalize_language(self._agent_language)
             if answer_in:
                 payload["answer_in"] = language_name(answer_in)
-            return ToolResult(status=ToolStatus.SUCCESS, payload=payload)
+            partial = context.status == "partial" or truncated
+            return ToolResult(
+                status=ToolStatus.SUCCESS, payload=payload, outcome="partial" if partial else None,
+            )
 
         return handler
 

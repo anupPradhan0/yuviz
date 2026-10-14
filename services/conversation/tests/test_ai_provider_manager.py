@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 
 import httpx
 import pytest
@@ -426,6 +427,7 @@ class TestOllamaThinkResolution:
         assert not any("extra.think" in record.message for record in caplog.records)
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="synthesizes with macOS's /usr/bin/say")
 class TestRealMacosTtsFactory:
     async def test_get_tts_creates_real_macos_instance_and_synthesizes_audio(self):
         manager = AIProviderManager(FakeSecretResolver())

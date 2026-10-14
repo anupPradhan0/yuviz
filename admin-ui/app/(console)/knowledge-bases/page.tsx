@@ -42,6 +42,7 @@ type Tab = "sources" | "apis";
 
 const STATUS_BADGE: Record<string, string> = {
   ready: "green",
+  ready_degraded: "amber",
   processing: "amber",
   pending: "amber",
   failed: "red",
@@ -168,7 +169,7 @@ export default function KnowledgeBasesPage() {
   }, [tenant, allTenants, isAllTenants, tenantLoading]);
 
   const stats = useMemo(() => {
-    const ready = sources.filter((s) => s.status === "ready").length;
+    const ready = sources.filter((s) => s.status === "ready" || s.status === "ready_degraded").length;
     const chunks = sources.reduce((n, s) => n + (s.chunk_count ?? 0), 0);
     // "Chained" = a param comes from another API's response; chain_levels is only the depth budget.
     const chained = apis.filter((a) => (a.params ?? []).some((p) => p.source === "upstream")).length;
@@ -367,7 +368,7 @@ export default function KnowledgeBasesPage() {
                     <td className="mono">{s.byte_size != null ? `${(s.byte_size / 1024).toFixed(1)} KB` : "—"}</td>
                     <td>
                       <span className={`badge ${STATUS_BADGE[s.status] ?? "gray"}`}>{s.status}</span>
-                      {s.status === "failed" && s.error && (
+                      {(s.status === "failed" || s.status === "ready_degraded" || s.error?.startsWith("re-index failed:")) && s.error && (
                         <div className="kb-source-sub" style={{ marginTop: 4, maxWidth: 260 }} title={s.error}>
                           {s.error}
                         </div>
@@ -375,7 +376,7 @@ export default function KnowledgeBasesPage() {
                     </td>
                     <td className="kb-source-sub">{timeAgo(s.created_at)}</td>
                     <td className="mono">
-                      {s.status === "ready" ? `${(s.chunk_count ?? 0).toLocaleString()} chunks` : "—"}
+                      {s.status === "ready" || s.status === "ready_degraded" ? `${(s.chunk_count ?? 0).toLocaleString()} chunks` : "—"}
                     </td>
                     <td>
                       {s.agents === null
@@ -389,26 +390,30 @@ export default function KnowledgeBasesPage() {
                     <td>
                       {canManage && (
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          {s.status === "failed" && (
+                          {(s.status === "failed" || s.retryable) && (
                             <>
-                              <button
-                                className="btn btn-ghost btn-sm"
-                                disabled={retryingSource === s.id || replacingSource === s.id}
-                                onClick={() => handleRetry(s)}
-                                title="Re-run ingestion without uploading again"
-                              >
-                                <RefreshCw size={12} />
-                                {retryingSource === s.id ? "Retrying…" : "Retry"}
-                              </button>
-                              <button
-                                className="btn btn-ghost btn-sm"
-                                disabled={retryingSource === s.id || replacingSource === s.id}
-                                onClick={() => handleReplaceClick(s)}
-                                title="Upload a different file to replace this one"
-                              >
-                                <Upload size={12} />
-                                {replacingSource === s.id ? "Replacing…" : "Replace"}
-                              </button>
+                              {s.retryable && (
+                                <button
+                                  className="btn btn-ghost btn-sm"
+                                  disabled={retryingSource === s.id || replacingSource === s.id}
+                                  onClick={() => handleRetry(s)}
+                                  title="Re-run ingestion without uploading again"
+                                >
+                                  <RefreshCw size={12} />
+                                  {retryingSource === s.id ? "Retrying…" : "Retry"}
+                                </button>
+                              )}
+                              {s.status === "failed" && (
+                                <button
+                                  className="btn btn-ghost btn-sm"
+                                  disabled={retryingSource === s.id || replacingSource === s.id}
+                                  onClick={() => handleReplaceClick(s)}
+                                  title="Upload a different file to replace this one"
+                                >
+                                  <Upload size={12} />
+                                  {replacingSource === s.id ? "Replacing…" : "Replace"}
+                                </button>
+                              )}
                             </>
                           )}
                           <button
