@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: pgvector/pgvector:pg14
+        image: pgvector/pgvector:0.8.0-pg14
         env:
           POSTGRES_USER: postgres
           # "password" is the test suite's own accepted placeholder (tests/test_env_catalogue.py
@@ -35,12 +35,6 @@ jobs:
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 5s --health-retries 10
-      ollama:
-        image: ollama/ollama:0.24.0
-        ports: ["11434:11434"]
-        options: >-
-          --health-cmd "ollama list"
-          --health-interval 5s --health-timeout 5s --health-retries 15
     env:
       POSTGRES_DSN: postgresql://postgres:password@localhost:5432/voiceai
       REDIS_URL: redis://localhost:6379/0
@@ -48,6 +42,9 @@ jobs:
       PGUSER: postgres
       PGPASSWORD: password
       JWT_SECRET: ci-only-jwt-secret-not-a-real-credential-0123456789
+      # Bump either and the model cache key changes with it.
+      OLLAMA_IMAGE: ollama/ollama:0.24.0
+      OLLAMA_CI_MODELS: nomic-embed-text qwen2.5:0.5b
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -72,7 +69,7 @@ jobs:
           psql voiceai -v ON_ERROR_STOP=1 -f database/schema.sql
           psql voiceai -v ON_ERROR_STOP=1 -f database/knowledge_schema.sql
           psql voiceai -v ON_ERROR_STOP=1 -f database/telephony_schema.sql
-          psql voiceai -v ON_ERROR_STOP=1 -v yuviz_app_password=ci-only -f database/rls.sql
+          psql voiceai -v ON_ERROR_STOP=1 -v yuviz_app_password=testpw -f database/rls.sql
 
       # libs/vad_sdk resolves models/silero_vad.onnx from the repo root; the test suite
       # has no fallback for a missing file (matches docs/setup.md's own local-setup step).
@@ -87,17 +84,53 @@ jobs:
       - name: Seed the conversation-service account
         run: python scripts/create_service_account.py conversation-service@internal.yuviz.ai ci-only-password-not-a-real-credential
 
+      # Ollama runs as a step, not a service, so the cached models are on disk before it starts.
+      - name: Restore the Ollama models
+        id: ollama-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.ollama/models
+          key: ollama-${{ env.OLLAMA_IMAGE }}-${{ env.OLLAMA_CI_MODELS }}
+
+      - name: Start Ollama
+        run: |
+          mkdir -p ~/.ollama/models
+          docker run -d --name ollama -p 127.0.0.1:11434:11434 -v "$HOME/.ollama/models:/root/.ollama/models" "$OLLAMA_IMAGE"
+          for _ in $(seq 30); do
+            curl -sf http://localhost:11434/api/version >/dev/null && exit 0
+            sleep 1
+          done
+          docker logs ollama
+          exit 1
+
       # /api/pull answers 200 even on failure; only a final "success" status means the model landed.
       - name: Pull the Ollama models
+        if: steps.ollama-cache.outputs.cache-hit != 'true'
         run: |
-          for model in nomic-embed-text qwen2.5:0.5b; do
+          for model in $OLLAMA_CI_MODELS; do
             curl -sf http://localhost:11434/api/pull -X POST -H 'Content-Type: application/json' \
               -d "{\"model\": \"${model}\", \"stream\": false}" | tee /tmp/pull.json
             grep -q '"status":"success"' /tmp/pull.json
           done
+          # Ollama writes as root; the cache action runs as the runner user.
+          sudo chown -R "$(id -u):$(id -g)" ~/.ollama/models
+
+      - name: Save the Ollama models
+        if: steps.ollama-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.ollama/models
+          key: ${{ steps.ollama-cache.outputs.cache-primary-key }}
+
+      - name: Check the Ollama models are present
+        run: |
+          tags="$(curl -sf http://localhost:11434/api/tags)"
+          for model in $OLLAMA_CI_MODELS; do
+            grep -q "\"name\":\"${model}" <<<"$tags" || { echo "missing Ollama model: ${model}"; exit 1; }
+          done
 
       - name: Run tests
-        run: python -m pytest -q -p no:cacheprovider -rfE
+        run: python -m pytest -q -p no:cacheprovider -rfEs
 
   gateway:
     runs-on: ubuntu-latest
