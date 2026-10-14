@@ -83,8 +83,7 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
     { key: "inbound", label: "Inbound", color: "var(--chart-inbound)", xy: points.map((p, i) => [xAt(i), yAt(p.inbound / max)]) },
     { key: "outbound", label: "Outbound", color: "var(--chart-outbound)", xy: points.map((p, i) => [xAt(i), yAt(p.outbound / max)]) },
   ] as const;
-  const hasOutbound = points.some((p) => p.outbound > 0);
-  const shown = hasOutbound ? series : series.slice(0, 1);
+  const shown = series;
   const pts = (xy: readonly (readonly number[])[]) => xy.map(([x, y]) => `${x},${y}`).join(" ");
   const inXy = series[0].xy;
   const aiXy = points.flatMap((p, i) => (p.aiPct == null ? [] : [[xAt(i), yAt(p.aiPct / 100), i]]));
@@ -208,7 +207,6 @@ export default function DashboardPage() {
       listAllDashboardStats(targetTenants, range.hours),
       range.days
         ? listAllUsageTrend(targetTenants, range.days).then((pts) => {
-            if (pts.length === 0) return [];
             // API omits zero-call days; draw every day of the range so today is always the last point.
             const byDate = new Map(pts.map((p) => [p.date.slice(0, 10), p]));
             const dense: ChartPoint[] = [];
@@ -225,7 +223,6 @@ export default function DashboardPage() {
             return dense;
           })
         : listAllTodaysActivity(targetTenants).then((pts) => {
-            if (pts.length === 0) return [];
             // API omits zero-call hours; draw every hour from midnight up to now.
             const byHour = new Map(pts.map((p) => [p.hour, p]));
             const hours = pts.map((p) => p.hour);
@@ -459,7 +456,7 @@ export default function DashboardPage() {
         </div>
         <div className="d-card">
           <div className="kpi-l">Handled by AI</div>
-          <div className="kpi-v">{kpi?.aiPct == null ? "—" : `${Math.round(kpi.aiPct)}%`}</div>
+          <div className="kpi-v">{kpi ? `${Math.round(kpi.aiPct ?? 0)}%` : "—"}</div>
           <div className={`kpi-d ${(kpi?.aiDeltaPt ?? 0) >= 0 ? "up" : "down"}`}>
             {kpi?.aiDeltaPt != null
               ? `${kpi.aiDeltaPt >= 0 ? "▲" : "▼"} ${Math.abs(kpi.aiDeltaPt).toFixed(1)} pts`
@@ -468,7 +465,7 @@ export default function DashboardPage() {
         </div>
         <div className="d-card">
           <div className="kpi-l">Avg call length</div>
-          <div className="kpi-v">{fmtDuration(kpi?.aht ?? null)}</div>
+          <div className="kpi-v">{kpi ? fmtDuration(kpi.aht ?? 0) : "—"}</div>
           <div className={`kpi-d ${(kpi?.ahtDeltaSec ?? 0) <= 0 ? "up" : "down"}`}>
             {kpi?.ahtDeltaSec != null && Math.round(kpi.ahtDeltaSec) !== 0
               ? `${kpi.ahtDeltaSec < 0 ? "▼" : "▲"} ${Math.abs(Math.round(kpi.ahtDeltaSec))}s ${kpi.ahtDeltaSec < 0 ? "faster" : "slower"}`
