@@ -69,7 +69,7 @@ const toChartPoint = (label: string, inbound: number, outbound: number, ended: n
   label,
   inbound,
   outbound,
-  aiPct: ended === 0 ? null : ((ended - escalated) / ended) * 100,
+  aiPct: ended === 0 ? 0 : ((ended - escalated) / ended) * 100,
 });
 
 function TrendChart({ points }: { points: ChartPoint[] }) {
@@ -94,16 +94,16 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
         <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" role="img" aria-label="Inbound and outbound calls over time">
           <path d={`M0 ${h * 0.25}H${w}M0 ${h * 0.5}H${w}M0 ${h * 0.75}H${w}`} stroke="var(--border)" strokeWidth="1" />
           <path d={`M${inXy[0][0]} ${h} L${pts(inXy).replaceAll(" ", " L")} L${inXy[inXy.length - 1][0]} ${h}Z`} fill="var(--chart-inbound)" opacity="0.12" />
+          {shown.map((s) => (
+            <polyline key={s.key} points={pts(s.xy)} fill="none" stroke={s.color} strokeWidth="2"
+              strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+          ))}
           {aiXy.length > 1 && (
             <polyline
               points={pts(aiXy)} fill="none" stroke="var(--green)" strokeWidth="1.5" opacity="0.7"
               strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke"
             />
           )}
-          {shown.map((s) => (
-            <polyline key={s.key} points={pts(s.xy)} fill="none" stroke={s.color} strokeWidth="2"
-              strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
-          ))}
         </svg>
         {/* HTML dots: SVG circles would stretch under the non-uniform viewBox scaling. */}
         {shown.flatMap((s) => s.xy.map(([x, y], i) => (
