@@ -87,6 +87,11 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
   const pts = (xy: readonly (readonly number[])[]) => xy.map(([x, y]) => `${x},${y}`).join(" ");
   const inXy = series[0].xy;
   const aiXy = points.flatMap((p, i) => (p.aiPct == null ? [] : [[xAt(i), yAt(p.aiPct / 100), i]]));
+  // One combined tooltip per point: at zero all three dots overlap, so each must carry every value.
+  const tip = (i: number) => {
+    const p = points[i];
+    return `${p.label} · Inbound: ${p.inbound} call${p.inbound === 1 ? "" : "s"} · Outbound: ${p.outbound} call${p.outbound === 1 ? "" : "s"} · Handled by AI: ${Math.round(p.aiPct ?? 0)}%`;
+  };
   const ticks = points.length <= 6 ? points.map((_, i) => i) : [0, Math.floor((points.length - 1) / 2), points.length - 1];
   return (
     <>
@@ -111,7 +116,7 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
             key={`${s.key}-${i}`}
             className="d-dot"
             style={{ left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, background: s.color }}
-            title={`${points[i].label}: ${points[i][s.key]} ${s.label.toLowerCase()} call${points[i][s.key] === 1 ? "" : "s"}`}
+            title={tip(i)}
           />
         )))}
         {aiXy.map(([x, y, i]) => (
@@ -119,7 +124,7 @@ function TrendChart({ points }: { points: ChartPoint[] }) {
             key={`ai-${i}`}
             className="d-dot ai"
             style={{ left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%` }}
-            title={`${points[i].label}: ${Math.round(points[i].aiPct!)}% handled by AI`}
+            title={tip(i)}
           />
         ))}
       </div>
