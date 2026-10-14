@@ -91,7 +91,7 @@ async def test_publish_writes_the_live_graph_bumps_version_and_appends_history(t
 
 async def test_publish_refreshes_the_cached_route_version(test_tenant, scoped, pool):
     agent = await _agent(test_tenant)
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did, agent_id=agent["id"])
     await phone_numbers.get_by_did(did)
     before = (await cache.get_json(f"did:{did}"))["version"]

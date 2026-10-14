@@ -29,7 +29,7 @@ async def other_tenant(pool):
 
 @pytest.fixture
 def did():
-    return f"test-did-{uuid.uuid4().hex[:8]}"
+    return f"9{uuid.uuid4().int % 10**10:010d}"
 
 
 @pytest_asyncio.fixture
@@ -101,7 +101,7 @@ async def test_concurrent_adds_of_the_same_did_let_exactly_one_win(test_tenant, 
 
 async def test_changing_a_number_to_a_live_did_is_rejected(test_tenant, did, cleanup, pool):
     await _add(test_tenant, did)
-    other_did = f"test-did-{uuid.uuid4().hex[:8]}"
+    other_did = f"9{uuid.uuid4().int % 10**10:010d}"
     movable = await _add(test_tenant, other_did)
     try:
         set_target_tenant(test_tenant["id"])
