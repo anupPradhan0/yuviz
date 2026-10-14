@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import sys
+import time
 from typing import Any
 
 import numpy as np
@@ -24,6 +26,12 @@ from ..interfaces import INSTANCE_LANGUAGE, SttResult
 # An outside language is reported only when the agent's languages hold less than this much of
 # Whisper's raw probability.
 _OUTSIDE_MAX_CANDIDATE_MASS = 0.10
+
+# After a failed download or load, no new attempt for this long (an air-gapped host would
+# otherwise retry on every utterance).
+_RETRY_AFTER_S = 60
+
+_DOWNLOAD_SCRIPT = "import sys; from faster_whisper.utils import download_model; download_model(sys.argv[1])"
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +77,7 @@ class FasterWhisperSTT:
         self._load_lock     = asyncio.Lock()
         self._download_on_demand = False
         self._load_task: asyncio.Task | None = None
+        self._last_failure: float | None = None   # time.monotonic() of the last failed download/load
         self._warned_english_only = False
 
     def load_when_needed(self) -> None:
@@ -78,8 +87,11 @@ class FasterWhisperSTT:
         self._start_background_load()
 
     def _start_background_load(self) -> None:
-        if self._load_task is None or self._load_task.done():
-            self._load_task = asyncio.create_task(self._load_allowing_download())
+        if self._load_task is not None and not self._load_task.done():
+            return
+        if self._last_failure is not None and time.monotonic() - self._last_failure < _RETRY_AFTER_S:
+            return
+        self._load_task = asyncio.create_task(self._load_allowing_download())
 
     async def _load_allowing_download(self) -> None:
         async with self._load_lock:  # concurrent callers load once
@@ -87,9 +99,29 @@ class FasterWhisperSTT:
                 return
             log.warning("FasterWhisper model=%s is not on disk — downloading it now", self._model_size)
             try:
-                await self.load(local_files_only=False)
+                await self._download()
+                await self.load()
             except Exception:
+                self._last_failure = time.monotonic()
                 log.exception("FasterWhisper model=%s download/load failed", self._model_size)
+
+    async def _download(self) -> None:
+        """Fetch the model in a subprocess: unlike an executor thread, stop_download() can kill it."""
+        proc = await asyncio.create_subprocess_exec(sys.executable, "-c", _DOWNLOAD_SCRIPT, self._model_size)
+        try:
+            code = await proc.wait()
+        finally:
+            if proc.returncode is None:  # cancelled at shutdown
+                proc.kill()
+                await proc.wait()
+        if code:
+            raise RuntimeError(f"model download exited {code}")
+
+    async def stop_download(self) -> None:
+        """Stop a background download."""
+        if self._load_task is not None:
+            self._load_task.cancel()
+            await asyncio.gather(self._load_task, return_exceptions=True)
 
     @property
     def loaded(self) -> bool:

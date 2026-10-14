@@ -424,3 +424,10 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
     never as FAILED, and never send it to a fix round.
     *Earned: PR #103's fan-in verifier ran `source .env && pytest` with a blank `POSTGRES_DSN` and no
     psql/npm on PATH. It reported 1061 errors and 110 failures and wasted several fix rounds, while the same tree ran 3098 passed locally.*
+
+51. [critic][implementer] Making a load lazy or deferred moves its cost into the first live request: check that startup prewarm
+    still pays it, before SERVING. Before adding a method to a class, grep for duck-typed callers of that name
+    (`getattr(x, "aclose")`, `hasattr`) that would now call it on objects they weren't written for.
+    *Earned: PR #103 deferred Kokoro's KPipeline load to keep it off the loop, so every agent's first greeting
+    after a restart paid 1-3 s of dead air. A new `FasterWhisperSTT.aclose()` was then picked up by the bundle's
+    "close the unused Ollama client" cleanup, which cancelled the shared Whisper download on every call.*

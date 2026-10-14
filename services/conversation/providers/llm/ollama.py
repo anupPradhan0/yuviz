@@ -106,7 +106,12 @@ class OllamaLLM:
             log.warning("OllamaLLM: could not list models (%s) model=%s",
                         coded.code if coded else "provider_error", self._model)
             return True
-        tags = {m["name"] for m in resp.json().get("models", [])}
+        try:
+            tags = {m["name"] for m in resp.json().get("models", [])}
+        except (ValueError, KeyError, TypeError, AttributeError):
+            # Not Ollama's /api/tags (a proxy, an HTML page): the first turn reports the real error.
+            log.warning("OllamaLLM: unrecognised model list (provider_error) model=%s", self._model)
+            return True
         return self._model in tags or f"{self._model}:latest" in tags
 
     def _raise_for_status(self, resp: httpx.Response) -> None:

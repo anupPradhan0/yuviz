@@ -129,6 +129,15 @@ class KokoroTTS:
         self._pipelines[lang_code] = pipeline
         return pipeline
 
+    @property
+    def loaded(self) -> bool:
+        return self._lang_code in self._pipelines
+
+    async def load(self) -> None:
+        """Build the row's KPipeline (loading the weights) in the executor; a no-op once built."""
+        async with self._lock:
+            await asyncio.get_running_loop().run_in_executor(None, self._pipeline_sync, self._lang_code)
+
     async def prewarm(self, languages: list[str]) -> None:
         """Build the pipelines for these ISO languages now, so the first sentence
         in a new language doesn't pay the G2P load on the turn's critical path."""

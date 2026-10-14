@@ -35,7 +35,7 @@ from libs.knowledge_sdk import (
 
 from .agent_config import load_agent, to_runtime_config
 from .agent_resolver import resolve_handler_deps
-from .ai_provider_manager import AIProviderManager
+from .ai_provider_manager import AIProviderManager, close_not_ready_providers
 from .provider_config_subscriber import ProviderConfigSubscriber
 from .callflow.handler import CallFlowConversationHandler
 from .callflow.resolver import resolve_call_flow
@@ -531,6 +531,7 @@ async def serve(port: int, args: argparse.Namespace) -> None:
         health_servicer.set(SERVICE_NAME, health_pb2.HealthCheckResponse.NOT_SERVING)
         await server.stop(grace=5)
     finally:
+        await close_not_ready_providers()
         if llm is not None:
             await llm.aclose()
         # Before sentiment_llm: transcripts.close() drains in-flight end_call

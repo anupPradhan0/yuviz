@@ -353,6 +353,16 @@ async def test_model_pulled_reads_the_tag_list(pulled, expected):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("response", [
+    httpx.Response(200, text="<html>welcome</html>"),
+    httpx.Response(200, json=["llama3.2"]),
+    httpx.Response(200, json={"models": [{"model": "llama3.2"}]}),
+], ids=["html", "top-level-list", "entry-without-name"])
+async def test_model_pulled_treats_an_unrecognised_reply_as_pulled(response):
+    assert await _make_llm(lambda request: response).model_pulled() is True
+
+
+@pytest.mark.asyncio
 async def test_model_pulled_treats_an_unreachable_ollama_as_pulled():
     def down(request):
         raise httpx.ConnectError("refused")

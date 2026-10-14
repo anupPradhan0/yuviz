@@ -514,13 +514,98 @@ class TestModelNotReady:
         from ..providers.tts import kokoro as kokoro_module
 
         constructed = []
+
+        class _Tts:
+            def __init__(self, **kw):
+                constructed.append(kw)
+
+            async def load(self):
+                pass
+
         monkeypatch.setattr(ai_provider_manager, "hf_hub_download", fake_download)
-        monkeypatch.setattr(kokoro_module, "KokoroTTS", lambda **kw: constructed.append(kw) or "tts")
+        monkeypatch.setattr(kokoro_module, "KokoroTTS", _Tts)
         cfg = ProviderConfig(id="tts-1", role="tts", engine="kokoro", voice="bm_daniel")
 
-        assert await _make_kokoro_tts(cfg, None) == "tts"
+        assert isinstance(await _make_kokoro_tts(cfg, None), _Tts)
         assert not any(name.startswith("voices/") for name in checked)
         assert constructed[0]["voice"] == "bm_daniel"
+
+    async def test_kokoro_ready_path_loads_the_weights_off_the_event_loop(self, monkeypatch):
+        import sys
+        import threading
+        import types
+
+        built: list[int] = []
+
+        class _KPipeline:
+            def __init__(self, lang_code, model=None):
+                built.append(threading.get_ident())
+                self.model = object()
+
+        monkeypatch.setitem(sys.modules, "kokoro", types.SimpleNamespace(KPipeline=_KPipeline))
+        monkeypatch.setattr(ai_provider_manager, "hf_hub_download", lambda repo, filename, local_files_only: "/x")
+        cfg = ProviderConfig(id="tts-1", role="tts", engine="kokoro", voice="af_heart")
+
+        tts = await _make_kokoro_tts(cfg, None)
+
+        assert tts.loaded  # built at prewarm, not on the first greeting
+        assert len(built) == 1 and built[0] != threading.get_ident()
+
+    async def test_kokoro_ready_path_reuses_a_not_ready_instance_that_loaded_and_drops_the_entry(self, monkeypatch):
+        import sys
+        import types
+
+        class _KPipeline:
+            def __init__(self, lang_code, model=None):
+                self.model = object()
+
+            def __call__(self, text, voice, speed):
+                return iter(())
+
+        weights_missing = True
+
+        def fake_download(repo, filename, local_files_only):
+            if weights_missing and filename == "kokoro-v1_0.pth":
+                raise LocalEntryNotFoundError("not cached")
+            return "/x"
+
+        monkeypatch.setitem(sys.modules, "kokoro", types.SimpleNamespace(KPipeline=_KPipeline))
+        monkeypatch.setattr(ai_provider_manager, "hf_hub_download", fake_download)
+        cfg = ProviderConfig(id="tts-1", role="tts", engine="kokoro", voice="af_heart")
+        with pytest.raises(ModelNotReadyError) as exc:
+            await _make_kokoro_tts(cfg, None)
+        await exc.value.provider.synthesize("hello", 24_000)  # loads it
+        weights_missing = False
+
+        assert await _make_kokoro_tts(cfg, None) is exc.value.provider
+        assert ai_provider_manager._not_ready_kokoro == {}
+
+    async def test_kokoro_ready_path_builds_fresh_when_the_not_ready_instance_never_loaded(self, monkeypatch):
+        import sys
+        import types
+
+        class _KPipeline:
+            def __init__(self, lang_code, model=None):
+                self.model = object()
+
+        weights_missing = True
+
+        def fake_download(repo, filename, local_files_only):
+            if weights_missing and filename == "kokoro-v1_0.pth":
+                raise LocalEntryNotFoundError("not cached")
+            return "/x"
+
+        monkeypatch.setitem(sys.modules, "kokoro", types.SimpleNamespace(KPipeline=_KPipeline))
+        monkeypatch.setattr(ai_provider_manager, "hf_hub_download", fake_download)
+        cfg = ProviderConfig(id="tts-1", role="tts", engine="kokoro", voice="af_heart")
+        with pytest.raises(ModelNotReadyError) as exc:
+            await _make_kokoro_tts(cfg, None)
+        weights_missing = False
+
+        tts = await _make_kokoro_tts(cfg, None)
+
+        assert tts is not exc.value.provider and tts.loaded
+        assert ai_provider_manager._not_ready_kokoro == {}
 
     async def test_faster_whisper_missing_model_raises(self, monkeypatch):
         from ..providers.stt.faster_whisper import FasterWhisperSTT

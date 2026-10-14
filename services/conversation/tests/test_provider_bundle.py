@@ -194,6 +194,31 @@ async def test_an_unused_not_ready_instance_is_closed():
 
 
 @pytest.mark.asyncio
+async def test_a_not_ready_whisper_keeps_downloading_while_the_default_stands_in():
+    stopped = []
+
+    class _DownloadingWhisper:
+        # Shared and still fetching its model: the bundle's cleanup of unused clients must not stop it.
+        async def stop_download(self):
+            stopped.append(True)
+
+    class _Manager(_FakeManager):
+        async def get(self, cfg):
+            if cfg.id == "stt1":
+                raise ModelNotReadyError("faster_whisper", "small", provider=_DownloadingWhisper())
+            return await super().get(cfg)
+
+    providers = ProviderConfigs(
+        stt=_sdk_cfg("stt1", "stt", "faster_whisper", "small"), llm=_sdk_cfg("llm1", "llm", "ollama"),
+        tts=_sdk_cfg("tts1", "tts", "cartesia"),
+    )
+
+    bundle = await _defaults(ProviderRegistry(_Manager())).resolve(providers, ("en",))
+
+    assert bundle.stt == "default-stt" and stopped == []
+
+
+@pytest.mark.asyncio
 async def test_a_default_stt_pinned_to_english_does_not_stand_in_for_a_hindi_agent():
     from types import SimpleNamespace
 

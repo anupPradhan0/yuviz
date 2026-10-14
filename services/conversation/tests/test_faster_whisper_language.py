@@ -255,7 +255,20 @@ async def test_short_low_confidence_match_is_skipped_unless_text_can_decide(whis
     assert result.language_confidence == pytest.approx(0.30 / 0.55)
 
 
-async def test_a_not_ready_instance_downloads_in_the_background_and_transcribes_once_loaded(whisper_cls):
+def _stub_download(stt, monkeypatch, code=0):
+    """Replace the download subprocess; returns the list of attempts."""
+    attempts: list[int] = []
+
+    async def download():
+        attempts.append(1)
+        if code:
+            raise RuntimeError(f"model download exited {code}")
+
+    monkeypatch.setattr(stt, "_download", download)
+    return attempts
+
+
+async def test_a_not_ready_instance_downloads_in_the_background_and_transcribes_once_loaded(whisper_cls, monkeypatch):
     stt = whisper_cls(model_size="small", language="en")
     loads: list[bool] = []
 
@@ -264,24 +277,85 @@ async def test_a_not_ready_instance_downloads_in_the_background_and_transcribes_
         return _StubModel()
 
     stt._WhisperModel = build
+    _stub_download(stt, monkeypatch)
     stt.load_when_needed()  # what the provider factory does for a model that isn't on disk
 
     # Not ready yet: no model, so the call gets empty text rather than waiting.
     assert (await stt.transcribe(b"\x00\x01" * 8000, 16000)).text == ""
 
     await stt._load_task
-    assert loads == [False]  # downloads allowed, unlike the startup load
+    assert loads == [True]  # the subprocess downloaded; the load itself is local
     assert stt.loaded
     assert (await stt.transcribe(b"\x00\x01" * 8000, 16000)).text == "haan ji"
 
 
-async def test_concurrent_transcribes_start_one_download(whisper_cls):
+async def test_concurrent_transcribes_start_one_download(whisper_cls, monkeypatch):
     stt = whisper_cls(model_size="small", language="en")
     loads: list[bool] = []
     stt._WhisperModel = lambda size, **kw: loads.append(kw["local_files_only"]) or _StubModel()
+    attempts = _stub_download(stt, monkeypatch)
     stt._download_on_demand = True
 
     await asyncio.gather(*(stt.transcribe(b"\x00\x01" * 8000, 16000) for _ in range(3)))
     await stt._load_task
 
-    assert loads == [False]
+    assert attempts == [1] and loads == [True]
+
+
+async def test_a_failed_download_is_not_retried_until_the_backoff_passes(whisper_cls, monkeypatch):
+    stt = whisper_cls(model_size="small", language="en")
+    attempts = _stub_download(stt, monkeypatch, code=1)
+    stt._download_on_demand = True
+    now = [1000.0]
+    from ..providers.stt import faster_whisper as fw
+    monkeypatch.setattr(fw, "time", types.SimpleNamespace(monotonic=lambda: now[0]))
+
+    await stt.transcribe(b"\x00\x01" * 8000, 16000)
+    await stt._load_task
+    for _ in range(3):  # more utterances during the backoff
+        now[0] += 10
+        await stt.transcribe(b"\x00\x01" * 8000, 16000)
+    assert attempts == [1]
+
+    now[0] += 60
+    await stt.transcribe(b"\x00\x01" * 8000, 16000)
+    await stt._load_task
+    assert attempts == [1, 1]
+
+
+async def test_stop_download_kills_an_in_flight_download_without_waiting_for_it(whisper_cls, monkeypatch):
+    stt = whisper_cls(model_size="small", language="en")
+    started = asyncio.Event()
+    procs = []
+
+    class _Proc:
+        returncode = None
+
+        async def wait(self):
+            started.set()
+            if self.returncode is None:
+                await asyncio.Event().wait()  # a download that never finishes
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    async def spawn(*argv):
+        procs.append(_Proc())
+        return procs[0]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    stt.load_when_needed()
+    await started.wait()
+
+    await asyncio.wait_for(stt.stop_download(), timeout=2)
+
+    assert procs[0].returncode == -9
+
+
+def test_whisper_has_no_aclose_for_the_bundle_to_call():
+    # ProviderRegistry closes any not-ready provider exposing aclose() when a default stands in
+    # (meant for unused Ollama clients); on Whisper that would cancel the shared download.
+    from services.conversation.providers.stt.faster_whisper import FasterWhisperSTT
+
+    assert not hasattr(FasterWhisperSTT, "aclose") and hasattr(FasterWhisperSTT, "stop_download")
