@@ -12,6 +12,8 @@ import os
 
 import redis.asyncio as redis
 
+from .did_format import normalize_did
+
 log = logging.getLogger(__name__)
 
 DEFAULT_TENANT = "default"
@@ -38,7 +40,11 @@ def _get_client() -> redis.Redis:
 
 
 async def resolve_did_route(did: str) -> tuple[str, str] | None:
-    """(tenant_slug, agent_slug), or None for any non-hit (miss, malformed, timeout, down)."""
+    """(tenant_slug, agent_slug), or None for any non-hit (miss, malformed, timeout, down).
+    Carriers send the number in their own form ("+91...", "91..."); the key is digits-only."""
+    did = normalize_did(did)
+    if not did:
+        return None
     try:
         raw = await asyncio.wait_for(_get_client().get(f"did:{did}"), _timeout_s())
     except (redis.RedisError, asyncio.TimeoutError):

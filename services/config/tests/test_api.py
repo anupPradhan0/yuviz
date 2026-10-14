@@ -118,7 +118,7 @@ class TestTenantEndpoints:
         assert still_there.status_code == 200
 
     async def test_delete_tenant_with_active_phone_number_is_409(self, client, test_tenant, pool):
-        did = f"test-did-{uuid.uuid4().hex[:8]}"
+        did = f"9{uuid.uuid4().int % 10**10:010d}"
         await pool.execute(
             "INSERT INTO phone_numbers (tenant_id, did, status) VALUES ($1, $2, 'active')",
             test_tenant["id"], did,
@@ -147,7 +147,7 @@ class TestTenantEndpoints:
     async def test_delete_tenant_retires_its_numbers_and_their_routes(self, client, test_tenant, pool):
         from services.config import cache, phone_numbers
 
-        did = f"test-did-{uuid.uuid4().hex[:8]}"
+        did = f"9{uuid.uuid4().int % 10**10:010d}"
         set_target_tenant(test_tenant["id"])
         await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did)
         assert await cache.get_json(f"did:{did}") is not None
@@ -1467,7 +1467,7 @@ class TestPhoneNumberEndpoints:
         resp = await client.post(
             f"/tenants/{test_tenant['id']}/phone-numbers",
             json={
-                "did": f"test-did-{uuid.uuid4().hex[:8]}",
+                "did": f"9{uuid.uuid4().int % 10**10:010d}",
                 "carrier_id": "00000000-0000-0000-0000-000000000000",
             },
         )
@@ -1477,14 +1477,14 @@ class TestPhoneNumberEndpoints:
     async def test_create_with_malformed_carrier_id_is_400(self, client, test_tenant):
         resp = await client.post(
             f"/tenants/{test_tenant['id']}/phone-numbers",
-            json={"did": f"test-did-{uuid.uuid4().hex[:8]}", "carrier_id": "not-a-uuid"},
+            json={"did": f"9{uuid.uuid4().int % 10**10:010d}", "carrier_id": "not-a-uuid"},
         )
         assert resp.status_code == 400
 
     async def test_update_with_nonexistent_carrier_id_is_404(self, client, test_tenant):
         create = await client.post(
             f"/tenants/{test_tenant['id']}/phone-numbers",
-            json={"did": f"test-did-{uuid.uuid4().hex[:8]}"},
+            json={"did": f"9{uuid.uuid4().int % 10**10:010d}"},
         )
         phone_number_id = create.json()["id"]
 

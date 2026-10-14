@@ -13,6 +13,7 @@ from typing import Any
 import asyncpg
 import redis.asyncio as redis
 
+from libs.telephony_sdk.did_format import normalize_did
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import audit, cache, db
@@ -39,6 +40,14 @@ async def _lock_live_telephony_config(conn: Any, telephony_config_id: Any) -> No
 
 def _cache_key(did: str) -> str:
     return f"did:{did}"
+
+
+def _canonical_did(did: str) -> str:
+    """The form every did:{did} reader looks up (libs.telephony_sdk.did_format)."""
+    canonical = normalize_did(did)
+    if not canonical:
+        raise ValueError("did must not be empty")
+    return canonical
 
 
 # A failed route write leaves calls on the old route until the next startup reload: say so loudly.
@@ -225,6 +234,7 @@ async def create_phone_number(
     user_id: Any | None = None,
     user_email: str | None = None,
 ) -> dict[str, Any]:
+    did = _canonical_did(did)
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
         await _lock_live_telephony_config(conn, telephony_config_id)
@@ -272,6 +282,8 @@ async def update_phone_number(
     unknown = set(fields) - _UPDATABLE_FIELDS
     if unknown:
         raise ValueError(f"update_phone_number() got non-updatable field(s): {unknown}")
+    if "did" in fields:
+        fields["did"] = _canonical_did(fields["did"])
 
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:

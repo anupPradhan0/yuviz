@@ -240,7 +240,7 @@ async def test_accept_refreshes_the_cached_route_version(pool, test_tenant, scop
 
     base = _prompt("base")
     agent = await _make_agent(test_tenant, base)
-    did = f"test-did-{uuid.uuid4().hex[:8]}"
+    did = f"9{uuid.uuid4().int % 10**10:010d}"
     await phone_numbers.create_phone_number(tenant_id=test_tenant["id"], did=did, agent_id=agent["id"])
     await phone_numbers.get_by_did(did)
     before = (await cache.get_json(f"did:{did}"))["version"]

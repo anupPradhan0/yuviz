@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from libs.telephony_sdk.did_format import normalize_did
 from libs.tenancy import platform_conn, tenant_conn
 
 from . import audit, db
@@ -53,7 +54,7 @@ async def caller_id_owned_by_tenant(tenant_id: Any, caller_id: str | None) -> bo
     async with tenant_conn(pool) as conn:
         row = await conn.fetchrow(
             "SELECT 1 FROM phone_numbers WHERE tenant_id = $1 AND did = $2 AND deleted_at IS NULL",
-            tenant_id, caller_id,
+            tenant_id, normalize_did(caller_id),
         )
     return row is not None
 
@@ -168,6 +169,6 @@ async def resolve_outbound_route(
             LEFT JOIN telephony_configs tc ON tc.id = pn.telephony_config_id AND tc.tenant_id = t.id AND tc.deleted_at IS NULL
             WHERE t.id = $1
             """,
-            tenant_id, agent_id, caller_id,
+            tenant_id, agent_id, normalize_did(caller_id),
         )
     return dict(row)

@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import pytest
 import pytest_asyncio
 
+from libs.telephony_sdk.did_format import normalize_did
 from services.campaigns import campaign_contacts, campaigns, dnc, originate, telephony_originate
 from services.campaigns.worker import CampaignWorker, _idempotency_key, _within_calling_hours
 
@@ -17,10 +18,10 @@ async def _provision_default_caller_id(test_tenant, pool):
     """Provision the default caller_id; the worker refuses unowned caller_ids."""
     await pool.execute(
         "INSERT INTO phone_numbers (did, tenant_id) VALUES ($1, $2) ON CONFLICT (did) WHERE deleted_at IS NULL DO NOTHING",
-        _DEFAULT_CALLER_ID, test_tenant["id"],
+        normalize_did(_DEFAULT_CALLER_ID), test_tenant["id"],
     )
     yield
-    await pool.execute("DELETE FROM phone_numbers WHERE did = $1", _DEFAULT_CALLER_ID)
+    await pool.execute("DELETE FROM phone_numbers WHERE did = $1", normalize_did(_DEFAULT_CALLER_ID))
 
 
 async def _make_running_campaign(test_tenant, test_agent, **overrides):
@@ -141,7 +142,7 @@ async def test_malformed_owned_caller_id_pauses_campaign_without_spending_attemp
     test_tenant, test_agent, monkeypatch, scoped, pool,
 ):
     bad_did = "+91-80-4567-8900"
-    await pool.execute("INSERT INTO phone_numbers (did, tenant_id) VALUES ($1, $2)", bad_did, test_tenant["id"])
+    await pool.execute("INSERT INTO phone_numbers (did, tenant_id) VALUES ($1, $2)", normalize_did(bad_did), test_tenant["id"])
     try:
         campaign = await _make_running_campaign(test_tenant, test_agent, caller_id=bad_did, max_attempts=3)
         await campaign_contacts.bulk_insert_contacts(campaign["id"], [{"phone_number": "+14155551111", "name": ""}])
@@ -162,7 +163,7 @@ async def test_malformed_owned_caller_id_pauses_campaign_without_spending_attemp
         assert (await campaigns.get_campaign(campaign["id"]))["status"] == "paused"
         assert worker._in_flight[str(campaign["id"])] == 0
     finally:
-        await pool.execute("DELETE FROM phone_numbers WHERE did = $1", bad_did)
+        await pool.execute("DELETE FROM phone_numbers WHERE did = $1", normalize_did(bad_did))
 
 
 async def test_malformed_stored_contact_fails_without_retry(test_tenant, test_agent, monkeypatch, scoped):

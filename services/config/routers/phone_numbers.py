@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from libs.telephony_sdk.did_format import normalize_did
 from libs.tenancy import set_target_tenant
 
 from .. import agents as agents_service
@@ -193,7 +194,8 @@ async def update_phone_number(
         # The stored id is a UUID, the request's a str.
         return None if value is None else str(value)
 
-    moved = ("did" in fields and fields["did"] != phone_number["did"]) or (
+    # Compared canonically, so re-typing the same number in another format isn't a move.
+    moved = ("did" in fields and fields["did"] != normalize_did(phone_number["did"])) or (
         "telephony_config_id" in fields
         and _id(fields["telephony_config_id"]) != _id(phone_number.get("telephony_config_id"))
     )

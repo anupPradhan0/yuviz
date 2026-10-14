@@ -135,3 +135,34 @@ def test_build_answer_response_uses_connect_stream_and_quoteattr():
     xml = provider.build_answer_response("wss://example/cloudonix/stream/tok&en")
     assert "<Connect><Stream url=" in xml
     assert "tok&amp;en" in xml
+
+
+@pytest.mark.parametrize("carrier_form", ["+918065354620", "918065354620", "+91 80-6535 4620", "(91) 8065354620"])
+async def test_resolve_did_route_looks_up_the_digits_only_key(monkeypatch, carrier_form):
+    # Carriers send "+91..." (or worse); the route is stored under the digits-only key.
+    keys: list[str] = []
+
+    class _Recording(_FakeClient):
+        async def get(self, key: str):
+            keys.append(key)
+            return json.dumps({"tenant_slug": "nex", "agent_slug": "sales"})
+
+    _use(monkeypatch, _Recording())
+
+    assert await did_route.resolve_did_route(carrier_form) == ("nex", "sales")
+    assert keys == ["did:918065354620"]
+
+
+@pytest.mark.parametrize("did", ["", "   "])
+async def test_resolve_did_route_never_looks_up_an_empty_key(monkeypatch, did):
+    keys: list[str] = []
+
+    class _Recording(_FakeClient):
+        async def get(self, key: str):
+            keys.append(key)
+            return None
+
+    _use(monkeypatch, _Recording())
+
+    assert await did_route.resolve_did_route(did) is None
+    assert keys == []

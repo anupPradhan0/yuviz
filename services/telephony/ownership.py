@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from libs.telephony_sdk import did_route
+from libs.telephony_sdk.did_format import normalize_did
 
 from .accounts import CONFIG_SERVICE_URL, accounts
 
@@ -43,7 +44,7 @@ async def resolve_outbound_identity(
 
     return OutboundIdentity(
         tenant_id=tenant_id, tenant_slug=tenant_slug,
-        agent_slug=requested_agent_slug, from_number=from_number,
+        agent_slug=requested_agent_slug, from_number=normalize_did(from_number),
     )
 
 
