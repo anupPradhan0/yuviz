@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 
 from libs.config_sdk import ConfigUnavailableError, IConfigProvider, RuntimeConfig
+from libs.config_sdk.languages import normalize_language
 
 from .ai_provider_manager import ModelNotReadyError
 from .provider_bundle import ProviderBundle, ProviderRegistry
@@ -34,7 +35,9 @@ async def resolve_handler_deps(
             )
             return None
 
-        bundle = await registry.resolve(runtime_config.providers)
+        media = runtime_config.media
+        languages = media.supported_languages or (normalize_language(media.language) or "en",)
+        bundle = await registry.resolve(runtime_config.providers, languages)
         return runtime_config, bundle
     except ConfigUnavailableError:
         log.warning("agent_resolver: config unavailable tenant=%s agent=%s", tenant_slug, agent_slug)

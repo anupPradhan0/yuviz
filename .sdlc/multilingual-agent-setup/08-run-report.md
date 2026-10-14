@@ -1,6 +1,6 @@
 # Run report: multilingual-agent-setup
-Status: paused at Gate B
-PR: none
+Status: shipped
+PR: https://github.com/yuviz-ai/yuviz/pull/103
 
 | Stage | Verdict | Rounds | Output tokens (exact) | Est. cost |
 |---|---|---|---|---|

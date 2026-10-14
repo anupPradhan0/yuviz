@@ -24,6 +24,26 @@ from ..ai_provider_manager import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_not_ready_instances_carried_between_tests():
+    ai_provider_manager._not_ready_whisper.clear()
+    ai_provider_manager._not_ready_kokoro.clear()
+    yield
+    ai_provider_manager._not_ready_whisper.clear()
+    ai_provider_manager._not_ready_kokoro.clear()
+
+
+@pytest.fixture(autouse=True)
+def _ollama_model_is_pulled(monkeypatch):
+    """Keep Ollama factory tests off the network; a test can re-patch it to say "not pulled"."""
+    from ..providers.llm.ollama import OllamaLLM
+
+    async def pulled(self):
+        return True
+
+    monkeypatch.setattr(OllamaLLM, "model_pulled", pulled)
+
+
 class FakeSecretResolver:
     def __init__(self) -> None:
         self.resolved_refs: list[str] = []
@@ -421,38 +441,172 @@ class TestRealMacosTtsFactory:
 # ── Local models not on disk ──────────────────────────────────────────────────
 
 class TestModelNotReady:
-    async def test_kokoro_missing_voice_raises_without_constructing_tts(self, monkeypatch):
+    async def test_kokoro_missing_base_weights_raise_carrying_the_built_instance(self, monkeypatch):
         def fake_download(repo, filename, local_files_only):
-            if filename == "voices/af_heart.pt":
+            if filename == "kokoro-v1_0.pth":
                 raise LocalEntryNotFoundError("not cached")
+            return "/cache/" + filename
+
+        from ..providers.tts import kokoro as kokoro_module
+
+        monkeypatch.setattr(ai_provider_manager, "hf_hub_download", fake_download)
+        monkeypatch.setattr(kokoro_module, "KokoroTTS", lambda **kw: "unloaded-tts")
+        cfg = ProviderConfig(id="tts-1", role="tts", engine="kokoro", voice="af_heart")
+
+        with pytest.raises(ModelNotReadyError) as exc:
+            await _make_kokoro_tts(cfg, None)
+
+        # The built instance rides along for a caller with nothing better to use.
+        assert (exc.value.engine, exc.value.provider) == ("kokoro", "unloaded-tts")
+
+    async def test_kokoro_builds_nothing_heavy_while_the_weights_are_missing(self, monkeypatch):
+        import sys
+        import types
+
+        built = []
+
+        class _KPipeline:
+            def __init__(self, lang_code, model=None):
+                built.append(lang_code)
+                self.model = object()
+
+            def __call__(self, text, voice, speed):
+                return iter(())
+
+        def fake_download(repo, filename, local_files_only):
+            if filename == "kokoro-v1_0.pth":
+                raise LocalEntryNotFoundError("not cached")
+            return "/cache/" + filename
+
+        monkeypatch.setitem(sys.modules, "kokoro", types.SimpleNamespace(KPipeline=_KPipeline))
+        monkeypatch.setattr(ai_provider_manager, "hf_hub_download", fake_download)
+        cfg = ProviderConfig(id="tts-1", role="tts", engine="kokoro", voice="af_heart")
+
+        with pytest.raises(ModelNotReadyError) as exc:
+            await _make_kokoro_tts(cfg, None)
+
+        assert built == []  # no KPipeline/KModel: nothing downloaded on the event loop
+        assert await exc.value.provider.synthesize("hello", 24_000) == b""
+        assert built == ["a"]  # the first synthesis loads it (in the executor)
+
+    async def test_concurrent_not_ready_kokoro_calls_share_one_deferred_instance(self, monkeypatch):
+        def fake_download(repo, filename, local_files_only):
+            raise LocalEntryNotFoundError("not cached")
+
+        monkeypatch.setattr(ai_provider_manager, "hf_hub_download", fake_download)
+        cfg = ProviderConfig(id="tts-1", role="tts", engine="kokoro", voice="hf_alpha")
+        providers = []
+        for _ in range(3):
+            with pytest.raises(ModelNotReadyError) as exc:
+                await _make_kokoro_tts(cfg, None)
+            providers.append(exc.value.provider)
+        assert providers[0] is providers[1] is providers[2]
+
+    async def test_kokoro_voice_file_is_left_to_the_lazy_fetch(self, monkeypatch):
+        checked = []
+
+        def fake_download(repo, filename, local_files_only):
+            checked.append(filename)
             return "/cache/" + filename
 
         from ..providers.tts import kokoro as kokoro_module
 
         constructed = []
         monkeypatch.setattr(ai_provider_manager, "hf_hub_download", fake_download)
-        monkeypatch.setattr(kokoro_module, "KokoroTTS", lambda **kw: constructed.append(kw))
-        cfg = ProviderConfig(id="tts-1", role="tts", engine="kokoro", voice="af_heart")
+        monkeypatch.setattr(kokoro_module, "KokoroTTS", lambda **kw: constructed.append(kw) or "tts")
+        cfg = ProviderConfig(id="tts-1", role="tts", engine="kokoro", voice="bm_daniel")
 
-        with pytest.raises(ModelNotReadyError) as exc:
-            await _make_kokoro_tts(cfg, None)
-
-        assert (exc.value.engine, exc.value.model) == ("kokoro", "af_heart")
-        assert constructed == []
+        assert await _make_kokoro_tts(cfg, None) == "tts"
+        assert not any(name.startswith("voices/") for name in checked)
+        assert constructed[0]["voice"] == "bm_daniel"
 
     async def test_faster_whisper_missing_model_raises(self, monkeypatch):
         from ..providers.stt.faster_whisper import FasterWhisperSTT
 
-        async def missing(self):
+        async def missing(self, **kw):
             raise LocalEntryNotFoundError("not cached")
 
         monkeypatch.setattr(FasterWhisperSTT, "load", missing)
+        started = []
+        monkeypatch.setattr(FasterWhisperSTT, "load_when_needed", lambda self: started.append(self))
         cfg = ProviderConfig(id="stt-1", role="stt", engine="faster_whisper", model="small")
 
         with pytest.raises(ModelNotReadyError) as exc:
             await _make_faster_whisper(cfg, None)
+        with pytest.raises(ModelNotReadyError) as again:
+            await _make_faster_whisper(cfg, None)
 
         assert (exc.value.engine, exc.value.model) == ("faster_whisper", "small")
+        # The same instance serves the next call (no second download); its load is just re-armed.
+        assert again.value.provider is exc.value.provider
+        assert started == [exc.value.provider] * 2
+
+    async def test_a_not_ready_whisper_is_not_handed_to_a_row_with_another_language(self, monkeypatch):
+        from ..providers.stt.faster_whisper import FasterWhisperSTT
+
+        async def missing(self, **kw):
+            raise LocalEntryNotFoundError("not cached")
+
+        monkeypatch.setattr(FasterWhisperSTT, "load", missing)
+        monkeypatch.setattr(FasterWhisperSTT, "load_when_needed", lambda self: None)
+
+        def cfg(language):
+            return ProviderConfig(id=f"stt-{language}", role="stt", engine="faster_whisper", model="small", language=language)
+
+        with pytest.raises(ModelNotReadyError) as en:
+            await _make_faster_whisper(cfg("en"), None)
+        with pytest.raises(ModelNotReadyError) as hi:
+            await _make_faster_whisper(cfg("hi"), None)
+
+        assert hi.value.provider is not en.value.provider
+        assert (en.value.provider._language, hi.value.provider._language) == ("en", "hi")
+
+    async def test_a_failed_background_whisper_load_is_restarted_by_the_next_get(self, monkeypatch):
+        from ..providers.stt.faster_whisper import FasterWhisperSTT
+
+        async def missing(self, **kw):
+            raise LocalEntryNotFoundError("not cached")
+
+        starts = []
+        monkeypatch.setattr(FasterWhisperSTT, "load", missing)
+        monkeypatch.setattr(FasterWhisperSTT, "load_when_needed", lambda self: starts.append(self))
+        cfg = ProviderConfig(id="stt-1", role="stt", engine="faster_whisper", model="small")
+
+        for _ in range(2):
+            with pytest.raises(ModelNotReadyError):
+                await _make_faster_whisper(cfg, None)
+
+        assert len(starts) == 2 and starts[0] is starts[1]
+
+    async def test_faster_whisper_instance_is_returned_once_its_download_finished(self, monkeypatch):
+        from ..providers.stt.faster_whisper import FasterWhisperSTT
+
+        async def missing(self, **kw):
+            raise LocalEntryNotFoundError("not cached")
+
+        monkeypatch.setattr(FasterWhisperSTT, "load", missing)
+        monkeypatch.setattr(FasterWhisperSTT, "load_when_needed", lambda self: None)
+        cfg = ProviderConfig(id="stt-1", role="stt", engine="faster_whisper", model="small")
+        with pytest.raises(ModelNotReadyError) as exc:
+            await _make_faster_whisper(cfg, None)
+
+        exc.value.provider._model = object()  # the background load finished
+
+        assert await _make_faster_whisper(cfg, None) is exc.value.provider
+
+    async def test_ollama_model_not_pulled_raises(self, monkeypatch):
+        from ..providers.llm.ollama import OllamaLLM
+
+        async def not_pulled(self):
+            return False
+
+        monkeypatch.setattr(OllamaLLM, "model_pulled", not_pulled)
+        cfg = ProviderConfig(id="llm-1", role="llm", engine="ollama", model="qwen3:4b")
+
+        with pytest.raises(ModelNotReadyError) as exc:
+            await _make_ollama(cfg, None)
+
+        assert (exc.value.engine, exc.value.model) == ("ollama", "qwen3:4b")
 
     async def test_ollama_base_url_defaults_to_env(self, monkeypatch):
         monkeypatch.setenv("VOICEAI_LLM_URL", "http://ollama:11434")

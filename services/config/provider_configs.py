@@ -409,8 +409,11 @@ def _cartesia_voices(resp: httpx.Response) -> list[dict[str, Any]]:
             "category": None,
             "labels": {},
             "preview_url": None,
-            # Cartesia voices carry a single language code.
-            "verified_languages": [v["language"]] if v.get("language") else [],
+            # Cartesia voices carry a single language code; entries match ElevenLabs' object shape.
+            "verified_languages": [{
+                "language": v["language"], "model_id": None, "accent": None,
+                "locale": None, "preview_url": None,
+            }] if v.get("language") else [],
         }
         for v in resp.json()
     ]

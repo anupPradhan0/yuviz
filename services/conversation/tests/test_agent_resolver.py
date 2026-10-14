@@ -12,7 +12,7 @@ from libs.config_sdk.providers.mock_provider import MockConfigProvider
 
 from ..agent_resolver import resolve_handler_deps
 from ..ai_provider_manager import AIProviderManager, ModelNotReadyError, ProviderConfig
-from ..provider_bundle import ProviderRegistry
+from ..provider_bundle import ProviderBundle, ProviderRegistry
 
 
 class FakeProviderInstance:
@@ -136,3 +136,24 @@ async def test_model_not_ready_returns_none_with_one_warning_naming_the_model(ca
     assert len(caplog.records) == 1
     assert "af_heart" in caplog.records[0].getMessage()
     assert "acme" not in caplog.records[0].getMessage()
+
+
+async def test_a_routed_agent_whose_tts_is_not_ready_still_gets_a_bundle():
+    async def not_ready_factory(cfg: ProviderConfig, api_key: str | None):
+        raise ModelNotReadyError("fake_tts", "af_heart", provider="not-ready-tts")
+
+    manager = AIProviderManager(
+        FakeSecretResolver(), registry={**FAKE_REGISTRY, ("tts", "fake_tts"): not_ready_factory}
+    )
+    registry = ProviderRegistry(manager)
+    registry.set_defaults(
+        ProviderBundle(stt="default-stt", llm="default-llm", tts="default-tts"),
+        stt_languages=frozenset({"en"}), tts_languages=frozenset({"en"}),
+    )
+
+    result = await resolve_handler_deps("acme", "sup", registry, _fully_configured_mock())
+
+    assert result is not None
+    _, bundle = result
+    assert bundle.tts == "default-tts"  # the agent is English; only the TTS role is swapped
+    assert isinstance(bundle.stt, FakeProviderInstance)

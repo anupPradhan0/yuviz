@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import shutil
 import sys
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from huggingface_hub.errors import LocalEntryNotFoundError
 
 from libs.config_sdk.local_models import LOCAL_MODELS, LocalModel, find_local_model
 
+log = logging.getLogger(__name__)
+
 _MAX_CONCURRENT_DOWNLOADS = 2
 _KILL_AFTER_S = 5
 _OLLAMA_PULL_TIMEOUT_S = 3600  # a stalled pull must not hold its download slot forever
@@ -26,6 +29,10 @@ _KOKORO_REPO = "hexgrad/Kokoro-82M"
 
 class DownloadCapReached(Exception):
     """Too many downloads are already running on this host."""
+
+
+class _OllamaPullError(Exception):
+    """Ollama answered the pull with an `error` (its text is safe to show the admin)."""
 
 
 @dataclass
@@ -123,10 +130,16 @@ class ModelDownloads:
             else:
                 code = await self._download_hf(job, model)
                 if code:
+                    log.error("local model download exited %s engine=%s name=%s", code, model.engine, model.name)
                     job.status, job.error = "failed", f"exit {code}"
                     return
         except Exception as exc:
-            job.status, job.error = "failed", f"download failed ({type(exc).__name__})"
+            log.exception("local model download failed engine=%s name=%s", model.engine, model.name)
+            job.status = "failed"
+            job.error = (
+                f"ollama pull failed: {exc}" if isinstance(exc, _OllamaPullError)
+                else f"download failed ({type(exc).__name__})"
+            )
             return
         del self._jobs[key]  # on disk now; status() reads the disk from here on
 
@@ -138,8 +151,8 @@ class ModelDownloads:
         async with self._http.stream("POST", "/api/pull", json={"model": name}, timeout=None) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
-                if json.loads(line).get("error"):
-                    raise RuntimeError("ollama pull reported an error")
+                if error := json.loads(line).get("error"):
+                    raise _OllamaPullError(error)
 
     @staticmethod
     async def _stop(proc: asyncio.subprocess.Process) -> None:

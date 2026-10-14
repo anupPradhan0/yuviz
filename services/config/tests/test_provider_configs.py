@@ -171,9 +171,11 @@ async def test_list_provider_voices_cartesia_maps_language(monkeypatch, fake_htt
 
     voices = await provider_configs.list_provider_voices(cfg["id"], secret_resolver=_FakeResolver())
 
-    assert [(v["voice_id"], v["name"], v["verified_languages"]) for v in voices] == [
+    # Same object shape as ElevenLabs: the admin UI reads `.language` from each entry.
+    assert [(v["voice_id"], v["name"], [x["language"] for x in v["verified_languages"]]) for v in voices] == [
         ("c1", "Katie", ["en"]), ("c2", "Sin idioma", []),
     ]
+    assert set(voices[0]["verified_languages"][0]) == {"language", "model_id", "accent", "locale", "preview_url"}
     url, headers = fake_http.calls[0]
     assert url == "https://api.cartesia.ai/voices"
     assert headers["X-API-Key"] == "secret-key"

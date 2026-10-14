@@ -46,6 +46,9 @@ class KokoroTTS:
     A per-call `language=` (ISO 639-1) picks another KPipeline, created lazily and
     cached per lang_code. Every pipeline shares the first one's KModel, so the
     weights load once; only the per-language G2P is new.
+
+    defer_load  — build no KPipeline (and so load no weights) until the first synthesis, which
+                  runs in the executor: for an instance made while the weights aren't on disk.
     """
 
     accepts_language = True
@@ -55,19 +58,22 @@ class KokoroTTS:
         voice:     str = "af_sarah",
         speed:     float = 1.0,
         lang_code: str = "a",
+        defer_load: bool = False,
     ) -> None:
         from kokoro import KPipeline
-        log.info("Loading Kokoro TTS voice=%s lang=%s", voice, lang_code)
         self._KPipeline = KPipeline
         self._lang_code = lang_code
-        self._pipelines: dict[str, Any] = {lang_code: KPipeline(lang_code=lang_code)}
+        self._pipelines: dict[str, Any] = {}
+        if not defer_load:
+            log.info("Loading Kokoro TTS voice=%s lang=%s", voice, lang_code)
+            self._pipelines[lang_code] = KPipeline(lang_code=lang_code)
         self._voice    = voice
         self._speed    = speed
         self._lock     = asyncio.Lock()  # KPipeline is not thread-safe for concurrent calls
         self._warned_languages: set[str] = set()
         # lang_codes whose KPipeline failed to build (e.g. missing G2P extras): never retried.
         self._failed_lang_codes: set[str] = set()
-        log.info("Kokoro TTS ready")
+        log.info("Kokoro TTS %s", "created, loads on first use" if defer_load else "ready")
 
     def _resolve_lang_code(self, language: Any) -> str:
         if language is INSTANCE_LANGUAGE or language is None:
@@ -102,6 +108,11 @@ class KokoroTTS:
         pipeline = self._pipelines.get(lang_code)
         if pipeline is not None:
             return pipeline
+        if self._lang_code not in self._pipelines:  # defer_load: the first synthesis loads the weights
+            log.info("Kokoro: loading weights for voice=%s lang=%s", self._voice, self._lang_code)
+            self._pipelines[self._lang_code] = self._KPipeline(lang_code=self._lang_code)
+            if lang_code == self._lang_code:
+                return self._pipelines[lang_code]
         base = self._pipelines[self._lang_code]
         if lang_code in self._failed_lang_codes:
             return base

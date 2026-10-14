@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from types import SimpleNamespace
@@ -82,11 +83,66 @@ async def test_candidates_fold_urdu_into_hindi_and_decode_in_hindi(whisper_cls):
     assert result.language_confidence == pytest.approx(0.90 / 0.95)
 
 
-async def test_candidates_pick_best_supported_language(whisper_cls):
+async def test_unsure_outside_language_keeps_the_agent_language(whisper_cls):
     stt = _stt(whisper_cls, language=None, model=_DetectingModel())
     result = await stt.transcribe(b"\x00\x01" * 8000, 16000, language=None, languages=("en", "es"))
-    # ur folds into nothing here (hi unsupported): en 0.05 vs es 0.05 — a tie, never confident.
-    assert result.language in ("en", "es") and result.language_confidence == pytest.approx(0.5)
+    # Whisper's top pick (ur, 0.55) is neither agent language but not confident: an accented
+    # caller must not be reported as speaking a third language.
+    assert result.language in ("en", "es")
+    assert stt._model.calls[0]["language"] in ("en", "es")
+
+
+class _ConfidentFrenchModel(_StubModel):
+    """Clear French speech to an en+es agent."""
+
+    def detect_language(self, pcm):
+        probs = [("fr", 0.92), ("en", 0.04), ("es", 0.04)]
+        return probs[0][0], probs[0][1], probs
+
+
+async def test_confident_unsupported_language_is_reported_as_that_language(whisper_cls):
+    stt = _stt(whisper_cls, language=None, model=_ConfidentFrenchModel())
+    result = await stt.transcribe(b"\x00\x01" * 8000, 16000, language=None, languages=("en", "es"))
+    # The tracker is told French at Whisper's own probability; the text still decodes in an agent language.
+    assert result.language == "fr" and result.language_confidence == pytest.approx(0.92)
+    assert stt._model.calls[0]["language"] in ("en", "es")
+
+
+class _AccentedOkayModel(_StubModel):
+    """Accented "okay": Whisper is confidently wrong (a third language) with real mass on English."""
+
+    def detect_language(self, pcm):
+        probs = [("nn", 0.75), ("en", 0.24), ("hi", 0.01)]
+        return probs[0][0], probs[0][1], probs
+
+
+@pytest.mark.parametrize("require_language", [None, ("en", 0.0)])
+async def test_accented_agent_language_speech_stays_in_the_agent_language(whisper_cls, require_language):
+    stt = _stt(whisper_cls, language=None, model=_AccentedOkayModel())
+    result = await stt.transcribe(
+        b"\x00\x01" * 8000, 16000, language=None, languages=("en", "hi"), require_language=require_language,
+    )
+    assert result.language == "en"
+    assert result.language_confidence == pytest.approx(0.24 / 0.25)
+
+
+async def test_a_hindi_session_switches_back_on_the_accented_english_utterance(whisper_cls):
+    from services.conversation.language import LanguageTracker, utterance_language
+
+    stt = _stt(whisper_cls, language=None, model=_AccentedOkayModel())
+    result = await stt.transcribe(b"\x00\x01" * 8000, 16000, language=None, languages=("en", "hi"))
+    tracker = LanguageTracker("en", ("en", "hi"), unsupported_to_default=True)
+    tracker.current, tracker._has_evidence = "hi", True
+    assert tracker.observe(utterance_language(result, ("en", "hi"))) is True
+    assert tracker.current == "en"
+
+
+async def test_a_confident_third_language_is_not_reported_for_a_short_utterance(whisper_cls):
+    stt = _stt(whisper_cls, language=None, model=_ConfidentFrenchModel())
+    result = await stt.transcribe(
+        b"\x00\x01" * 8000, 16000, language=None, languages=("en", "es"), require_language=("en", 0.0),
+    )
+    assert result.language == "en"
 
 
 async def test_fixed_language_ignores_candidates(whisper_cls):
@@ -197,3 +253,35 @@ async def test_short_low_confidence_match_is_skipped_unless_text_can_decide(whis
     )
     assert result.text == "haan ji" and stt._model.calls[0]["language"] == "hi"
     assert result.language_confidence == pytest.approx(0.30 / 0.55)
+
+
+async def test_a_not_ready_instance_downloads_in_the_background_and_transcribes_once_loaded(whisper_cls):
+    stt = whisper_cls(model_size="small", language="en")
+    loads: list[bool] = []
+
+    def build(size, **kwargs):
+        loads.append(kwargs["local_files_only"])
+        return _StubModel()
+
+    stt._WhisperModel = build
+    stt.load_when_needed()  # what the provider factory does for a model that isn't on disk
+
+    # Not ready yet: no model, so the call gets empty text rather than waiting.
+    assert (await stt.transcribe(b"\x00\x01" * 8000, 16000)).text == ""
+
+    await stt._load_task
+    assert loads == [False]  # downloads allowed, unlike the startup load
+    assert stt.loaded
+    assert (await stt.transcribe(b"\x00\x01" * 8000, 16000)).text == "haan ji"
+
+
+async def test_concurrent_transcribes_start_one_download(whisper_cls):
+    stt = whisper_cls(model_size="small", language="en")
+    loads: list[bool] = []
+    stt._WhisperModel = lambda size, **kw: loads.append(kw["local_files_only"]) or _StubModel()
+    stt._download_on_demand = True
+
+    await asyncio.gather(*(stt.transcribe(b"\x00\x01" * 8000, 16000) for _ in range(3)))
+    await stt._load_task
+
+    assert loads == [False]

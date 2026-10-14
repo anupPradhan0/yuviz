@@ -24,6 +24,7 @@ import redis.asyncio as aioredis
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
 from libs.config_sdk import CacheAsideConfigProvider, HttpConfigRepository, IConfigProvider, RedisConfigRepository
+from libs.config_sdk.languages import normalize_language, stt_languages, tts_languages
 from libs.config_sdk.test_credentials import redeem_test_credential
 from libs.knowledge_sdk import (
     CacheAsideKnowledgeProvider,
@@ -45,7 +46,7 @@ from .pipeline import PipelineConversationHandler
 from . import rejection
 from .rejection import RejectionHandler
 from .pipeline_config import PipelineConfig
-from .provider_bundle import ProviderRegistry, _to_ai_provider_config
+from .provider_bundle import ProviderBundle, ProviderRegistry, _to_ai_provider_config
 from .providers.stt.faster_whisper import FasterWhisperSTT
 from .providers.llm.ollama import OllamaLLM
 from .secret_resolver import CompositeSecretResolver
@@ -112,6 +113,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    choices=["pipeline", "echo"],
                    help="pipeline = real STT/LLM/TTS; echo = loopback for testing")
     return p.parse_args(argv)
+
+
+def _default_stt_languages(cfg: PipelineConfig) -> frozenset[str]:
+    """What the process-default STT can hear: only its pinned language, or whatever Whisper
+    detects when it is unpinned."""
+    if cfg.stt.language:
+        return frozenset({normalize_language(cfg.stt.language)})
+    return stt_languages("faster_whisper", cfg.stt.model_size)
 
 
 def _build_tts(cfg: PipelineConfig):
@@ -344,6 +353,11 @@ async def serve(port: int, args: argparse.Namespace) -> None:
             timeout_s=cfg.llm.timeout_s,
         )
         tts = _build_tts(cfg)
+        provider_registry.set_defaults(
+            ProviderBundle(stt=stt, llm=llm, tts=tts),
+            stt_languages=_default_stt_languages(cfg),
+            tts_languages=tts_languages(cfg.tts.engine, None, cfg.tts.voice),
+        )
         await rejection.prewarm(tts, cfg.sample_rate)
 
         async def _build_pipeline_handler(

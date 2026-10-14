@@ -161,7 +161,7 @@ async def lifespan(app: FastAPI):
     await _prewarm_routes(overwrite=True)
     watchdog = asyncio.create_task(_reload_routes_when_redis_empties())
     app.state.model_downloads = ModelDownloads(
-        ollama_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
+        ollama_url=os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434",
     )
     yield
     watchdog.cancel()

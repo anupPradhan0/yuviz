@@ -285,21 +285,64 @@ async def test_provider_edit_revalidates_moded_agents_with_the_real_query(test_t
     await provider_configs.update_provider_config(base, allow_pointer_schemes=False, name="Renamed voice")
 
 
-async def test_template_create_is_monolingual(pool, test_tenant, test_admin):
-    llm = await pool.fetchval(
-        "INSERT INTO provider_configs (tenant_id, name, role, engine, api_key_ref) "
-        "VALUES ($1, 'llm cfg', 'llm', 'openai', 'ref') RETURNING id", test_tenant["id"],
-    )
+async def _post_template(pool, test_tenant, test_admin, template_id, configs, **extra):
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test",
         headers={"Authorization": f"Bearer {test_admin['token']}"},
     ) as client:
-        resp = await client.post(f"/tenants/{test_tenant['slug']}/agents/from-template", json={
-            "template_id": "faq-support", "template_version": 4, "name": "Front Desk",
-            "business_name": "Acme Dental", "business_facts": "Open 9 to 5.", "llm_config_id": str(llm),
+        return await client.post(f"/tenants/{test_tenant['slug']}/agents/from-template", json={
+            "template_id": template_id, "template_version": 4, "name": "Front Desk",
+            "business_name": "Acme Dental", "business_facts": "Open 9 to 5.", **configs, **extra,
         })
+
+
+async def _llm_config(pool, tenant_id):
+    return str(await pool.fetchval(
+        "INSERT INTO provider_configs (tenant_id, name, role, engine, api_key_ref) "
+        "VALUES ($1, 'llm cfg', 'llm', 'openai', 'ref') RETURNING id", tenant_id,
+    ))
+
+
+async def _deepgram_stt(pool, tenant_id):
+    return str(await pool.fetchval(
+        "INSERT INTO provider_configs (tenant_id, name, role, engine, model, api_key_ref) "
+        "VALUES ($1, 'stt cfg', 'stt', 'deepgram', 'nova-3', 'ref') RETURNING id", tenant_id,
+    ))
+
+
+async def test_voice_template_create_is_monolingual(pool, test_tenant, test_admin, scoped):
+    stt = await _deepgram_stt(pool, test_tenant["id"])
+    configs = {
+        "llm_config_id": await _llm_config(pool, test_tenant["id"]), "stt_config_id": stt,
+        "tts_config_id": await _cartesia(test_tenant["id"]),
+    }
+    resp = await _post_template(pool, test_tenant, test_admin, "inbound-triage", configs)
     assert resp.status_code == 201, resp.text
     row = await _agent_row(pool, uuid.UUID(resp.json()["id"]))
     assert row["language_mode"] == "monolingual"
     assert row["language"] == "en"
     assert row["supported_languages"] is None
+
+
+@pytest.mark.parametrize("language", ["nl-BE", "en-US", "hi"])
+async def test_chat_template_keeps_any_language_tag_as_given(pool, test_tenant, test_admin, language):
+    configs = {"llm_config_id": await _llm_config(pool, test_tenant["id"])}
+    resp = await _post_template(pool, test_tenant, test_admin, "faq-support", configs, language=language)
+    assert resp.status_code == 201, resp.text
+    row = await _agent_row(pool, uuid.UUID(resp.json()["id"]))
+    assert row["language_mode"] is None
+    assert row["language"] == language
+
+
+@pytest.mark.parametrize("language", ["nl-BE", "en-US"])
+async def test_voice_template_keeps_a_tag_the_registry_does_not_list(pool, test_tenant, test_admin, scoped, language):
+    configs = {
+        "llm_config_id": await _llm_config(pool, test_tenant["id"]),
+        "stt_config_id": await _deepgram_stt(pool, test_tenant["id"]),
+        "tts_config_id": await _cartesia(test_tenant["id"]),
+    }
+    resp = await _post_template(pool, test_tenant, test_admin, "inbound-triage", configs, language=language)
+    assert resp.status_code == 201, resp.text
+    row = await _agent_row(pool, uuid.UUID(resp.json()["id"]))
+    assert row["language_mode"] is None
+    assert row["language"] == language

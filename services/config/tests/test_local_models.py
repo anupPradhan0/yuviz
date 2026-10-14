@@ -4,6 +4,7 @@ stubbed: nothing here downloads a model."""
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 import uuid
@@ -281,3 +282,38 @@ async def test_get_is_identical_across_tenants_and_names_no_tenant(
     for tenant in (test_tenant, other_tenant_admin["tenant"]):
         assert str(tenant["id"]) not in resp_a.text and tenant["slug"] not in resp_a.text
     assert {"engine", "role", "name", "label", "languages", "status", "error"} == set(resp_a.json()[0])
+
+
+async def test_failed_pull_surfaces_ollamas_own_error_and_logs(monkeypatch, caplog):
+    d = ModelDownloads(ollama_url="http://ollama.invalid")
+
+    async def not_on_disk(model, ollama_tags=None):
+        return False
+
+    async def no_tags():
+        return set()
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        async def aiter_lines(self):
+            yield json.dumps({"error": "pull model manifest: file does not exist"})
+
+    class _Stream:
+        async def __aenter__(self):
+            return _Resp()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(d, "_on_disk", not_on_disk)
+    monkeypatch.setattr(d, "_ollama_tags", no_tags)
+    monkeypatch.setattr(d._http, "stream", lambda *a, **kw: _Stream())
+    with caplog.at_level("ERROR", logger="services.config.model_downloads"):
+        await d.trigger("ollama", "llama3.2")
+        await d._jobs[("ollama", "llama3.2")].task
+    entry = next(e for e in await d.status() if (e["engine"], e["name"]) == ("ollama", "llama3.2"))
+    assert entry["error"] == "ollama pull failed: pull model manifest: file does not exist"
+    assert any("engine=ollama name=llama3.2" in r.getMessage() for r in caplog.records)
+    await d.aclose()

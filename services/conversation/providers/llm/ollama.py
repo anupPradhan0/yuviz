@@ -73,6 +73,18 @@ class OllamaLLM:
         )
         log.info("OllamaLLM model=%s base_url=%s think=%s", model, self._base_url, think)
 
+    async def model_pulled(self) -> bool:
+        """Whether Ollama has this model. An unreachable Ollama reads as pulled: the first turn
+        reports the real error, as it always did."""
+        try:
+            resp = await self._client.get("/api/tags")
+            resp.raise_for_status()
+        except httpx.HTTPError:
+            log.warning("OllamaLLM: could not list models at %s", self._base_url, exc_info=True)
+            return True
+        tags = {m["name"] for m in resp.json().get("models", [])}
+        return self._model in tags or f"{self._model}:latest" in tags
+
     def _raise_for_status(self, resp: httpx.Response) -> None:
         if resp.status_code == 404 and not self._warned_not_pulled:
             self._warned_not_pulled = True

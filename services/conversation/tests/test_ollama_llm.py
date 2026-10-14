@@ -335,3 +335,26 @@ async def test_404_warns_once_per_instance_naming_the_model_and_still_raises(cap
     warnings = [r for r in caplog.records if "not pulled" in r.getMessage()]
     assert len(warnings) == 1
     assert "llama3.2" in warnings[0].getMessage()
+
+
+def _tags_handler(*names: str):
+    return lambda request: httpx.Response(200, json={"models": [{"name": n} for n in names]})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("pulled", "expected"), [
+    (("llama3.2:latest",), True),
+    (("llama3.2",), True),
+    (("qwen3:4b",), False),
+    ((), False),
+])
+async def test_model_pulled_reads_the_tag_list(pulled, expected):
+    assert await _make_llm(_tags_handler(*pulled)).model_pulled() is expected
+
+
+@pytest.mark.asyncio
+async def test_model_pulled_treats_an_unreachable_ollama_as_pulled():
+    def down(request):
+        raise httpx.ConnectError("refused")
+
+    assert await _make_llm(down).model_pulled() is True
