@@ -2650,3 +2650,102 @@ async def test_orchestrator_receives_the_directive_without_it_entering_history()
 
     assert "English" in orchestrator.seen_trailing_message.content
     assert orchestrator.seen_history == history
+
+
+def _reply_text(responses) -> str:
+    return "".join(r.response_text or "" for r in responses)
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_text_tool_call_as_the_only_output_speaks_the_fallback():
+    from ..pipeline import _FALLBACK_LLM_ERROR
+
+    llm = _make_llm(['{"name": "delete_everything", ', '"parameters": {}}'])
+    handler = _make_handler(_make_stt("hello"), llm, _make_tts(b"\x00" * 640), system_prompt="You are Alex.")
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert _reply_text(responses) == _FALLBACK_LLM_ERROR
+    assert any(r.tts_payloads for r in responses)
+
+
+@pytest.mark.asyncio
+async def test_only_a_filler_then_an_empty_round_speaks_the_fallback_once():
+    from ..pipeline import _FALLBACK_LLM_ERROR
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    orchestrator = _FakeToolOrchestrator([ToolCallStartedEvent(tool_name="search_knowledge")])
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(["unused"]), _make_tts(b"\x00" * 640),
+        system_prompt="You are Alex.", tool_orchestrator=orchestrator,
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert _reply_text(responses).count(_FALLBACK_LLM_ERROR) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_fallback_after_a_transition_line_then_an_empty_round():
+    from ..pipeline import _FALLBACK_LLM_ERROR
+    from ..tools.llm_adapter import LocalToolCompletedEvent
+
+    class _Transitioning(_FakeToolOrchestrator):
+        async def run_turn(self, *args, **kwargs):
+            handler._workflow.pending_speech = "Connecting you now."
+            async for e in super().run_turn(*args, **kwargs):
+                yield e
+
+    orchestrator = _Transitioning([LocalToolCompletedEvent(tool_name="go_next")])
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(["unused"]), _make_tts(b"\x00" * 640),
+        system_prompt="You are Alex.", tool_orchestrator=orchestrator,
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert _reply_text(responses) == "Connecting you now."
+    assert _FALLBACK_LLM_ERROR not in _reply_text(responses)
+
+
+@pytest.mark.asyncio
+async def test_a_normal_turn_speaks_no_fallback():
+    from ..pipeline import _FALLBACK_LLM_ERROR
+
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(["Hi", " there", "!"]), _make_tts(b"\x00" * 640), system_prompt="You are Alex.",
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert _reply_text(responses) == "Hi there!"
+    assert _FALLBACK_LLM_ERROR not in _reply_text(responses)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("move", ["end", "transfer"])
+async def test_no_error_fallback_when_the_turn_moves_to_an_end_or_transfer_node(move):
+    # A deliberate end or transfer with no transition line keeps its own wording, not the error line.
+    from libs.config_sdk.workflow import Node
+
+    from ..pipeline import _FALLBACK_LLM_ERROR
+    from ..tools.llm_adapter import LocalToolCompletedEvent
+
+    class _Moving(_FakeToolOrchestrator):
+        async def run_turn(self, *args, **kwargs):
+            if move == "end":
+                handler._workflow.pending_end = True
+            else:
+                handler._workflow.pending_transfer = Node(id="t", type="transfer", name="Transfer", transfer_destination="+15550100")
+            async for e in super().run_turn(*args, **kwargs):
+                yield e
+
+    orchestrator = _Moving([LocalToolCompletedEvent(tool_name="go_next")])
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(["unused"]), _make_tts(b"\x00" * 640),
+        system_prompt="You are Alex.", tool_orchestrator=orchestrator,
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert _FALLBACK_LLM_ERROR not in _reply_text(responses)
