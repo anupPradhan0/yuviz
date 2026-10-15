@@ -856,8 +856,11 @@ async def test_trailing_message_ends_every_llm_call_and_never_enters_history():
 
     _ = [e async for e in orchestrator.run_turn("agent1", "t1", "c1", "s1", history, trailing_message=directive)]
 
-    # First call: folded into the caller's turn; after the tool result: its own user turn.
+    # Folded into the caller's turn on every call, also after the tool result: a separate user
+    # turn there reads as a new question and small models call the tool again.
     first, after_tool = llm.seen_messages
-    assert first[-1].role == "user" and first[-1].content == f"book it\n\n{directive.content}"
-    assert after_tool[-1] == directive and after_tool[-2].role == "tool"
+    folded = f"book it\n\n{directive.content}"
+    assert first[-1].role == "user" and first[-1].content == folded
+    assert after_tool[0].content == folded and after_tool[-1].role == "tool"
+    assert all(m.content != directive.content for m in after_tool)
     assert directive not in history and history[0].content == "book it" and len(history) == 3
