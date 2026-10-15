@@ -17,7 +17,6 @@ from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import LocalEntryNotFoundError
 
 from libs.config_sdk.languages import LANGUAGES, normalize_language
-from libs.config_sdk.local_models import find_local_model
 
 from ... import model_downloads
 from ..interfaces import INSTANCE_LANGUAGE
@@ -87,7 +86,6 @@ class KokoroTTS:
         self._voice    = voice
         self._speed    = speed
         self._lock     = asyncio.Lock()  # KPipeline is not thread-safe for concurrent calls
-        self._voice_on_disk = False
         self._last_fetch_failure: float | None = None
         self._warned_languages: set[str] = set()
         # lang_codes whose KPipeline failed to build (e.g. missing G2P extras): never retried.
@@ -148,37 +146,27 @@ class KokoroTTS:
         self._pipelines[lang_code] = pipeline
         return pipeline
 
-    async def _fetch_files(self, *, voice: bool) -> None:
-        """Fetch the files that aren't on disk in a killable, shared subprocess (KPipeline would
-        download them on an executor thread nobody can stop). The base weights are fetched before
-        they load; the voice only on synthesis (`voice=True`), so call setup never waits on it.
-        The repo is fixed and only a registry voice is fetched. A failed voice fetch is left to
-        KPipeline's own small lazy fetch, as before; a failed base fetch raises."""
-        if self._last_fetch_failure is not None and time.monotonic() - self._last_fetch_failure < _RETRY_AFTER_S:
-            if not self.loaded:
-                raise RuntimeError("Kokoro weights are not on disk (last download failed; retrying later)")
+    async def _fetch_base_weights(self) -> None:
+        """Before the base weights load: fetch them in a killable, shared subprocess if they aren't on
+        disk (KPipeline would download ~330 MB on an executor thread nobody can stop). Voice files
+        (~0.5 MB) are left to KPipeline's own lazy fetch, as before: they never wait on a shared
+        download slot, so a synthesis is never queued behind a multi-GB model download."""
+        if self.loaded:
             return
-        wanted: dict[str, list[str]] = {}
-        if not self.loaded:
-            wanted["base"] = ["config.json", "kokoro-v1_0.pth"]
-        if voice and not self._voice_on_disk and find_local_model("kokoro", self._voice) is not None:
-            wanted[self._voice] = [f"voices/{self._voice}.pt"]
-        for name, files in wanted.items():
+        if self._last_fetch_failure is not None and time.monotonic() - self._last_fetch_failure < _RETRY_AFTER_S:
+            raise RuntimeError("Kokoro weights are not on disk (last download failed; retrying later)")
+        files = ["config.json", "kokoro-v1_0.pth"]
+        try:
+            for filename in files:
+                await asyncio.to_thread(hf_hub_download, KOKORO_REPO, filename, local_files_only=True)
+        except LocalEntryNotFoundError:
+            log.warning("Kokoro base weights are not on disk — downloading them now")
             try:
-                for filename in files:
-                    await asyncio.to_thread(hf_hub_download, KOKORO_REPO, filename, local_files_only=True)
-            except LocalEntryNotFoundError:
-                log.warning("Kokoro files %s are not on disk — downloading them now", name)
-                try:
-                    await model_downloads.fetch(("kokoro", name), _DOWNLOAD_SCRIPT, KOKORO_REPO, *files)
-                except Exception:
-                    self._last_fetch_failure = time.monotonic()
-                    log.exception("Kokoro download of %s failed", name)
-                    if name == "base":
-                        raise
-                    continue
-            if name == self._voice:
-                self._voice_on_disk = True
+                await model_downloads.fetch(("kokoro", "base"), _DOWNLOAD_SCRIPT, KOKORO_REPO, *files)
+            except Exception:
+                self._last_fetch_failure = time.monotonic()
+                log.exception("Kokoro base weights download failed")
+                raise
 
     async def stop_download(self) -> None:
         """At shutdown: kill the downloads in flight (a synthesis waiting on one then fails)."""
@@ -191,7 +179,7 @@ class KokoroTTS:
     async def load(self) -> None:
         """Build the row's KPipeline (loading the weights) in the executor; a no-op once built."""
         async with self._lock:
-            await self._fetch_files(voice=False)
+            await self._fetch_base_weights()
             await asyncio.get_running_loop().run_in_executor(None, self._pipeline_sync, self._lang_code)
 
     async def prewarm(self, languages: list[str]) -> None:
@@ -202,7 +190,7 @@ class KokoroTTS:
             if code in self._pipelines or code in self._failed_lang_codes:
                 continue
             async with self._lock:
-                await self._fetch_files(voice=False)
+                await self._fetch_base_weights()
                 await loop.run_in_executor(None, self._pipeline_sync, code)
 
     async def synthesize(self, text: str, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE) -> bytes:
@@ -211,7 +199,7 @@ class KokoroTTS:
         lang_code = self._resolve_lang_code(language)
         loop = asyncio.get_running_loop()
         async with self._lock:
-            await self._fetch_files(voice=True)
+            await self._fetch_base_weights()
             return await loop.run_in_executor(None, self._synthesize_sync, text, sample_rate, lang_code)
 
     async def synthesize_stream(self, text: str, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE):

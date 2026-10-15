@@ -868,18 +868,21 @@ class TestKokoroDownloadShutdown:
 
         assert fetched == [] and tts.loaded
 
-    async def test_a_failed_voice_fetch_is_left_to_kpipeline_and_backs_off(self, monkeypatch):
+    async def test_synthesis_never_waits_on_a_shared_download_slot_for_a_voice(self, monkeypatch):
+        # Both slots held by multi-GB downloads: a ~0.5 MB voice is left to KPipeline's lazy fetch, so
+        # synthesis with the base weights on disk never queues behind them (PR #103 review).
         import sys
         import types
 
-        monkeypatch.setitem(sys.modules, "kokoro", types.SimpleNamespace(KPipeline=lambda *a, **kw: object()))
+        class _Pipeline:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __call__(self, text, voice, speed):
+                return iter(())
+
+        monkeypatch.setitem(sys.modules, "kokoro", types.SimpleNamespace(KPipeline=_Pipeline))
         from ..providers.tts import kokoro as kokoro_module
-
-        attempts = []
-
-        async def failing_fetch(key, *args):
-            attempts.append(key)
-            raise RuntimeError("model download exited 1")
 
         def cached_except_voice(repo, filename, local_files_only):
             if filename.startswith("voices/"):
@@ -887,16 +890,17 @@ class TestKokoroDownloadShutdown:
             return "/cache/" + filename
 
         monkeypatch.setattr(kokoro_module, "hf_hub_download", cached_except_voice)
-        monkeypatch.setattr(kokoro_module.model_downloads, "fetch", failing_fetch)
-        tts = kokoro_module.KokoroTTS(voice="af_sarah", defer_load=True)
-        await tts.load()
+        slots = kokoro_module.model_downloads._slots
+        held = [await slots.acquire() for _ in range(kokoro_module.model_downloads.MAX_CONCURRENT_DOWNLOADS)]
+        try:
+            tts = kokoro_module.KokoroTTS(voice="af_sarah", defer_load=True)
+            await tts.load()
+            await asyncio.wait_for(tts.synthesize("hello", 24_000), timeout=2)
+        finally:
+            for _ in held:
+                slots.release()
 
-        await tts._fetch_files(voice=True)  # does not raise: KPipeline's own lazy fetch remains
-        await tts._fetch_files(voice=True)  # within the back-off: no second subprocess
-
-        assert attempts == [("kokoro", "af_sarah")]
-
-    async def test_only_registry_voices_are_fetched(self, monkeypatch):
+    async def test_only_the_fixed_base_weights_are_ever_fetched(self, monkeypatch):
         import sys
         import types
 
@@ -920,6 +924,6 @@ class TestKokoroDownloadShutdown:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
         monkeypatch.setattr(kokoro_module, "hf_hub_download", not_cached)
-        await kokoro_module.KokoroTTS(voice="../../evil", defer_load=True)._fetch_files(voice=True)
+        await kokoro_module.KokoroTTS(voice="../../evil", defer_load=True)._fetch_base_weights()
 
         assert len(spawned) == 1 and spawned[0][-2:] == ("config.json", "kokoro-v1_0.pth")
