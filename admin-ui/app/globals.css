@@ -1054,6 +1054,9 @@ body {
 .agent-card-status { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; padding: 3px 9px; border-radius: 99px; background: var(--surf-3); color: var(--text-3); font-size: .68rem; font-weight: 600; }
 .agent-card-status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .agent-card-status.on { background: var(--green-dim); color: var(--green); }
+.agent-card-status.unreachable { background: var(--amber-dim); color: var(--amber); }
+.agent-readiness-list { margin: 12px 0 0; padding-left: 20px; line-height: 1.8; }
+.agent-readiness-list li { list-style: none; }
 .agent-card-facts { display: flex; flex-wrap: wrap; margin-bottom: 16px; font-size: .72rem; color: var(--text-3); }
 .agent-card-facts span + span::before { content: "·"; margin: 0 6px; }
 .agent-card-facts span.muted { font-style: italic; }
@@ -1739,6 +1742,7 @@ body {
 .ed2-live i { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); }
 .ed2-live.on { border-color: var(--green-border); background: var(--green-dim); color: var(--green); }
 .ed2-live.on i { background: var(--green); }
+.ed2-dir select { border: 1px solid var(--border-2); border-radius: 5px; background: var(--surf); color: var(--text); font: inherit; padding: 3px 5px; }
 .ed2-dir { font-size: .74rem; color: var(--text-3); }
 .ed2-top-right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
 .ed2-menu { position: relative; }

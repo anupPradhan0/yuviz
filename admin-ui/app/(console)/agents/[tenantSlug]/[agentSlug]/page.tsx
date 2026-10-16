@@ -10,7 +10,7 @@ import {
   Loader2, Settings2, SlidersHorizontal, Sparkles, Trash2, Undo2,
 } from "lucide-react";
 import {
-  Agent, AgentUpdate, ApiError, Call, PhoneNumber, ProviderConfig, createAgent, deleteAgent, getAgent,
+  Agent, AgentUpdate, ApiError, Call, Campaign, PhoneNumber, ProviderConfig, createAgent, deleteAgent, getAgent,
   getCurrentUser, getLiveCalls, listCalls, listCampaigns, listPhoneNumbers, listProviders, rewritePrompt,
   undoPrompt, updateAgent,
 } from "@/lib/api";
@@ -23,6 +23,7 @@ import { AgentTestPanel } from "@/components/AgentTestPanel";
 import { LANGUAGES, OTHER } from "@/lib/engineCatalog";
 import { normalizeDialTarget } from "@/lib/dialTargets";
 import { useMenuKeys } from "@/lib/useMenuKeys";
+import { readinessItems } from "@/lib/agentReadiness";
 
 type Section = "instructions" | "voice" | "knowledge" | "settings" | "advanced";
 
@@ -85,7 +86,8 @@ export default function AgentDetailPage() {
   const [agent, setAgent] = useState<Agent | null>(null);
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [numbers, setNumbers] = useState<PhoneNumber[] | null>(null);
-  const [inCampaign, setInCampaign] = useState(false);
+  const [campaigns, setCampaigns] = useState<Campaign[] | null>(null);
+  const [liveConfirmOpen, setLiveConfirmOpen] = useState(false);
   const [recentCalls, setRecentCalls] = useState<Call[]>([]);
   const [section, setSection] = useState<Section>("instructions");
   const [justCreated] = useState(() => searchParams.get("new") === "1");
@@ -142,6 +144,7 @@ export default function AgentDetailPage() {
         const lang = languageState(a);
         const initialForm: AgentUpdate = {
           name: a.name,
+          direction: a.direction,
           greeting: a.greeting,
           system_prompt: a.system_prompt,
           goodbye_grace_ms: a.goodbye_grace_ms,
@@ -174,8 +177,7 @@ export default function AgentDetailPage() {
           form: initialForm, languageChoice: lang.languageChoice, customLanguage: lang.customLanguage,
         }));
         listPhoneNumbers(a.tenant_id).then(setNumbers).catch(() => setNumbers(null));
-        // Campaigns run in a separate service; if it's down the agent just counts as inbound.
-        listCampaigns(a.tenant_id).then((cs) => setInCampaign(cs.some((c) => c.agent_id === a.id))).catch(() => {});
+        listCampaigns(a.tenant_id).then(setCampaigns).catch(() => setCampaigns(null));
         listCalls(tenantSlug, { agentId: a.id, limit: 5 })
           .then((r) => setRecentCalls(r.items))
           .catch(() => {});
@@ -403,8 +405,11 @@ export default function AgentDetailPage() {
   const escalation = form.escalation_threshold ?? null;
   const escalationOptions =
     escalation === null || ESCALATION_OPTIONS.includes(escalation) ? ESCALATION_OPTIONS : [...ESCALATION_OPTIONS, escalation].sort((a, b) => a - b);
-  const hasNumber = numbers?.some((n) => n.agent_id === agent.id) ?? true;
-  const needsNumber = !hasNumber && !inCampaign;
+  const hasNumber = numbers?.some((n) => n.agent_id === agent.id && n.status === "active") ?? true;
+  const needsNumber = form.direction !== "outbound" && !hasNumber;
+  const missingReadiness = numbers && campaigns
+    ? readinessItems({ ...agent, direction: form.direction ?? agent.direction }, numbers, campaigns)
+    : null;
 
   // First thing still stopping the agent from taking real calls.
   const blocker: { text: string; action?: string; section: Section } | null =
@@ -458,7 +463,7 @@ export default function AgentDetailPage() {
               type="button"
               className="btn btn-primary btn-sm"
               title="Make this agent available to take calls"
-              onClick={() => setForm({ ...form, status: "active" })}
+              onClick={() => setLiveConfirmOpen(true)}
             >
               Go live
             </button>
@@ -470,12 +475,20 @@ export default function AgentDetailPage() {
             aria-checked={isActive}
             className={`ed2-live${isActive ? " on" : ""}`}
             title={isActive ? "Click to pause this agent" : "Click to let this agent take calls"}
-            onClick={() => setForm({ ...form, status: isActive ? "inactive" : "active" })}
+            onClick={() => isActive ? setForm({ ...form, status: "inactive" }) : setLiveConfirmOpen(true)}
           >
             <i /> {isActive ? "Taking calls" : "Paused"}
           </button>
         )}
-        <span className="ed2-dir">{inCampaign ? "My agent calls people" : "People call my agent"}</span>
+        <label className="ed2-dir">
+          Calls: {" "}
+          <select aria-label="Agent call direction" value={form.direction ?? agent.direction}
+            onChange={(e) => setForm({ ...form, direction: e.target.value as Agent["direction"] })}>
+            <option value="inbound">People call my agent</option>
+            <option value="outbound">My agent calls people</option>
+            <option value="both">Both directions</option>
+          </select>
+        </label>
         <div className="ed2-top-right">
           <div className="ed2-save" aria-live="polite">{saveStatus}</div>
           <button
@@ -932,6 +945,30 @@ export default function AgentDetailPage() {
           )}
         </aside>
       </div>
+
+      <Modal
+        open={liveConfirmOpen}
+        title={`Go live with "${agent.name}"?`}
+        onClose={() => setLiveConfirmOpen(false)}
+        footer={<>
+          <button className="btn btn-ghost btn-sm" onClick={() => setLiveConfirmOpen(false)}>Cancel</button>
+          <button className="btn btn-primary btn-sm" onClick={() => {
+            setForm((current) => ({ ...current, status: "active" }));
+            setLiveConfirmOpen(false);
+          }}>{missingReadiness?.length ? "Go live anyway" : "Go live"}</button>
+        </>}
+      >
+        {missingReadiness === null ? (
+          <p>Phone setup could not be checked. Verify numbers and campaigns before taking real calls.</p>
+        ) : missingReadiness.length ? (
+          <>
+            <p>This agent can be tested in the browser, but these items are needed for phone calls:</p>
+            <ul className="agent-readiness-list">{missingReadiness.map((item) => (
+              <li key={item.text}>✗ {item.text} — <Link href={item.href}>{item.action}</Link></li>
+            ))}</ul>
+          </>
+        ) : <p>Phone setup is ready for this agent.</p>}
+      </Modal>
 
       <Modal
         open={deleteConfirmOpen}

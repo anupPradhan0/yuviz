@@ -13,7 +13,7 @@ import { AgentTestPopup } from "@/components/AgentTestPopup";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 import { listAgentKnowledgeBases } from "@/lib/knowledgeApi";
 import { listAgentCustomApis } from "@/lib/toolexecApi";
-import { AGENT_TEMPLATES, agentDirection, agentIcon, agentTemplate } from "@/lib/agentTemplates";
+import { AGENT_TEMPLATES, agentIcon, agentTemplate } from "@/lib/agentTemplates";
 import { LANGUAGES } from "@/lib/engineCatalog";
 import { AgentDraft, clearAgentDraft, draftSavedLabel, loadAgentDraft } from "@/lib/agentDraft";
 
@@ -131,7 +131,7 @@ export default function AgentsPage() {
             listAgentCustomApis(a.id).then((r) => r.length).catch(() => null),
           ]);
           const nums = tenantNumbers.get(a.tenant_id);
-          const numbers = nums ? nums.filter((n) => n.agent_id === a.id).map((n) => n.did) : null;
+          const numbers = nums ? nums.filter((n) => n.agent_id === a.id && n.status === "active").map((n) => n.did) : null;
           const stats = tenantStats.get(a.tenant_id);
           const calls = stats ? (stats.find((s) => s.agent_id === a.id) ?? { agent_id: a.id, ...NO_CALLS }) : null;
           return [a.id, { sources: kbs, tools: apis, calls, numbers }] as const;
@@ -217,7 +217,8 @@ export default function AgentsPage() {
             const language = LANGUAGES.find((l) => l.value === a.language)?.label ?? a.language;
             const Icon = agentIcon(a);
             const tpl = agentTemplate(a);
-            const direction = agentDirection(a);
+            const direction = a.direction;
+            const unreachable = a.status === "active" && direction !== "outbound" && att?.numbers?.length === 0;
             const editUrl = `/agents/${a.tenantSlug}/${a.slug}`;
             return (
               <div key={a.id} className={`agent-card${a.status === "active" ? "" : " paused"}`}>
@@ -235,7 +236,7 @@ export default function AgentsPage() {
                 <div className="agent-card-meta">
                   {direction && (
                     <span className={`badge ${direction === "inbound" ? "cyan" : "indigo"}`}>
-                      {direction === "inbound" ? "Inbound" : "Outbound"}
+                      {direction === "inbound" ? "Inbound" : direction === "outbound" ? "Outbound" : "Inbound + outbound"}
                     </span>
                   )}
                   <span className="badge gray">{tpl?.label ?? "Custom"}</span>
@@ -273,8 +274,8 @@ export default function AgentsPage() {
                 })()}
 
                 <div className="agent-card-foot">
-                  <span className={`agent-card-status${a.status === "active" ? " on" : ""}`}>
-                    <i />{a.status === "active" ? "Live" : "Paused"}
+                  <span className={`agent-card-status${unreachable ? " unreachable" : a.status === "active" ? " on" : ""}`}>
+                    <i />{unreachable ? "Not reachable – no number" : a.status === "active" ? "Live" : "Paused"}
                   </span>
                 </div>
               </div>
