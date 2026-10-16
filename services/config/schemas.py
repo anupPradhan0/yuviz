@@ -93,6 +93,7 @@ class AgentCreate(BaseModel):
     supported_languages:    list[str] | None = None
     tts_config_by_language: dict[str, str | None] | None = None
     greeting_by_language:   dict[str, str] | None = None
+    language_mode:          Literal["monolingual", "multilingual"] | None = None
 
     @field_validator("workflow")
     @classmethod
@@ -105,6 +106,11 @@ def _no_double_braces(value: str) -> str:
     if "{{" in value or "}}" in value:
         raise ValueError("double curly brackets are not allowed")
     return value
+
+
+class LocalModelDownload(BaseModel):
+    engine: str
+    name:   str
 
 
 class AgentFromTemplate(BaseModel):
@@ -217,6 +223,8 @@ class AgentUpdate(BaseModel):
     supported_languages:    list[str] | None = None
     tts_config_by_language: dict[str, str | None] | None = None
     greeting_by_language:   dict[str, str] | None = None
+    # Set once, never cleared; omitted = derived from supported_languages (see _validate_languages).
+    language_mode:          Literal["monolingual", "multilingual"] | None = None
 
     # Runs only when the field is sent: omitted means "unchanged", explicit null is a bad request.
     @field_validator("sentiment_analysis_enabled")

@@ -11,7 +11,9 @@ from libs.config_sdk import MockConfigProvider
 from libs.config_sdk.workflow import starter_graph
 
 from .. import language as lang_state
-from ..language import LanguageTracker, UtteranceLanguage, reply_language_instruction, utterance_language
+from ..language import (
+    LanguageTracker, UtteranceLanguage, fixed_language_instruction, reply_language_instruction, utterance_language,
+)
 from ..pipeline import PipelineConversationHandler, _SENTENCE_RE
 from ..provider_bundle import ProviderBundle
 from ..providers.interfaces import INSTANCE_LANGUAGE, SttResult
@@ -140,6 +142,35 @@ def test_reply_instruction_names_language_and_script():
     # Anchored to the latest turn, so a mixed call can't pull the reply back to Hindi.
     assert "even if earlier turns of the call were in another language" in en
     assert "mix" not in en
+
+
+def test_unsupported_to_default_returns_to_primary_after_a_switch():
+    t = LanguageTracker("en", ("en", "hi"), unsupported_to_default=True)
+    t.observe(U("hi", 0.9))
+    assert t.current == "hi"
+    assert t.observe(U("fr", 0.9)) is True
+    assert t.current == "en"
+
+
+def test_unsupported_stays_put_by_default():
+    t = LanguageTracker("en", ("en", "hi"))
+    t.observe(U("hi", 0.9))
+    assert t.observe(U("fr", 0.9)) is False
+    assert t.current == "hi"
+
+
+def test_unsupported_to_default_ignores_low_confidence():
+    t = LanguageTracker("en", ("en", "hi"), unsupported_to_default=True)
+    t.observe(U("hi", 0.9))
+    assert t.observe(U("fr", 0.5)) is False
+    assert t.current == "hi"
+
+
+def test_instructions_say_answer_in_language_whatever_the_passages_are():
+    assert "Knowledge passages may be in another language; answer in Hindi (हिन्दी) anyway." in fixed_language_instruction("hi")
+    assert "Reply only in English." in fixed_language_instruction("en")
+    assert "Knowledge passages may be in another language; answer in English anyway." in reply_language_instruction("en")
+    assert "Knowledge passages may be in another language; answer in Hindi (हिन्दी) anyway." in reply_language_instruction("hi")
 
 
 # ── Sentence splitter ────────────────────────────────────────────────────────

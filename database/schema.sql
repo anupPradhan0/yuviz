@@ -141,6 +141,9 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS workflow_draft JSONB;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS supported_languages    TEXT[];
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS tts_config_by_language JSONB;  -- {"hi": "<provider_configs.id>"}
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS greeting_by_language   JSONB;  -- {"hi": "नमस्ते ..."}
+-- Monolingual | multilingual; NULL = agent saved before modes existed (legacy validation path).
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS language_mode TEXT
+    CHECK (language_mode IN ('monolingual', 'multilingual'));
 DO $$ BEGIN
     ALTER TABLE agents ADD CONSTRAINT agents_tts_config_by_language_object
         CHECK (tts_config_by_language IS NULL OR jsonb_typeof(tts_config_by_language) = 'object');

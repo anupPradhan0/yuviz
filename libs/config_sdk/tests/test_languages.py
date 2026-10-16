@@ -9,6 +9,7 @@ from libs.config_sdk.languages import (
     agent_supported_languages,
     deepgram_supports_multi,
     normalize_language,
+    stt_languages,
     tts_languages,
 )
 from libs.config_sdk.providers.cache_aside import CacheAsideConfigProvider
@@ -189,3 +190,11 @@ async def test_free_text_agent_language_is_ignored_at_runtime(bad):
 async def test_legacy_underscore_tag_still_reaches_providers():
     rc = await _runtime(_repo({"language": "en_IN"}))
     assert rc.media.stt_language == "en_IN"   # Deepgram canonicalises it to en-IN
+
+
+def test_stt_languages_by_engine_and_model():
+    from libs.config_sdk.languages import LANGUAGES
+    assert stt_languages("faster_whisper", "small.en") == frozenset({"en"})
+    assert stt_languages("faster_whisper", "small") == frozenset(LANGUAGES)
+    assert stt_languages("deepgram", "nova-3") == frozenset(LANGUAGES)
+    assert stt_languages("unknown-engine", None) == frozenset({"en"})

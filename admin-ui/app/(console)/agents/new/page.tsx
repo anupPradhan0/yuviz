@@ -4,12 +4,13 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeft, ArrowRight, Check, Sparkles } from "lucide-react";
+import { AlertCircle, ArrowLeft, ArrowRight, Check, Sparkles } from "lucide-react";
 import {
   Agent,
   AgentDirection,
   AgentUpdate,
   ApiError,
+  LanguageMode,
   ProviderConfig,
   Tenant,
   createAgent,
@@ -21,13 +22,18 @@ import {
 } from "@/lib/api";
 import { KnowledgeBase, assignKnowledgeBase, listKnowledgeBases } from "@/lib/knowledgeApi";
 import { CustomApi, listCustomApis, setAgentCustomApiEnabled } from "@/lib/toolexecApi";
-import { AgentVoiceSettings, isLanguageError, multilingualPayload } from "@/components/AgentVoiceSettings";
-import { OTHER } from "@/lib/engineCatalog";
+import {
+  AgentVoiceSettings, agentLocalModels, isLanguageError, multilingualPayload, notReadyModels,
+} from "@/components/AgentVoiceSettings";
+import { useLocalModels } from "@/lib/useLocalModels";
+import { OTHER, languageLabel, languagesWithoutVoice } from "@/lib/engineCatalog";
 import { buildSystemPrompt } from "@/lib/systemPromptBuilder";
 import { templateByKey } from "@/lib/agentTemplates";
 import { normalizeDialTarget } from "@/lib/dialTargets";
 import { QuickCreateAgent } from "@/components/QuickCreateAgent";
-import { AgentDraft, clearAgentDraft, draftSavedLabel, loadAgentDraft, saveAgentDraft } from "@/lib/agentDraft";
+import {
+  AgentDraft, clearAgentDraft, deriveLanguageDraft, draftSavedLabel, loadAgentDraft, saveAgentDraft,
+} from "@/lib/agentDraft";
 
 type Step = "identity" | "voice" | "limits" | "advanced" | "knowledge" | "review";
 
@@ -70,11 +76,9 @@ export default function NewAgentPage() {
   const [tone, setTone] = useState(template?.tone ?? TONES[0]);
 
   // Step 2 — Language & Voice
-  const [languageChoice, setLanguageChoice] = useState("");
-  const [customLanguage, setCustomLanguage] = useState("");
-  const [supportedLanguages, setSupportedLanguages] = useState<string[]>([]);
+  const [languageMode, setLanguageMode] = useState<LanguageMode>("monolingual");
+  const [languages, setLanguages] = useState<string[]>(["en"]);
   const [ttsByLanguage, setTtsByLanguage] = useState<Record<string, string>>({});
-  const [greetingByLanguage, setGreetingByLanguage] = useState<Record<string, string>>({});
   const [languagesError, setLanguagesError] = useState<string | null>(null);
   const [sttId, setSttId] = useState<string | null>(null);
   const [llmId, setLlmId] = useState<string | null>(null);
@@ -118,8 +122,10 @@ export default function NewAgentPage() {
   const skipAutosave = useRef(false);
 
   const tenant = useMemo(() => tenants.find((t) => t.slug === tenantSlug) ?? null, [tenants, tenantSlug]);
-  const language =
-    languageChoice === "" ? null : languageChoice === OTHER ? customLanguage.trim() || null : languageChoice;
+  const language = languages[0] ?? null;
+  const selectedModels = agentLocalModels(providers, [sttId, llmId, ttsId, ...Object.values(ttsByLanguage)]);
+  const localModels = useLocalModels(selectedModels);
+  const modelsNotReady = notReadyModels(selectedModels, localModels);
 
   useEffect(() => {
     // A template click is an explicit fresh start, so it doesn't resume an older draft.
@@ -133,12 +139,16 @@ export default function NewAgentPage() {
       setPurpose(d.purpose);
       setPersona(d.persona);
       setTone(d.tone);
-      setLanguageChoice(d.languageChoice);
-      setCustomLanguage(d.customLanguage);
-      // Absent in drafts saved before multilingual agents.
-      setSupportedLanguages(d.supportedLanguages ?? []);
+      // Drafts saved before language modes hold a default plus secondaries instead.
+      const restored = d.languageMode && d.languages
+        ? { languageMode: d.languageMode, languages: d.languages }
+        : deriveLanguageDraft({
+          language: d.languageChoice === OTHER ? d.customLanguage.trim() || null : d.languageChoice || null,
+          supported_languages: d.supportedLanguages ?? null,
+        });
+      setLanguageMode(restored.languageMode);
+      setLanguages(restored.languages);
       setTtsByLanguage(d.ttsByLanguage ?? {});
-      setGreetingByLanguage(d.greetingByLanguage ?? {});
       setSttId(d.sttId);
       setLlmId(d.llmId);
       setTtsId(d.ttsId);
@@ -175,8 +185,10 @@ export default function NewAgentPage() {
     const timer = setTimeout(() => {
       const draft: AgentDraft = {
         savedAt: Date.now(),
-        step, name, direction, tenantSlug, purpose, persona, tone, languageChoice, customLanguage,
-        supportedLanguages, ttsByLanguage, greetingByLanguage, sttId, llmId, ttsId,
+        step, name, direction, tenantSlug, purpose, persona, tone, languageMode, languages,
+        // Kept for the draft shape's older readers.
+        languageChoice: languages[0] ?? "", customLanguage: "",
+        ttsByLanguage, sttId, llmId, ttsId,
         maxCallDuration, goodbyeGraceMs, escalationThreshold, transferType, transferDestination,
         transferCondition, transferAnnouncement, complianceInstructions, fallbackResponse,
         selectedKbIds: Array.from(selectedKbIds), selectedApiIds: Array.from(selectedApiIds),
@@ -187,8 +199,8 @@ export default function NewAgentPage() {
     }, 400);
     return () => clearTimeout(timer);
   }, [
-    draftReady, mode, hasContent, step, name, direction, tenantSlug, purpose, persona, tone, languageChoice, customLanguage,
-    supportedLanguages, ttsByLanguage, greetingByLanguage,
+    draftReady, mode, hasContent, step, name, direction, tenantSlug, purpose, persona, tone, languageMode, languages,
+    ttsByLanguage,
     sttId, llmId, ttsId, maxCallDuration, goodbyeGraceMs, escalationThreshold, transferType,
     transferDestination, transferCondition, transferAnnouncement, complianceInstructions, fallbackResponse,
     selectedKbIds, selectedApiIds, greeting, systemPrompt, promptEdited,
@@ -306,6 +318,8 @@ export default function NewAgentPage() {
 
   const stepIndex = STEPS.findIndex((s) => s.key === step);
   const canLeaveIdentity = slugify(name) !== "" && tenantSlug !== "";
+  const unvoiced = languagesWithoutVoice(languages, ttsByLanguage, providers.find((p) => p.id === (ttsId ?? tenant?.default_tts_config_id)), localModels.supports);
+  const voicesMissing = unvoiced.length > 0;
   const goNext = () => setStep(STEPS[Math.min(stepIndex + 1, STEPS.length - 1)].key);
   const goBack = () => setStep(STEPS[Math.max(stepIndex - 1, 0)].key);
 
@@ -333,8 +347,7 @@ export default function NewAgentPage() {
           llm_config_id: known(llmId),
           tts_config_id: known(ttsId),
           // Sent here so a language 400 rejects the create instead of leaving a half-set-up agent.
-          language,
-          ...multilingualPayload(language, supportedLanguages, ttsByLanguage, greetingByLanguage),
+          ...multilingualPayload(languageMode, languages, ttsByLanguage),
           status: "inactive",
         });
         createdAgent.current = agent;
@@ -343,8 +356,7 @@ export default function NewAgentPage() {
         const fresh = agent;
         // Voice ids are re-sent: the language check (a 400 the user fixes on the voice step) reads them.
         await updateAgent(tenantSlug, fresh.id, {
-          language,
-          ...multilingualPayload(language, supportedLanguages, ttsByLanguage, greetingByLanguage),
+          ...multilingualPayload(languageMode, languages, ttsByLanguage),
           stt_config_id: known(sttId),
           llm_config_id: known(llmId),
           tts_config_id: known(ttsId),
@@ -481,20 +493,18 @@ export default function NewAgentPage() {
           tenantId={tenant.id}
           providers={providers}
           setProviders={setProviders}
-          languageChoice={languageChoice}
-          onLanguageChoice={setLanguageChoice}
-          customLanguage={customLanguage}
-          onCustomLanguage={setCustomLanguage}
-          supportedLanguages={supportedLanguages}
-          onSupportedLanguages={setSupportedLanguages}
+          localModels={localModels}
+          languageMode={languageMode}
+          onLanguageMode={setLanguageMode}
+          languages={languages}
+          onLanguages={setLanguages}
           ttsByLanguage={ttsByLanguage}
           onTtsByLanguage={setTtsByLanguage}
-          greetingByLanguage={greetingByLanguage}
-          onGreetingByLanguage={setGreetingByLanguage}
           languagesError={languagesError}
           sttId={sttId}
           llmId={llmId}
           ttsId={ttsId}
+          defaultTtsId={tenant.default_tts_config_id}
           onAssign={(role, id) => (role === "stt" ? setSttId(id) : role === "llm" ? setLlmId(id) : setTtsId(id))}
           onError={setLoadError}
         />
@@ -687,6 +697,12 @@ export default function NewAgentPage() {
                 )}
               </div>
             )}
+            {modelsNotReady.length > 0 && (
+              <div className="voice-missing" style={{ marginBottom: 14 }}>
+                {modelsNotReady.map((m) => `${m.name} (${m.status})`).join(", ")} isn&apos;t ready yet. You can create
+                the agent now, but calls fall back to the default setup until it is.
+              </div>
+            )}
             <div className="form-group">
               <label className="form-label">Opening line <span className="hint">first thing the agent says</span></label>
               <input className="form-input" value={greeting} onChange={(e) => setGreeting(e.target.value)} />
@@ -745,9 +761,13 @@ export default function NewAgentPage() {
             Next <ArrowRight size={13} />
           </button>
         ) : (
-          <button className="btn btn-primary btn-sm" onClick={handleCreate} disabled={creating || !canLeaveIdentity}>
+          <>
+          {voicesMissing && <span className="ed-save err"><AlertCircle size={13} /> Voice needed for {unvoiced.map(languageLabel).join(", ")}</span>}
+          <button className="btn btn-primary btn-sm" onClick={handleCreate} disabled={creating || !canLeaveIdentity || voicesMissing}
+            title={voicesMissing ? "Choose a voice for every language first" : undefined}>
             {creating ? "Creating…" : "Create agent"}
           </button>
+          </>
         )}
       </div>
     </>

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from libs.egress_guard import UnsafeProviderUrl, validate_base_url
+from libs.config_sdk.local_models import find_local_model
 from libs.config_sdk.secrets import ENCRYPTED_PREFIX, QUARANTINED as _QUARANTINED, encrypt_secret
 from libs.tenancy import platform_conn, tenant_conn
 
@@ -51,6 +52,36 @@ def require_safe_embedding_url(role: str, engine: str, extra: dict[str, Any] | N
         validate_base_url(extra["base_url"])
     except UnsafeProviderUrl as exc:
         raise ValueError(f"extra.base_url rejected: {exc}") from None
+
+
+# What ctranslate2 accepts; a tenant-chosen value outside these is an error at load time, and the
+# Conversation service keys its model downloads on neither, so they are checked on write.
+_WHISPER_EXTRA_VALUES = {
+    "device": {"cpu", "cuda", "auto"},
+    "compute_type": {
+        "default", "auto", "int8", "int8_float16", "int8_float32", "int8_bfloat16",
+        "int16", "float16", "bfloat16", "float32",
+    },
+}
+
+
+def require_supported_whisper(
+    engine: str, model: str | None, extra: dict[str, Any] | None, old: dict[str, Any] | None = None,
+) -> None:
+    """The Conversation service downloads a missing faster-whisper model on first use, so a tenant may
+    only name one from the local-model registry (else it could make the shared host fetch any repo),
+    and device/compute_type must be values ctranslate2 knows. `old` is the stored row on an update:
+    only what changed is checked, so rows saved before these checks still load and can be edited."""
+    if engine != "faster_whisper":
+        return
+    if (old is None or (old["engine"], old["model"]) != (engine, model)) and model \
+            and find_local_model(engine, model) is None:
+        raise ValueError(f"model {model!r} is not a supported faster_whisper model")
+    old_extra = (old or {}).get("extra") or {}
+    for key, allowed in _WHISPER_EXTRA_VALUES.items():
+        value = (extra or {}).get(key)
+        if value is not None and value != old_extra.get(key) and value not in allowed:
+            raise ValueError(f"extra.{key} {value!r} is not supported; use one of {sorted(allowed)}")
 
 
 def ref_mask_required(user: CurrentUser) -> bool:
@@ -197,6 +228,7 @@ async def create_provider_config(
 
     api_key_ref = resolve_api_key_input(api_key, api_key_ref, allow_pointer_schemes=allow_pointer_schemes)
     require_safe_embedding_url(role, engine, extra)
+    require_supported_whisper(engine, model, extra)
 
     pool = await db.get_pool()
     async with tenant_conn(pool) as conn:
@@ -259,6 +291,11 @@ async def update_provider_config(
         if "extra" in fields or "engine" in fields:
             require_safe_embedding_url(
                 old["role"], fields.get("engine", old["engine"]), new_extra if "extra" in fields else old["extra"])
+
+        require_supported_whisper(
+            fields.get("engine", old["engine"]), fields.get("model", old["model"]),
+            new_extra if "extra" in fields else old["extra"], old=old,
+        )
 
         # After the FOR UPDATE fetch, so "[stored]" and the byte-identical
         # round-trip are compared with the row this transaction holds.
@@ -407,35 +444,11 @@ async def soft_delete_provider_config(
 
 
 _ELEVENLABS_VOICES_URL = "https://api.elevenlabs.io/v1/voices"
+_CARTESIA_VOICES_URL = "https://api.cartesia.ai/voices"
+_CARTESIA_API_VERSION = "2024-06-10"  # keep equal to services/conversation/providers/tts/cartesia.py
 
 
-async def list_elevenlabs_voices(provider_id: Any, *, secret_resolver: SecretResolver) -> list[dict[str, Any]]:
-    """Lists ElevenLabs voices server-side; the resolved key is never returned to the caller."""
-    cfg = await get_provider_config(provider_id)
-    if cfg is None:
-        raise LookupError(f"provider_config {provider_id} not found")
-    if cfg["role"] != "tts" or cfg["engine"] != "elevenlabs":
-        raise ValueError(
-            f"provider_config {provider_id} is role={cfg['role']!r} engine={cfg['engine']!r}, "
-            "expected role='tts' engine='elevenlabs'"
-        )
-    if not cfg["api_key_ref"]:
-        raise ValueError(f"provider_config {provider_id} has no api_key_ref configured")
-
-    api_key = await secret_resolver.resolve(cfg["api_key_ref"])
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(_ELEVENLABS_VOICES_URL, headers={"xi-api-key": api_key})
-    except httpx.RequestError as exc:
-        raise ValueError(f"could not reach the ElevenLabs Voices API: {exc.__class__.__name__}") from exc
-    if resp.status_code != 200:
-        # Log the upstream body but don't forward it in the 400 detail.
-        log.warning(
-            "ElevenLabs Voices API returned %s for provider_config %s: %s",
-            resp.status_code, provider_id, resp.text[:200],
-        )
-        raise ValueError(f"ElevenLabs Voices API returned {resp.status_code}")
-
+def _elevenlabs_voices(resp: httpx.Response) -> list[dict[str, Any]]:
     return [
         {
             "voice_id": v["voice_id"],
@@ -448,3 +461,58 @@ async def list_elevenlabs_voices(provider_id: Any, *, secret_resolver: SecretRes
         }
         for v in resp.json().get("voices", [])
     ]
+
+
+def _cartesia_voices(resp: httpx.Response) -> list[dict[str, Any]]:
+    return [
+        {
+            "voice_id": v["id"],
+            "name": v["name"],
+            "category": None,
+            "labels": {},
+            "preview_url": None,
+            # Cartesia voices carry a single language code; entries match ElevenLabs' object shape.
+            "verified_languages": [{
+                "language": v["language"], "model_id": None, "accent": None,
+                "locale": None, "preview_url": None,
+            }] if v.get("language") else [],
+        }
+        for v in resp.json()
+    ]
+
+
+async def list_provider_voices(provider_id: Any, *, secret_resolver: SecretResolver) -> list[dict[str, Any]]:
+    """Lists ElevenLabs or Cartesia voices server-side; the resolved key is never returned to the caller."""
+    cfg = await get_provider_config(provider_id)
+    if cfg is None:
+        raise LookupError(f"provider_config {provider_id} not found")
+    engine = cfg["engine"]
+    if cfg["role"] != "tts" or engine not in ("elevenlabs", "cartesia"):
+        raise ValueError(
+            f"provider_config {provider_id} is role={cfg['role']!r} engine={engine!r}, "
+            "expected role='tts' engine='elevenlabs' or 'cartesia'"
+        )
+    if not cfg["api_key_ref"]:
+        raise ValueError(f"provider_config {provider_id} has no api_key_ref configured")
+
+    api_key = await secret_resolver.resolve(cfg["api_key_ref"])
+    if engine == "elevenlabs":
+        label, url, headers = "ElevenLabs", _ELEVENLABS_VOICES_URL, {"xi-api-key": api_key}
+    else:
+        label, url, headers = "Cartesia", _CARTESIA_VOICES_URL, {
+            "X-API-Key": api_key, "Cartesia-Version": _CARTESIA_API_VERSION,
+        }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, headers=headers)
+    except httpx.RequestError as exc:
+        raise ValueError(f"could not reach the {label} Voices API: {exc.__class__.__name__}") from exc
+    if resp.status_code != 200:
+        # Log the upstream body but don't forward it in the 400 detail.
+        log.warning(
+            "%s Voices API returned %s for provider_config %s: %s",
+            label, resp.status_code, provider_id, resp.text[:200],
+        )
+        raise ValueError(f"{label} Voices API returned {resp.status_code}")
+
+    return _elevenlabs_voices(resp) if engine == "elevenlabs" else _cartesia_voices(resp)

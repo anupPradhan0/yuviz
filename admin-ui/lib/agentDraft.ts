@@ -1,6 +1,7 @@
 // Browser-only autosave for the /agents/new wizard, so leaving the page never loses typed work.
 
 import { tokenUserId } from "@/lib/auth";
+import { baseLanguage } from "@/lib/engineCatalog";
 
 const DRAFT_PREFIX = "yuviz:new-agent-draft";
 
@@ -8,6 +9,29 @@ const DRAFT_PREFIX = "yuviz:new-agent-draft";
 function draftKey(): string | null {
   const userId = tokenUserId();
   return userId ? `${DRAFT_PREFIX}:${userId}` : null;
+}
+
+export type LanguageMode = "monolingual" | "multilingual";
+
+export interface LanguageDraft {
+  languageMode: LanguageMode;
+  languages: string[];
+  // A legacy agent with 3+ languages must be cut to 2 before its next save.
+  needsReduce: boolean;
+}
+
+// Legacy agents have no stored mode: the language count decides it.
+export function deriveLanguageDraft(agent: {
+  language: string | null;
+  supported_languages: string[] | null;
+  language_mode?: LanguageMode | null;
+}): LanguageDraft {
+  // Legacy rows carry region tags ("en-US"); the pickers only know base codes.
+  const langs = [...new Set((agent.supported_languages ?? []).map(baseLanguage).filter((c): c is string => !!c))];
+  if (agent.language_mode === "monolingual" || (!agent.language_mode && langs.length < 2)) {
+    return { languageMode: "monolingual", languages: [langs[0] ?? baseLanguage(agent.language) ?? "en"], needsReduce: false };
+  }
+  return { languageMode: "multilingual", languages: langs, needsReduce: langs.length > 2 };
 }
 
 export interface AgentDraft {
@@ -24,7 +48,8 @@ export interface AgentDraft {
   // Optional: drafts saved before multilingual agents lack them.
   supportedLanguages?: string[];
   ttsByLanguage?: Record<string, string>;
-  greetingByLanguage?: Record<string, string>;
+  languageMode?: LanguageMode;
+  languages?: string[];
   sttId: string | null;
   llmId: string | null;
   ttsId: string | null;

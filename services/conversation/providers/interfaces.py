@@ -50,6 +50,23 @@ class ChatMessage:
     tool_call_id: str | None = field(default=None)
 
 
+def with_directive(messages: list[ChatMessage], directive: ChatMessage | None) -> list[ChatMessage]:
+    """A copy of messages for one LLM request with a transient directive folded into the caller's
+    latest turn (the last plain user message), even when tool calls and results follow it.
+
+    Never a turn of its own: as a separate user message after a tool result, small models
+    (llama3.2) read it as a new question and call the tool again — six LLM rounds per turn.
+    And as a trailing system message they ignore it once knowledge passages are in another
+    language. Folded into the caller's turn, both hold."""
+    if directive is None:
+        return messages
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if m.role == "user" and not m.tool_calls and m.tool_call_id is None:
+            return [*messages[:i], ChatMessage(role="user", content=f"{m.content}\n\n{directive.content}"), *messages[i + 1:]]
+    return [*messages, directive]
+
+
 class ISTT(Protocol):
     """Transcribe accumulated PCM audio to text.
 

@@ -11,7 +11,7 @@ from dataclasses import replace
 from typing import Any, AsyncGenerator, Awaitable, Callable, TypeAlias
 
 from ..metrics import IMetrics
-from ..providers.interfaces import ChatMessage
+from ..providers.interfaces import ChatMessage, with_directive
 from ..tool_latency import ToolLatencyStore
 from .executor_registry import ExecutorRegistry
 from .llm_adapter import (
@@ -95,11 +95,13 @@ class ToolCallOrchestrator:
         local_tools: LocalToolsSource = None,
         only_tools: list[str] | Callable[[], list[str] | None] | None = None,
         carry_taint: bool = False,
+        trailing_message: ChatMessage | None = None,
     ) -> AsyncGenerator[TurnEvent, None]:
         """only_tools subsets DB tools for this turn (never grants). Both tool
         args may be callables so a mid-turn node change re-resolves schemas.
         carry_taint: this turn is not a new caller utterance (e.g. recovery after a failed transfer), so
-        retrieved text read earlier is still in context and the held writes are not yet confirmed."""
+        retrieved text read earlier is still in context and the held writes are not yet confirmed.
+        trailing_message is sent last on every LLM call of the turn but never stored in history."""
         local_calls = 0
         guard = TurnGuard(self._max_tool_calls_per_turn)
         call_key = (tenant_id, call_id)
@@ -154,7 +156,8 @@ class ToolCallOrchestrator:
         while True:
             tool_call_happened = False
             this_call_tool_choice, tool_choice = tool_choice, None
-            async for event in self._llm_adapter.generate(history, schemas, tool_choice=this_call_tool_choice):
+            async for event in self._llm_adapter.generate(
+                with_directive(history, trailing_message), schemas, tool_choice=this_call_tool_choice):
                 if isinstance(event, TokenEvent):
                     yield event
                     continue

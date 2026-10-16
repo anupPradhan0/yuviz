@@ -174,8 +174,9 @@ keep working unchanged.
 
   The English text stays byte-identical. The agent's own `farewell_message` and
   `transfer_announcement` still take precedence.
-- **Greeting:** if `greeting_by_language[default_language]` is set, it is rendered through the
-  workflow's variables. Otherwise the existing `runner.greeting()` is used.
+- **Greeting:** the runtime accepts an optional `greeting_by_language` map from the API, rendered
+  through the workflow's variables; otherwise the existing `runner.greeting()` is used. The editor
+  exposes only the single greeting and no per-language greeting editor.
 - **Short-utterance gate:** this applies only to multilingual agents. Single-language agents keep the
   1.0 s gate exactly as it is.
   - Audio under 0.45 s is always dropped. Whisper hallucinates a confident "Thank you." below that.
@@ -214,13 +215,38 @@ whatever language the call was in; transliterate names to Latin script."* Nothin
   `pipeline_config.py`, `docs/docker-startup.md` and the seed script.
 - Agent editor, "Language & Voice" tab:
   - a default-language select and a supported-languages multi-select;
-  - a voice override and a greeting for each language;
+  - a voice override for each language; the single agent greeting is kept, with no per-language greeting editor;
   - corrected hint text.
 - `ProvidersPanel`:
   - a language field on STT/TTS forms (`multi` for Deepgram STT);
   - stop recommending `.en` Whisper models when an agent has more than one language.
 - `engineCatalog.ts`: Cartesia and Deepgram added, plus the Kokoro Hindi voices (`hf_alpha`,
   `hf_beta`, `hm_omega`, `hm_psi`).
+
+## 7a. Language modes and local models
+
+- **Mode.** `agents.language_mode` (`monolingual` | `multilingual`, NULL = legacy) gates validation and
+  the runtime. A moded write is capped at 2 languages (`MAX_LANGUAGES`), checks that STT and TTS
+  support every language (`stt_languages` / `tts_languages` in `libs/config_sdk/languages.py`), and
+  stores one language for monolingual. Legacy rows with 3+ languages stay valid for unrelated edits;
+  the cap runs only when the request carries `language_mode` or `supported_languages`.
+- **Runtime.** A monolingual agent gets `fixed_language_instruction` appended to the node prompt. A
+  multilingual agent builds its `LanguageTracker` with `unsupported_to_default=True`, so a confident
+  utterance in an unsupported language returns the session to the default language.
+- **RAG language rule.** The `search_knowledge` payload carries `answer_in` (the session language,
+  else the agent language) so the model replies in the caller's language whatever the passages' language.
+- **Catalogue.** `libs/config_sdk/local_models.py` (`LOCAL_MODELS`) is the single registry of
+  faster-whisper, Ollama, Kokoro and macOS models and their languages; the editor filters on it and
+  `scripts/generate_voice_samples.py` reads its voice ids.
+- **`/local-models`.** `GET` reports status (`ready`, `missing`, `downloading`, `failed`,
+  `unavailable`) for each entry; `POST /downloads` (superadmin/admin) starts one: 202, 200 if already
+  present, 400 outside the registry, 429 at 2 concurrent downloads. `ModelDownloads` runs in the Config
+  process (Ollama pull over httpx, Hugging Face in a killable subprocess, closed in `lifespan`).
+- **Colocation.** Config and Conversation must share a host: compose mounts the same `hf-cache` and one
+  `${OLLAMA_BASE_URL}`. Otherwise status describes the wrong disk. A model that is still missing at call
+  time raises `ModelNotReadyError`; the resolver logs one warning and falls back.
+- **Single worker.** Dedupe and the cap are per Config process; replicas on one host stay correct but
+  may download twice.
 
 ## 8. Latency & cost
 

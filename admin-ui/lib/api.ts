@@ -202,13 +202,37 @@ export const previewVoice = async (providerId: string, text: string): Promise<Bl
   return res.blob();
 };
 
-export const listElevenLabsVoices = (providerId: string) =>
+export const listProviderVoices = (providerId: string) =>
   request<ElevenLabsVoice[]>(`/providers/${providerId}/voices`);
+
+// ── Local models ─────────────────────────────────────────────────────────
+
+export type LocalModelStatus = "ready" | "missing" | "downloading" | "failed" | "unavailable";
+
+export interface LocalModel {
+  engine: string;
+  role: "stt" | "llm" | "tts";
+  name: string;
+  label: string;
+  // null = not language-bound (LLMs).
+  languages: string[] | null;
+  status: LocalModelStatus;
+  error: string | null;
+}
+
+export const listLocalModels = () => request<LocalModel[]>("/local-models");
+
+export const triggerModelDownload = (engine: string, name: string) =>
+  request<{ status: "downloading" | "ready" }>("/local-models/downloads", {
+    method: "POST",
+    body: JSON.stringify({ engine, name }),
+  });
 
 // ── Agents ───────────────────────────────────────────────────────────────
 
 export type AgentStatus = "active" | "inactive";
 export type AgentDirection = "inbound" | "outbound" | "both";
+export type LanguageMode = "monolingual" | "multilingual";
 
 export interface Agent {
   id: string;
@@ -227,6 +251,8 @@ export interface Agent {
   tts_config_by_language: Record<string, string> | null;
   // Only the default language's entry is spoken (at call start, in place of the opening line).
   greeting_by_language: Record<string, string> | null;
+  // null = saved before modes existed.
+  language_mode: LanguageMode | null;
   stt_config_id: string | null;
   llm_config_id: string | null;
   tts_config_id: string | null;
@@ -292,6 +318,7 @@ export interface AgentCreate {
   supported_languages?: string[] | null;
   tts_config_by_language?: Record<string, string> | null;
   greeting_by_language?: Record<string, string> | null;
+  language_mode?: LanguageMode;
 }
 
 export interface AgentUpdate {
@@ -304,6 +331,7 @@ export interface AgentUpdate {
   supported_languages?: string[] | null;
   tts_config_by_language?: Record<string, string> | null;
   greeting_by_language?: Record<string, string> | null;
+  language_mode?: LanguageMode;
   stt_config_id?: string | null;
   llm_config_id?: string | null;
   tts_config_id?: string | null;

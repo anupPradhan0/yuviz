@@ -84,12 +84,15 @@ class LanguageTracker:
       language is only a prior).
     - After that, a switch needs SWITCH_STREAK (default 1) consecutive confident utterances in the
       same new language, so one noisy utterance can't flip it.
-    - Unsupported or low-confidence utterances change nothing and break a streak.
+    - Unsupported or low-confidence utterances change nothing and break a streak, except that
+      with `unsupported_to_default` a confident unsupported one returns the session to `default`.
     """
 
-    def __init__(self, default: str, supported: tuple[str, ...]) -> None:
+    def __init__(self, default: str, supported: tuple[str, ...], *, unsupported_to_default: bool = False) -> None:
         self.current = default
+        self._default = default
         self._supported = supported
+        self._unsupported_to_default = unsupported_to_default
         self._candidate: str | None = None
         self._streak = 0
         self._has_evidence = False
@@ -100,6 +103,11 @@ class LanguageTracker:
         """Feed one (non-short) utterance; returns True when the session language switched."""
         lang, conf = utterance.language, utterance.confidence
         if lang not in self._supported or conf is None or conf < MIN_CONFIDENCE:
+            if (
+                self._unsupported_to_default and lang is not None and lang not in self._supported
+                and conf is not None and conf >= MIN_CONFIDENCE and self.current != self._default
+            ):
+                return self._switch(self._default, f"unsupported language {lang}", session_id)
             if lang is not None and lang not in self._supported:
                 log.debug("language %s not supported — staying in %s session=%s", lang, self.current, session_id)
             self._candidate, self._streak = None, 0
@@ -151,6 +159,18 @@ def script_language(text: str, supported: tuple[str, ...]) -> str | None:
     return None
 
 
+def _knowledge_clause(name: str) -> str:
+    return f" Knowledge passages may be in another language; answer in {name} anyway."
+
+
+def fixed_language_instruction(language: str) -> str:
+    """System-prompt line for monolingual agents: every reply stays in the agent's language."""
+    lang = LANGUAGES.get(language)
+    name = f"{lang.name} ({lang.native_name})" if lang and lang.native_name != lang.name else language_name(language)
+    hint = f" {lang.script_hint}" if lang and lang.script_hint else ""
+    return f"\n\nReply only in {name}.{hint}{_knowledge_clause(name)}"
+
+
 def reply_language_instruction(language: str) -> str:
     """Per-turn system-prompt line for multilingual agents (never single-language ones).
 
@@ -169,4 +189,5 @@ def reply_language_instruction(language: str) -> str:
         f"\n\nThe caller is speaking {plain} now. Reply only in {name}, even if earlier turns "
         f"of the call were in another language{mix}.{hint} "
         "Keep any [[...]] tokens, numbers and tool arguments exactly as specified."
+        f"{_knowledge_clause(name)}"
     )

@@ -6,62 +6,66 @@
 import { Dispatch, SetStateAction, useEffect, useState } from "react";
 import Link from "next/link";
 import { AlertCircle, Check } from "lucide-react";
-import { AgentUpdate, ApiError, ProviderConfig, createProvider, listProviders, updateProvider } from "@/lib/api";
 import {
-  BUILTIN_TTS_ENGINE, DEEPGRAM_MULTI_LANGUAGES, LANGUAGES, OTHER, SUPPORTED_LANGUAGES, baseLanguage,
-  deepgramSupportsMulti, languageLabel, ttsLanguages,
+  AgentUpdate, ApiError, ElevenLabsVoice, LanguageMode, ProviderConfig, ProviderConfigCreate, createProvider, listProviderVoices,
+  listProviders, updateProvider,
+} from "@/lib/api";
+import {
+  BUILTIN_TTS_ENGINE, BUILTIN_TTS_VOICE, DEEPGRAM_MULTI_LANGUAGES, LANGUAGE_MODES, LOCAL_ENGINES, MAX_LANGUAGES,
+  PREMIUM_ENGINES, SUPPORTED_LANGUAGES, baseLanguage, deepgramSupportsMulti, keptGreetings, languageLabel, languagesWithoutVoice, ttsLanguages, voiceSpeaks,
 } from "@/lib/engineCatalog";
-import { LocalVoicePicker } from "@/components/LocalVoicePicker";
-import { ElevenLabsVoicePicker } from "@/components/ElevenLabsVoicePicker";
+import { ModelRef, useLocalModels } from "@/lib/useLocalModels";
 
 type Role = "stt" | "llm" | "tts";
 
-// The supported list as the server stores it: default first, de-duplicated. Fewer than
-// two languages = single-language agent, so [] (detection off).
-export function effectiveLanguages(language: string | null, supported: string[] | null | undefined): string[] {
-  if (!supported?.length) return [];
-  const out: string[] = [];
-  for (const code of [baseLanguage(language), ...supported.map(baseLanguage)]) {
-    if (code && !out.includes(code)) out.push(code);
-  }
-  return out.length > 1 ? out : [];
+export type LocalModels = ReturnType<typeof useLocalModels>;
+
+// The catalogue model a provider config points at, or null when the Config Service does not manage it:
+// premium engines, and an Ollama with its own base_url (Config never pulls into a URL a tenant supplies).
+export function localModelRef(p: ProviderConfig): ModelRef | null {
+  if (!LOCAL_ENGINES.has(p.engine) || (p.engine === "ollama" && p.extra?.base_url)) return null;
+  const name = p.role === "tts" ? p.voice || (p.engine === BUILTIN_TTS_ENGINE ? BUILTIN_TTS_VOICE : "") : p.model;
+  return name ? { engine: p.engine, name } : null;
 }
 
-// PATCH fields for the multilingual settings. Entries for unsupported languages and blank
-// ones are dropped; a single-language agent clears all three.
+// The free models behind the given provider configs.
+export function agentLocalModels(providers: ProviderConfig[], ids: (string | null | undefined)[]): ModelRef[] {
+  return ids.flatMap((id) => {
+    const p = providers.find((x) => x.id === id);
+    const ref = p && localModelRef(p);
+    return ref ? [ref] : [];
+  });
+}
+
+// Models that are in the catalogue but not usable yet (missing, downloading, failed, unavailable).
+export function notReadyModels(refs: ModelRef[], { status }: LocalModels) {
+  return refs.flatMap((r) => {
+    const s = status(r.engine, r.name);
+    return s && s !== "ready" ? [{ ...r, status: s }] : [];
+  });
+}
+
+// PATCH fields for the language settings. A monolingual agent clears the per-language voice map;
+// a multilingual one keeps entries for its non-default languages only (the default language's voice
+// is `tts_config_id`), dropping blank ones. The server clears the stored greetings on a monolingual write.
 export function multilingualPayload(
-  language: string | null,
-  supported: string[] | null | undefined,
+  mode: LanguageMode,
+  languages: string[],
   ttsByLanguage: Record<string, string> | null | undefined,
-  greetingByLanguage: Record<string, string> | null | undefined,
-): Pick<AgentUpdate, "supported_languages" | "tts_config_by_language" | "greeting_by_language"> {
-  const langs = effectiveLanguages(language, supported);
-  if (langs.length === 0) return { supported_languages: null, tts_config_by_language: null, greeting_by_language: null };
-  const keep = (m: Record<string, string> | null | undefined) => {
-    const out: Record<string, string> = {};
-    for (const l of langs) if (m?.[l]?.trim()) out[l] = m[l].trim();
-    return Object.keys(out).length ? out : null;
+): Pick<AgentUpdate, "language" | "language_mode" | "supported_languages" | "tts_config_by_language"> {
+  if (mode === "monolingual") {
+    return { language: languages[0] ?? null, language_mode: mode, supported_languages: null, tts_config_by_language: null };
+  }
+  const voices: Record<string, string> = {};
+  for (const l of languages.slice(1)) if (ttsByLanguage?.[l]?.trim()) voices[l] = ttsByLanguage[l].trim();
+  return {
+    language: languages[0], language_mode: mode, supported_languages: languages,
+    tts_config_by_language: Object.keys(voices).length ? voices : null,
   };
-  return { supported_languages: langs, tts_config_by_language: keep(ttsByLanguage), greeting_by_language: keep(greetingByLanguage) };
 }
 
 // The Config Service's 400s for language/voice coverage all name the language field or say
 // it can't be spoken; those belong next to the languages section, not just in the banner.
-// The server skips English (every engine reads it); every other language needs a voice that speaks it.
-function canSpeak(p: ProviderConfig, lang: string): boolean {
-  return lang === "en" || ttsLanguages(p).includes(lang);
-}
-
-const KOKORO_EXAMPLE_VOICES: Record<string, string> = {
-  hi: "hf_alpha or hm_omega", en: "af_heart", es: "ef_dora", fr: "ff_siwis", it: "if_sara",
-  pt: "pf_dora",
-};
-
-function kokoroExample(lang: string): string {
-  // ja/zh have no Kokoro voice here: suggest another engine rather than a voice that can't load.
-  return KOKORO_EXAMPLE_VOICES[lang] ?? "none available for this language — use Cartesia or ElevenLabs";
-}
-
 export function isLanguageError(detail: string): boolean {
   return /language|can't be spoken/i.test(detail);
 }
@@ -78,11 +82,101 @@ const SERVICE_NAMES: Record<string, string> = {
   elevenlabs: "ElevenLabs", cartesia: "Cartesia", deepgram: "Deepgram", macos: "Basic voice",
 };
 
+// Voices of a connected premium account that speak `lang`. Falls back to a pasted voice ID when
+// the account's voice list can't be loaded.
+function PremiumLanguageVoice({ provider, lang, current, placeholder, onPick }: {
+  provider: ProviderConfig;
+  lang: string;
+  /** The voice config now chosen for `lang`, if any. */
+  current: ProviderConfig | undefined;
+  /** Shown while nothing is chosen. */
+  placeholder: string;
+  onPick: (voiceId: string, label: string) => void;
+}) {
+  // undefined = still loading, null = the list failed to load.
+  const [loaded, setLoaded] = useState<{ providerId: string; voices: ElevenLabsVoice[] | null } | null>(null);
+  const [manualId, setManualId] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    listProviderVoices(provider.id)
+      .then((voices) => { if (!cancelled) setLoaded({ providerId: provider.id, voices }); })
+      .catch(() => { if (!cancelled) setLoaded({ providerId: provider.id, voices: null }); });
+    return () => { cancelled = true; };
+  }, [provider.id]);
+
+  const voices = loaded?.providerId === provider.id ? loaded.voices : undefined;
+  // The model must speak `lang` too: an English-only model can't use a voice verified for Hindi.
+  // Cloned or generated voices have no verified languages: go by their label, else by the model.
+  const modelLanguages = ttsLanguages(provider);
+  const speaks = (v: ElevenLabsVoice) => {
+    const labelled = baseLanguage(v.labels.language);
+    const langs = v.verified_languages.length ? v.verified_languages.map((x) => x.language) : labelled ? [labelled] : modelLanguages;
+    return langs.includes(lang);
+  };
+  const matching = voices?.filter((v) => modelLanguages.includes(lang) && speaks(v));
+  const pasteVoiceId = (
+    <>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          className="form-input"
+          style={{ flex: 1 }}
+          value={manualId}
+          onChange={(e) => setManualId(e.target.value)}
+          placeholder="Paste the voice ID"
+        />
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          disabled={!manualId.trim()}
+          onClick={() => { onPick(manualId.trim(), manualId.trim()); setManualId(""); }}
+        >
+          Use
+        </button>
+      </div>
+    </>
+  );
+
+  return (
+    <div>
+      {voices === undefined ? (
+        <div className="form-hint" style={{ marginTop: 0 }}>Loading voices…</div>
+      ) : voices === null ? (
+        <>
+          {pasteVoiceId}
+          <div className="form-hint">Couldn&apos;t load the voice list, so paste a voice ID instead.</div>
+        </>
+      ) : matching!.length === 0 ? (
+        <>
+          <div className="form-hint" style={{ marginTop: 0, marginBottom: 6 }}>
+            No {languageLabel(lang)} voices found on this account. Paste a voice ID instead.
+          </div>
+          {pasteVoiceId}
+        </>
+      ) : (
+        <select
+          className="form-select"
+          value={current?.voice ?? ""}
+          onChange={(e) => {
+            const v = matching!.find((x) => x.voice_id === e.target.value);
+            if (v) onPick(v.voice_id, v.name);
+          }}
+        >
+          <option value="" disabled>{placeholder}</option>
+          {/* A saved voice that is no longer in the list still shows as selected. */}
+          {current?.voice && !matching!.some((v) => v.voice_id === current.voice) && (
+            <option value={current.voice}>{current.name}</option>
+          )}
+          {matching!.map((v) => <option key={v.voice_id} value={v.voice_id}>{v.name}</option>)}
+        </select>
+      )}
+    </div>
+  );
+}
+
 export function AgentVoiceSettings({
-  tenantId, providers, setProviders,
-  languageChoice, onLanguageChoice, customLanguage, onCustomLanguage,
-  supportedLanguages, onSupportedLanguages, ttsByLanguage, onTtsByLanguage,
-  greetingByLanguage, onGreetingByLanguage, onGreetingBlur, languagesError,
+  tenantId, providers, setProviders, localModels, defaultTtsId,
+  languageMode, onLanguageMode, languages, onLanguages, ttsByLanguage, onTtsByLanguage, languagesError,
   sttId, llmId, ttsId, onAssign, onError, part,
 }: {
   /** Omitted = everything; the agent editor splits voice and engines across two sections. */
@@ -90,18 +184,18 @@ export function AgentVoiceSettings({
   tenantId: string;
   providers: ProviderConfig[];
   setProviders: Dispatch<SetStateAction<ProviderConfig[]>>;
-  languageChoice: string;
-  onLanguageChoice: (v: string) => void;
-  customLanguage: string;
-  onCustomLanguage: (v: string) => void;
-  supportedLanguages: string[];
-  onSupportedLanguages: (v: string[]) => void;
+  /** Owned by the page, which also needs the statuses to warn on save and block testing. */
+  localModels: LocalModels;
+  /** The workspace's default voice config, which the default language uses when `ttsId` is unset. */
+  defaultTtsId: string | null;
+  languageMode: LanguageMode;
+  onLanguageMode: (v: LanguageMode) => void;
+  /** Base codes, primary first: exactly one when monolingual, up to MAX_LANGUAGES when multilingual. */
+  languages: string[];
+  onLanguages: (v: string[]) => void;
+  /** Voice configs of the non-default languages; the default language's is `ttsId`. */
   ttsByLanguage: Record<string, string>;
   onTtsByLanguage: (v: Record<string, string>) => void;
-  greetingByLanguage: Record<string, string>;
-  onGreetingByLanguage: (v: Record<string, string>) => void;
-  /** Called when a per-language greeting loses focus (the editor saves held edits on blur). */
-  onGreetingBlur?: () => void;
   // The server's 400 detail for the language fields, shown inline.
   languagesError?: string | null;
   sttId: string | null | undefined;
@@ -113,12 +207,17 @@ export function AgentVoiceSettings({
   // null = follow the assigned voice: built-in unless the agent already uses another service.
   const [chosenMode, setChosenMode] = useState<"builtin" | "own" | null>(null);
   const [showConnect, setShowConnect] = useState(false);
+  // The connected voice service whose voices are listed; null = the one the agent's voice already uses.
+  const [accountId, setAccountId] = useState<string | null>(null);
   const [service, setService] = useState("elevenlabs");
   const [apiKey, setApiKey] = useState("");
   const [voiceId, setVoiceId] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
   const [speedDraft, setSpeedDraft] = useState<number | null>(null);
+  // The second language dropped by the last Multi→Mono switch, until that choice is undone.
+  const [droppedLanguage, setDroppedLanguage] = useState<string | null>(null);
+  const { models, supports, status, trigger } = localModels;
 
   // Voices are often created on the AI & Voice page mid-setup: re-read the list when this
   // panel opens and whenever the browser tab regains focus, so new ones show up here.
@@ -139,17 +238,45 @@ export function AgentVoiceSettings({
   const selectedLlm = providers.find((p) => p.id === llmId) ?? null;
   const selectedStt = providers.find((p) => p.id === sttId) ?? null;
 
-  const defaultLanguage = baseLanguage(languageChoice === OTHER ? customLanguage : languageChoice);
-  const languages = effectiveLanguages(defaultLanguage, supportedLanguages);
-  const multilingual = languages.length > 0;
-  // With no default picked, the server makes the first supported language the default.
-  const startLanguage = multilingual ? languages[0] : null;
+  const multilingual = languageMode === "multilingual";
+  const primaryLanguage = languages[0] ?? null;
+
+  const voiceIdFor = (lang: string) => (lang === primaryLanguage ? ttsId : ttsByLanguage[lang]) ?? null;
+  // With no voice chosen for the agent, calls use the workspace's default voice.
+  const baseVoice = selectedTts ?? providers.find((p) => p.id === defaultTtsId) ?? null;
+  const voiceFor = (lang: string) => providers.find((p) => p.id === voiceIdFor(lang));
+
+  const changeMode = (mode: LanguageMode) => {
+    if (mode === languageMode) return;
+    onLanguageMode(mode);
+    if (mode === "monolingual") {
+      // Keep the primary language; the other one's voice goes on save.
+      setDroppedLanguage(languages[1] ?? null);
+      onLanguages(languages.slice(0, 1));
+    } else {
+      setDroppedLanguage(null);
+    }
+  };
+
+  // The default language's voice lives in `ttsId`: when another language becomes the default,
+  // it takes its own voice over, or none.
+  const changeLanguages = (next: string[]) => {
+    // A monolingual agent keeps its voice when it can speak the new language.
+    const keepVoice = !multilingual && !!next[0] && voiceSpeaks(selectedTts, next[0], supports);
+    if (next[0] !== primaryLanguage && !keepVoice) onAssign("tts", (next[0] && ttsByLanguage[next[0]]) || null);
+    onLanguages(next);
+  };
 
   const toggleLanguage = (code: string) => {
-    if (multilingual && code === defaultLanguage) return; // the chosen default is always supported
-    onSupportedLanguages(
-      supportedLanguages.includes(code) ? supportedLanguages.filter((c) => c !== code) : [...supportedLanguages, code],
-    );
+    changeLanguages(languages.includes(code) ? languages.filter((c) => c !== code) : [...languages, code]);
+  };
+
+  // A voice from the other source can't carry over, so switching source starts the choices afresh.
+  const changeVoiceSource = (source: "builtin" | "own") => {
+    if (source === voiceMode) return;
+    setChosenMode(source);
+    onAssign("tts", null);
+    onTtsByLanguage({});
   };
 
   const setLanguageEntry = (
@@ -161,19 +288,23 @@ export function AgentVoiceSettings({
     onChange(next);
   };
 
-  // .en Whisper models can't hear any other language; Deepgram only code-switches on nova-2/3.
-  const sttLanguageWarning = !multilingual || !selectedStt
+  // Free models are judged by the catalogue (an .en Whisper can't hear Hindi); Deepgram only code-switches on nova-2/3.
+  const sttUnheard = selectedStt?.model ? languages.filter((l) => !supports(selectedStt.engine, selectedStt.model!, l)) : [];
+  const sttLanguageWarning = !selectedStt
     ? null
-    : selectedStt.engine === "faster_whisper" && selectedStt.model?.endsWith(".en")
-      ? `${selectedStt.model} only understands English. Use a multilingual model (e.g. small) so callers can be heard in every language.`
+    : sttUnheard.length > 0
+      ? `${selectedStt.model} can't recognise ${sttUnheard.map(languageLabel).join(", ")}. Pick a speech model that supports ${languages.map(languageLabel).join(" and ")}.`
+      : !multilingual || languages.length < 2
+        ? null
       : selectedStt.engine === "deepgram" && selectedStt.model && !deepgramSupportsMulti(selectedStt.model, languages)
         ? (/^nova-[23]/i.test(selectedStt.model)
           // Already the right model: the gap is a language Deepgram's multi mode doesn't cover.
           ? `${selectedStt.model} can't recognise ${languages.filter((l) => !DEEPGRAM_MULTI_LANGUAGES.includes(l)).map(languageLabel).join(", ")} while switching languages. Remove it, or use a Whisper speech recognition provider.`
           : `${selectedStt.model} can't switch between ${languages.map(languageLabel).join(", ")} mid-call; it will listen in the default language only. Use nova-2 or nova-3, which cover en, hi, es, fr, de, pt, it and ja.`)
         : null;
-  const connectedVoices = byRole("tts").filter((p) => p.engine !== BUILTIN_TTS_ENGINE);
+  const connectedVoices = byRole("tts").filter((p) => PREMIUM_ENGINES.includes(p.engine));
   const voiceMode = chosenMode ?? (selectedTts && selectedTts.engine !== BUILTIN_TTS_ENGINE ? "own" : "builtin");
+  const account = providers.find((p) => p.id === accountId) ?? (selectedTts && PREMIUM_ENGINES.includes(selectedTts.engine) ? selectedTts : null);
   const connectOpen = showConnect || connectedVoices.length === 0;
 
   const replaceProvider = (updated: ProviderConfig) =>
@@ -187,17 +318,39 @@ export function AgentVoiceSettings({
     }
   };
 
-  const applyDetectedLanguage = (l: string) => {
-    if (multilingual) return; // picking a voice must not move the default of a multilingual agent
-    if (LANGUAGES.some((x) => x.value === l)) {
-      onLanguageChoice(l);
-    } else {
-      onLanguageChoice(OTHER);
-      onCustomLanguage(l);
+  // Choosing a free model starts its download when the host doesn't have it yet.
+  const prefetch = (p: ProviderConfig | undefined) => {
+    const ref = p && localModelRef(p);
+    const s = ref && status(ref.engine, ref.name);
+    if (ref && (s === "missing" || s === "failed")) {
+      trigger(ref.engine, ref.name).catch((e) => onError(e instanceof ApiError ? e.detail : String(e)));
     }
   };
 
-  const assignVoice = (id: string) => onAssign("tts", id);
+  const assign = (role: Role, id: string | null) => {
+    onAssign(role, id);
+    prefetch(providers.find((p) => p.id === id));
+  };
+
+  const setVoiceFor = (lang: string, id: string) => {
+    if (lang === primaryLanguage) onAssign("tts", id);
+    else setLanguageEntry(ttsByLanguage, onTtsByLanguage, lang, id);
+  };
+
+  // Points one language's voice at a voice config, creating it when none matches yet.
+  const assignLanguageVoice = async (lang: string, spec: ProviderConfigCreate) => {
+    try {
+      const existing = providers.find(
+        (p) => p.role === "tts" && p.engine === spec.engine && p.voice === spec.voice && p.api_key_ref === (spec.api_key_ref ?? null),
+      );
+      const voice = existing ?? await createProvider(tenantId, spec);
+      if (!existing) setProviders((prev) => [...prev, voice]);
+      prefetch(voice);
+      setVoiceFor(lang, voice.id);
+    } catch (e) {
+      onError(e instanceof ApiError ? e.detail : String(e));
+    }
+  };
 
   const handleConnect = async () => {
     const svc = VOICE_SERVICES.find((s) => s.engine === service)!;
@@ -209,7 +362,7 @@ export function AgentVoiceSettings({
         ...(svc.engine === "cartesia" ? { voice: voiceId.trim() } : {}),
       });
       setProviders((prev) => [...prev, created]);
-      assignVoice(created.id);
+      setAccountId(created.id);
       setApiKey("");
       setVoiceId("");
       setShowConnect(false);
@@ -220,18 +373,27 @@ export function AgentVoiceSettings({
     }
   };
 
-  const savedSpeed = Number(selectedTts?.extra?.speed ?? 1.0);
+  // One speed for every voice the agent uses.
+  const voiceConfigs = languages.flatMap((l) => voiceFor(l) ?? []);
+  const savedSpeed = Number(voiceConfigs[0]?.extra?.speed ?? 1.0);
   const speed = speedDraft ?? savedSpeed;
   const commitSpeed = (v: number) => {
     setSpeedDraft(null);
-    if (selectedTts && v !== savedSpeed) patchExtra(selectedTts, { speed: v });
+    for (const p of voiceConfigs) if (v !== Number(p.extra?.speed ?? 1.0)) patchExtra(p, { speed: v });
   };
 
   // Must match _is_thinking_capable() in services/conversation/ai_provider_manager.py.
   const thinkingCapable = selectedLlm?.engine === "ollama" && !!selectedLlm.model?.startsWith("gemma4");
 
   const providerSelect = (role: "stt" | "llm", value: string | null | undefined, label: string, hint: string) => {
-    const options = byRole(role);
+    // Speech models that can't hear every chosen language are left out (the current pick stays visible).
+    const options = byRole(role).filter((p) =>
+      role !== "stt" || !p.model || p.id === value || languages.every((l) => supports(p.engine, p.model!, l)));
+    const noFreeStt = role === "stt" && models.length > 0
+      && !models.some((m) => m.role === "stt" && languages.every((l) => supports(m.engine, m.name, l)));
+    const pick = providers.find((p) => p.id === value);
+    const ref = pick && localModelRef(pick);
+    const pickStatus = ref && status(ref.engine, ref.name);
     return (
       <div className="form-group">
         <label className="form-label">{label}</label>
@@ -243,7 +405,7 @@ export function AgentVoiceSettings({
           </div>
         ) : (
           <>
-            <select className="form-select" value={value || ""} onChange={(e) => onAssign(role, e.target.value || null)}>
+            <select className="form-select" value={value || ""} onChange={(e) => assign(role, e.target.value || null)}>
               <option value="">Choose…</option>
               {options.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -257,7 +419,99 @@ export function AgentVoiceSettings({
                 <span>Required — the agent can&apos;t take calls without it.</span>
               </div>
             )}
+            {pickStatus === "downloading" && <div className="form-hint">Downloading the model…</div>}
+            {pickStatus === "failed" && (
+              <div className="voice-missing">
+                <AlertCircle size={13} />
+                <span>The model download failed. Choose another model, or try again later.</span>
+              </div>
+            )}
           </>
+        )}
+        {noFreeStt && (
+          <div className="voice-missing">
+            <AlertCircle size={13} />
+            <span>
+              No free model supports {languages.map(languageLabel).join(" and ")}.{" "}
+              <Link href="/ai-voice">Use a premium speech service in AI &amp; Voice</Link>.
+            </span>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // The voice dropdown for one selected language: only voices of the chosen source that speak it.
+  const languageVoice = (lang: string) => {
+    const current = voiceFor(lang);
+    const label = languageLabel(lang);
+    const workspaceVoice = lang === primaryLanguage && !current ? providers.find((p) => p.id === defaultTtsId) : undefined;
+    // A secondary language the default voice can already speak needs no voice of its own.
+    const sharedVoice = lang !== primaryLanguage && !current && voiceSpeaks(baseVoice, lang, supports) ? baseVoice : null;
+    const placeholder = workspaceVoice ? `Workspace default voice (${workspaceVoice.name})`
+      : sharedVoice ? `Uses ${sharedVoice.name} (speaks ${label})`
+      : `Choose a ${label} voice…`;
+    let picker;
+    if (voiceMode === "own") {
+      picker = account ? (
+        <PremiumLanguageVoice
+          provider={account}
+          lang={lang}
+          current={current}
+          placeholder={placeholder}
+          onPick={(voice, voiceName) => assignLanguageVoice(lang, {
+            name: `${SERVICE_NAMES[account.engine]} — ${voiceName}`, role: "tts", engine: account.engine,
+            environment: account.environment, model: account.model ?? undefined, voice,
+            api_key_ref: account.api_key_ref ?? undefined, extra: account.extra ?? undefined,
+          })}
+        />
+      ) : (
+        <div className="form-hint" style={{ marginTop: 0 }}>Connect or pick a voice service above to list its voices.</div>
+      );
+    } else {
+      const freeVoices = models.filter((m) =>
+        m.role === "tts" && m.engine === BUILTIN_TTS_ENGINE && m.status !== "unavailable" && supports(m.engine, m.name, lang));
+      const configFor = (name: string) => providers.find((p) => p.role === "tts" && p.engine === BUILTIN_TTS_ENGINE && p.voice === name);
+      picker = (
+        <select
+          className="form-select"
+          value={current?.id ?? ""}
+          onChange={(e) => {
+            const picked = e.target.value;
+            if (!picked.startsWith("free:")) {
+              prefetch(providers.find((p) => p.id === picked));
+              return setVoiceFor(lang, picked);
+            }
+            const name = picked.slice(5);
+            void assignLanguageVoice(lang, { name: `${BUILTIN_TTS_ENGINE} — ${name}`, role: "tts", engine: BUILTIN_TTS_ENGINE, voice: name });
+          }}
+        >
+          <option value="" disabled>{placeholder}</option>
+          {/* A saved voice outside the list still shows as selected. */}
+          {current && !freeVoices.some((m) => configFor(m.name)?.id === current.id) && (
+            <option value={current.id}>{current.name}</option>
+          )}
+          {freeVoices.map((m) => (
+            <option key={m.name} value={configFor(m.name)?.id ?? `free:${m.name}`}>{m.label}</option>
+          ))}
+        </select>
+      );
+    }
+    return (
+      <div className="form-group">
+        <label className="form-label">
+          {label} voice{lang === primaryLanguage && multilingual && <span className="hint">default</span>}
+        </label>
+        {picker}
+        {!current && !workspaceVoice && !sharedVoice && (
+          <div className="voice-missing">
+            <AlertCircle size={13} />
+            <span>
+              {lang === primaryLanguage
+                ? `Voice needed — ${label} has no voice and the workspace has no default voice.`
+                : `Voice needed — the agent can't be saved until ${label} has a voice.`}
+            </span>
+          </div>
         )}
       </div>
     );
@@ -266,139 +520,6 @@ export function AgentVoiceSettings({
   return (
     <>
       {part !== "engines" && <>
-      <div className="card" style={{ marginBottom: 14 }}>
-        <div className="card-hdr">
-          <div className="card-title">Language</div>
-        </div>
-        <div className="card-body">
-          <div className="form-group">
-            <label className="form-label">{multilingual ? "Default language" : "What language will callers speak?"}</label>
-            <select className="form-select" value={languageChoice} onChange={(e) => onLanguageChoice(e.target.value)}>
-              <option value="">Automatic — match the voice</option>
-              {LANGUAGES.map((l) => (
-                <option key={l.value} value={l.value}>{l.label}</option>
-              ))}
-              <option value={OTHER}>Other…</option>
-            </select>
-            {languageChoice === OTHER && (
-              <input
-                className="form-input"
-                style={{ marginTop: 6, fontFamily: "var(--mono)" }}
-                value={customLanguage}
-                onChange={(e) => onCustomLanguage(e.target.value)}
-                placeholder="Short language code, e.g. nl for Dutch"
-              />
-            )}
-            <div className="form-hint">
-              {multilingual
-                ? "The agent greets callers in this language, then follows whichever language they speak."
-                : "Used to understand callers and to speak back, in place of the language set on the speech recognition and voice providers. Picking a voice sets this for you."}
-            </div>
-          </div>
-
-          <div className="form-group" style={{ marginBottom: 0 }}>
-            <label className="form-label">
-              Languages callers may switch to <span className="hint">optional</span>
-            </label>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }} role="group" aria-label="Supported languages">
-              {SUPPORTED_LANGUAGES.map((l) => {
-                const isDefault = multilingual && l.value === startLanguage;
-                const on = isDefault || supportedLanguages.some((c) => baseLanguage(c) === l.value);
-                return (
-                  <button
-                    key={l.value}
-                    type="button"
-                    aria-pressed={on}
-                    className={`btn btn-sm ${on ? "btn-primary" : "btn-ghost"}`}
-                    onClick={() => toggleLanguage(l.value)}
-                    title={isDefault && l.value === defaultLanguage ? "The default language is always included" : undefined}
-                  >
-                    {languageLabel(l.value)}{isDefault ? " · default" : ""}
-                  </button>
-                );
-              })}
-            </div>
-            <div className="form-hint">
-              The language above alone sets the speech recognition and voice language. Adding languages here turns on
-              language detection: the agent notices which language the caller speaks, switches to it, and replies in it.
-              {!multilingual && supportedLanguages.length > 0 && " Pick at least two languages (including the default)."}
-            </div>
-          </div>
-
-          {multilingual && (
-            <div style={{ marginTop: 14 }}>
-              {languages.map((lang) => (
-                <div key={lang} style={{ borderTop: "1px solid var(--border-2)", paddingTop: 12, marginTop: 12 }}>
-                  <div className="form-label" style={{ marginBottom: 8 }}>
-                    {languageLabel(lang)}{lang === startLanguage && <span className="hint">default</span>}
-                  </div>
-                  <div className="form-row" style={{ flexWrap: "wrap" }}>
-                    <div className="form-group">
-                      <label className="form-label">Voice</label>
-                      <select
-                        className="form-select"
-                        value={ttsByLanguage[lang] ?? ""}
-                        onChange={(e) => setLanguageEntry(ttsByLanguage, onTtsByLanguage, lang, e.target.value)}
-                      >
-                        <option value="">
-                          Use agent voice{selectedTts && !canSpeak(selectedTts, lang) ? ` — can't speak ${languageLabel(lang)}` : ""}
-                        </option>
-                        {byRole("tts").map((p) => {
-                          const ok = canSpeak(p, lang);
-                          return (
-                            // Disabled rather than hidden, so a saved-but-wrong pick still shows as selected.
-                            <option key={p.id} value={p.id} disabled={!ok && ttsByLanguage[lang] !== p.id}>
-                              {p.name}{p.environment !== "prod" ? ` (${p.environment})` : ""}
-                              {ok ? "" : ` — can't speak ${languageLabel(lang)}`}
-                            </option>
-                          );
-                        })}
-                      </select>
-                      {(() => {
-                        const voice = providers.find((p) => p.id === ttsByLanguage[lang]) ?? selectedTts;
-                        if (!voice || canSpeak(voice, lang)) return null;
-                        return (
-                          <div className="voice-missing">
-                            <AlertCircle size={13} />
-                            <span>
-                              {voice.name} can&apos;t speak {languageLabel(lang)}.{" "}
-                              <Link href="/ai-voice">Add a {languageLabel(lang)} voice in AI &amp; Voice</Link>
-                              {voice.engine === "kokoro" ? ` (for Kokoro, e.g. ${kokoroExample(lang)})` : ""}, then pick it here.
-                            </span>
-                          </div>
-                        );
-                      })()}
-                    </div>
-                    <div className="form-group">
-                      <label className="form-label">Greeting</label>
-                      <textarea
-                        className="form-textarea"
-                        style={{ minHeight: 56 }}
-                        value={greetingByLanguage[lang] ?? ""}
-                        onChange={(e) => setLanguageEntry(greetingByLanguage, onGreetingByLanguage, lang, e.target.value)}
-                        onBlur={onGreetingBlur}
-                        placeholder={lang === startLanguage ? "Leave blank to use the opening line" : "Optional"}
-                      />
-                    </div>
-                  </div>
-                </div>
-              ))}
-              <div className="form-hint">
-                Only the default language&apos;s greeting is spoken, when the call starts. Every language needs a voice
-                that can speak it — the agent voice, or one picked here.
-              </div>
-            </div>
-          )}
-
-          {languagesError && (
-            <div className="voice-missing">
-              <AlertCircle size={13} />
-              <span>{languagesError}</span>
-            </div>
-          )}
-        </div>
-      </div>
-
       <div className="card" style={{ marginBottom: 14 }}>
         <div className="card-hdr">
           <div className="card-title">Voice</div>
@@ -411,7 +532,7 @@ export function AgentVoiceSettings({
               role="radio"
               aria-checked={voiceMode === "builtin"}
               className={`voice-engine-card${voiceMode === "builtin" ? " on" : ""}`}
-              onClick={() => setChosenMode("builtin")}
+              onClick={() => changeVoiceSource("builtin")}
             >
               <div className="agent-template-title">Built-in voice <span className="voice-default-tag">Default</span></div>
               <div className="agent-template-blurb">Included with your plan. Works right away, no setup needed.</div>
@@ -421,61 +542,32 @@ export function AgentVoiceSettings({
               role="radio"
               aria-checked={voiceMode === "own"}
               className={`voice-engine-card${voiceMode === "own" ? " on" : ""}`}
-              onClick={() => setChosenMode("own")}
+              onClick={() => changeVoiceSource("own")}
             >
               <div className="agent-template-title">Your own voice service</div>
               <div className="agent-template-blurb">Use your ElevenLabs, Cartesia or other account.</div>
             </button>
           </div>
 
-          {voiceMode === "builtin" ? (
-            <div className="form-group" style={{ marginBottom: 0 }}>
-              <label className="form-label">Choose a voice</label>
-              <LocalVoicePicker
-                engine={BUILTIN_TTS_ENGINE}
-                tenantId={tenantId}
-                providers={providers}
-                value={ttsId}
-                onChange={assignVoice}
-                onProviderCreated={(p) => setProviders((prev) => [...prev, p])}
-                onLanguageDetected={applyDetectedLanguage}
-              />
-            </div>
-          ) : (
+          {voiceMode === "own" && (
             <>
               {connectedVoices.length > 0 && (
                 <div className="form-group">
-                  <label className="form-label">Your voice services</label>
+                  <label className="form-label">Which service should the voices come from?</label>
                   <div className="voice-list">
                     {connectedVoices.map((p) => (
                       <button
                         key={p.id}
                         type="button"
-                        className={`voice-list-row${p.id === ttsId ? " on" : ""}`}
-                        onClick={() => assignVoice(p.id)}
+                        className={`voice-list-row${p.id === account?.id ? " on" : ""}`}
+                        onClick={() => setAccountId(p.id)}
                       >
-                        <span className="voice-list-check">{p.id === ttsId && <Check size={13} />}</span>
+                        <span className="voice-list-check">{p.id === account?.id && <Check size={13} />}</span>
                         <span className="voice-list-name">{p.name}</span>
                         <span className="voice-list-meta">{SERVICE_NAMES[p.engine] ?? p.engine}</span>
                       </button>
                     ))}
                   </div>
-                </div>
-              )}
-
-              {selectedTts?.engine === "elevenlabs" && (
-                <div className="form-group">
-                  <label className="form-label">Which ElevenLabs voice?</label>
-                  <ElevenLabsVoicePicker
-                    tenantId={tenantId}
-                    provider={selectedTts}
-                    onProviderCreated={(p) => setProviders((prev) => [...prev, p])}
-                    onVoicePicked={(updated) => {
-                      replaceProvider(updated);
-                      assignVoice(updated.id);
-                    }}
-                    onLanguageDetected={applyDetectedLanguage}
-                  />
                 </div>
               )}
 
@@ -537,7 +629,7 @@ export function AgentVoiceSettings({
                 onClick={handleConnect}
                 disabled={connecting || !apiKey.trim() || (service === "cartesia" && !voiceId.trim())}
               >
-                {connecting ? "Connecting…" : service === "elevenlabs" ? "Connect and choose a voice" : "Connect and use this voice"}
+                {connecting ? "Connecting…" : "Connect and use this service"}
               </button>
               {connectedVoices.length > 0 && (
                 <button type="button" className="btn btn-ghost btn-sm" style={{ marginLeft: 6 }} onClick={() => setShowConnect(false)}>
@@ -559,7 +651,7 @@ export function AgentVoiceSettings({
                 max={1.2}
                 step={0.05}
                 value={speed}
-                disabled={!selectedTts}
+                disabled={voiceConfigs.length === 0}
                 aria-label="Speaking speed"
                 onChange={(e) => setSpeedDraft(Number(e.target.value))}
                 onMouseUp={(e) => commitSpeed(Number(e.currentTarget.value))}
@@ -570,13 +662,95 @@ export function AgentVoiceSettings({
               <span className="voice-speed-value">{speed === 1 ? "Normal" : `${speed.toFixed(2)}×`}</span>
             </div>
             <div className="form-hint">
-              {selectedTts
-                ? "Saved right away, and shared by every agent that uses this voice."
+              {voiceConfigs.length > 0
+                ? "Saved right away, and shared by every agent that uses these voices."
                 : "Pick a voice first."}
             </div>
           </div>
         </div>
       </div>
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="card-hdr">
+          <div className="card-title">Language</div>
+        </div>
+        <div className="card-body">
+          <div className="voice-engine-row" role="radiogroup" aria-label="Language mode" style={{ marginBottom: 14 }}>
+            {LANGUAGE_MODES.map((m) => (
+              <button
+                key={m.value}
+                type="button"
+                role="radio"
+                aria-checked={languageMode === m.value}
+                className={`voice-engine-card${languageMode === m.value ? " on" : ""}`}
+                onClick={() => changeMode(m.value)}
+              >
+                <div className="agent-template-title">{m.label}</div>
+                <div className="agent-template-blurb">{m.blurb}</div>
+              </button>
+            ))}
+          </div>
+
+          {multilingual ? (
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label">Languages <span className="hint">pick {MAX_LANGUAGES}</span></label>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }} role="group" aria-label="Languages">
+                {SUPPORTED_LANGUAGES.map((l) => {
+                  const on = languages.includes(l.value);
+                  const full = !on && languages.length >= MAX_LANGUAGES;
+                  return (
+                    <button
+                      key={l.value}
+                      type="button"
+                      aria-pressed={on}
+                      disabled={full}
+                      className={`btn btn-sm ${on ? "btn-primary" : "btn-ghost"}`}
+                      onClick={() => toggleLanguage(l.value)}
+                      title={full ? `maximum ${MAX_LANGUAGES} languages` : undefined}
+                    >
+                      {languageLabel(l.value)}{on && l.value === primaryLanguage ? " · default" : ""}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="form-hint">
+                The agent greets callers in the default language, then follows whichever of the two they speak.
+                {languages.length < MAX_LANGUAGES && ` Pick ${MAX_LANGUAGES - languages.length} more.`}
+                {languages.length >= MAX_LANGUAGES && ` Maximum ${MAX_LANGUAGES} languages: remove one to pick another.`}
+              </div>
+            </div>
+          ) : (
+            <div className="form-group" style={{ marginBottom: 0 }}>
+              <label className="form-label">What language will callers speak?</label>
+              <select className="form-select" value={primaryLanguage ?? ""} onChange={(e) => changeLanguages([e.target.value])}>
+                {SUPPORTED_LANGUAGES.map((l) => (
+                  <option key={l.value} value={l.value}>{languageLabel(l.value)}</option>
+                ))}
+              </select>
+              <div className="form-hint">Used to understand callers and to speak back.</div>
+              {droppedLanguage && (
+                <div className="voice-missing">
+                  <AlertCircle size={13} />
+                  <span>
+                    {languageLabel(droppedLanguage)} will be removed when you save, along with its voice.
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{ marginTop: 14 }}>
+            {languages.map((lang) => <div key={lang}>{languageVoice(lang)}</div>)}
+          </div>
+
+          {languagesError && (
+            <div className="voice-missing">
+              <AlertCircle size={13} />
+              <span>{languagesError}</span>
+            </div>
+          )}
+        </div>
+      </div>
+
       </>}
 
       {part !== "voice" && <div className="card">

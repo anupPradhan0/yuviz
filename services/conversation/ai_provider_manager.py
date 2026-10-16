@@ -6,15 +6,34 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable
 
-from libs.config_sdk.languages import KOKORO_DEFAULT_VOICE
+from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import LocalEntryNotFoundError
 
+from libs.config_sdk.languages import KOKORO_DEFAULT_VOICE
+from libs.config_sdk.local_models import find_local_model
+
+from .providers.tts.kokoro import KOKORO_REPO
 from .secret_resolver import SecretResolver
 
 log = logging.getLogger(__name__)
+
+
+class ModelNotReadyError(RuntimeError):
+    """A local model is not on this host's disk yet (still downloading, or never fetched).
+    `provider` is the instance built anyway, for a caller with no better provider to use: it
+    loads or fails lazily, as it did before this check existed."""
+
+    def __init__(self, engine: str, model: str, provider: Any = None):
+        super().__init__(f"{engine} model {model!r} is not downloaded on this host")
+        self.engine = engine
+        self.model = model
+        self.provider = provider
+
 
 # TTS speed multiplier from extra["speed"]; range matches ElevenLabs. Invalid -> default.
 VOICE_SPEED_MIN     = 0.7
@@ -91,30 +110,63 @@ class ProviderConfig:
 ProviderFactory = Callable[[ProviderConfig, str | None], Awaitable[Any]]
 
 
+# Whisper instances whose model was missing, keyed by what identifies the model: the next call
+# finds the same one (already downloading) instead of starting another download.
+_not_ready_whisper: dict[tuple[str, str, str, str | None], Any] = {}
+
+
 async def _make_faster_whisper(cfg: ProviderConfig, _api_key: str | None) -> Any:
     from .providers.stt.faster_whisper import FasterWhisperSTT
 
-    inst = FasterWhisperSTT(
-        model_size=cfg.model or "small",
-        device=cfg.extra.get("device", "cpu"),
-        compute_type=cfg.extra.get("compute_type", "int8"),
-        language=cfg.language,
-    )
-    await inst.load()
-    return inst
+    model_size = cfg.model or "small"
+    device = cfg.extra.get("device", "cpu")
+    compute_type = cfg.extra.get("compute_type", "int8")
+    key = (model_size, device, compute_type, cfg.language)  # everything that shapes the instance
+    inst = _not_ready_whisper.get(key)
+    if inst is not None and inst.loaded:
+        del _not_ready_whisper[key]
+        return inst
+    if inst is not None:
+        inst.load_when_needed()  # restarts a background load that failed
+    if inst is None:
+        inst = FasterWhisperSTT(
+            model_size=model_size, device=device, compute_type=compute_type, language=cfg.language,
+        )
+        try:
+            await inst.load()
+        except LocalEntryNotFoundError:
+            if find_local_model("faster_whisper", model_size) is None:
+                raise  # only registry models are downloaded: the name is tenant-chosen
+            # Pre-check behaviour: the model downloads on its first use. Until it has, the instance
+            # transcribes nothing, so a caller with a better provider is given that one.
+            inst.load_when_needed()
+            _not_ready_whisper[key] = inst
+        else:
+            return inst
+    raise ModelNotReadyError("faster_whisper", model_size, provider=inst)
+
+
+async def close_not_ready_providers() -> None:
+    """At shutdown: stop the background model downloads of instances no call has taken over."""
+    for inst in (*_not_ready_whisper.values(), *_not_ready_kokoro.values()):
+        await inst.stop_download()
 
 
 async def _make_ollama(cfg: ProviderConfig, _api_key: str | None) -> Any:
     from .providers.llm.ollama import OllamaLLM
 
-    return OllamaLLM(
+    llm = OllamaLLM(
         model=_model_or_default(cfg, "llama3.2"),
         system=cfg.extra.get("system", _VOICE_SYSTEM_PROMPT),
         temperature=cfg.extra.get("temperature", 0.7),
-        base_url=cfg.extra.get("base_url", "http://localhost:11434"),
+        base_url=cfg.extra.get("base_url") or os.environ.get("VOICEAI_LLM_URL") or "http://localhost:11434",
         timeout_s=cfg.extra.get("timeout_s", 30.0),
         think=_think_flag(cfg),
     )
+    # Checked once per cached provider, not per turn.
+    if not await llm.model_pulled():
+        raise ModelNotReadyError("ollama", llm._model, provider=llm)
+    return llm
 
 
 async def _make_macos_tts(cfg: ProviderConfig, _api_key: str | None) -> Any:
@@ -126,14 +178,36 @@ async def _make_macos_tts(cfg: ProviderConfig, _api_key: str | None) -> Any:
     return MacOSTTS(voice=cfg.voice or "Samantha", speed=int(wpm))
 
 
+# One deferred instance per voice while the base weights are missing, so N concurrent calls
+# don't each load their own copy of the model on first synthesis.
+_not_ready_kokoro: dict[tuple[str, float, str], Any] = {}
+
+
 async def _make_kokoro_tts(cfg: ProviderConfig, _api_key: str | None) -> Any:
     from .providers.tts.kokoro import KokoroTTS
 
-    return KokoroTTS(
-        voice=cfg.voice or KOKORO_DEFAULT_VOICE,
-        speed=voice_speed(cfg),
-        lang_code=cfg.extra.get("lang_code", "a"),
-    )
+    voice = cfg.voice or KOKORO_DEFAULT_VOICE
+    speed, lang_code = voice_speed(cfg), cfg.extra.get("lang_code", "a")
+    key = (voice, speed, lang_code)
+    # Checked before anything heavy is built: KPipeline would download the base weights
+    # (~330 MB) synchronously on the event loop. A voice file is ~0.5 MB: KPipeline fetches
+    # it on first use.
+    try:
+        for filename in ("config.json", "kokoro-v1_0.pth"):
+            await asyncio.to_thread(hf_hub_download, KOKORO_REPO, filename, local_files_only=True)
+    except LocalEntryNotFoundError as exc:
+        # For a caller with nothing better: loads (and downloads) on its first synthesis, off the loop.
+        tts = _not_ready_kokoro.get(key)
+        if tts is None:
+            tts = _not_ready_kokoro[key] = KokoroTTS(voice=voice, speed=speed, lang_code=lang_code, defer_load=True)
+        raise ModelNotReadyError("kokoro", KOKORO_REPO, provider=tts) from exc
+    pending = _not_ready_kokoro.pop(key, None)
+    if pending is not None and pending.loaded:
+        return pending
+    # The ~1-3 s torch load runs in the executor, here at prewarm, not on a live call's greeting.
+    tts = KokoroTTS(voice=voice, speed=speed, lang_code=lang_code, defer_load=True)
+    await tts.load()
+    return tts
 
 
 def _model_or_default(cfg: ProviderConfig, default: str) -> str:
