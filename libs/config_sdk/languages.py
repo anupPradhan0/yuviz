@@ -132,6 +132,19 @@ def tts_languages(engine: str, model: str | None, voice: str | None = None) -> f
     return frozenset({"en"})
 
 
+def stt_languages(engine: str, model: str | None) -> frozenset[str]:
+    """Registry languages an STT engine/model can recognise. Unknown engines: English only,
+    so a new engine must be added here before a multilingual agent can use it."""
+    engine = (engine or "").lower()
+    if engine == "faster_whisper":
+        # Whisper's '*.en' checkpoints and the distil-* ones are English-only; the rest auto-detect.
+        name = (model or "").lower()
+        return frozenset({"en"}) if name.endswith(".en") or name.startswith("distil-") else frozenset(LANGUAGES)
+    if engine == "deepgram":
+        return frozenset(LANGUAGES)
+    return frozenset({"en"})
+
+
 def tts_model_of(engine: str, model: str | None, extra: dict | None) -> str | None:
     """The model id the TTS factory actually uses for this row."""
     extra = extra or {}

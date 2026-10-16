@@ -26,6 +26,9 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "http://localhost:11434"
 
+# A real /api/tags is a few KB; the URL is tenant-chosen, so a longer body is not read to the end.
+_MAX_TAGS_BYTES = 1_000_000
+
 # Ollama evicts idle models after 5m by default; a reload costs ~15s on the next first turn.
 _KEEP_ALIVE = "30m"
 
@@ -89,9 +92,46 @@ class OllamaLLM:
         self._think       = think
         # Set after a 400 rejecting `think`, so later turns stop sending it.
         self._think_unsupported = False
+        self._warned_not_pulled = False
         self._client      = guarded_client(timeout=self._timeout)
         self._client.base_url = self._base_url
         log.info("OllamaLLM model=%s base_url=%s think=%s", model, self._base_url, think)
+
+    async def model_pulled(self) -> bool:
+        """Whether Ollama has this model. An unreachable Ollama reads as pulled: the first turn
+        reports the real error, as it always did."""
+        try:
+            # Uncompressed only, so the size cap below bounds what is decoded, not just what is sent.
+            async with self._client.stream("GET", "/api/tags", headers={"Accept-Encoding": "identity"}) as resp:
+                resp.raise_for_status()
+                if resp.headers.get("Content-Encoding", "identity").lower() != "identity":
+                    log.warning("OllamaLLM: model list is compressed (provider_response_encoded) model=%s", self._model)
+                    return True
+                body = b""
+                async for chunk in resp.aiter_bytes():
+                    body += chunk
+                    if len(body) > _MAX_TAGS_BYTES:
+                        log.warning("OllamaLLM: model list too large (provider_response_too_large) model=%s", self._model)
+                        return True
+        except httpx.HTTPError as exc:
+            # Fixed code only: exception text from a tenant-chosen URL must not reach the log (libs.egress_guard).
+            coded = _coded(exc)
+            log.warning("OllamaLLM: could not list models (%s) model=%s",
+                        coded.code if coded else "provider_error", self._model)
+            return True
+        try:
+            tags = {m["name"] for m in json.loads(body).get("models", [])}
+        except (ValueError, KeyError, TypeError, AttributeError):
+            # Not Ollama's /api/tags (a proxy, an HTML page): the first turn reports the real error.
+            log.warning("OllamaLLM: unrecognised model list (provider_error) model=%s", self._model)
+            return True
+        return self._model in tags or f"{self._model}:latest" in tags
+
+    def _raise_for_status(self, resp: httpx.Response) -> None:
+        if resp.status_code == 404 and not self._warned_not_pulled:
+            self._warned_not_pulled = True
+            log.warning("OllamaLLM: model=%s not pulled on this host", self._model)
+        resp.raise_for_status()
 
     async def _stream_chat_lines(self, payload: dict[str, Any]) -> AsyncGenerator[str, None]:
         try:
@@ -112,7 +152,7 @@ class OllamaLLM:
             payload = {k: v for k, v in payload.items() if k != "think"}
         if "think" not in payload:
             async with self._client.stream("POST", "/api/chat", json=payload) as resp:
-                resp.raise_for_status()
+                self._raise_for_status(resp)
                 async for line in resp.aiter_lines():
                     yield line
             return
@@ -125,7 +165,7 @@ class OllamaLLM:
                 if not rejected:
                     resp.raise_for_status()
             else:
-                resp.raise_for_status()
+                self._raise_for_status(resp)
             if not rejected:
                 async for line in resp.aiter_lines():
                     yield line
@@ -139,7 +179,7 @@ class OllamaLLM:
             self._think_unsupported = True
             fallback = {k: v for k, v in payload.items() if k != "think"}
             async with self._client.stream("POST", "/api/chat", json=fallback) as resp2:
-                resp2.raise_for_status()
+                self._raise_for_status(resp2)
                 async for line in resp2.aiter_lines():
                     yield line
 

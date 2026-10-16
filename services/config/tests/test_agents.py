@@ -4,8 +4,10 @@ import uuid
 
 import pytest
 import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 
-from services.config import agents, cache
+from services.config import agents, cache, provider_configs
+from services.config.app import app
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -162,3 +164,206 @@ async def test_soft_delete_agent_allowed_once_call_ends(test_tenant, scoped, poo
         assert await agents.get_agent(test_tenant["slug"], "support-agent") is None
     finally:
         await pool.execute("DELETE FROM calls WHERE session_id = $1", session_id)
+
+
+# ── Language modes ───────────────────────────────────────────────────────────
+
+async def _cartesia(tenant_id):
+    return str((await provider_configs.create_provider_config(
+        tenant_id=tenant_id, name="Cartesia", role="tts", engine="cartesia", voice="v",
+        allow_pointer_schemes=False,
+    ))["id"])
+
+
+async def _agent_row(pool, agent_id):
+    return await pool.fetchrow("SELECT * FROM agents WHERE id = $1", agent_id)
+
+
+@pytest.mark.parametrize(("fields", "message"), [
+    ({"language": "en", "supported_languages": ["en", "hi", "es"], "language_mode": "multilingual"},
+     "at most 2 languages"),
+    ({"language": "en", "language_mode": "multilingual"}, "needs a second language"),
+    ({"language": "en", "supported_languages": ["en", "hi", "es"]}, "at most 2 languages"),
+    ({"language_mode": "monolingual"}, "exactly 1 language"),
+    ({"language": "en", "supported_languages": ["en", "hi"], "language_mode": "monolingual"},
+     "exactly 1 language"),
+])
+async def test_create_rejects_a_language_count_the_mode_does_not_allow(test_tenant, scoped, fields, message):
+    tts = await _cartesia(test_tenant["id"])
+    with pytest.raises(ValueError, match=message):
+        await agents.create_agent(
+            tenant_id=test_tenant["id"], slug="bad-mode", name="Bad", tts_config_id=tts, **fields,
+        )
+
+
+async def test_unknown_language_mode_is_a_422():
+    from services.config.schemas import AgentCreate, AgentUpdate
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        AgentCreate(slug="a", name="A", language_mode="trilingual")
+    with pytest.raises(ValidationError):
+        AgentUpdate(language_mode="trilingual")
+
+
+async def test_monolingual_save_clears_the_per_language_columns(test_tenant, scoped, pool):
+    tts = await _cartesia(test_tenant["id"])
+    created = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="mono", name="Mono", tts_config_id=tts,
+        language="en", supported_languages=["en", "hi"], greeting_by_language={"hi": "namaste"},
+        tts_config_by_language={"hi": tts},
+    )
+    assert created["language_mode"] == "multilingual"
+    await agents.update_agent(
+        created["id"], tenant_slug=test_tenant["slug"], language_mode="monolingual",
+    )
+    row = await _agent_row(pool, created["id"])
+    assert row["language_mode"] == "monolingual"
+    assert row["language"] == "en"
+    assert row["supported_languages"] is None
+    assert row["tts_config_by_language"] is None
+    assert row["greeting_by_language"] is None
+
+
+async def test_a_stored_mode_cannot_be_cleared(test_tenant, scoped):
+    created = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="moded", name="Moded", language="en", language_mode="monolingual",
+    )
+    with pytest.raises(ValueError, match="can't be cleared"):
+        await agents.update_agent(created["id"], tenant_slug=test_tenant["slug"], language_mode=None)
+
+
+async def test_a_mode_is_derived_from_the_language_count(test_tenant, scoped):
+    tts = await _cartesia(test_tenant["id"])
+    created = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="derive", name="Derive", tts_config_id=tts, language="en",
+    )
+    assert created["language_mode"] is None
+    two = await agents.update_agent(
+        created["id"], tenant_slug=test_tenant["slug"], supported_languages=["en", "hi"],
+    )
+    assert two["language_mode"] == "multilingual"
+    with pytest.raises(ValueError, match="at most 2 languages"):
+        await agents.update_agent(
+            created["id"], tenant_slug=test_tenant["slug"], supported_languages=["en", "hi", "es"],
+        )
+
+
+async def test_a_language_only_patch_cannot_grow_a_multilingual_agent_past_two(test_tenant, scoped, pool):
+    tts = await _cartesia(test_tenant["id"])
+    created = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="grow", name="Grow", tts_config_id=tts,
+        language="en", supported_languages=["en", "hi"],
+    )
+    with pytest.raises(ValueError, match="at most 2 languages"):
+        await agents.update_agent(created["id"], tenant_slug=test_tenant["slug"], language="es")
+    assert list((await _agent_row(pool, created["id"]))["supported_languages"]) == ["en", "hi"]
+
+
+async def test_a_legacy_three_language_agent_still_takes_an_unrelated_edit(test_tenant, scoped, pool):
+    tts = await _cartesia(test_tenant["id"])
+    created = await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="legacy3", name="Legacy", tts_config_id=tts, language="en",
+    )
+    await pool.execute(
+        "UPDATE agents SET supported_languages = ARRAY['en','hi','es'] WHERE id = $1", created["id"],
+    )
+    updated = await agents.update_agent(created["id"], tenant_slug=test_tenant["slug"], name="Renamed")
+    assert updated["name"] == "Renamed"
+    assert updated["language_mode"] is None
+
+
+async def test_provider_edit_revalidates_moded_agents_with_the_real_query(test_tenant, scoped):
+    base = await _cartesia(test_tenant["id"])
+    await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="ml", name="ML", tts_config_id=base,
+        language="en", supported_languages=["en", "hi"],
+    )
+    await agents.create_agent(
+        tenant_id=test_tenant["id"], slug="mono-hi", name="Mono", tts_config_id=base,
+        language="hi", language_mode="monolingual",
+    )
+    await provider_configs.update_provider_config(base, allow_pointer_schemes=False, name="Renamed voice")
+
+
+async def _post_template(pool, test_tenant, test_admin, template_id, configs, **extra):
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+        headers={"Authorization": f"Bearer {test_admin['token']}"},
+    ) as client:
+        return await client.post(f"/tenants/{test_tenant['slug']}/agents/from-template", json={
+            "template_id": template_id, "template_version": 4, "name": "Front Desk",
+            "business_name": "Acme Dental", "business_facts": "Open 9 to 5.", **configs, **extra,
+        })
+
+
+async def _llm_config(pool, tenant_id):
+    return str(await pool.fetchval(
+        "INSERT INTO provider_configs (tenant_id, name, role, engine, api_key_ref) "
+        "VALUES ($1, 'llm cfg', 'llm', 'openai', 'ref') RETURNING id", tenant_id,
+    ))
+
+
+async def _deepgram_stt(pool, tenant_id):
+    return str(await pool.fetchval(
+        "INSERT INTO provider_configs (tenant_id, name, role, engine, model, api_key_ref) "
+        "VALUES ($1, 'stt cfg', 'stt', 'deepgram', 'nova-3', 'ref') RETURNING id", tenant_id,
+    ))
+
+
+async def test_voice_template_create_is_monolingual(pool, test_tenant, test_admin, scoped):
+    stt = await _deepgram_stt(pool, test_tenant["id"])
+    configs = {
+        "llm_config_id": await _llm_config(pool, test_tenant["id"]), "stt_config_id": stt,
+        "tts_config_id": await _cartesia(test_tenant["id"]),
+    }
+    resp = await _post_template(pool, test_tenant, test_admin, "inbound-triage", configs, language="en")
+    assert resp.status_code == 201, resp.text
+    row = await _agent_row(pool, uuid.UUID(resp.json()["id"]))
+    assert row["language_mode"] == "monolingual"
+    assert row["language"] == "en"
+    assert row["supported_languages"] is None
+
+
+async def test_voice_template_without_a_language_stores_none_and_accepts_a_non_english_voice(
+    pool, test_tenant, test_admin, scoped,
+):
+    # Easy flow "Choose automatically" sends language null: it must not become "en" + a mode, which
+    # would 400 a tenant whose voice is Hindi.
+    hindi_voice = str((await provider_configs.create_provider_config(
+        tenant_id=test_tenant["id"], name="Kokoro hi", role="tts", engine="kokoro", voice="hf_alpha",
+        allow_pointer_schemes=False,
+    ))["id"])
+    configs = {
+        "llm_config_id": await _llm_config(pool, test_tenant["id"]),
+        "stt_config_id": await _deepgram_stt(pool, test_tenant["id"]),
+        "tts_config_id": hindi_voice,
+    }
+    resp = await _post_template(pool, test_tenant, test_admin, "inbound-triage", configs, language=None)
+    assert resp.status_code == 201, resp.text
+    row = await _agent_row(pool, uuid.UUID(resp.json()["id"]))
+    assert row["language"] is None
+    assert row["language_mode"] is None
+
+
+@pytest.mark.parametrize("language", ["nl-BE", "en-US", "hi"])
+async def test_chat_template_keeps_any_language_tag_as_given(pool, test_tenant, test_admin, language):
+    configs = {"llm_config_id": await _llm_config(pool, test_tenant["id"])}
+    resp = await _post_template(pool, test_tenant, test_admin, "faq-support", configs, language=language)
+    assert resp.status_code == 201, resp.text
+    row = await _agent_row(pool, uuid.UUID(resp.json()["id"]))
+    assert row["language_mode"] is None
+    assert row["language"] == language
+
+
+@pytest.mark.parametrize("language", ["nl-BE", "en-US"])
+async def test_voice_template_keeps_a_tag_the_registry_does_not_list(pool, test_tenant, test_admin, scoped, language):
+    configs = {
+        "llm_config_id": await _llm_config(pool, test_tenant["id"]),
+        "stt_config_id": await _deepgram_stt(pool, test_tenant["id"]),
+        "tts_config_id": await _cartesia(test_tenant["id"]),
+    }
+    resp = await _post_template(pool, test_tenant, test_admin, "inbound-triage", configs, language=language)
+    assert resp.status_code == 201, resp.text
+    row = await _agent_row(pool, uuid.UUID(resp.json()["id"]))
+    assert row["language_mode"] is None
+    assert row["language"] == language

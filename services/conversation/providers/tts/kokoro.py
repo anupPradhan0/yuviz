@@ -9,17 +9,32 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 from typing import Any
 
 import numpy as np
+from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import LocalEntryNotFoundError
 
 from libs.config_sdk.languages import LANGUAGES, normalize_language
 
+from ... import model_downloads
 from ..interfaces import INSTANCE_LANGUAGE
+
+# After a failed fetch, no new attempt for this long: an offline host must not start a
+# subprocess on every sentence.
+_RETRY_AFTER_S = 60
 
 log = logging.getLogger(__name__)
 
 _KOKORO_NATIVE_RATE = 24_000  # Hz — kokoro's output sample rate
+
+KOKORO_REPO = "hexgrad/Kokoro-82M"
+
+_DOWNLOAD_SCRIPT = (
+    "import sys; from huggingface_hub import hf_hub_download; "
+    "[hf_hub_download(sys.argv[1], name) for name in sys.argv[2:]]"
+)
 
 
 def kokoro_lang_code(language: str | None) -> str | None:
@@ -46,6 +61,10 @@ class KokoroTTS:
     A per-call `language=` (ISO 639-1) picks another KPipeline, created lazily and
     cached per lang_code. Every pipeline shares the first one's KModel, so the
     weights load once; only the per-language G2P is new.
+
+    defer_load  — build no KPipeline (and so load no weights) until the first synthesis, which
+                  runs in the executor: for an instance made while the weights aren't on disk.
+                  Missing files are fetched first in a subprocess that stop_download() can kill.
     """
 
     accepts_language = True
@@ -55,19 +74,23 @@ class KokoroTTS:
         voice:     str = "af_sarah",
         speed:     float = 1.0,
         lang_code: str = "a",
+        defer_load: bool = False,
     ) -> None:
         from kokoro import KPipeline
-        log.info("Loading Kokoro TTS voice=%s lang=%s", voice, lang_code)
         self._KPipeline = KPipeline
         self._lang_code = lang_code
-        self._pipelines: dict[str, Any] = {lang_code: KPipeline(lang_code=lang_code)}
+        self._pipelines: dict[str, Any] = {}
+        if not defer_load:
+            log.info("Loading Kokoro TTS voice=%s lang=%s", voice, lang_code)
+            self._pipelines[lang_code] = KPipeline(lang_code=lang_code)
         self._voice    = voice
         self._speed    = speed
         self._lock     = asyncio.Lock()  # KPipeline is not thread-safe for concurrent calls
+        self._last_fetch_failure: float | None = None
         self._warned_languages: set[str] = set()
         # lang_codes whose KPipeline failed to build (e.g. missing G2P extras): never retried.
         self._failed_lang_codes: set[str] = set()
-        log.info("Kokoro TTS ready")
+        log.info("Kokoro TTS %s", "created, loads on first use" if defer_load else "ready")
 
     def _resolve_lang_code(self, language: Any) -> str:
         if language is INSTANCE_LANGUAGE or language is None:
@@ -102,6 +125,11 @@ class KokoroTTS:
         pipeline = self._pipelines.get(lang_code)
         if pipeline is not None:
             return pipeline
+        if self._lang_code not in self._pipelines:  # defer_load: the first synthesis loads the weights
+            log.info("Kokoro: loading weights for voice=%s lang=%s", self._voice, self._lang_code)
+            self._pipelines[self._lang_code] = self._KPipeline(lang_code=self._lang_code)
+            if lang_code == self._lang_code:
+                return self._pipelines[lang_code]
         base = self._pipelines[self._lang_code]
         if lang_code in self._failed_lang_codes:
             return base
@@ -118,6 +146,42 @@ class KokoroTTS:
         self._pipelines[lang_code] = pipeline
         return pipeline
 
+    async def _fetch_base_weights(self) -> None:
+        """Before the base weights load: fetch them in a killable, shared subprocess if they aren't on
+        disk (KPipeline would download ~330 MB on an executor thread nobody can stop). Voice files
+        (~0.5 MB) are left to KPipeline's own lazy fetch, as before: they never wait on a shared
+        download slot, so a synthesis is never queued behind a multi-GB model download."""
+        if self.loaded:
+            return
+        if self._last_fetch_failure is not None and time.monotonic() - self._last_fetch_failure < _RETRY_AFTER_S:
+            raise RuntimeError("Kokoro weights are not on disk (last download failed; retrying later)")
+        files = ["config.json", "kokoro-v1_0.pth"]
+        try:
+            for filename in files:
+                await asyncio.to_thread(hf_hub_download, KOKORO_REPO, filename, local_files_only=True)
+        except LocalEntryNotFoundError:
+            log.warning("Kokoro base weights are not on disk — downloading them now")
+            try:
+                await model_downloads.fetch(("kokoro", "base"), _DOWNLOAD_SCRIPT, KOKORO_REPO, *files)
+            except Exception:
+                self._last_fetch_failure = time.monotonic()
+                log.exception("Kokoro base weights download failed")
+                raise
+
+    async def stop_download(self) -> None:
+        """At shutdown: kill the downloads in flight (a synthesis waiting on one then fails)."""
+        await model_downloads.stop_downloads()
+
+    @property
+    def loaded(self) -> bool:
+        return self._lang_code in self._pipelines
+
+    async def load(self) -> None:
+        """Build the row's KPipeline (loading the weights) in the executor; a no-op once built."""
+        async with self._lock:
+            await self._fetch_base_weights()
+            await asyncio.get_running_loop().run_in_executor(None, self._pipeline_sync, self._lang_code)
+
     async def prewarm(self, languages: list[str]) -> None:
         """Build the pipelines for these ISO languages now, so the first sentence
         in a new language doesn't pay the G2P load on the turn's critical path."""
@@ -126,6 +190,7 @@ class KokoroTTS:
             if code in self._pipelines or code in self._failed_lang_codes:
                 continue
             async with self._lock:
+                await self._fetch_base_weights()
                 await loop.run_in_executor(None, self._pipeline_sync, code)
 
     async def synthesize(self, text: str, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE) -> bytes:
@@ -134,6 +199,7 @@ class KokoroTTS:
         lang_code = self._resolve_lang_code(language)
         loop = asyncio.get_running_loop()
         async with self._lock:
+            await self._fetch_base_weights()
             return await loop.run_in_executor(None, self._synthesize_sync, text, sample_rate, lang_code)
 
     async def synthesize_stream(self, text: str, sample_rate: int, *, language: Any = INSTANCE_LANGUAGE):

@@ -7,6 +7,7 @@ import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from libs.config_sdk.languages import LANGUAGES
 from libs.tenancy import tenant_conn
 
 from .. import agent_templates
@@ -163,6 +164,7 @@ async def create_agent(
             supported_languages=body.supported_languages,
             tts_config_by_language=body.tts_config_by_language,
             greeting_by_language=body.greeting_by_language,
+            language_mode=body.language_mode,
             status=body.status,
             tenant_slug=tenant_slug,
             user_id=current_user.id,
@@ -203,6 +205,9 @@ async def create_agent_from_template(
     greeting, system_prompt = agent_templates.render(
         template, name=body.name, business_name=body.business_name, facts=body.business_facts,
     )
+    # Only an exact registry code on a voice template gets a mode (and so STT/TTS coverage checks);
+    # no language, any other tag, or a chat template that never speaks is stored as it always was.
+    mode = "monolingual" if body.language in LANGUAGES and {"stt", "tts"} <= template.needs else None
     try:
         return await agents_service.create_agent(
             tenant_id=tenant["id"],
@@ -215,6 +220,7 @@ async def create_agent_from_template(
             tts_config_id=body.tts_config_id,
             workflow=None,
             language=body.language,
+            language_mode=mode,
             status="inactive",
             template_id=template.id,
             template_version=template.version,

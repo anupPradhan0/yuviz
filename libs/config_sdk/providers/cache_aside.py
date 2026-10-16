@@ -123,6 +123,7 @@ def _agent_from_dict(row: dict[str, Any]) -> Agent:
         workflow_draft=_parse_json(row.get("workflow_draft")),
         call_flow_id=row.get("call_flow_id"),
         supported_languages=tuple(row["supported_languages"]) if row.get("supported_languages") else None,
+        language_mode=row.get("language_mode"),
         tts_config_by_language=_parse_json(row.get("tts_config_by_language")) or None,
         greeting_by_language=_parse_json(row.get("greeting_by_language")) or None,
     )

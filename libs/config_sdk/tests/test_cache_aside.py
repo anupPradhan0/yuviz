@@ -446,6 +446,19 @@ async def test_get_call_flow_both_miss_returns_none():
     assert await provider.get_call_flow("acme", "no-such-flow") is None
 
 
+async def test_agent_row_maps_language_mode():
+    redis_repo = FakeRepo(agents={
+        ("acme", "mono"): _agent_row("mono", language_mode="monolingual"),
+        ("acme", "legacy"): _agent_row("legacy"),
+    })
+    provider = CacheAsideConfigProvider(redis_repo, FakeRepo())
+
+    mono = await provider.get_agent("acme", "mono")
+    legacy = await provider.get_agent("acme", "legacy")
+    assert mono is not None and mono.language_mode == "monolingual"
+    assert legacy is not None and legacy.language_mode is None
+
+
 async def test_agent_row_maps_call_flow_id():
     redis_repo = FakeRepo(agents={("acme", "sup"): _agent_row("sup", call_flow_id="flow1")})
     provider = CacheAsideConfigProvider(redis_repo, FakeRepo())
