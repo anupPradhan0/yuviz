@@ -66,7 +66,7 @@ function AgentCardMenu({ agent, editUrl, stepsUrl, onStatus }: {
             </button>
             <button role="menuitem" onClick={() => { setOpen(false); onStatus(agent); }}>
               {agent.status === "active" ? <PauseCircle size={13} /> : <PlayCircle size={13} />}
-              {agent.status === "active" ? "Pause agent" : "Resume agent"}
+              {agent.status === "active" ? "Pause agent" : agent.activated_at ? "Resume agent" : "Go live"}
             </button>
           </div>
         </>

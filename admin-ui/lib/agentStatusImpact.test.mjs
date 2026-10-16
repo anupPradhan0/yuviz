@@ -20,9 +20,24 @@ test("pausing a backup explains whether the primary still answers", () => {
     ["+14155550100: continues to Support; this agent will no longer be its backup."]);
 });
 
+test("pausing the default agent includes numbers that reach it implicitly", () => {
+  const defaultAgent = { ...agent, id: "default-id", slug: "default", name: "Default agent" };
+  const implicit = { ...number, agent_id: null, fallback_agent_id: null };
+  const inactivePrimary = { ...number, agent_id: "a", fallback_agent_id: null };
+  assert.deepEqual(pauseOutcomes(defaultAgent, [agent, defaultAgent], [implicit]),
+    ["+14155550100: calls won't reach an agent."]);
+  assert.deepEqual(pauseOutcomes(defaultAgent, [{ ...agent, status: "inactive" }, defaultAgent], [inactivePrimary]),
+    ["+14155550100: calls won't reach an agent."]);
+  assert.deepEqual(pauseOutcomes(defaultAgent, [agent, defaultAgent], [inactivePrimary]), []);
+});
+
 test("resuming checks inbound and outbound setup by direction", () => {
   const campaign = { agent_id: "a", caller_id: number.did };
   assert.equal(resumeMissing(agent, "inbound", [], []).length, 1);
   assert.deepEqual(resumeMissing(agent, "outbound", [number], [campaign]), []);
   assert.equal(resumeMissing(agent, "both", [], []).length, 2);
+  const unwired = { ...number, provider_sync: { ok: false } };
+  assert.equal(resumeMissing(agent, "inbound", [unwired], []).length, 1);
+  assert.equal(resumeMissing(agent, "outbound", [unwired], [campaign]).length, 1);
+  assert.deepEqual(resumeMissing(agent, "both", [{ ...number, provider_sync: { ok: true } }], [campaign]), []);
 });
