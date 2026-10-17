@@ -1358,7 +1358,8 @@ ALTER TABLE call_flows ADD CONSTRAINT call_flows_direction_check
     CHECK (direction IN ('inbound', 'outbound', 'both'));
 
 -- Backfill once for existing agents. Campaign membership and shipped template
--- channels are stronger evidence than a greeting; ambiguous agents stay inbound.
+-- channels are stronger evidence than a greeting; legacy Quick-create greetings
+-- and UI template names are the last resort before ambiguous agents stay inbound.
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns
                  WHERE table_schema = 'public' AND table_name = 'agents' AND column_name = 'direction') THEN
@@ -1369,6 +1370,12 @@ DO $$ BEGIN
         THEN 'both'
       WHEN EXISTS (SELECT 1 FROM campaigns c WHERE c.agent_id = a.id AND c.deleted_at IS NULL)
            OR a.template_id IN ('payment-reminder', 'renewal-offer', 'csat-survey', 'lead-qualification')
+        THEN 'outbound'
+      WHEN btrim(a.greeting) IN (
+             'Hi, do you have a quick minute?',
+             'Hi, I''m calling about your recent enquiry. Do you have a minute?',
+             'Hello, I''m calling about your account. Is now a good time to talk?'
+           ) OR lower(btrim(a.name)) IN ('qualify leads', 'payment reminders')
         THEN 'outbound'
       ELSE 'inbound'
     END;
