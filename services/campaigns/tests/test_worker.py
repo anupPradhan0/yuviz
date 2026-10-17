@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -73,6 +74,26 @@ async def test_tick_campaign_respects_pacing(test_tenant, test_agent, monkeypatc
     await worker._tick_campaign(campaign)  # immediately again — pacing should block this
 
     assert len(calls) == 1
+
+
+async def test_first_dial_is_not_paced_on_a_freshly_booted_host(test_tenant, test_agent, monkeypatch, scoped):
+    campaign = await _make_running_campaign(test_tenant, test_agent, pacing_seconds=9999)
+    await campaign_contacts.bulk_insert_contacts(campaign["id"], [{"phone_number": "+14155551111", "name": ""}])
+
+    calls = []
+
+    async def fake_originate(phone_number, caller_id):
+        calls.append(phone_number)
+        return "job-1"
+
+    monkeypatch.setattr(originate, "originate_call", fake_originate)
+    # time.monotonic() is host uptime; a host up for 5s is far below pacing_seconds.
+    monkeypatch.setattr("services.campaigns.worker.time", SimpleNamespace(monotonic=lambda: 5.0))
+    worker = CampaignWorker()
+
+    await worker._tick_campaign(campaign)
+
+    assert calls == ["+14155551111"]
 
 
 async def test_tick_campaign_respects_concurrency_cap(test_tenant, test_agent, monkeypatch, scoped):

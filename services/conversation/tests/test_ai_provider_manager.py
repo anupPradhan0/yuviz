@@ -249,7 +249,7 @@ async def _first_available_ollama_model() -> str | None:
             models = resp.json().get("models", [])
     except (httpx.HTTPError, ValueError):
         return None
-    # Embedding models (nomic-embed-text, used by the knowledge base) can't chat.
+    # /api/tags order is arbitrary and embedding-only models reject /api/chat.
     chat = [m["name"] for m in models if "embed" not in m["name"]]
     return chat[0] if chat else None
 

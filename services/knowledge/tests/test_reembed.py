@@ -335,10 +335,20 @@ async def test_other_kbs_of_the_tenant_are_untouched(pool, mig):
 
 # --- tenant isolation ----------------------------------------------------------------------------------------------
 
+async def _set_app_password(dsn: str) -> None:
+    # Other suites reset yuviz_app's password to their own; set ours so test order doesn't matter.
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.execute("ALTER ROLE yuviz_app PASSWORD 'testpw'")
+    finally:
+        await conn.close()
+
+
 @pytest_asyncio.fixture(loop_scope="session")
 async def app_pool():
     dsn = os.environ["POSTGRES_DSN"]
     try:
+        await _set_app_password(dsn)
         p = await asyncpg.create_pool(f"postgresql://yuviz_app:testpw@localhost:5432/{dsn.rsplit('/', 1)[1]}", min_size=1, max_size=4)
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"yuviz_app role not available: {exc}")

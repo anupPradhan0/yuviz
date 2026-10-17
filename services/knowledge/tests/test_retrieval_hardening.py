@@ -163,12 +163,15 @@ async def test_router_shape_with_24_concurrent_retrievals_is_not_mostly_partial(
         await _run(t, a, embedder, q, repo=repo)
     await retrieval_log.flush()
 
+    # Generous waits and stage timeouts; acquire_timeout stays at production so pool starvation still shows as partial.
+    cfg = RetrievalConfig(queue_wait_s=2.0, deadline_s=5.0, dense_timeout_s=2.0, lexical_timeout_s=2.0)
+
     async def router_call(i):
         set_caller_tenant(str(t["id"]))
         try:
             async with tenant_conn(pool) as held:
                 return (await retrieve(held, repo, make_manager(embedder), tenant_slug=t["slug"],
-                                       agent_slug=a["slug"], query=f"refunds processed days {i}"))["status"]
+                                       agent_slug=a["slug"], query=f"refunds processed days {i}", config=cfg))["status"]
         except RetrievalUnavailable:
             return "unavailable"
 
