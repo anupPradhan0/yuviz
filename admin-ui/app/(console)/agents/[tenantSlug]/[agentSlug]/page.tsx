@@ -17,6 +17,7 @@ import {
 import { KnowledgeBasePanel } from "@/components/KnowledgeBasePanel";
 import { AgentCustomApisPanel } from "@/components/AgentCustomApisPanel";
 import { Modal } from "@/components/Modal";
+import { AgentStatusDialog } from "@/components/AgentStatusDialog";
 import { SipPanel } from "@/components/SipPanel";
 import {
   AgentVoiceSettings, agentLocalModels, isLanguageError, multilingualPayload, notReadyModels,
@@ -115,6 +116,7 @@ export default function AgentDetailPage() {
   const [duplicating, setDuplicating] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [statusDialogAgent, setStatusDialogAgent] = useState<Agent | null>(null);
   const [liveCallCount, setLiveCallCount] = useState<number | null>(null);
   const [deleteChecking, setDeleteChecking] = useState(false);
 
@@ -477,7 +479,8 @@ export default function AgentDetailPage() {
               type="button"
               className="btn btn-primary btn-sm"
               title="Make this agent available to take calls"
-              onClick={() => setForm({ ...form, status: "active" })}
+              onClick={() => setStatusDialogAgent(agent)}
+              disabled={saving || dirty}
             >
               Go live
             </button>
@@ -487,11 +490,14 @@ export default function AgentDetailPage() {
             type="button"
             role="switch"
             aria-checked={isActive}
-            className={`ed2-live${isActive ? " on" : ""}`}
-            title={isActive ? "Click to pause this agent" : "Click to let this agent take calls"}
-            onClick={() => setForm({ ...form, status: isActive ? "inactive" : "active" })}
+            className={`agent-status-toggle${isActive ? " on" : ""}`}
+            aria-label={isActive ? "Pause agent" : "Resume agent"}
+            title={saving || dirty ? "Save pending changes first" : isActive ? "Pause this agent" : "Resume this agent"}
+            disabled={saving || dirty}
+            onClick={() => setStatusDialogAgent(agent)}
           >
-            <i /> {isActive ? "Taking calls" : "Paused"}
+            <span className="agent-status-track"><i /></span>
+            <span>{isActive ? "Live" : "Paused"}</span>
           </button>
         )}
         <span className="ed2-dir">{inCampaign ? "My agent calls people" : "People call my agent"}</span>
@@ -976,6 +982,19 @@ export default function AgentDetailPage() {
           )}
         </aside>
       </div>
+
+      <AgentStatusDialog key={statusDialogAgent?.id ?? "closed"} agent={statusDialogAgent} tenantSlug={tenantSlug}
+        onClose={() => setStatusDialogAgent(null)} onConfirm={async (target) => {
+          const updated = await updateAgent(tenantSlug, target.id, {
+            status: target.status === "active" ? "inactive" : "active",
+          });
+          setAgent(updated);
+          setForm((current) => ({ ...current, status: updated.status }));
+          setBaseline((current) => {
+            const parsed = JSON.parse(current);
+            return JSON.stringify({ ...parsed, form: { ...parsed.form, status: updated.status } });
+          });
+        }} />
 
       <Modal
         open={deleteConfirmOpen}
