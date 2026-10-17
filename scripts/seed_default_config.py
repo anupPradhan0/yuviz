@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from libs.config_sdk.local_models import LOCAL_MODELS, find_local_model  # noqa: E402
 from libs.tenancy import set_target_tenant  # noqa: E402
 
 from services.config import agents, db, provider_configs, tenants  # noqa: E402
@@ -52,6 +53,9 @@ PROVIDER_DEFAULTS = [
 
 
 async def main() -> None:
+    if find_local_model("faster_whisper", STT_MODEL) is None:
+        allowed = ", ".join(m.name for m in LOCAL_MODELS if m.engine == "faster_whisper")
+        sys.exit(f"VOICEAI_STT_MODEL={STT_MODEL!r} is not a supported faster_whisper model; use one of: {allowed}")
     await db.get_pool(dsn=os.environ.get("POSTGRES_ADMIN_DSN") or os.environ["POSTGRES_DSN"])
     tenant = await tenants.get_tenant(TENANT_SLUG)
     if tenant is None:

@@ -835,3 +835,32 @@ async def test_local_tool_lookup_uses_definition_name_not_dict_key():
     assert calls == [{}]
     assert LocalToolCompletedEvent(tool_name="caller_verified") in events
     assert TokenEvent(text="Thanks!") in events
+
+
+async def test_trailing_message_ends_every_llm_call_and_never_enters_history():
+    llm = _ScriptedLLM([
+        [ToolCallEvent(tool_call_id="c1", tool_name="execute_api", arguments={"api_name": "x"})],
+        [TokenEvent(text="Done.")],
+    ])
+    executor = _FixedExecutor(ToolResult(status=ToolStatus.SUCCESS, payload={"ok": True}))
+    registry = ExecutorRegistry()
+    registry.register("execute_api", lambda provider: executor)
+    orchestrator = ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([_policy()]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=registry,
+    )
+    directive = ChatMessage(role="user", content="(Instruction, not from the caller: Reply only in English.)")
+    history = [ChatMessage(role="user", content="book it")]
+
+    _ = [e async for e in orchestrator.run_turn("agent1", "t1", "c1", "s1", history, trailing_message=directive)]
+
+    # Folded into the caller's turn on every call, also after the tool result: a separate user
+    # turn there reads as a new question and small models call the tool again.
+    first, after_tool = llm.seen_messages
+    folded = f"book it\n\n{directive.content}"
+    assert first[-1].role == "user" and first[-1].content == folded
+    assert after_tool[0].content == folded and after_tool[-1].role == "tool"
+    assert all(m.content != directive.content for m in after_tool)
+    assert directive not in history and history[0].content == "book it" and len(history) == 3

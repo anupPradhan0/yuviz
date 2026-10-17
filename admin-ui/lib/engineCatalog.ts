@@ -1,7 +1,7 @@
 // Engines must match ai_provider_manager.py's _DEFAULT_REGISTRY. Model/voice lists are
 // suggestions only (not enforced server-side); the UI always offers "Other (custom)".
 
-import { ProviderRole } from "./api";
+import { ProviderConfig, ProviderRole } from "./api";
 
 export interface EngineOption {
   value: string;
@@ -77,36 +77,36 @@ export interface VoiceOption {
   id:       string;
   label:    string;
   gender:   VoiceGender;
-  // Same format as LANGUAGES values, so a voice pick can set agent.language.
-  language: string;
+  // Only for engines the /local-models catalogue does not serve; the catalogue owns macos/kokoro languages.
+  language?: string;
   // Pre-rendered by scripts/generate_voice_samples.py; absent = no preview yet.
   sampleUrl?: string;
 }
 
 export const VOICES_BY_ENGINE: Record<string, VoiceOption[] | null> = {
   macos: [
-    { id: "Samantha", label: "Samantha", gender: "female", language: "en-US", sampleUrl: "/voice-samples/macos/Samantha.wav" },
-    { id: "Karen",    label: "Karen",    gender: "female", language: "en-AU", sampleUrl: "/voice-samples/macos/Karen.wav" },
-    { id: "Moira",    label: "Moira",    gender: "female", language: "en-IE", sampleUrl: "/voice-samples/macos/Moira.wav" },
-    { id: "Alex",     label: "Alex",     gender: "male",   language: "en-US", sampleUrl: "/voice-samples/macos/Alex.wav" },
-    { id: "Daniel",   label: "Daniel",   gender: "male",   language: "en-GB", sampleUrl: "/voice-samples/macos/Daniel.wav" },
+    { id: "Samantha", label: "Samantha", gender: "female", sampleUrl: "/voice-samples/macos/Samantha.wav" },
+    { id: "Karen",    label: "Karen",    gender: "female", sampleUrl: "/voice-samples/macos/Karen.wav" },
+    { id: "Moira",    label: "Moira",    gender: "female", sampleUrl: "/voice-samples/macos/Moira.wav" },
+    { id: "Alex",     label: "Alex",     gender: "male",   sampleUrl: "/voice-samples/macos/Alex.wav" },
+    { id: "Daniel",   label: "Daniel",   gender: "male",   sampleUrl: "/voice-samples/macos/Daniel.wav" },
   ],
   // af_/bf_ = American/British female, am_/bm_ = American/British male.
   kokoro: [
-    { id: "af_sarah",  label: "Sarah (US)",   gender: "female", language: "en-US", sampleUrl: "/voice-samples/kokoro/af_sarah.wav" },
-    { id: "af_bella",  label: "Bella (US)",   gender: "female", language: "en-US", sampleUrl: "/voice-samples/kokoro/af_bella.wav" },
-    { id: "af_nicole", label: "Nicole (US)",  gender: "female", language: "en-US", sampleUrl: "/voice-samples/kokoro/af_nicole.wav" },
-    { id: "bf_emma",   label: "Emma (UK)",    gender: "female", language: "en-GB", sampleUrl: "/voice-samples/kokoro/bf_emma.wav" },
-    { id: "bf_isabella", label: "Isabella (UK)", gender: "female", language: "en-GB", sampleUrl: "/voice-samples/kokoro/bf_isabella.wav" },
-    { id: "am_adam",   label: "Adam (US)",    gender: "male",   language: "en-US", sampleUrl: "/voice-samples/kokoro/am_adam.wav" },
-    { id: "am_michael", label: "Michael (US)", gender: "male",  language: "en-US", sampleUrl: "/voice-samples/kokoro/am_michael.wav" },
-    { id: "bm_george", label: "George (UK)",  gender: "male",   language: "en-GB", sampleUrl: "/voice-samples/kokoro/bm_george.wav" },
-    { id: "bm_lewis",  label: "Lewis (UK)",   gender: "male",   language: "en-GB", sampleUrl: "/voice-samples/kokoro/bm_lewis.wav" },
+    { id: "af_sarah",  label: "Sarah (US)",   gender: "female", sampleUrl: "/voice-samples/kokoro/af_sarah.wav" },
+    { id: "af_bella",  label: "Bella (US)",   gender: "female", sampleUrl: "/voice-samples/kokoro/af_bella.wav" },
+    { id: "af_nicole", label: "Nicole (US)",  gender: "female", sampleUrl: "/voice-samples/kokoro/af_nicole.wav" },
+    { id: "bf_emma",   label: "Emma (UK)",    gender: "female", sampleUrl: "/voice-samples/kokoro/bf_emma.wav" },
+    { id: "bf_isabella", label: "Isabella (UK)", gender: "female", sampleUrl: "/voice-samples/kokoro/bf_isabella.wav" },
+    { id: "am_adam",   label: "Adam (US)",    gender: "male",   sampleUrl: "/voice-samples/kokoro/am_adam.wav" },
+    { id: "am_michael", label: "Michael (US)", gender: "male",  sampleUrl: "/voice-samples/kokoro/am_michael.wav" },
+    { id: "bm_george", label: "George (UK)",  gender: "male",   sampleUrl: "/voice-samples/kokoro/bm_george.wav" },
+    { id: "bm_lewis",  label: "Lewis (UK)",   gender: "male",   sampleUrl: "/voice-samples/kokoro/bm_lewis.wav" },
     // hf_/hm_ = Hindi female/male.
-    { id: "hf_alpha",  label: "Alpha (Hindi)", gender: "female", language: "hi" },
-    { id: "hf_beta",   label: "Beta (Hindi)",  gender: "female", language: "hi" },
-    { id: "hm_omega",  label: "Omega (Hindi)", gender: "male",   language: "hi" },
-    { id: "hm_psi",    label: "Psi (Hindi)",   gender: "male",   language: "hi" },
+    { id: "hf_alpha",  label: "Alpha (Hindi)", gender: "female" },
+    { id: "hf_beta",   label: "Beta (Hindi)",  gender: "female" },
+    { id: "hm_omega",  label: "Omega (Hindi)", gender: "male" },
+    { id: "hm_psi",    label: "Psi (Hindi)",   gender: "male" },
   ],
   // Aura voices are English-only; the voice id is the Aura model name.
   deepgram: [
@@ -139,6 +139,14 @@ export const LANGUAGES = [
 
 export const OTHER = "__other__";
 
+export const LANGUAGE_MODES = [
+  { value: "monolingual", label: "Monolingual", blurb: "One language, spoken and answered throughout." },
+  { value: "multilingual", label: "Multilingual", blurb: "Two languages; the agent follows the caller between them." },
+] as const;
+
+// Mirrors the server's cap on a multilingual agent's languages.
+export const MAX_LANGUAGES = 2;
+
 // Mirrors libs/config_sdk/languages.py LANGUAGES: the only codes a multilingual agent
 // (supported_languages, per-language voices/greetings) accepts. ISO 639-1.
 export const SUPPORTED_LANGUAGES = [
@@ -164,14 +172,9 @@ export function baseLanguage(code: string | null | undefined): string | null {
 
 // Mirrors libs/config_sdk/languages.py tts_languages(): which SUPPORTED_LANGUAGES a TTS
 // provider can speak. The server enforces this on save; the UI uses it to steer the pick.
+// Free engines (kokoro, macos) are not here: their per-voice languages come from /local-models.
 const MULTILINGUAL_TTS = ["en", "hi", "es", "fr", "de", "pt", "it", "ja", "zh"];
 const ELEVENLABS_ENGLISH_ONLY_MODELS = ["eleven_monolingual_v1", "eleven_turbo_v2", "eleven_flash_v2"];
-// Kokoro voice ids start with their language's lang_code; each voice speaks only that language.
-// No ja/zh: their pipelines need G2P extras the services don't install (server agrees).
-const KOKORO_DEFAULT_VOICE = "af_sarah";
-const KOKORO_VOICE_PREFIX: Record<string, string> = {
-  a: "en", b: "en", h: "hi", e: "es", f: "fr", p: "pt", i: "it",
-};
 
 // Mirrors deepgram_supports_multi() in libs/config_sdk/languages.py: Deepgram code-switches
 // only on nova-2/nova-3, and only across the languages it covers in multi mode.
@@ -192,14 +195,37 @@ export function ttsLanguages(p: { engine: string; model: string | null; voice: s
     const model = String(extra.model_id ?? p.model ?? "eleven_turbo_v2_5").toLowerCase();
     return ELEVENLABS_ENGLISH_ONLY_MODELS.includes(model) ? ["en"] : MULTILINGUAL_TTS;
   }
-  if (p.engine === "kokoro") {
-    // No voice: the provider uses KOKORO_DEFAULT_VOICE (server: libs/config_sdk/languages.py), an
-    // English voice. A voice of another language (e.g. jf_alpha): none of ours.
-    const voice = p.voice || KOKORO_DEFAULT_VOICE;
-    const lang = KOKORO_VOICE_PREFIX[voice.charAt(0).toLowerCase()];
-    return lang ? [lang] : [];
-  }
   return ["en"];
+}
+
+export const PREMIUM_ENGINES = ["elevenlabs", "cartesia"];
+
+// Whether a voice config can speak `lang`: premium engines by their model, free voices by the catalogue.
+export function voiceSpeaks(
+  voice: ProviderConfig | null | undefined, lang: string, supports: (engine: string, name: string, lang: string) => boolean,
+): boolean {
+  if (!voice) return false;
+  if (PREMIUM_ENGINES.includes(voice.engine)) return ttsLanguages(voice).includes(lang);
+  return !!voice.voice && supports(voice.engine, voice.voice, lang);
+}
+
+// The non-default languages that still have no voice of their own and that the default voice can't
+// speak either. The default language may fall back to the workspace's default voice, so it never
+// blocks a save.
+export function languagesWithoutVoice(
+  languages: string[], ttsByLanguage: Record<string, string> | null | undefined,
+  baseVoice: ProviderConfig | null | undefined, supports: (engine: string, name: string, lang: string) => boolean,
+): string[] {
+  return languages.slice(1).filter((l) => !ttsByLanguage?.[l] && !voiceSpeaks(baseVoice, l, supports));
+}
+
+// The stored per-language greetings to keep for a multilingual agent: its non-default languages only.
+// The default language is greeted with the single Greeting field, and a stored entry for it would
+// override that field on calls.
+export function keptGreetings(
+  stored: Record<string, string> | null | undefined, languages: string[],
+): Record<string, string> {
+  return Object.fromEntries(Object.entries(stored ?? {}).filter(([l]) => languages.slice(1).includes(l)));
 }
 
 export function languageLabel(code: string): string {

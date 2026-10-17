@@ -8,17 +8,49 @@ Hindi (`hi`) and English (`en`) are first-class. Spanish, French, German, Portug
 Japanese and Chinese are in the language registry. They work with English system strings (fillers,
 goodbyes) until someone adds a string table for them (see [Adding a language](#adding-a-language)).
 
-## Two settings, two behaviours
+## Two modes
 
-| Setting | What it does |
+Every agent saved from the editor has a `language_mode`.
+
+| Mode | What it does |
 |---|---|
-| `language` (agent) | Sets the STT and TTS language. It overrides the provider row's own `language`. On its own it changes nothing else: the agent stays single-language and its prompt is unchanged. |
-| `supported_languages` (agent) | Turns on the **multilingual path**: per-utterance language detection, switching, and a per-turn "Reply in <language>" instruction. `language` becomes the *default* language, the one the call starts in. |
+| `monolingual` | One language (`language`). STT and TTS use it, and the prompt gains a fixed "Reply in <language>" line. No detection, no switching. |
+| `multilingual` | Turns on the **multilingual path**: per-utterance language detection, switching, and a per-turn "Reply in <language>" instruction. `language` is the *default*, the one the call starts in. |
 
-Agents with no `supported_languages` behave exactly as before.
+A multilingual agent has **at most 2 languages** (`supported_languages`, default first). Longer lists
+are rejected on any write that carries `language_mode` or `supported_languages`. In multilingual mode, a
+confident utterance in a language outside the list moves the session back to the default language.
+
+Agents with `language_mode` unset (saved before modes existed) behave exactly as before, including
+legacy lists of 3 or more languages. The editor shows a "Reduce to 2 languages" prompt for those, and
+saving from the editor applies the cap. Switching Multi to Mono in the editor drops the second
+language's voice override on save.
 
 > **Behaviour change:** before this release the runtime ignored `agents.language`. Agents that already
 > had a value now use it for STT and TTS. `scripts/audit_agent_language.sql` lists the affected agents.
+
+## Free local models
+
+The editor only offers free STT, TTS and LLM models that support the chosen language(s). The Config
+service serves the catalogue and downloads missing models:
+
+- `GET /local-models` (any signed-in user) lists faster-whisper sizes, Ollama models, Kokoro voices and
+  macOS voices, each with `languages` and a `status` of `ready`, `missing`, `downloading`, `failed` or
+  `unavailable` (macOS `say` inside Linux containers).
+- `POST /local-models/downloads` (`{engine, name}`, superadmin or admin) starts a download and returns
+  202 `downloading`, or 200 `ready` when the model is already there. It returns 400 for a model not in
+  the catalogue and 429 when 2 downloads are already running. Saving is allowed while a model downloads;
+  testing is blocked until it is `ready`.
+- Until the model is present the runtime logs one warning and falls back to the legacy providers.
+
+**Config and Conversation must share a host.** `/local-models` reports what is on the Config host's disk
+and Ollama. Docker compose mounts the same `hf-cache` volume into both services and feeds one
+`${OLLAMA_BASE_URL}` to both. `start_local.sh` shares `~/.cache/huggingface`. On split hosts the status
+would be wrong. An Ollama provider config with its own `extra.base_url` gets no download or badge.
+
+**Single worker.** Download dedupe and the 2-download cap live in one Config process. Run one uvicorn
+worker (today's default). With several replicas on one host each could start the same download: still
+correct (Hugging Face file locks, idempotent Ollama pull), just wasteful.
 
 ## Step by step
 
@@ -48,12 +80,13 @@ Agents with no `supported_languages` behave exactly as before.
    PATCH /tenants/{tenant}/agents/{agent_id}
    {
      "language": "hi",
+     "language_mode": "multilingual",
      "supported_languages": ["hi", "en"]
    }
    ```
 
-   The default language always ends up first in `supported_languages`. To turn the multilingual path
-   off again, send `"supported_languages": []`.
+   Add `"language_mode": "multilingual"` (or `"monolingual"` with a single language). The default
+   language always ends up first in `supported_languages`, which holds at most 2 entries.
 4. **Optional: a voice per language.** This must be a TTS provider config of the **same tenant**:
    another tenant's id is rejected as "not found". A provider used as an override can't be deleted
    while an agent references it.
@@ -64,13 +97,8 @@ Agents with no `supported_languages` behave exactly as before.
 
    Languages without an override use the agent's own TTS provider, with the session language passed on
    every request.
-5. **Optional: a greeting per language.** The greeting for the default language is spoken when the
-   call connects. Workflow variables such as `{{agent_name}}` work as usual. If there is no entry for
-   the default language, the agent's normal greeting is used.
-
-   ```json
-   { "greeting_by_language": { "hi": "नमस्ते, मैं {{agent_name}} बोल रही हूँ।", "en": "Hi, this is {{agent_name}}." } }
-   ```
+5. **Greeting.** The agent has a single greeting, spoken when the call connects. The editor has no
+   per-language greeting field. Workflow variables such as `{{agent_name}}` work as usual.
 
 ## How language switching works
 
@@ -128,6 +156,9 @@ the caller actually spoke are stored on `calls.detected_languages`, in order of 
 
 ## Knowledge bases
 
+- **Reply language.** The `search_knowledge` result carries an `answer_in` field naming the session
+  language (the agent's language for a monolingual agent), so the model answers in the caller's
+  language even when the retrieved passages are in another one.
 - **Chunking** is language-aware. Documents in Chinese, Japanese, Thai, Lao, Khmer or Myanmar are sized
   by characters instead of words. The document's `language` decides; if it isn't set, the script is
   sniffed. Other languages, including Hindi, chunk by words as before.

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, Circle } from "lucide-react";
-import { ApiError, ElevenLabsVoice, ProviderConfig, createProvider, listElevenLabsVoices, updateProvider } from "@/lib/api";
+import { ApiError, ElevenLabsVoice, ProviderConfig, createProvider, listProviderVoices, updateProvider } from "@/lib/api";
 import { ELEVENLABS_LANGUAGES } from "@/lib/engineCatalog";
 // Module-level so it survives unmounts; cleared on reload or Refresh.
 const voicesCache = new Map<string, ElevenLabsVoice[]>();
@@ -68,7 +68,7 @@ export function ElevenLabsVoicePicker({
     // Reset on provider change too, so the previous provider's state doesn't flash.
     setLoading(true);
     setError(null);
-    listElevenLabsVoices(provider.id)
+    listProviderVoices(provider.id)
       .then((v) => {
         if (ignore) return;
         voicesCache.set(provider.id, v);
@@ -92,7 +92,7 @@ export function ElevenLabsVoicePicker({
     voicesCache.delete(providerId);
     setLoading(true);
     setError(null);
-    listElevenLabsVoices(providerId)
+    listProviderVoices(providerId)
       .then((v) => {
         voicesCache.set(providerId, v);
         if (providerId === currentProviderId.current) setVoices(v);

@@ -137,7 +137,7 @@ async def delete_provider_config(
 async def list_provider_voices(provider_id: str, current_user: CurrentUser = Depends(get_current_user)):
     cfg = await _authorize_provider(provider_id, current_user)
     set_target_tenant(cfg["tenant_id"])
-    return await provider_configs_service.list_elevenlabs_voices(
+    return await provider_configs_service.list_provider_voices(
         provider_id, secret_resolver=_secret_resolver,
     )
 

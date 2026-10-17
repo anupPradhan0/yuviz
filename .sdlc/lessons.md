@@ -119,12 +119,14 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
     *Earned: an offboarded tenant_admin's planted invite still admitted a new admin days later, into
     a tenant that could itself have been soft-deleted in the meantime.*
 
-17. [architect][planner][implementer] Deleting or replacing an endpoint is not done until every caller
-    is found — and the callers are not all in the same language. Grep `admin-ui/`, `scripts/`, `docs/`
-    and the other services, not just the service that owns the route. A cutover task that sequences
-    the server side perfectly still ships a dead button if the frontend was never in its file list.
-    *Earned: `POST /users` was deleted after the invite routes were mounted, precisely so no
-    account-creation path would break — while `admin-ui/app/settings/page.tsx` kept calling it.*
+17. [architect][planner][implementer][critic] Deleting, replacing or tightening an endpoint or shared
+    function is not done until every caller is found — and the callers are not all in the same language.
+    Grep `admin-ui/`, `scripts/`, `docs/` and the other services, not just the service that owns the route.
+    When validation gets stricter or a path gains a new flag, replay each existing caller's real inputs
+    (including UI dropdown values and llm-only templates) against the new rules before calling it safe.
+    *Earned: `POST /users` was deleted while `admin-ui/app/settings/page.tsx` kept calling it.
+    PR #103 stamped `language_mode` on template creation, which routed Easy-flow inputs it used to accept
+    (nl-BE, chat-only templates) into the moded validator, so they got a 400; four review rounds only read the new paths.*
 
 18. [implementer][critic] Sync I/O inside an `async def` blocks the whole event loop, not just that
     request. `smtplib`, `requests`, `time.sleep`, file reads and any DB driver that is not the async
@@ -381,7 +383,9 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
     *Earned: multilingual-agents. Honouring `agents.language` sent "en-US" to faster-whisper (raises
     on every turn — dead air for ordinary single-language agents), ElevenLabs and Cartesia; review
     rounds then found `en_US` and legacy "English" reaching Deepgram's stream URL, and
-    `language_code` sent to ElevenLabs models that don't support it.*
+    `language_code` sent to ElevenLabs models that don't support it. PR #103: the new Cartesia branch
+    returned `verified_languages` as strings while the UI type (from ElevenLabs) reads `.language`. When
+    adding a producer branch, diff its output shape against the consumer's declared type field by field.*
 
 46. [architect][critic] A capability table (registry, catalogue, UI hint) is a promise the runtime
     must keep: before advertising "engine X speaks language Y", prove the runtime path for Y on X
@@ -404,3 +408,29 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
     a cross-tenant attach.
     *Earned: PR #66 (critical ×2). Attaching a KB checked only the agent, so another tenant's KB could be
     read; an agent tool policy accepted another tenant's provider config, and its API key was used at runtime.*
+
+49. [critic][security][implementer] A new raise, readiness check or "fall back if X" is only as safe as
+    its least-guarded consumer: trace the exception or None from the raise site through every real caller
+    (gateway-routed calls, prewarm, the web test) and name the line that recovers on each. A design's
+    "falls back" without a named recovering line on every path counts as unbuilt.
+    *Earned: PR #103's `ModelNotReadyError` for a Kokoro voice not on disk reached
+    `resolve_handler_deps` → None → `RejectionHandler(UNAVAILABLE)` on routed calls, which hung up callers,
+    where Kokoro used to fetch the voice lazily. The promised Ollama "not pulled" fallback never existed;
+    the model 404'd mid-call. External reviewers caught both after four internal rounds passed them.
+    A recovery path is new attack surface too: the background download added to "recover" a missing Whisper
+    model let any tenant admin make the shared call host fetch any HF repo. Gate every download a tenant value
+    can name on the registry allowlist, at the download site and on write.*
+
+50. [critic][tester][approver] A suite run that errors at import, fixture setup or connection (missing
+    binary, blank DSN, unreachable DB, `command not found`) is an environment failure, not a test result.
+    Before any verdict, re-run one failing test with the env stated in the task file. Report it as BLOCKED-ENV,
+    never as FAILED, and never send it to a fix round.
+    *Earned: PR #103's fan-in verifier ran `source .env && pytest` with a blank `POSTGRES_DSN` and no
+    psql/npm on PATH. It reported 1061 errors and 110 failures and wasted several fix rounds, while the same tree ran 3098 passed locally.*
+
+51. [critic][implementer] Making a load lazy or deferred moves its cost into the first live request: check that startup prewarm
+    still pays it, before SERVING. Before adding a method to a class, grep for duck-typed callers of that name
+    (`getattr(x, "aclose")`, `hasattr`) that would now call it on objects they weren't written for.
+    *Earned: PR #103 deferred Kokoro's KPipeline load to keep it off the loop, so every agent's first greeting
+    after a restart paid 1-3 s of dead air. A new `FasterWhisperSTT.aclose()` was then picked up by the bundle's
+    "close the unused Ollama client" cleanup, which cancelled the shared Whisper download on every call.*

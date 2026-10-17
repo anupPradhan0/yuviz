@@ -29,6 +29,7 @@ from ..directives import (
 )
 from .. import pipeline as pipeline_module
 from ..fillers import _TOOL_FILLERS
+from ..language import fixed_language_instruction, reply_language_instruction
 from ..pipeline import (
     PipelineConversationHandler,
     _END_CALL_MARKER,
@@ -137,7 +138,9 @@ def _make_handler(
     sentiment_analysis_enabled: bool = False,
     has_booking_tool: bool = False,
     workflow: dict | None = None, node_tools: list[str] | None = None,
-    node_knowledge: list[str] | None = None, transcripts=None, **handler_kwargs,
+    node_knowledge: list[str] | None = None, transcripts=None,
+    agent_language: str | None = None, language_mode: str | None = None,
+    supported_languages: tuple[str, ...] | None = None, **handler_kwargs,
 ) -> PipelineConversationHandler:
     """Build a handler from a hand-built RuntimeConfig/ProviderBundle, no IConfigProvider."""
     now = datetime.now(timezone.utc)
@@ -163,7 +166,8 @@ def _make_handler(
         greeting=greeting, system_prompt=system_prompt, goodbye_grace_ms=goodbye_grace_ms,
         stt_config_id=None, llm_config_id=None, tts_config_id=None,
         status="active", config_version=1, updated_at=now,
-        workflow=workflow,
+        workflow=workflow, language=agent_language, language_mode=language_mode,
+        supported_languages=supported_languages,
     )
     placeholder = SDKProviderConfig(id="p1", role="stt", engine="fake", model=None, voice=None, language=None, api_key_ref=None)
     runtime_config = RuntimeConfig(
@@ -176,7 +180,11 @@ def _make_handler(
             transfer_announcement=transfer_announcement,
             workflow=workflow, workflow_draft=workflow,
         ),
-        media=MediaInfo(voice=None, language=None),
+        media=MediaInfo(
+            voice=None, language=None,
+            supported_languages=supported_languages or (),
+            default_language=supported_languages[0] if supported_languages else None,
+        ),
         policies=Policies(
             vad_engine=None, vad_onset_ms=None, vad_hold_ms=None, vad_speech_threshold=None,
             silence_timeout_ms=None, stt_timeout_ms=None, llm_timeout_ms=None,
@@ -2069,8 +2077,10 @@ class _FakeToolOrchestrator:
         self, agent_id, tenant_id, call_id, session_id, history,
         caller_number="", called_number="", call_direction="", cancel_event=None, force_tool_name=None,
         phone_number_confirmed=False, local_tools=None, only_tools=None, carry_taint=False,
+        trailing_message=None,
     ):
         self.seen_carry_taint = carry_taint
+        self.seen_trailing_message = trailing_message
         self.seen_force_tool_name = force_tool_name
         self.seen_phone_number_confirmed = phone_number_confirmed
         self.seen_agent_id = agent_id
@@ -2542,3 +2552,200 @@ async def test_pipeline_speaks_fallback_when_llm_stream_raises():
     tts_responses = [r for r in responses if r.tts_payloads]
     assert tts_responses, "expected a spoken fallback despite the LLM error"
     assert not any(r.end_call for r in responses), "a transient error must not end the call"
+
+
+# ---------------------------------------------------------------------------
+# Reply-language line in the node prompt
+# ---------------------------------------------------------------------------
+
+def _refreshed_prompt(**kwargs) -> str:
+    handler = _make_handler(_make_stt(), _make_llm(), _make_tts(), system_prompt="Be helpful.", **kwargs)
+    history: list[ChatMessage] = []
+    handler._refresh_node_prompt(history, "s1")
+    return history[0].content
+
+
+def test_monolingual_agent_prompt_gets_the_fixed_language_instruction():
+    prompt = _refreshed_prompt(agent_language="hi", language_mode="monolingual")
+    assert prompt.endswith(fixed_language_instruction("hi"))
+
+
+def test_agent_without_a_language_mode_gets_no_added_line():
+    prompt = _refreshed_prompt(agent_language="hi")
+    assert fixed_language_instruction("hi") not in prompt
+    assert "Reply only in" not in prompt
+
+
+def test_multilingual_session_prompt_keeps_the_per_turn_reply_instruction():
+    prompt = _refreshed_prompt(
+        agent_language="en", language_mode="multilingual", supported_languages=("en", "hi"),
+    )
+    assert prompt.endswith(reply_language_instruction("en"))
+
+
+# ---------------------------------------------------------------------------
+# Transient reply-language directive at the end of every LLM request
+# ---------------------------------------------------------------------------
+
+def _multilingual_handler(llm=None, **kwargs):
+    tts = _make_tts()
+    tts.prewarm = AsyncMock()
+    return _make_handler(
+        _make_stt(), llm or _make_llm(), tts, system_prompt="Be helpful.",
+        agent_language="en", language_mode="multilingual", supported_languages=("en", "hi"), **kwargs,
+    )
+
+
+def test_directive_follows_the_session_language_after_a_switch():
+    handler = _multilingual_handler()
+    handler._session("s1").language.current = "hi"
+    assert "Hindi" in handler._reply_directive("s1").content
+    handler._session("s1").language.current = "en"
+    directive = handler._reply_directive("s1")
+    assert directive.role == "user"
+    assert directive.content == f"(Instruction, not from the caller: {reply_language_instruction('en').strip()})"
+
+
+def test_monolingual_directive_is_the_fixed_language_and_legacy_has_none():
+    mono = _make_handler(_make_stt(), _make_llm(), _make_tts(), agent_language="hi", language_mode="monolingual")
+    assert mono._reply_directive("s1").content == (
+        f"(Instruction, not from the caller: {fixed_language_instruction('hi').strip()})"
+    )
+    legacy = _make_handler(_make_stt(), _make_llm(), _make_tts(), agent_language="hi")
+    assert legacy._reply_directive("s1") is None
+
+
+@pytest.mark.asyncio
+async def test_plain_llm_request_ends_with_the_directive_and_history_is_unchanged():
+    seen: list[list[ChatMessage]] = []
+
+    async def _gen(messages):
+        seen.append(list(messages))
+        yield "Sure."
+
+    llm = _make_llm()
+    llm.generate = _gen
+    handler = _multilingual_handler(llm)
+    handler._session("s1").language.current = "en"
+    history = [ChatMessage(role="system", content="p"), ChatMessage(role="user", content="namaste")]
+
+    _ = [t async for t in handler._token_stream(history, "s1", asyncio.Event(), [])]
+
+    # Folded into the caller's turn, so strict templates still see user/assistant alternation.
+    assert seen[0][:-1] == history[:-1] and len(seen[0]) == 2
+    last = seen[0][-1]
+    assert last.role == "user" and last.content.startswith("namaste\n\n(Instruction, not from the caller")
+    assert "English" in last.content
+    assert history[-1].content == "namaste" and len(history) == 2
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_receives_the_directive_without_it_entering_history():
+    orchestrator = _FakeToolOrchestrator([])
+    handler = _multilingual_handler(tool_orchestrator=orchestrator)
+    handler._session("s1").language.current = "en"
+    history = [ChatMessage(role="user", content="hi")]
+
+    _ = [e async for e in handler._token_stream(history, "s1", asyncio.Event(), [])]
+
+    assert "English" in orchestrator.seen_trailing_message.content
+    assert orchestrator.seen_history == history
+
+
+def _reply_text(responses) -> str:
+    return "".join(r.response_text or "" for r in responses)
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_text_tool_call_as_the_only_output_speaks_the_fallback():
+    from ..pipeline import _FALLBACK_LLM_ERROR
+
+    llm = _make_llm(['{"name": "delete_everything", ', '"parameters": {}}'])
+    handler = _make_handler(_make_stt("hello"), llm, _make_tts(b"\x00" * 640), system_prompt="You are Alex.")
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert _reply_text(responses) == _FALLBACK_LLM_ERROR
+    assert any(r.tts_payloads for r in responses)
+
+
+@pytest.mark.asyncio
+async def test_only_a_filler_then_an_empty_round_speaks_the_fallback_once():
+    from ..pipeline import _FALLBACK_LLM_ERROR
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    orchestrator = _FakeToolOrchestrator([ToolCallStartedEvent(tool_name="search_knowledge")])
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(["unused"]), _make_tts(b"\x00" * 640),
+        system_prompt="You are Alex.", tool_orchestrator=orchestrator,
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert _reply_text(responses).count(_FALLBACK_LLM_ERROR) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_fallback_after_a_transition_line_then_an_empty_round():
+    from ..pipeline import _FALLBACK_LLM_ERROR
+    from ..tools.llm_adapter import LocalToolCompletedEvent
+
+    class _Transitioning(_FakeToolOrchestrator):
+        async def run_turn(self, *args, **kwargs):
+            handler._workflow.pending_speech = "Connecting you now."
+            async for e in super().run_turn(*args, **kwargs):
+                yield e
+
+    orchestrator = _Transitioning([LocalToolCompletedEvent(tool_name="go_next")])
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(["unused"]), _make_tts(b"\x00" * 640),
+        system_prompt="You are Alex.", tool_orchestrator=orchestrator,
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert _reply_text(responses) == "Connecting you now."
+    assert _FALLBACK_LLM_ERROR not in _reply_text(responses)
+
+
+@pytest.mark.asyncio
+async def test_a_normal_turn_speaks_no_fallback():
+    from ..pipeline import _FALLBACK_LLM_ERROR
+
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(["Hi", " there", "!"]), _make_tts(b"\x00" * 640), system_prompt="You are Alex.",
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert _reply_text(responses) == "Hi there!"
+    assert _FALLBACK_LLM_ERROR not in _reply_text(responses)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("move", ["end", "transfer"])
+async def test_no_error_fallback_when_the_turn_moves_to_an_end_or_transfer_node(move):
+    # A deliberate end or transfer with no transition line keeps its own wording, not the error line.
+    from libs.config_sdk.workflow import Node
+
+    from ..pipeline import _FALLBACK_LLM_ERROR
+    from ..tools.llm_adapter import LocalToolCompletedEvent
+
+    class _Moving(_FakeToolOrchestrator):
+        async def run_turn(self, *args, **kwargs):
+            if move == "end":
+                handler._workflow.pending_end = True
+            else:
+                handler._workflow.pending_transfer = Node(id="t", type="transfer", name="Transfer", transfer_destination="+15550100")
+            async for e in super().run_turn(*args, **kwargs):
+                yield e
+
+    orchestrator = _Moving([LocalToolCompletedEvent(tool_name="go_next")])
+    handler = _make_handler(
+        _make_stt("hello"), _make_llm(["unused"]), _make_tts(b"\x00" * 640),
+        system_prompt="You are Alex.", tool_orchestrator=orchestrator,
+    )
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert _FALLBACK_LLM_ERROR not in _reply_text(responses)

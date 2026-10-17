@@ -12,13 +12,26 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import time
 from typing import Any
 
 import numpy as np
 
 from libs.config_sdk.languages import LANGUAGES, normalize_language
 
+from ... import model_downloads
+from ...language import MIN_CONFIDENCE
 from ..interfaces import INSTANCE_LANGUAGE, SttResult
+
+# An outside language is reported only when the agent's languages hold less than this much of
+# Whisper's raw probability.
+_OUTSIDE_MAX_CANDIDATE_MASS = 0.10
+
+# After a failed download or load, no new attempt for this long (an air-gapped host would
+# otherwise retry on every utterance).
+_RETRY_AFTER_S = 60
+
+_DOWNLOAD_SCRIPT = "import sys; from faster_whisper.utils import download_model; download_model(sys.argv[1])"
 
 log = logging.getLogger(__name__)
 
@@ -61,9 +74,59 @@ class FasterWhisperSTT:
         self._beam_size     = beam_size
         self._model         = None   # populated by load()
         self._lock          = asyncio.Lock()
+        self._load_lock     = asyncio.Lock()
+        self._download_on_demand = False
+        self._load_task: asyncio.Task | None = None
+        self._last_failure: float | None = None   # time.monotonic() of the last failed download/load
         self._warned_english_only = False
 
-    async def load(self) -> None:
+    def load_when_needed(self) -> None:
+        """For an instance whose model isn't on disk: fetch and load it in the background now,
+        and again on a transcribe if that failed. Until it is ready, transcribe returns empty text."""
+        self._download_on_demand = True
+        self._start_background_load()
+
+    def _start_background_load(self) -> None:
+        if self._load_task is not None and not self._load_task.done():
+            return
+        if self._last_failure is not None and time.monotonic() - self._last_failure < _RETRY_AFTER_S:
+            return
+        self._load_task = asyncio.create_task(self._load_allowing_download())
+
+    async def _load_allowing_download(self) -> None:
+        async with self._load_lock:  # concurrent callers load once
+            if self._model is not None:
+                return
+            log.warning("FasterWhisper model=%s is not on disk — downloading it now", self._model_size)
+            try:
+                await self._download()
+                await self.load()
+            except Exception:
+                self._last_failure = time.monotonic()
+                log.exception("FasterWhisper model=%s download/load failed", self._model_size)
+
+    async def _download(self) -> None:
+        """Fetch the model in a subprocess shared by every instance of it (see model_downloads)."""
+        # Keyed on the repo the name resolves to, so aliases (large / large-v3) share one download.
+        try:
+            from faster_whisper.utils import _MODELS
+        except ImportError:  # stubbed in tests
+            _MODELS = {}
+        repo = _MODELS.get(self._model_size, self._model_size)
+        await model_downloads.fetch(("faster_whisper", repo), _DOWNLOAD_SCRIPT, self._model_size)
+
+    async def stop_download(self) -> None:
+        """At shutdown: stop the background download."""
+        if self._load_task is not None:
+            self._load_task.cancel()
+            await asyncio.gather(self._load_task, return_exceptions=True)
+        await model_downloads.stop_downloads()
+
+    @property
+    def loaded(self) -> bool:
+        return self._model is not None
+
+    async def load(self, *, local_files_only: bool = True) -> None:
         """Load the model in a thread-pool executor; call after server.start()."""
         log.info("Loading FasterWhisper model=%s device=%s compute=%s",
                  self._model_size, self._device, self._compute_type)
@@ -75,7 +138,7 @@ class FasterWhisperSTT:
                 device=self._device,
                 compute_type=self._compute_type,
                 # Skip huggingface_hub's per-load revision check (latency; breaks air-gapped hosts).
-                local_files_only=True,
+                local_files_only=local_files_only,
             ),
         )
         log.info("FasterWhisper ready")
@@ -85,6 +148,8 @@ class FasterWhisperSTT:
         languages: tuple[str, ...] | None = None,
         require_language: tuple[str, float] | None = None,
     ) -> SttResult:
+        if self._model is None and self._download_on_demand:
+            self._start_background_load()
         if not audio or self._model is None:
             return SttResult(text="")
 
@@ -124,9 +189,13 @@ class FasterWhisperSTT:
     async def cancel_stream(self, session_id: str) -> None:
         return
 
-    def _detect_among(self, pcm: np.ndarray, candidates: tuple[str, ...]) -> tuple[str, float | None]:
-        """Best candidate language and its share of the candidates' probability (aliases
-        folded in). One extra encoder pass, no decode; the transcribe that follows decodes once.
+    def _detect_among(
+        self, pcm: np.ndarray, candidates: tuple[str, ...],
+    ) -> tuple[str, float | None, tuple[str, float] | None]:
+        """Best candidate language, its share of the candidates' probability (aliases folded
+        in), and Whisper's own top language with its raw probability when it is confidently
+        none of the candidates (else None). One extra encoder pass, no decode; the transcribe
+        that follows decodes once.
 
         The share, not the raw probability: Whisper spreads accented speech across many
         languages the agent can't use, which would leave English at ~0.5 for clearly
@@ -140,7 +209,13 @@ class FasterWhisperSTT:
         scores = {code: score(code) for code in candidates}
         best = max(scores, key=scores.get)
         total = sum(scores.values())
-        return best, (scores[best] / total if total > 0 else None)
+        covered = set(candidates).union(a for code in candidates if code in LANGUAGES for a in LANGUAGES[code].aliases)
+        # Third-language speech leaves the agent's languages almost no probability. Whisper is
+        # often confidently wrong on short or accented agent-language audio ("okay" -> nn 0.75,
+        # en 0.24), so a confident outside top with real mass on the candidates is not reported.
+        is_outside = _top not in covered and _p >= MIN_CONFIDENCE and total < _OUTSIDE_MAX_CANDIDATE_MASS
+        outside = (_top, _p) if is_outside else None
+        return best, (scores[best] / total if total > 0 else None), outside
 
     def _transcribe_sync(
         self, audio: bytes, sample_rate: int, language: str | None,
@@ -155,10 +230,17 @@ class FasterWhisperSTT:
             pcm = self._resample(pcm, sample_rate, 16_000)
 
         detected: tuple[str, float | None] | None = None
+        # What the caller is told was spoken: a language outside the agent's, when Whisper heard
+        # one, so the tracker can see third-language speech; the text is still decoded in `detected`.
+        reported: tuple[str, float | None] | None = None
         # English-only (.en) models can't detect; ctranslate2 raises if asked. They decode
         # English as they always did.
         if language is None and languages and self._model.model.is_multilingual:
-            detected = self._detect_among(pcm, tuple(languages))
+            best, share, outside = self._detect_among(pcm, tuple(languages))
+            detected = (best, share)
+            # A short utterance is judged on the agent's languages only: too little audio to trust
+            # an outside language over them.
+            reported = outside if outside is not None and require_language is None else detected
             # Short utterances are only kept in the session's language at the caller's minimum
             # confidence: skip the decode (and its encoder pass) for any blip that would be
             # dropped anyway. The caller passes 0 where the decoded text can still decide
@@ -194,8 +276,8 @@ class FasterWhisperSTT:
 
         text = " ".join(kept).strip()
         log.debug("FasterWhisper transcript=%r lang=%s p=%.2f", text, info.language, info.language_probability)
-        if detected is not None:
-            return SttResult(text=text, confidence=1.0, language=detected[0], language_confidence=detected[1])
+        if reported is not None:
+            return SttResult(text=text, confidence=1.0, language=reported[0], language_confidence=reported[1])
         if language is not None:
             # Forced language: nothing was detected.
             return SttResult(text=text, confidence=1.0)
