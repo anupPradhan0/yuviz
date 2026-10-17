@@ -106,6 +106,8 @@ export default function NewCallFlowPage() {
 
   const chooseDirection = (next: FlowDirection) => {
     setDirection(next);
+    // A clone uses its source graph; the starter picks are irrelevant in copy mode.
+    if (start === "clone") return;
     const valid = picks.filter((type) => BLOCKS.some((block) => block.type === type && block.directions.includes(next)));
     const withoutMenu = !valid.includes("menu");
     const first = valid.find((type) => terminalSteps.includes(type));
