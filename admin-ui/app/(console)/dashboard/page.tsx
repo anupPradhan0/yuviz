@@ -23,6 +23,7 @@ import {
 } from "@/lib/api";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 import { Outcome, Tone, outcomeOf } from "@/lib/callOutcome";
+import { hasInboundNumber, isChatAgent } from "@/lib/agentReadiness";
 
 const RANGE_OPTIONS = [
   { label: "Today", hours: 24, days: 0, prev: "previous 24h", period: "in the last 24 hours" },
@@ -360,9 +361,6 @@ export default function DashboardPage() {
   }, [calls]);
 
   const agentRows = useMemo(() => {
-    const numbered = new Set(numbers.map((n) => n.agent_id).filter(Boolean));
-    // Outbound-only agents dial out through a campaign and need no number of their own.
-    const dialing = new Set(campaigns.map((c) => c.agent_id));
     const perAgent = new Map<string, { calls: number; ended: number; toPerson: number }>();
     for (const c of calls) {
       if (!c.agent_id) continue;
@@ -375,7 +373,8 @@ export default function DashboardPage() {
     return agents
       .map((a) => {
         const s = perAgent.get(a.id) ?? { calls: 0, ended: 0, toPerson: 0 };
-        const noNumber = a.status === "active" && !numbered.has(a.id) && !dialing.has(a.id);
+        const noNumber = a.status === "active" && a.direction !== "outbound" &&
+          !isChatAgent(a) && !hasInboundNumber(a, numbers);
         return {
           agent: a,
           calls: s.calls,
@@ -387,7 +386,7 @@ export default function DashboardPage() {
         };
       })
       .sort((a, b) => b.calls - a.calls);
-  }, [agents, numbers, campaigns, calls]);
+  }, [agents, numbers, calls]);
 
   const attention = useMemo(() => {
     const items: { tone: Tone; text: string; action: string; href: string }[] = [];

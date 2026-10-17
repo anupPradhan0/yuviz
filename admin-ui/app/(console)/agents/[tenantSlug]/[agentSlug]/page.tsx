@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import {
   Agent, AgentUpdate, ApiError, Call, LanguageMode, PhoneNumber, ProviderConfig, createAgent, deleteAgent, getAgent,
-  getCurrentUser, getLiveCalls, listCalls, listCampaigns, listPhoneNumbers, listProviders, listTenants, rewritePrompt,
+  getCurrentUser, getLiveCalls, listCalls, listPhoneNumbers, listProviders, listTenants, rewritePrompt,
   undoPrompt, updateAgent,
 } from "@/lib/api";
 import { KnowledgeBasePanel } from "@/components/KnowledgeBasePanel";
@@ -28,6 +28,7 @@ import { deriveLanguageDraft } from "@/lib/agentDraft";
 import { useLocalModels } from "@/lib/useLocalModels";
 import { normalizeDialTarget } from "@/lib/dialTargets";
 import { useMenuKeys } from "@/lib/useMenuKeys";
+import { hasInboundNumber, isChatAgent } from "@/lib/agentReadiness";
 
 type Section = "instructions" | "voice" | "knowledge" | "settings" | "advanced";
 
@@ -86,7 +87,6 @@ export default function AgentDetailPage() {
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [defaultTtsId, setDefaultTtsId] = useState<string | null>(null);
   const [numbers, setNumbers] = useState<PhoneNumber[] | null>(null);
-  const [inCampaign, setInCampaign] = useState(false);
   const [recentCalls, setRecentCalls] = useState<Call[]>([]);
   const [section, setSection] = useState<Section>("instructions");
   const [justCreated] = useState(() => searchParams.get("new") === "1");
@@ -151,6 +151,7 @@ export default function AgentDetailPage() {
         const openingGreeting = a.greeting_by_language?.[a.language ?? lang.languages[0]];
         const initialForm: AgentUpdate = {
           name: a.name,
+          direction: a.direction,
           greeting: openingGreeting ?? a.greeting,
           system_prompt: a.system_prompt,
           goodbye_grace_ms: a.goodbye_grace_ms,
@@ -179,8 +180,6 @@ export default function AgentDetailPage() {
         setLanguages(lang.languages);
         setBaseline(JSON.stringify({ form: initialForm, languageMode: lang.languageMode, languages: lang.languages }));
         listPhoneNumbers(a.tenant_id).then(setNumbers).catch(() => setNumbers(null));
-        // Campaigns run in a separate service; if it's down the agent just counts as inbound.
-        listCampaigns(a.tenant_id).then((cs) => setInCampaign(cs.some((c) => c.agent_id === a.id))).catch(() => {});
         listCalls(tenantSlug, { agentId: a.id, limit: 5 })
           .then((r) => setRecentCalls(r.items))
           .catch(() => {});
@@ -422,8 +421,8 @@ export default function AgentDetailPage() {
   const escalation = form.escalation_threshold ?? null;
   const escalationOptions =
     escalation === null || ESCALATION_OPTIONS.includes(escalation) ? ESCALATION_OPTIONS : [...ESCALATION_OPTIONS, escalation].sort((a, b) => a - b);
-  const hasNumber = numbers?.some((n) => n.agent_id === agent.id) ?? true;
-  const needsNumber = !hasNumber && !inCampaign;
+  const needsNumber = numbers !== null && form.direction !== "outbound" &&
+    !isChatAgent(agent) && !hasInboundNumber(agent, numbers);
 
   // First thing still stopping the agent from taking real calls.
   const blocker: { text: string; action?: string; section: Section } | null =
@@ -500,7 +499,15 @@ export default function AgentDetailPage() {
             <span>{isActive ? "Live" : "Paused"}</span>
           </button>
         )}
-        <span className="ed2-dir">{inCampaign ? "My agent calls people" : "People call my agent"}</span>
+        <label className="ed2-dir">
+          Calls: {" "}
+          <select aria-label="Agent call direction" value={form.direction ?? agent.direction}
+            onChange={(e) => setForm({ ...form, direction: e.target.value as Agent["direction"] })}>
+            <option value="inbound">People call my agent</option>
+            <option value="outbound">My agent calls people</option>
+            <option value="both">Both directions</option>
+          </select>
+        </label>
         <div className="ed2-top-right">
           <div className="ed2-save" aria-live="polite">{saveStatus}</div>
           <button

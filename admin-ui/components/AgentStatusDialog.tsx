@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Agent, ApiError, Campaign, PhoneNumber, listAgents, listCampaigns, listPhoneNumbers } from "@/lib/api";
-import { agentDirection } from "@/lib/agentTemplates";
-import { pauseOutcomes, resumeMissing, statusDirection } from "@/lib/agentStatusImpact";
+import { pauseOutcomes, resumeMissing } from "@/lib/agentStatusImpact";
+import { isChatAgent } from "@/lib/agentReadiness";
 import { Modal } from "@/components/Modal";
 
 export function AgentStatusDialog({ agent, tenantSlug, onClose, onConfirm }: {
@@ -43,11 +43,9 @@ export function AgentStatusDialog({ agent, tenantSlug, onClose, onConfirm }: {
   const pausing = agent.status === "active";
   const activatingDraft = !pausing && !agent.activated_at;
   const action = pausing ? "Pause" : activatingDraft ? "Go live with" : "Resume";
-  const storedDirection = (agent as Agent & { direction?: "inbound" | "outbound" | "both" }).direction;
-  const direction = statusDirection(storedDirection, agentDirection(agent), campaigns, agent.id);
   const outcomes = numbers && agents ? pauseOutcomes(agent, agents, numbers) : null;
   const runningCampaigns = campaigns?.filter((campaign) => campaign.agent_id === agent.id && campaign.status === "running");
-  const missing = numbers && agents && campaigns ? resumeMissing(agent, direction, agents, numbers, campaigns) : null;
+  const missing = numbers && agents ? resumeMissing(agent, agent.direction, agents, numbers, campaigns, isChatAgent(agent)) : null;
   const canConfirm = !loading && !busy && (!pausing || outcomes !== null);
 
   const confirm = async () => {
@@ -83,7 +81,7 @@ export function AgentStatusDialog({ agent, tenantSlug, onClose, onConfirm }: {
           <ul className="agent-status-impact">{runningCampaigns.map((campaign) => <li key={campaign.id}>{campaign.name}</li>)}</ul>
         </>}
       </>
-    ) : missing === null ? <p>Phone setup could not be checked. Verify the agent’s numbers and campaigns before resuming.</p> :
+    ) : missing === null ? <p>Phone routing could not be checked. Verify the agent’s numbers before resuming.</p> :
       missing.length ? <>
         <p>This agent can be tested in the browser, but these items are needed for phone calls:</p>
         <ul className="agent-status-impact">{missing.map((line) => <li key={line}>{line}</li>)}</ul>

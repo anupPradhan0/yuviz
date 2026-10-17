@@ -124,6 +124,7 @@ export function QuickCreateAgent({ initialTemplate, onStepByStep }: {
       const agent = await createAgent(account.slug, {
         slug: slugify(name),
         name: name.trim(),
+        direction,
         greeting: template?.greeting ?? DEFAULT_GREETING[direction],
         system_prompt: systemPrompt,
         stt_config_id: pick("stt", account.default_stt_config_id),

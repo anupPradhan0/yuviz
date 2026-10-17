@@ -1,18 +1,5 @@
 import type { Agent, Campaign, PhoneNumber } from "./api";
 
-type Direction = "inbound" | "outbound" | "both";
-
-export function statusDirection(
-  stored: Direction | undefined, guessed: "inbound" | "outbound" | null,
-  campaigns: Campaign[] | null, agentId: string,
-): Direction {
-  if (stored) return stored;
-  if (campaigns?.some((campaign) => campaign.agent_id === agentId)) {
-    return guessed === "inbound" ? "both" : "outbound";
-  }
-  return guessed ?? "inbound";
-}
-
 // Mirror the primary → fallback → default choice used by _load_route. The
 // selected agent's status is overridden to model either side of the switch.
 function routeFor(agents: Agent[], selected: Agent, selectedActive: boolean) {
@@ -56,20 +43,25 @@ export function pauseOutcomes(agent: Agent, agents: Agent[], numbers: PhoneNumbe
 }
 
 export function resumeMissing(
-  agent: Agent, direction: Direction,
-  agents: Agent[], numbers: PhoneNumber[], campaigns: Campaign[],
+  agent: Agent, direction: "inbound" | "outbound" | "both",
+  agents: Agent[], numbers: PhoneNumber[], campaigns: Campaign[] | null, isChat = false,
 ): string[] {
   const missing: string[] = [];
+  if (isChat) return missing;
   const wired = numbers.filter((number) => number.status === "active" && number.provider_sync?.ok !== false);
   const resumedRoute = routeFor(agents, agent, true);
   if (direction !== "outbound" && !wired.some((number) => resumedRoute(number)?.id === agent.id)) {
     missing.push("No active phone number is assigned to this agent.");
   }
   if (direction !== "inbound") {
-    const activeDids = new Set(wired.map((number) => normalizeDid(number.did)));
-    if (!campaigns.some((campaign) => campaign.agent_id === agent.id && campaign.status !== "completed" &&
-      !!campaign.caller_id && activeDids.has(normalizeDid(campaign.caller_id)))) {
-      missing.push("No campaign has an active business number to use as caller ID.");
+    if (campaigns === null) {
+      missing.push("Could not check outbound campaign setup.");
+    } else {
+      const activeDids = new Set(wired.map((number) => normalizeDid(number.did)));
+      if (!campaigns.some((campaign) => campaign.agent_id === agent.id && campaign.status !== "completed" &&
+        !!campaign.caller_id && activeDids.has(normalizeDid(campaign.caller_id)))) {
+        missing.push("No campaign has an active business number to use as caller ID.");
+      }
     }
   }
   return missing;
