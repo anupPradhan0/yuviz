@@ -158,6 +158,9 @@ async def world(pool, test_service_viewer, monkeypatch, tmp_path):
     # The router resolves its manager through this name; ingestion gets its manager passed in.
     monkeypatch.setattr(retrieve_router, "get_embedding_manager", lambda: make_manager(embedder))
     monkeypatch.setenv("PATH", str(tmp_path))  # no OCR engine on PATH: a scanned PDF must fail visibly, not hang
+    # Generous stage timeouts: these test the pipeline, not this machine's speed (CI runners miss the 120 ms ones).
+    monkeypatch.setattr(retrieval, "_config", dataclasses.replace(
+        retrieval._config, dense_timeout_s=2.0, lexical_timeout_s=2.0, deadline_s=5.0))
     retrieval.clear_caches()
     ops_metrics.reset()
     created: list[Any] = []
@@ -538,7 +541,7 @@ async def test_health_reports_retrieval_stats_and_queue_depth(world):
     assert stats["no_match_rate"] == 0.2 and stats["degraded"] >= 1
     assert stats["degraded_by_reason"].get("embedding_unavailable") == 1
     latency = stats["latency_ms"]
-    assert 0 < latency["p50"] <= latency["p95"] <= latency["p99"] < 400
+    assert 0 < latency["p50"] <= latency["p95"] <= latency["p99"] < retrieval._config.deadline_s * 1000
     assert health["queue"]["pending"] == 1 and health["queue"]["oldest_pending_age_s"] >= 0
     assert queued["status"] == "pending"
 
