@@ -125,6 +125,8 @@ function Canvas({ flow, tenantSlug }: { flow: CallFlow; tenantSlug: string }) {
   const [publishing, setPublishing] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [agentsLoaded, setAgentsLoaded] = useState(false);
+  const [agentsError, setAgentsError] = useState<string | null>(null);
   const [ttsProviders, setTtsProviders] = useState<ProviderConfig[]>([]);
   const [version, setVersion] = useState(flow.config_version);
 
@@ -144,7 +146,19 @@ function Canvas({ flow, tenantSlug }: { flow: CallFlow; tenantSlug: string }) {
   const { screenToFlowPosition } = useReactFlow();
 
   useEffect(() => {
-    listAgents(tenantSlug).then(setAgents).catch(() => {});
+    let cancelled = false;
+    listAgents(tenantSlug)
+      .then((found) => {
+        if (cancelled) return;
+        setAgents(found);
+        setAgentsLoaded(true);
+        setAgentsError(null);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setAgentsError(e instanceof ApiError ? e.detail : String(e));
+      });
+    return () => { cancelled = true; };
   }, [tenantSlug]);
 
   useEffect(() => {
@@ -154,6 +168,7 @@ function Canvas({ flow, tenantSlug }: { flow: CallFlow; tenantSlug: string }) {
   const attached = agents.filter((a) => a.call_flow_id === flow.id);
 
   const openSettings = () => {
+    if (!agentsLoaded) return;
     setMeta(savedMeta);
     setAgentPicks(new Set(attached.map((a) => a.id)));
     setSettingsError(null);
@@ -162,6 +177,7 @@ function Canvas({ flow, tenantSlug }: { flow: CallFlow; tenantSlug: string }) {
 
   // Writes call_flows for the details and agents.call_flow_id for each agent whose tick changed.
   const saveSettings = async () => {
+    if (!agentsLoaded) return;
     setSavingMeta(true);
     setSettingsError(null);
     try {
@@ -402,7 +418,7 @@ function Canvas({ flow, tenantSlug }: { flow: CallFlow; tenantSlug: string }) {
           <span className="wf-save-state">
             {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Draft saved" : saveState === "error" ? "Save failed" : ""}
           </span>
-          <button className="btn btn-ghost btn-sm" onClick={openSettings}>
+          <button className="btn btn-ghost btn-sm" onClick={openSettings} disabled={!agentsLoaded}>
             <Settings size={13} /> Settings
           </button>
           <button className="btn btn-ghost btn-sm" onClick={() => setShowVersions((v) => !v)}>
@@ -733,13 +749,15 @@ function Canvas({ flow, tenantSlug }: { flow: CallFlow; tenantSlug: string }) {
           {!selected && !selectedEdge && (
           <div className="cf-who">
             <div className="cf-who-title">Who hears this menu</div>
-            {attached.length > 0 ? (
+            {!agentsLoaded ? (
+              <p>{agentsError ? `Could not load agents: ${agentsError}` : "Loading agents…"}</p>
+            ) : attached.length > 0 ? (
               <p>Callers to <b>{attached.map((a) => a.name).join(", ")}</b> hear this menu first.</p>
             ) : (
               <p>No agent uses this menu yet, so no caller hears it.</p>
             )}
             {!published && <p>Publish it once the steps look right — until then callers don&apos;t hear it.</p>}
-            <button className="btn btn-ghost btn-sm" onClick={openSettings}>
+            <button className="btn btn-ghost btn-sm" onClick={openSettings} disabled={!agentsLoaded}>
               {attached.length > 0 ? "Change agents" : "Choose agents"}
             </button>
           </div>
@@ -785,7 +803,7 @@ function Canvas({ flow, tenantSlug }: { flow: CallFlow; tenantSlug: string }) {
             <button className="btn btn-ghost btn-sm" onClick={() => setSettingsOpen(false)} disabled={savingMeta}>
               Cancel
             </button>
-            <button className="btn btn-primary btn-sm" onClick={saveSettings} disabled={!meta.name.trim() || savingMeta}>
+            <button className="btn btn-primary btn-sm" onClick={saveSettings} disabled={!meta.name.trim() || savingMeta || !agentsLoaded}>
               {savingMeta ? "Saving…" : "Save"}
             </button>
           </>

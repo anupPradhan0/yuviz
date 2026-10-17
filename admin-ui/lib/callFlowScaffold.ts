@@ -100,7 +100,10 @@ export function scaffoldGraph(picks: CallFlowNodeType[], direction: string): Cal
   if (!TERMINAL.includes(chain[chain.length - 1])) chain.push("hangup");
 
   const menuAt = chain.findIndex((t) => t === "menu");
-  const linear = menuAt === -1 ? chain : chain.slice(0, menuAt + 1);
+  // Without a menu there is only one path. Stop at the first step that leaves
+  // the flow, even if the builder has more terminal steps ticked.
+  const firstTerminal = chain.findIndex((type) => TERMINAL.includes(type));
+  const linear = menuAt === -1 ? chain.slice(0, firstTerminal + 1) : chain.slice(0, menuAt + 1);
   const branches = menuAt === -1 ? [] : chain.slice(menuAt + 1);
 
   let prev = "start";
