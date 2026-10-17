@@ -46,16 +46,18 @@ export default function NewCallFlowPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  const { tenant, allTenants, isAllTenants } = useActiveTenant();
+  const { tenant, allTenants, isAllTenants, error: tenantError } = useActiveTenant();
   const [accountSlug, setAccountSlug] = useState(searchParams.get("tenant") || "");
   // A superadmin on "All tenants" still has to say which account owns the menu.
   const tenantSlug = (tenant ?? allTenants.find((t) => t.slug === accountSlug) ?? allTenants[0])?.slug ?? "";
-  const [existing, setExisting] = useState<CallFlowSummary[]>([]);
+  const [flowList, setFlowList] = useState<{ slug: string; flows: CallFlowSummary[] }>({ slug: "", flows: [] });
+  const existing = flowList.slug === tenantSlug ? flowList.flows : [];
 
   const [direction, setDirection] = useState<FlowDirection>("inbound");
   // A starter key, "scratch", or "clone".
   const [start, setStart] = useState("press");
-  const [cloneFromId, setCloneFromId] = useState("");
+  const [clonePick, setClonePick] = useState<{ slug: string; id: string }>({ slug: "", id: "" });
+  const cloneFromId = clonePick.slug === tenantSlug ? clonePick.id : "";
   const [picks, setPicks] = useState<CallFlowNodeType[]>(STARTERS[0].picks);
   const [name, setName] = useState("");
 
@@ -63,14 +65,22 @@ export default function NewCallFlowPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!tenantSlug) return;
-    listCallFlows(tenantSlug).then(setExisting).catch(() => setExisting([]));
+    let cancelled = false;
+    if (tenantSlug) {
+      listCallFlows(tenantSlug)
+        .then((flows) => { if (!cancelled) setFlowList({ slug: tenantSlug, flows }); })
+        .catch(() => { if (!cancelled) setFlowList({ slug: tenantSlug, flows: [] }); });
+    }
+    return () => { cancelled = true; };
   }, [tenantSlug]);
 
   const cloning = start === "clone";
   const blocks = BLOCKS.filter((b) => b.directions.includes(direction));
   // Picks are kept in BLOCKS order so the chain matches the list the user sees.
   const steps = blocks.filter((b) => picks.includes(b.type)).map((b) => b.type);
+  const hasMenu = steps.includes("menu");
+  const terminalSteps: CallFlowNodeType[] = ["agent", "dial", "hangup"];
+  const firstTerminal = !hasMenu ? steps.find((type) => terminalSteps.includes(type)) : undefined;
   const graph = scaffoldGraph(steps, direction);
 
   // Walk the scaffold: a straight line from start, then the menu's keypress branches.
@@ -96,29 +106,26 @@ export default function NewCallFlowPage() {
 
   const chooseDirection = (next: FlowDirection) => {
     setDirection(next);
-    const starter = STARTERS.find((s) => s.key === start);
-    if (starter?.picks.some((type) => !BLOCKS.some((block) => block.type === type && block.directions.includes(next)))) {
-      const available = STARTERS.find((s) => s.picks.every((type) =>
-        BLOCKS.some((block) => block.type === type && block.directions.includes(next))));
-      if (available) {
-        setStart(available.key);
-        setPicks(available.picks);
-      } else {
-        setStart("scratch");
-        setPicks([]);
-      }
-    } else if (start === "scratch") {
-      setPicks((current) => current.filter((type) =>
-        BLOCKS.some((block) => block.type === type && block.directions.includes(next))));
-    }
+    const valid = picks.filter((type) => BLOCKS.some((block) => block.type === type && block.directions.includes(next)));
+    const withoutMenu = !valid.includes("menu");
+    const first = valid.find((type) => terminalSteps.includes(type));
+    const nextPicks = withoutMenu && first
+      ? valid.filter((type) => !terminalSteps.includes(type) || type === first)
+      : valid;
+    if (nextPicks.length !== picks.length) setStart("scratch");
+    setPicks(nextPicks);
   };
 
-  const togglePick = (type: CallFlowNodeType) =>
-    setPicks((p) => (p.includes(type) ? p.filter((t) => t !== type) : [...p, type]));
+  const togglePick = (type: CallFlowNodeType) => {
+    const next = picks.includes(type) ? picks.filter((t) => t !== type) : [...picks, type];
+    const starter = STARTERS.find((s) => s.key === start);
+    if (starter && (next.length !== starter.picks.length || next.some((t) => !starter.picks.includes(t)))) setStart("scratch");
+    setPicks(next);
+  };
 
   const cloneSource = existing.find((f) => f.id === cloneFromId);
   const dir = DIRECTIONS.find((d) => d.value === direction)!;
-  const canCreate = !creating && !!tenantSlug && slugify(name) !== "" && (!cloning || !!cloneFromId);
+  const canCreate = !creating && !!tenantSlug && slugify(name) !== "" && (!cloning || !!cloneSource);
 
   const handleCreate = async () => {
     if (!canCreate) return;
@@ -222,7 +229,7 @@ export default function NewCallFlowPage() {
         {cloning ? (
           <>
             <div className="qc-lbl">Menu to copy</div>
-            <select className="form-select" value={cloneFromId} onChange={(e) => setCloneFromId(e.target.value)}>
+            <select className="form-select" value={cloneFromId} onChange={(e) => setClonePick({ slug: tenantSlug, id: e.target.value })}>
               <option value="">— pick a menu —</option>
               {existing.map((f) => <option key={f.id} value={f.id}>{f.name} (v{f.config_version})</option>)}
             </select>
@@ -234,7 +241,9 @@ export default function NewCallFlowPage() {
             <div className="qc-steps">
               {blocks.map((b) => (
                 <label key={b.type}>
-                  <input type="checkbox" checked={picks.includes(b.type)} onChange={() => togglePick(b.type)} />
+                  <input type="checkbox" checked={picks.includes(b.type)}
+                    disabled={!hasMenu && terminalSteps.includes(b.type) && !!firstTerminal && firstTerminal !== b.type}
+                    onChange={() => togglePick(b.type)} />
                   <span>
                     <b>{b.label}</b>
                     <span className="form-hint">{b.blurb}</span>
@@ -246,6 +255,7 @@ export default function NewCallFlowPage() {
               Steps run in this order. Steps after the keypad menu become its options, and a hang up is
               added if nothing ends the call.
             </div>
+            {!hasMenu && firstTerminal && <div className="form-hint">Only one step can end the call without a keypad menu.</div>}
           </>
         )}
 
@@ -261,13 +271,13 @@ export default function NewCallFlowPage() {
           <div className="form-hint">Address: <span className="mono">{slugify(name) || "—"}</span></div>
         )}
 
-        {error && <div className="error-banner" style={{ marginTop: 12 }}>{error}</div>}
+        {(error ?? tenantError) && <div className="error-banner" style={{ marginTop: 12 }}>{error ?? tenantError}</div>}
 
         <div className="qc-foot">
           <span>
             {dir.blurb} · {cloning
               ? `copy of ${cloneSource?.name ?? "a menu"}`
-              : `${steps.length} step${steps.length === 1 ? "" : "s"} picked`}
+              : `${line.length} step${line.length === 1 ? "" : "s"} in the menu`}
           </span>
           <button className="btn btn-primary btn-sm" onClick={handleCreate} disabled={!canCreate}>
             {creating ? "Creating…" : <>Create menu <ArrowRight size={13} /></>}
@@ -285,7 +295,7 @@ export default function NewCallFlowPage() {
               <span>
                 <dir.icon size={12} />
                 {dir.title}
-                {!cloning && <> · {steps.length} step{steps.length === 1 ? "" : "s"}</>}
+                {!cloning && <> · {line.length} step{line.length === 1 ? "" : "s"}</>}
               </span>
             </div>
           </div>

@@ -27,3 +27,11 @@ test("a menu keeps distinct terminal branches", () => {
   const menuEdges = graph.edges.filter((edge) => edge.source === "menu-1");
   assert.deepEqual(menuEdges.map((edge) => edge.data?.key), ["1", "2", "timeout"]);
 });
+
+test("a collect menu branch ends instead of stalling", () => {
+  const graph = scaffoldGraph(["menu", "collect"], "inbound");
+  const collect = graph.nodes.find((node) => node.type === "collect");
+  assert.equal(collect.data.variable, "account_number");
+  assert.equal(graph.edges.some((edge) => edge.source === collect.id &&
+    graph.nodes.find((node) => node.id === edge.target)?.type === "hangup"), true);
+});

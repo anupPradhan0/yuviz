@@ -751,8 +751,12 @@ function Canvas({ flow, tenantSlug }: { flow: CallFlow; tenantSlug: string }) {
             <div className="cf-who-title">Who hears this menu</div>
             {!agentsLoaded ? (
               <p>{agentsError ? `Could not load agents: ${agentsError}` : "Loading agents…"}</p>
-            ) : attached.length > 0 ? (
+            ) : savedMeta.direction !== "inbound" ? (
+              <p>Calls only play menus set to People call us, so no caller hears this yet.</p>
+            ) : attached.length > 0 && published ? (
               <p>Callers to <b>{attached.map((a) => a.name).join(", ")}</b> hear this menu first.</p>
+            ) : attached.length > 0 ? (
+              <p>This menu is attached to <b>{attached.map((a) => a.name).join(", ")}</b>, but callers cannot hear it until it is published.</p>
             ) : (
               <p>No agent uses this menu yet, so no caller hears it.</p>
             )}
