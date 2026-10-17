@@ -38,6 +38,7 @@ export interface AgentDraft {
   savedAt: number;
   step: string;
   name: string;
+  direction?: "inbound" | "outbound" | "both";
   tenantSlug: string;
   purpose: string;
   persona: string;

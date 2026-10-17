@@ -6,17 +6,19 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Bot, MoreVertical, Pencil, Play, Plus, Workflow } from "lucide-react";
-import { Agent, AgentCallStats, ApiError, getAgentCallStats, listAgents, listPhoneNumbers } from "@/lib/api";
+import { Bot, MoreVertical, PauseCircle, Pencil, Play, PlayCircle, Plus, Workflow } from "lucide-react";
+import { Agent, AgentCallStats, ApiError, getAgentCallStats, listAgents, listPhoneNumbers, updateAgent } from "@/lib/api";
+import { AgentStatusDialog } from "@/components/AgentStatusDialog";
 import { useMenuKeys } from "@/lib/useMenuKeys";
 import { AgentTestPopup } from "@/components/AgentTestPopup";
 import { CallStatsGrid, NO_CALLS } from "@/components/CallStatsGrid";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 import { listAgentKnowledgeBases } from "@/lib/knowledgeApi";
 import { listAgentCustomApis } from "@/lib/toolexecApi";
-import { AGENT_TEMPLATES, agentDirection, agentIcon, agentTemplate } from "@/lib/agentTemplates";
+import { AGENT_TEMPLATES, agentIcon, agentTemplate } from "@/lib/agentTemplates";
 import { LANGUAGES } from "@/lib/engineCatalog";
 import { AgentDraft, clearAgentDraft, draftSavedLabel, loadAgentDraft } from "@/lib/agentDraft";
+import { hasInboundNumber, isChatAgent } from "@/lib/agentReadiness";
 
 interface AgentRow extends Agent {
   tenantName: string;
@@ -28,9 +30,12 @@ interface Attachments {
   tools: number | null;
   calls: AgentCallStats | null;
   numbers: string[] | null;
+  inboundNumber: boolean | null;
 }
 
-function AgentCardMenu({ editUrl, stepsUrl }: { editUrl: string; stepsUrl: string }) {
+function AgentCardMenu({ agent, editUrl, stepsUrl, onStatus }: {
+  agent: AgentRow; editUrl: string; stepsUrl: string; onStatus: (agent: AgentRow) => void;
+}) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const { triggerRef, menuRef, onMenuKey } = useMenuKeys(open, () => setOpen(false));
@@ -56,6 +61,10 @@ function AgentCardMenu({ editUrl, stepsUrl }: { editUrl: string; stepsUrl: strin
             <button role="menuitem" onClick={() => router.push(stepsUrl)}>
               <Workflow size={13} /> Conversation steps
             </button>
+            <button role="menuitem" onClick={() => { setOpen(false); onStatus(agent); }}>
+              {agent.status === "active" ? <PauseCircle size={13} /> : <PlayCircle size={13} />}
+              {agent.status === "active" ? "Pause agent" : agent.activated_at ? "Resume agent" : "Go live"}
+            </button>
           </div>
         </>
       )}
@@ -73,6 +82,7 @@ export default function AgentsPage() {
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState<AgentDraft | null>(null);
   const [testing, setTesting] = useState<AgentRow | null>(null);
+  const [statusTarget, setStatusTarget] = useState<AgentRow | null>(null);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -121,10 +131,11 @@ export default function AgentsPage() {
             listAgentCustomApis(a.id).then((r) => r.length).catch(() => null),
           ]);
           const nums = tenantNumbers.get(a.tenant_id);
-          const numbers = nums ? nums.filter((n) => n.agent_id === a.id).map((n) => n.did) : null;
+          const numbers = nums ? nums.filter((n) => n.agent_id === a.id && n.status === "active").map((n) => n.did) : null;
+          const inboundNumber = nums ? hasInboundNumber(a, nums) : null;
           const stats = tenantStats.get(a.tenant_id);
           const calls = stats ? (stats.find((s) => s.agent_id === a.id) ?? { agent_id: a.id, ...NO_CALLS }) : null;
-          return [a.id, { sources: kbs, tools: apis, calls, numbers }] as const;
+          return [a.id, { sources: kbs, tools: apis, calls, numbers, inboundNumber }] as const;
         }),
       );
       setAttachments(Object.fromEntries(entries));
@@ -207,7 +218,9 @@ export default function AgentsPage() {
             const language = LANGUAGES.find((l) => l.value === a.language)?.label ?? a.language;
             const Icon = agentIcon(a);
             const tpl = agentTemplate(a);
-            const direction = agentDirection(a);
+            const direction = a.direction;
+            const unreachable = a.status === "active" && direction !== "outbound" &&
+              !isChatAgent(a) && att?.inboundNumber === false;
             const editUrl = `/agents/${a.tenantSlug}/${a.slug}`;
             return (
               <div key={a.id} className={`agent-card${a.status === "active" ? "" : " paused"}`}>
@@ -216,7 +229,8 @@ export default function AgentsPage() {
                   <button className="agent-card-icon-btn" aria-label={`Test ${a.name}`} title="Test it" onClick={() => setTesting(a)}>
                     <Play size={15} />
                   </button>
-                  <AgentCardMenu editUrl={editUrl} stepsUrl={`/workflows/${a.tenantSlug}/${a.slug}`} />
+                  <AgentCardMenu agent={a} editUrl={editUrl}
+                    stepsUrl={`/workflows/${a.tenantSlug}/${a.slug}`} onStatus={setStatusTarget} />
                 </div>
 
                 <Link href={editUrl} className="agent-card-name agent-card-link">{a.name}</Link>
@@ -225,12 +239,12 @@ export default function AgentsPage() {
                 <div className="agent-card-meta">
                   {direction && (
                     <span className={`badge ${direction === "inbound" ? "cyan" : "indigo"}`}>
-                      {direction === "inbound" ? "Inbound" : "Outbound"}
+                      {direction === "inbound" ? "Inbound" : direction === "outbound" ? "Outbound" : "Inbound + outbound"}
                     </span>
                   )}
                   <span className="badge gray">{tpl?.label ?? "Custom"}</span>
                   {att?.numbers != null && (att.numbers.length === 0
-                    ? <span className="badge gray">No number</span>
+                    ? direction !== "outbound" && !isChatAgent(a) && <span className="badge gray">No number</span>
                     : att.numbers.map((n) => <span key={n} className="badge green">{n}</span>))}
                 </div>
 
@@ -248,8 +262,8 @@ export default function AgentsPage() {
                 {att?.calls && <CallStatsGrid stats={att.calls} />}
 
                 <div className="agent-card-foot">
-                  <span className={`agent-card-status${a.status === "active" ? " on" : ""}`}>
-                    <i />{a.status === "active" ? "Live" : "Paused"}
+                  <span className={`agent-card-status${unreachable ? " unreachable" : a.status === "active" ? " on" : ""}`}>
+                    <i />{unreachable ? "Not reachable – no number" : a.status === "active" ? "Live" : "Paused"}
                   </span>
                 </div>
               </div>
@@ -296,6 +310,15 @@ export default function AgentsPage() {
           </div>
         </section>
       )}
+      <AgentStatusDialog key={statusTarget?.id ?? "closed"} agent={statusTarget} tenantSlug={statusTarget?.tenantSlug ?? ""}
+        onClose={() => setStatusTarget(null)} onConfirm={async (target) => {
+          const row = statusTarget;
+          if (!row) return;
+          const updated = await updateAgent(row.tenantSlug, target.id, {
+            status: target.status === "active" ? "inactive" : "active",
+          });
+          setAgents((current) => current.map((item) => item.id === target.id ? { ...item, ...updated } : item));
+        }} />
     </>
   );
 }

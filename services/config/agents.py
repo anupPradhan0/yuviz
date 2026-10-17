@@ -37,7 +37,7 @@ from .system_prompt import check_prompt_structure
 # `workflow` is absent — only publish/create may write a validated graph
 # (except the greeting/system_prompt mirror sync in update_agent).
 _UPDATABLE_FIELDS = {
-    "name", "greeting", "system_prompt", "goodbye_grace_ms", "language",
+    "name", "direction", "greeting", "system_prompt", "goodbye_grace_ms", "language",
     "stt_config_id", "llm_config_id", "tts_config_id",
     "transfer_type", "transfer_destination", "queue_id", "escalation_threshold",
     "caller_id_policy", "platform_did", "custom_caller_id",
@@ -511,6 +511,7 @@ async def create_agent(
     tenant_id: Any,
     slug: str,
     name: str,
+    direction: str = "inbound",
     greeting: str = "",
     system_prompt: str = "",
     stt_config_id: Any | None = None,
@@ -566,14 +567,14 @@ async def create_agent(
             "INSERT INTO agents "
             "(tenant_id, slug, name, greeting, system_prompt, "
             "stt_config_id, llm_config_id, tts_config_id, workflow, workflow_draft, "
-            "language, status, template_id, template_version, "
+            "language, status, direction, template_id, template_version, "
             "supported_languages, tts_config_by_language, greeting_by_language, language_mode) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $9::jsonb, $10, $11, $12, $13, "
-            "$14, $15::jsonb, $16::jsonb, $17) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $9::jsonb, $10, $11, $12, $13, $14, "
+            "$15, $16::jsonb, $17::jsonb, $18) "
             "RETURNING *",
             tenant_id, slug, name, greeting, system_prompt,
             stt_config_id, llm_config_id, tts_config_id, graph_json,
-            langs.get("language", language), status, template_id, template_version,
+            langs.get("language", language), status, direction, template_id, template_version,
             langs["supported_languages"], langs["tts_config_by_language"],
             langs["greeting_by_language"], langs.get("language_mode"),
         )

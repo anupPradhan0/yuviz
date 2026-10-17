@@ -517,3 +517,66 @@ def test_shared_blocks_are_plain_text_lines_that_never_look_like_headings():
         assert len(lines) >= 9
         assert not set(sp._HEADINGS) & {ln.strip() for ln in lines}
         assert not any(ln.lstrip().startswith(("#", "*", "-", "|")) for ln in lines)
+
+
+def _sections(prompt: str) -> dict[str, str]:
+    """Each required heading's section text (WANTS runs to WRONG)."""
+    lines = prompt.splitlines()
+    heads = list(sp._HEADINGS)
+    pos = [lines.index(h) for h in heads]
+    ends = [*pos[1:], len(lines)]
+    return {h: "\n".join(lines[a + 1:b]) for h, a, b in zip(heads, pos, ends)}
+
+
+# --- knowledge grounding in the generation brief and the saved prompt ------
+
+def _kb_inputs(on: bool = True):
+    return {**_inputs(), "has_knowledge_base": on}
+
+
+def test_generation_brief_copies_the_knowledge_rule_exactly_when_a_kb_is_attached():
+    brief = sp._meta_prompt(_kb_inputs())
+    assert f"3. Under {sp.HEADING_WANTS}: {sp._KNOWLEDGE_RULE}" in brief
+
+
+def test_generation_brief_has_no_knowledge_rule_without_a_knowledge_base():
+    brief = sp._meta_prompt(_kb_inputs(False))
+    assert "search_knowledge" not in brief and sp._KNOWLEDGE_RULE not in brief
+
+
+def test_knowledge_rule_is_scoped_to_documents_and_defers_live_data_to_other_tools():
+    rule = sp._KNOWLEDGE_RULE
+    assert "search_knowledge" in rule and "call the search_knowledge tool first" in rule
+    assert "EVERY" not in rule and "every factual question" not in rule
+    assert "matching tool" in rule and "order" in rule
+
+
+def test_enforcer_puts_the_knowledge_rule_back_when_the_model_dropped_it():
+    prompt = _prompt()
+    assert sp._KNOWLEDGE_RULE not in prompt
+    fixed = enforce_prompt_structure(prompt, channel="voice", has_knowledge_base=True)
+    sec = _sections(fixed)
+    assert sp._KNOWLEDGE_RULE in sec[sp.HEADING_WANTS]
+    assert sp._KNOWLEDGE_RULE not in sec[sp.HEADING_GUARDRAILS]
+    # idempotent, and the rest of the structure is intact
+    assert enforce_prompt_structure(fixed, channel="voice", has_knowledge_base=True) == fixed
+    assert sp.check_prompt_structure(fixed)
+
+
+def test_enforcer_adds_no_knowledge_rule_for_an_agent_without_a_kb():
+    prompt = _prompt()
+    assert sp._KNOWLEDGE_RULE not in enforce_prompt_structure(prompt, channel="voice")
+    assert sp._KNOWLEDGE_RULE not in enforce_prompt_structure(prompt, channel="voice", has_knowledge_base=False)
+
+
+async def test_generated_prompt_keeps_the_knowledge_rule_even_if_the_model_paraphrased_it(monkeypatch):
+    paraphrased = _prompt(job=["Use the knowledge base when answering.", "Stay on topic.", "Be kind."])
+
+    async def fake_complete(*args, **kwargs):
+        return paraphrased
+
+    monkeypatch.setattr(sp, "_complete", fake_complete)
+    out = await sp.generate_system_prompt("t", "c", _kb_inputs(), secret_resolver=None)
+    assert sp._KNOWLEDGE_RULE in _sections(out)[sp.HEADING_WANTS]
+    out_no_kb = await sp.generate_system_prompt("t", "c", _kb_inputs(False), secret_resolver=None)
+    assert sp._KNOWLEDGE_RULE not in out_no_kb

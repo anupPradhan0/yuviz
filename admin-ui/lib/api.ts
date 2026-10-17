@@ -231,6 +231,7 @@ export const triggerModelDownload = (engine: string, name: string) =>
 // ── Agents ───────────────────────────────────────────────────────────────
 
 export type AgentStatus = "active" | "inactive";
+export type AgentDirection = "inbound" | "outbound" | "both";
 export type LanguageMode = "monolingual" | "multilingual";
 
 export interface Agent {
@@ -238,6 +239,7 @@ export interface Agent {
   tenant_id: string;
   slug: string;
   name: string;
+  direction: AgentDirection;
   greeting: string;
   system_prompt: string;
   goodbye_grace_ms: number;
@@ -304,6 +306,7 @@ export interface Agent {
 export interface AgentCreate {
   slug: string;
   name: string;
+  direction?: AgentDirection;
   greeting?: string;
   system_prompt?: string;
   stt_config_id?: string | null;
@@ -320,6 +323,7 @@ export interface AgentCreate {
 
 export interface AgentUpdate {
   name?: string;
+  direction?: AgentDirection;
   greeting?: string;
   system_prompt?: string;
   goodbye_grace_ms?: number;

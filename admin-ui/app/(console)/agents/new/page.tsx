@@ -7,6 +7,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { AlertCircle, ArrowLeft, ArrowRight, Check, Sparkles } from "lucide-react";
 import {
   Agent,
+  AgentDirection,
   AgentUpdate,
   ApiError,
   LanguageMode,
@@ -68,6 +69,7 @@ export default function NewAgentPage() {
 
   // Step 1 — Identity
   const [name, setName] = useState(template?.label ?? "");
+  const [direction, setDirection] = useState<AgentDirection>(template?.direction ?? "inbound");
   const [tenantSlug, setTenantSlug] = useState(searchParams.get("tenant") || "");
   const [purpose, setPurpose] = useState(template?.purpose ?? "");
   const [persona, setPersona] = useState(template?.persona ?? "");
@@ -132,6 +134,7 @@ export default function NewAgentPage() {
       /* eslint-disable react-hooks/set-state-in-effect */
       setStep(STEPS.some((s) => s.key === d.step) ? (d.step as Step) : "identity");
       setName(d.name);
+      setDirection(d.direction ?? "inbound");
       if (!searchParams.get("tenant")) setTenantSlug(d.tenantSlug);
       setPurpose(d.purpose);
       setPersona(d.persona);
@@ -182,7 +185,7 @@ export default function NewAgentPage() {
     const timer = setTimeout(() => {
       const draft: AgentDraft = {
         savedAt: Date.now(),
-        step, name, tenantSlug, purpose, persona, tone, languageMode, languages,
+        step, name, direction, tenantSlug, purpose, persona, tone, languageMode, languages,
         // Kept for the draft shape's older readers.
         languageChoice: languages[0] ?? "", customLanguage: "",
         ttsByLanguage, sttId, llmId, ttsId,
@@ -196,7 +199,7 @@ export default function NewAgentPage() {
     }, 400);
     return () => clearTimeout(timer);
   }, [
-    draftReady, mode, hasContent, step, name, tenantSlug, purpose, persona, tone, languageMode, languages,
+    draftReady, mode, hasContent, step, name, direction, tenantSlug, purpose, persona, tone, languageMode, languages,
     ttsByLanguage,
     sttId, llmId, ttsId, maxCallDuration, goodbyeGraceMs, escalationThreshold, transferType,
     transferDestination, transferCondition, transferAnnouncement, complianceInstructions, fallbackResponse,
@@ -337,6 +340,7 @@ export default function NewAgentPage() {
         agent = await createAgent(tenantSlug, {
           slug,
           name: name.trim(),
+          direction,
           greeting,
           system_prompt: systemPrompt,
           stt_config_id: known(sttId),
@@ -442,6 +446,15 @@ export default function NewAgentPage() {
                 {tenants.map((t) => (
                   <option key={t.id} value={t.slug}>{t.name}</option>
                 ))}
+              </select>
+            </div>
+            <div className="form-group">
+              <label className="form-label" htmlFor="agent-direction">Call direction</label>
+              <select id="agent-direction" className="form-select" value={direction}
+                onChange={(e) => setDirection(e.target.value as AgentDirection)}>
+                <option value="inbound">People call my agent</option>
+                <option value="outbound">My agent calls people</option>
+                <option value="both">Both directions</option>
               </select>
             </div>
             <div className="form-group">

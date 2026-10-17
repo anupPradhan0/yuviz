@@ -80,6 +80,7 @@ class SystemPromptGenerate(BaseModel):
 class AgentCreate(BaseModel):
     slug:           str
     name:           str
+    direction:      Literal["inbound", "outbound", "both"] = "inbound"
     greeting:       str = ""
     system_prompt:  str = ""
     stt_config_id:  str | None = None
@@ -160,6 +161,14 @@ class PromptAccept(BaseModel):
 
 class AgentUpdate(BaseModel):
     name:                 str | None = None
+    direction:            Literal["inbound", "outbound", "both"] | None = None
+
+    @field_validator("direction")
+    @classmethod
+    def _direction_not_null(cls, value: str | None) -> str:
+        if value is None:
+            raise ValueError("direction cannot be null")
+        return value
     greeting:             str | None = None
     system_prompt:        str | None = None
     goodbye_grace_ms:     int | None = None

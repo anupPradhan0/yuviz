@@ -98,14 +98,6 @@ export function agentTemplate(agent: { name: string; greeting: string | null }):
   );
 }
 
-// Direction isn't stored; infer it from the template or the quick-create default greeting.
-export function agentDirection(agent: { name: string; greeting: string | null }): CallDirection | null {
-  const tpl = agentTemplate(agent);
-  if (tpl) return tpl.direction;
-  const greeting = agent.greeting?.trim();
-  return (Object.keys(DEFAULT_GREETING) as CallDirection[]).find((d) => DEFAULT_GREETING[d] === greeting) ?? null;
-}
-
 // Template icon when one matches; otherwise a stable pick by id.
 export function agentIcon(agent: { id: string; name: string; greeting: string | null }): LucideIcon {
   const tpl = agentTemplate(agent);
