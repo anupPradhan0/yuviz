@@ -29,6 +29,14 @@ test("both directions require both routes", () => {
   assert.equal(readinessItems(both, [], []).length, 2);
 });
 
+test("campaign lookup failure keeps the independent inbound check", () => {
+  assert.equal(readinessItems(agent, [], null)[0].text, "No active phone number is assigned to this agent");
+  assert.equal(readinessItems({ ...agent, direction: "both" }, [], null)[0].text,
+    "No active phone number is assigned to this agent");
+  assert.equal(readinessItems({ ...agent, direction: "outbound" }, [number], null)[0].text,
+    "Could not check outbound campaign setup");
+});
+
 test("chat-template agents do not need phone routes", () => {
   assert.deepEqual(readinessItems({ ...agent, template_id: "faq-support" }, [], []), []);
   assert.deepEqual(readinessItems({ ...agent, direction: "both", template_id: "faq-support" }, [], []), []);

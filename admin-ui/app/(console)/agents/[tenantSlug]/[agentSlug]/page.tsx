@@ -27,7 +27,7 @@ import { deriveLanguageDraft } from "@/lib/agentDraft";
 import { useLocalModels } from "@/lib/useLocalModels";
 import { normalizeDialTarget } from "@/lib/dialTargets";
 import { useMenuKeys } from "@/lib/useMenuKeys";
-import { readinessItems } from "@/lib/agentReadiness";
+import { hasInboundNumber, isChatAgent, readinessItems } from "@/lib/agentReadiness";
 
 type Section = "instructions" | "voice" | "knowledge" | "settings" | "advanced";
 
@@ -422,9 +422,9 @@ export default function AgentDetailPage() {
   const escalation = form.escalation_threshold ?? null;
   const escalationOptions =
     escalation === null || ESCALATION_OPTIONS.includes(escalation) ? ESCALATION_OPTIONS : [...ESCALATION_OPTIONS, escalation].sort((a, b) => a - b);
-  const hasNumber = numbers?.some((n) => n.agent_id === agent.id && n.status === "active") ?? true;
-  const needsNumber = form.direction !== "outbound" && !hasNumber;
-  const missingReadiness = numbers && campaigns
+  const needsNumber = numbers !== null && form.direction !== "outbound" &&
+    !isChatAgent(agent) && !hasInboundNumber(agent, numbers);
+  const missingReadiness = numbers !== null
     ? readinessItems({ ...agent, direction: form.direction ?? agent.direction }, numbers, campaigns)
     : null;
 

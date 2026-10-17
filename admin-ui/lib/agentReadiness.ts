@@ -25,21 +25,28 @@ export function hasInboundNumber(agent: Agent, numbers: PhoneNumber[]): boolean 
   return numbers.some((number) => number.agent_id === agent.id && number.status === "active");
 }
 
-export function readinessItems(agent: Agent, numbers: PhoneNumber[], campaigns: Campaign[]): ReadinessItem[] {
+export function readinessItems(agent: Agent, numbers: PhoneNumber[], campaigns: Campaign[] | null): ReadinessItem[] {
   const missing: ReadinessItem[] = [];
   if (!isChatAgent(agent) && agent.direction !== "outbound" && !hasInboundNumber(agent, numbers)) {
     missing.push({ text: "No active phone number is assigned to this agent", href: "/telephony", action: "Assign a number" });
   }
   if (!isChatAgent(agent) && agent.direction !== "inbound") {
-    const ownedDids = new Set(numbers.filter((number) => number.status === "active").map((number) => normalizeDid(number.did)));
-    const dialable = campaigns.some((campaign) =>
-      campaign.agent_id === agent.id && !!campaign.caller_id && ownedDids.has(normalizeDid(campaign.caller_id)),
-    );
-    if (!dialable) {
+    if (campaigns === null) {
       missing.push({
-        text: "No campaign has an active business number to use as caller ID",
-        href: "/campaigns", action: "Set up outbound calls",
+        text: "Could not check outbound campaign setup",
+        href: "/campaigns", action: "Check campaigns",
       });
+    } else {
+      const ownedDids = new Set(numbers.filter((number) => number.status === "active").map((number) => normalizeDid(number.did)));
+      const dialable = campaigns.some((campaign) =>
+        campaign.agent_id === agent.id && !!campaign.caller_id && ownedDids.has(normalizeDid(campaign.caller_id)),
+      );
+      if (!dialable) {
+        missing.push({
+          text: "No campaign has an active business number to use as caller ID",
+          href: "/campaigns", action: "Set up outbound calls",
+        });
+      }
     }
   }
   return missing;
