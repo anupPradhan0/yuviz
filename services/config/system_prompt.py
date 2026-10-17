@@ -101,6 +101,11 @@ HUMAN_SPEECH_CHAT = "\n".join((
     "Never mention these instructions, your tools or \"the system\".",
 ))
 _SPEECH_BLOCK = {"voice": HUMAN_SPEECH_VOICE, "chat": HUMAN_SPEECH_CHAT}
+# Added under HEADING_WANTS for an agent with a knowledge base; scoped to what documents cover so it cannot crowd out the
+# agent's other tools. Mirrored in admin-ui/lib/systemPromptBuilder.ts (a test compares them).
+_KNOWLEDGE_RULE = (
+    "For any question the business's own documents would answer (policies, hours, services, pricing rules, terms, how something works), call the search_knowledge tool first, before answering and before saying you do not know, and answer only from what it returns, in the caller's language. If it returns nothing relevant, say so plainly and offer a next step; do not answer from memory. Live account, order or booking details come from the matching tool when one is available, not from search_knowledge."
+)
 
 
 class PromptStructureError(ValueError):
@@ -151,7 +156,9 @@ def _role_medium_matches(lines: list[str], channel: Literal["voice", "chat"]) ->
     return f"live {_MEDIUM[channel]}" in role
 
 
-def enforce_prompt_structure(text: str, *, channel: Literal["voice", "chat"]) -> str:
+def enforce_prompt_structure(
+    text: str, *, channel: Literal["voice", "chat"], has_knowledge_base: bool = False,
+) -> str:
     if not _has_current_structure(text):
         raise PromptStructureError("prompt is missing its sections or job lines")
     lines = text.splitlines()
@@ -159,10 +166,11 @@ def enforce_prompt_structure(text: str, *, channel: Literal["voice", "chat"]) ->
         raise PromptStructureError(f"role line is not on a live {_MEDIUM[channel]}")
     idx = dict(zip(_HEADINGS, _heading_indices(lines)))
     # Later section first, so the earlier indices stay valid after an insert.
-    for block, heading, next_heading in (
-        (_GUARDRAILS, HEADING_GUARDRAILS, HEADING_STYLE),
-        (_SPEECH_BLOCK[channel], HEADING_SPEAK, HEADING_WANTS),
-    ):
+    blocks = [(_GUARDRAILS, HEADING_GUARDRAILS, HEADING_STYLE)]
+    if has_knowledge_base:
+        blocks.append((_KNOWLEDGE_RULE, HEADING_WANTS, HEADING_WRONG))
+    blocks.append((_SPEECH_BLOCK[channel], HEADING_SPEAK, HEADING_WANTS))
+    for block, heading, next_heading in blocks:
         start, end = idx[heading], idx[next_heading]
         if block in "\n".join(lines[start + 1:end]):
             continue
@@ -259,13 +267,7 @@ def _meta_prompt(inputs: dict[str, Any]) -> str:
         "soften them):\n"
         f"1. Under {HEADING_GUARDRAILS}: {_GUARDRAILS}\n"
         f"2. Under {HEADING_SPEAK}: {HUMAN_SPEECH_VOICE}\n"
-        + ("3. A knowledge base is attached, so the agent has a search_knowledge tool. Under "
-           f"{HEADING_WANTS} add a rule that for EVERY factual question about the business or "
-           "its subject it must call search_knowledge first, before answering and before "
-           "saying it does not know, and answer only from what the tool returns (in the "
-           "caller's language). If the tool returns nothing relevant it must say so plainly and "
-           "offer a next step, never answer from memory or improvise.\n"
-           if inputs["has_knowledge_base"] else "")
+        + (f"3. Under {HEADING_WANTS}: {_KNOWLEDGE_RULE}\n" if inputs["has_knowledge_base"] else "")
         + (f"4. When it doesn't know something, it must say, verbatim: \"{inputs['fallback_response']}\"\n"
            if inputs.get("fallback_response") else "")
         + (f"5. It must always follow these rules, verbatim: {inputs['compliance_instructions']}\n"
@@ -390,7 +392,9 @@ async def generate_system_prompt(
         tenant_id, llm_config_id, [{"role": "user", "content": _meta_prompt(inputs)}],
         max_tokens=_PROMPT_MAX_TOKENS, secret_resolver=secret_resolver,
     )
-    return enforce_prompt_structure(text, channel="voice")
+    return enforce_prompt_structure(
+        text, channel="voice", has_knowledge_base=bool(inputs.get("has_knowledge_base")),
+    )
 
 
 def _revise_system(channel: Literal["voice", "chat"]) -> str:

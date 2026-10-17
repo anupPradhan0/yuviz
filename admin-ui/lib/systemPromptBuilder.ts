@@ -1,6 +1,6 @@
 // Deterministic system-prompt template (no LLM call) so guardrails can't be dropped by generation variance.
 // The speech and guardrail blocks below must stay identical to services/config/system_prompt.py
-// (HUMAN_SPEECH_VOICE, _GUARDRAILS); a pytest compares them.
+// (HUMAN_SPEECH_VOICE, _GUARDRAILS, _KNOWLEDGE_RULE); a pytest compares them.
 
 const HUMAN_SPEECH_VOICE = [
   "Sound like a warm, confident front-desk person: natural and friendly, never robotic.",
@@ -31,6 +31,10 @@ const GUARDRAILS = [
   "If the caller is abusive, warn once calmly, then end the conversation politely.",
   "If a knowledge-search tool is available, search it before saying you do not know.",
   "When a handoff is needed, follow this job's handoff rule.",
+].join("\n");
+
+const KNOWLEDGE_RULE = [
+  "For any question the business's own documents would answer (policies, hours, services, pricing rules, terms, how something works), call the search_knowledge tool first, before answering and before saying you do not know, and answer only from what it returns, in the caller's language. If it returns nothing relevant, say so plainly and offer a next step; do not answer from memory. Live account, order or booking details come from the matching tool when one is available, not from search_knowledge.",
 ].join("\n");
 
 export interface SystemPromptInputs {
@@ -71,6 +75,7 @@ export function buildSystemPrompt(inputs: SystemPromptInputs): string {
   }
 
   if (inputs.hasKnowledgeBase) {
+    wants.push(KNOWLEDGE_RULE);
     guardrails.push(
       "Ground every factual claim in the knowledge base or tool results provided to you. If the " +
         "knowledge base does not cover what the caller is asking, say you don't have that " +
