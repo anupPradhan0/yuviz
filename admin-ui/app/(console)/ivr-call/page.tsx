@@ -213,7 +213,14 @@ export default function CallFlowsPage() {
             const dir = DIRECTION[f.direction];
             const url = `/ivr-call/${f.id}`;
             // The call runtime only plays published inbound menus; it ignores status.
-            const live = f.is_published && f.direction === "inbound";
+            const live = f.is_published && f.direction === "inbound" && (l?.agents?.length ?? 0) > 0;
+            const status = live
+              ? "Live"
+              : !f.is_published
+                ? "Draft"
+                : f.direction === "inbound" && l?.agents == null
+                  ? "Agent links unknown"
+                  : "Not playing on calls";
             return (
               <div key={f.id} className={`agent-card${live ? "" : " paused"}`}>
                 <div className="agent-card-top">
@@ -243,7 +250,7 @@ export default function CallFlowsPage() {
 
                 <div className="agent-card-foot">
                   <span className={`agent-card-status${live ? " on" : ""}`}>
-                    <i />{live ? "Live" : f.is_published ? "Not playing on calls" : "Draft"}
+                    <i />{status}
                   </span>
                 </div>
               </div>

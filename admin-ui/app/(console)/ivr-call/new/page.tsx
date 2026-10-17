@@ -94,6 +94,25 @@ export default function NewCallFlowPage() {
     else if (key === "scratch") setPicks([]);
   };
 
+  const chooseDirection = (next: FlowDirection) => {
+    setDirection(next);
+    const starter = STARTERS.find((s) => s.key === start);
+    if (starter?.picks.some((type) => !BLOCKS.some((block) => block.type === type && block.directions.includes(next)))) {
+      const available = STARTERS.find((s) => s.picks.every((type) =>
+        BLOCKS.some((block) => block.type === type && block.directions.includes(next))));
+      if (available) {
+        setStart(available.key);
+        setPicks(available.picks);
+      } else {
+        setStart("scratch");
+        setPicks([]);
+      }
+    } else if (start === "scratch") {
+      setPicks((current) => current.filter((type) =>
+        BLOCKS.some((block) => block.type === type && block.directions.includes(next))));
+    }
+  };
+
   const togglePick = (type: CallFlowNodeType) =>
     setPicks((p) => (p.includes(type) ? p.filter((t) => t !== type) : [...p, type]));
 
@@ -147,7 +166,7 @@ export default function NewCallFlowPage() {
               role="radio"
               aria-checked={direction === d.value}
               className={direction === d.value ? "on" : ""}
-              onClick={() => setDirection(d.value)}
+              onClick={() => chooseDirection(d.value)}
             >
               <b>{d.title}</b>
               <span>{d.blurb}</span>
