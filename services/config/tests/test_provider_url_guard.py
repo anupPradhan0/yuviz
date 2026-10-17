@@ -85,3 +85,51 @@ async def test_engines_with_fixed_vendor_urls_and_other_roles_are_not_affected(a
         resp = await admin.post(f"/tenants/{test_tenant['id']}/providers", json={
             "name": engine, "role": role, "engine": engine, "extra": {"base_url": "http://10.0.0.5:11434"}})
         assert resp.status_code == 201, (role, engine, resp.text)
+
+
+async def test_a_faster_whisper_model_outside_the_registry_is_a_400_on_create_and_update(admin, pool, test_tenant):
+    body = {"name": "STT", "role": "stt", "engine": "faster_whisper", "model": "someone/huge-model"}
+    resp = await admin.post(f"/tenants/{test_tenant['id']}/providers", json=body)
+    assert resp.status_code == 400 and "not a supported faster_whisper model" in resp.json()["detail"]
+    assert await pool.fetchval("SELECT count(*) FROM provider_configs WHERE tenant_id = $1", test_tenant["id"]) == 0
+
+    created = await admin.post(f"/tenants/{test_tenant['id']}/providers", json={**body, "model": "small"})
+    assert created.status_code == 201
+    bad = await admin.patch(f"/providers/{created.json()['id']}", json={"model": "someone/huge-model"})
+    assert bad.status_code == 400
+    ok = await admin.patch(f"/providers/{created.json()['id']}", json={"model": "tiny"})
+    assert ok.status_code == 200
+
+
+async def test_a_stored_non_registry_whisper_row_still_loads_and_can_be_renamed(admin, pool, test_tenant):
+    row_id = await pool.fetchval(
+        "INSERT INTO provider_configs (tenant_id, name, role, engine, model) "
+        "VALUES ($1, 'legacy', 'stt', 'faster_whisper', 'distil-large') RETURNING id", test_tenant["id"],
+    )
+    assert (await admin.get(f"/providers/{row_id}")).status_code == 200
+    assert (await admin.patch(f"/providers/{row_id}", json={"name": "renamed"})).status_code == 200
+
+
+async def test_renaming_a_legacy_whisper_row_with_the_ui_shaped_patch_is_accepted(admin, pool, test_tenant):
+    # ProvidersPanel always sends engine and the stored model alongside the edited field.
+    row_id = await pool.fetchval(
+        "INSERT INTO provider_configs (tenant_id, name, role, engine, model) "
+        "VALUES ($1, 'legacy', 'stt', 'faster_whisper', 'my-finetune') RETURNING id", test_tenant["id"],
+    )
+    resp = await admin.patch(
+        f"/providers/{row_id}", json={"name": "renamed", "engine": "faster_whisper", "model": "my-finetune"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert (await admin.patch(f"/providers/{row_id}", json={"model": "other-finetune"})).status_code == 400
+
+
+@pytest.mark.parametrize("extra", [{"compute_type": "int3"}, {"device": "tpu"}])
+async def test_a_bogus_whisper_device_or_compute_type_is_a_400_on_write(admin, test_tenant, extra):
+    body = {"name": "STT", "role": "stt", "engine": "faster_whisper", "model": "small", "extra": extra}
+    assert (await admin.post(f"/tenants/{test_tenant['id']}/providers", json=body)).status_code == 400
+    created = await admin.post(
+        f"/tenants/{test_tenant['id']}/providers",
+        json={**body, "extra": {"device": "cpu", "compute_type": "int8"}},
+    )
+    assert created.status_code == 201
+    assert (await admin.patch(f"/providers/{created.json()['id']}", json={"extra": extra})).status_code == 400

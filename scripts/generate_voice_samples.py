@@ -1,6 +1,6 @@
 """Pre-render static macOS/Kokoro voice preview samples for LocalVoicePicker.
 
-Re-run when engineCatalog.ts's VOICES_BY_ENGINE changes.
+Re-run when the voices in libs/config_sdk/local_models.py change.
 Usage: ./venv/bin/python scripts/generate_voice_samples.py
 """
 
@@ -10,6 +10,7 @@ import asyncio
 import wave
 from pathlib import Path
 
+from libs.config_sdk.local_models import LOCAL_MODELS
 from services.conversation.providers.tts.kokoro import KokoroTTS
 from services.conversation.providers.tts.macos import MacOSTTS
 
@@ -18,14 +19,8 @@ SAMPLE_TEXT = "Hi there, this is a quick preview of my voice."
 
 OUT_ROOT = Path(__file__).resolve().parent.parent / "admin-ui" / "public" / "voice-samples"
 
-# Mirrors admin-ui/lib/engineCatalog.ts's VOICES_BY_ENGINE; keep in sync by hand.
-MACOS_VOICES = ["Samantha", "Karen", "Moira", "Alex", "Daniel"]
-KOKORO_VOICES = [
-    "af_sarah", "af_bella", "af_nicole",
-    "bf_emma", "bf_isabella",
-    "am_adam", "am_michael",
-    "bm_george", "bm_lewis",
-]
+MACOS_VOICES = [m.name for m in LOCAL_MODELS if m.engine == "macos"]
+KOKORO_VOICES = [m.name for m in LOCAL_MODELS if m.engine == "kokoro"]
 
 
 def _write_wav(path: Path, pcm: bytes) -> None:

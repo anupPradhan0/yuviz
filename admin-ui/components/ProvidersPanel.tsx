@@ -23,6 +23,7 @@ import {
   VOICES_BY_ENGINE, languageLabel,
 } from "@/lib/engineCatalog";
 import { useActiveTenant } from "@/lib/useActiveTenant";
+import { useLocalModels } from "@/lib/useLocalModels";
 
 const ALL_ROLES: ProviderRole[] = ["stt", "llm", "tts"];
 const ENVIRONMENTS: ProviderEnvironment[] = ["prod", "staging", "dev"];
@@ -72,6 +73,21 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
   // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
   useEffect(refresh, [tenantId]);
 
+  const { models: localModels } = useLocalModels();
+
+  // Free engines (faster_whisper, ollama, kokoro, macos) list the server's catalogue; cloud engines keep their static lists.
+  const modelsFor = (role: ProviderRole, engine: string) => {
+    if (role === "embedding") return EMBEDDING_MODELS_BY_ENGINE[engine];
+    const local = localModels.filter((m) => m.engine === engine && m.role === role);
+    return local.length ? local.map((m) => m.name) : MODELS_BY_ENGINE[engine];
+  };
+  const voicesFor = (engine: string) => {
+    const local = localModels.filter((m) => m.engine === engine && m.role === "tts");
+    if (!local.length) return VOICES_BY_ENGINE[engine];
+    const genders = new Map(VOICES_BY_ENGINE[engine]?.map((v) => [v.id, v.gender]));
+    return local.map((m) => ({ id: m.name, label: m.label, gender: genders.get(m.name) }));
+  };
+
   const resetForm = () => {
     setForm(emptyForm(allowedRoles[0]));
     setModelChoice("");
@@ -117,10 +133,10 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
       name: p.name, role: p.role, engine: p.engine, environment: p.environment,
       api_key_ref: p.api_key_ref || undefined, language: p.language || undefined,
     });
-    const models = MODELS_BY_ENGINE[p.engine];
+    const models = modelsFor(p.role, p.engine);
     if (p.model) setModelChoice(models && models.includes(p.model) ? p.model : OTHER);
     if (p.model && !(models && models.includes(p.model))) setCustomModel(p.model);
-    const voices = VOICES_BY_ENGINE[p.engine];
+    const voices = voicesFor(p.engine);
     const knownVoice = voices?.some((v) => v.id === p.voice) ?? false;
     if (p.voice) setVoiceChoice(knownVoice ? p.voice : OTHER);
     if (p.voice && !knownVoice) setCustomVoice(p.voice);
@@ -217,8 +233,8 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
     }
   };
 
-  const modelOptions = form.role === "embedding" ? EMBEDDING_MODELS_BY_ENGINE[form.engine] : MODELS_BY_ENGINE[form.engine];
-  const voiceOptions = VOICES_BY_ENGINE[form.engine];
+  const modelOptions = modelsFor(form.role, form.engine);
+  const voiceOptions = voicesFor(form.engine);
   const languageOptions = [
     ...(form.role === "stt" && form.engine === "deepgram"
       ? [{ value: DEEPGRAM_MULTI, label: "multi (code-switching, nova-2/3)" }]
@@ -426,7 +442,7 @@ export function ProvidersPanel({ allowedRoles = ALL_ROLES, title }: { allowedRol
                   <option value="">— select a voice —</option>
                   {voiceOptions.map((v) => (
                     <option key={v.id} value={v.id}>
-                      {v.label} ({v.gender})
+                      {v.gender ? `${v.label} (${v.gender})` : v.label}
                     </option>
                   ))}
                   <option value={OTHER}>Other (custom)…</option>

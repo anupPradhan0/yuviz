@@ -96,6 +96,8 @@ class Agent:
     # None/empty = single-language agent. Set = multilingual: language switching and
     # the per-turn "Reply in X" instruction. `language` is the default language.
     supported_languages: tuple[str, ...] | None = None
+    # 'monolingual' | 'multilingual'; None = saved before modes existed (legacy validation).
+    language_mode: str | None = None
     # {lang: provider_configs.id} same-tenant TTS overrides; absent lang = base TTS.
     tts_config_by_language: dict[str, str] | None = None
     greeting_by_language: dict[str, str] | None = None

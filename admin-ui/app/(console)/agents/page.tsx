@@ -6,8 +6,9 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Bot, MoreVertical, Pencil, Play, Plus, Workflow } from "lucide-react";
-import { Agent, AgentCallStats, ApiError, getAgentCallStats, listAgents, listPhoneNumbers } from "@/lib/api";
+import { Bot, MoreVertical, PauseCircle, Pencil, Play, PlayCircle, Plus, Workflow } from "lucide-react";
+import { Agent, AgentCallStats, ApiError, getAgentCallStats, listAgents, listPhoneNumbers, updateAgent } from "@/lib/api";
+import { AgentStatusDialog } from "@/components/AgentStatusDialog";
 import { useMenuKeys } from "@/lib/useMenuKeys";
 import { AgentTestPopup } from "@/components/AgentTestPopup";
 import { useActiveTenant } from "@/lib/useActiveTenant";
@@ -35,7 +36,9 @@ const NO_CALLS: Omit<AgentCallStats, "agent_id"> = { calls: 0, tests: 0, avg_dur
 const successPct = (s: AgentCallStats) =>
   s.finished ? Math.round((100 * (s.finished - s.failed)) / s.finished) : null;
 
-function AgentCardMenu({ editUrl, stepsUrl }: { editUrl: string; stepsUrl: string }) {
+function AgentCardMenu({ agent, editUrl, stepsUrl, onStatus }: {
+  agent: AgentRow; editUrl: string; stepsUrl: string; onStatus: (agent: AgentRow) => void;
+}) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const { triggerRef, menuRef, onMenuKey } = useMenuKeys(open, () => setOpen(false));
@@ -61,6 +64,10 @@ function AgentCardMenu({ editUrl, stepsUrl }: { editUrl: string; stepsUrl: strin
             <button role="menuitem" onClick={() => router.push(stepsUrl)}>
               <Workflow size={13} /> Conversation steps
             </button>
+            <button role="menuitem" onClick={() => { setOpen(false); onStatus(agent); }}>
+              {agent.status === "active" ? <PauseCircle size={13} /> : <PlayCircle size={13} />}
+              {agent.status === "active" ? "Pause agent" : agent.activated_at ? "Resume agent" : "Go live"}
+            </button>
           </div>
         </>
       )}
@@ -83,6 +90,7 @@ export default function AgentsPage() {
   const [search, setSearch] = useState("");
   const [draft, setDraft] = useState<AgentDraft | null>(null);
   const [testing, setTesting] = useState<AgentRow | null>(null);
+  const [statusTarget, setStatusTarget] = useState<AgentRow | null>(null);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -226,7 +234,8 @@ export default function AgentsPage() {
                   <button className="agent-card-icon-btn" aria-label={`Test ${a.name}`} title="Test it" onClick={() => setTesting(a)}>
                     <Play size={15} />
                   </button>
-                  <AgentCardMenu editUrl={editUrl} stepsUrl={`/workflows/${a.tenantSlug}/${a.slug}`} />
+                  <AgentCardMenu agent={a} editUrl={editUrl}
+                    stepsUrl={`/workflows/${a.tenantSlug}/${a.slug}`} onStatus={setStatusTarget} />
                 </div>
 
                 <Link href={editUrl} className="agent-card-name agent-card-link">{a.name}</Link>
@@ -321,6 +330,15 @@ export default function AgentsPage() {
           </div>
         </section>
       )}
+      <AgentStatusDialog key={statusTarget?.id ?? "closed"} agent={statusTarget} tenantSlug={statusTarget?.tenantSlug ?? ""}
+        onClose={() => setStatusTarget(null)} onConfirm={async (target) => {
+          const row = statusTarget;
+          if (!row) return;
+          const updated = await updateAgent(row.tenantSlug, target.id, {
+            status: target.status === "active" ? "inactive" : "active",
+          });
+          setAgents((current) => current.map((item) => item.id === target.id ? { ...item, ...updated } : item));
+        }} />
     </>
   );
 }

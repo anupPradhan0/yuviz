@@ -1,0 +1,142 @@
+{
+ "slug": "multilingual-agent-setup",
+ "base": "c0df980558227129b3c28016d1f6f48a6d11c655",
+ "stage": "done",
+ "status": "shipped",
+ "started_at": "2026-10-13T02:22:37Z",
+ "stages": {
+  "security_design": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "GREEN",
+   "out_tokens": {
+    "opus": 6433
+   },
+   "artifact_written": true,
+   "findings_path": ".sdlc/multilingual-agent-setup/02-security.md",
+   "controls_verified": 8,
+   "agents": []
+  },
+  "prd": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "AMBER",
+   "out_tokens": {
+    "sonnet": 26507,
+    "opus": 20886
+   },
+   "artifact_written": true,
+   "findings_path": ".sdlc/multilingual-agent-setup/01-prd.review.md",
+   "controls_verified": 9,
+   "agents": []
+  },
+  "_state_writes": {
+   "status": "pending",
+   "rounds": 0,
+   "verdict": null,
+   "out_tokens": {
+    "haiku": 74771
+   },
+   "agents": []
+  },
+  "design": {
+   "status": "passed",
+   "rounds": 2,
+   "verdict": "GREEN",
+   "out_tokens": {
+    "opus": 44500
+   },
+   "artifact_written": true,
+   "findings_path": ".sdlc/multilingual-agent-setup/02-design.review.md",
+   "controls_verified": 9,
+   "agents": []
+  },
+  "plan": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "AMBER",
+   "out_tokens": {
+    "opus": 83794
+   },
+   "artifact_written": true,
+   "findings_path": ".sdlc/multilingual-agent-setup/03-tasks.review.md",
+   "controls_verified": 6,
+   "agents": []
+  },
+  "build": {
+   "status": "passed",
+   "rounds": 0,
+   "verdict": "GREEN",
+   "out_tokens": {
+    "haiku": 42700,
+    "sonnet": 209333
+   },
+   "agents": []
+  },
+  "review": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "GREEN",
+   "out_tokens": {
+    "sonnet": 22332,
+    "opus": 58558
+   },
+   "agents": [
+    "review:size",
+    "review:backend",
+    "review:admin-ui",
+    "review:fanin:r1",
+    "review:fanin-fix",
+    "review:fanin:2"
+   ],
+   "started_at": "2026-10-13T06:04:08Z"
+  },
+  "security_code": {
+   "status": "passed",
+   "rounds": 1,
+   "verdict": "GREEN",
+   "out_tokens": {},
+   "agents": [],
+   "findings_path": ".sdlc/multilingual-agent-setup/05-security.md",
+   "started_at": "2026-10-13T06:04:08Z",
+   "controls_verified": 10
+  },
+  "test": {
+   "status": "passed",
+   "verdict": "GREEN"
+  }
+ },
+ "open": [
+  {
+   "stage": "security_code",
+   "severity": "low",
+   "finding": "Any tenant admin can start host-wide model downloads (allowlisted, cap 2, 1h Ollama timeout); no disk-free check."
+  },
+  {
+   "stage": "build",
+   "severity": "minor",
+   "finding": "Japanese Kokoro voices are downloadable but never offered in the UI (no Japanese language code in the registry)."
+  }
+ ],
+ "retro_sources": [
+  ".sdlc/multilingual-agent-setup/05-review-backend.md",
+  ".sdlc/multilingual-agent-setup/05-review-admin-ui.md",
+  ".sdlc/multilingual-agent-setup/05-review-admin-ui.md"
+ ],
+ "gates": {
+  "prd": "approved",
+  "ship": "approved"
+ },
+ "build_phase_done": "Phase 8: Review fixes",
+ "known_preexisting_failures": "tests/test_rls_coverage.py::test_every_reason_literal_is_an_enumerated_bypass_or_override fails on the redesign base too.",
+ "verify": {
+  "result": "passed",
+  "label": "Final run after the PR #103 review fixes",
+  "command": "venv/bin/python -m pytest -q",
+  "pytest": "1 failed, 3138 passed, 1 skipped; the one failure is the pre-existing tests/test_rls_coverage.py case listed under known_preexisting_failures",
+  "admin_ui": "npm run lint, npm run build and npm test passed at the earlier checkpoint; admin-ui is untouched by the review fixes"
+ },
+ "updated_at": "2026-10-13T06:21:52Z",
+ "checkpoint": "Committed 65964a1 on feature/multilingual-agent-setup, rebased onto origin/redesign af52dc4. Independent final review AMBER -> 3 findings fixed and re-verified. PR #103 review fixes applied on top (see verify for the current test results).",
+ "pr": "https://github.com/yuviz-ai/yuviz/pull/103"
+}

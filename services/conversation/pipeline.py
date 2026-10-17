@@ -34,15 +34,16 @@ from .fillers import FillerSelector
 from .i18n import t
 from .guardrails import GuardrailCounter, GuardrailDetector
 from . import language as lang_state
-from .language import LanguageTracker, reply_language_instruction, script_language, utterance_language
+from .language import LanguageTracker, fixed_language_instruction, reply_language_instruction, script_language, utterance_language
 from .metrics import IMetrics, NullMetrics
 from .provider_bundle import ProviderBundle
 from .tool_latency import ToolLatencyStore
-from .providers.interfaces import ChatMessage, SttResult
-from libs.config_sdk.languages import normalize_language
+from .providers.interfaces import ChatMessage, SttResult, with_directive
+from libs.config_sdk.languages import language_name, normalize_language
 from .session import HandlerResponse
 from .session_finalizer import FinalizationResult, SessionFinalizer
 from .tools.llm_adapter import DeterministicSpokenEvent
+from .tools.llm_adapter import LLMAdapter
 from .tools.llm_adapter import LocalToolCompletedEvent
 from .tools.llm_adapter import TokenEvent as ToolTokenEvent
 from .tools.llm_adapter import ToolCallStartedEvent
@@ -525,6 +526,7 @@ class PipelineConversationHandler:
             tts_language if (not self._multilingual and tts_language != providers.tts.language) else None
         )
         self._agent_language = runtime_config.agent.language
+        self._language_mode = runtime_config.agent.language_mode
         self._greeting_by_language = getattr(runtime_config.conversation, "greeting_by_language", None)
         # Spoken system strings: the session language, else an explicit agents.language.
         # Never a provider row's language, so agents without one keep their English strings.
@@ -1049,7 +1051,7 @@ class PipelineConversationHandler:
                 messages_for_llm, cancel_event, session_id, directives, store=history,
                 # Not a caller utterance: retrieved text read earlier is still in context, so a planted
                 # passage cannot use a failed transfer to get a clean turn for its write.
-                carry_taint=True,
+                carry_taint=True, silent_turn_text="transfer_failed_fallback",
             ):
                 full_response.append(chunk)
                 if tts_audio:
@@ -1107,13 +1109,27 @@ class PipelineConversationHandler:
 
     # ── Workflow helpers ─────────────────────────────────────────────────
 
-    def _refresh_node_prompt(self, history: list[ChatMessage], session_id: str | None = None) -> None:
-        """Refresh history[0] with the active node's rendered prompt, plus the reply-language
-        line on the multilingual path (per turn, so it follows a language switch)."""
-        content = self._workflow.system_prompt()
+    def _reply_language_line(self, session_id: str | None) -> str:
+        """The reply-language instruction for this session; empty for legacy agents."""
         language = self._session_language(session_id) if session_id is not None else None
         if language:
-            content += reply_language_instruction(language)
+            return reply_language_instruction(language)
+        if self._language_mode == "monolingual" and self._agent_language:
+            return fixed_language_instruction(normalize_language(self._agent_language))
+        return ""
+
+    def _reply_directive(self, session_id: str | None) -> ChatMessage | None:
+        """The reply-language line again as the LAST message of every LLM request: small models
+        follow the recent turns and knowledge passages over the system prompt, and ignore a
+        trailing system message, so it goes as a user turn. Transient, never stored in history."""
+        line = self._reply_language_line(session_id).strip()
+        return ChatMessage(role="user", content=f"(Instruction, not from the caller: {line})") if line else None
+
+    def _refresh_node_prompt(self, history: list[ChatMessage], session_id: str | None = None) -> None:
+        """Refresh history[0] with the active node's rendered prompt, plus the reply-language
+        line on the multilingual path (per turn, so it follows a language switch) or the fixed
+        reply language of a monolingual-mode agent."""
+        content = self._workflow.system_prompt() + self._reply_language_line(session_id)
         prompt = ChatMessage(role="system", content=content)
         if history and history[0].role == "system":
             history[0] = prompt
@@ -1221,8 +1237,10 @@ class PipelineConversationHandler:
     ) -> AsyncGenerator[str | ToolCallStartedEvent | LocalToolCompletedEvent, None]:
         """LLM tokens + ToolCallStartedEvent filler + LocalToolCompletedEvent for bridging speech."""
         if self._tool_orchestrator is None:
-            async for token in self._llm.generate(history):
-                yield token
+            directive = self._reply_directive(session_id)
+            async for event in LLMAdapter(self._llm).generate(with_directive(history, directive)):
+                assert isinstance(event, ToolTokenEvent)
+                yield event.text
             return
 
         # Callables so a mid-turn transition re-reads the new node's tools.
@@ -1234,6 +1252,7 @@ class PipelineConversationHandler:
             caller_number=self._caller_number, called_number=self._called_number,
             call_direction=self._direction, cancel_event=cancel_event,
             local_tools=local_tools, only_tools=only_tools, carry_taint=carry_taint,
+            trailing_message=self._reply_directive(session_id),
         ):
             if isinstance(event, ToolCallStartedEvent):
                 if not event.filler_only:
@@ -1261,15 +1280,18 @@ class PipelineConversationHandler:
         tool_calls_made: list[str] | None = None,
         store:        list[ChatMessage] | None = None,
         carry_taint:  bool = False,
+        silent_turn_text: str = "fallback_llm_error",
     ) -> AsyncGenerator[tuple[str, bytes, bool], None]:
         """Stream LLM tokens and synthesize per sentence, yielding (raw_token, tts_bytes, end_call).
-        Directives are stripped before TTS and appended to `directives` in place."""
+        Directives are stripped before TTS and appended to `directives` in place.
+        A turn that says nothing and carries no directive speaks the `silent_turn_text` string instead."""
         stream_buf  = StreamBuffer()
         text_buffer = ""  # directive-free text awaiting a sentence boundary
         if tool_calls_made is None:
             tool_calls_made = []
         # end_call latched so transition speech / filler cannot clear [[END_CALL]].
         end_call = False
+        spoke = False  # any reply speech this turn; a filler does not count
         try:
             async for item in self._token_stream(
                 history, session_id, cancel_event, tool_calls_made, store, carry_taint,
@@ -1281,6 +1303,7 @@ class PipelineConversationHandler:
                     speech = self._workflow.pending_speech
                     if speech:
                         self._workflow.pending_speech = None
+                        spoke = True
                         # Yield text once so full_response/history/transcript record it.
                         first = True
                         async for chunk in self._synthesize_sentence_stream(speech, session_id):
@@ -1317,6 +1340,7 @@ class PipelineConversationHandler:
                 result = DirectiveParser.parse(stream_buf.feed(token))
                 directives.extend(result.directives)
                 text_buffer += result.clean_text
+                spoke = spoke or bool(result.clean_text.strip())
                 end_call = any(isinstance(d, EndCallDirective) for d in directives)
                 if result.directives:
                     for d in result.directives:
@@ -1336,6 +1360,7 @@ class PipelineConversationHandler:
         except Exception:
             log.exception("LLM streaming failed session=%s", session_id)
             if not cancel_event.is_set():
+                spoke = True
                 fallback_text = t("fallback_llm_error", self._spoken_language(session_id))
                 async for chunk in self._synthesize_sentence_stream(fallback_text, session_id):
                     yield fallback_text, chunk, False
@@ -1348,6 +1373,21 @@ class PipelineConversationHandler:
         if text_buffer.strip() and not cancel_event.is_set():
             async for chunk in self._synthesize_sentence_stream(text_buffer.strip(), session_id):
                 yield "", chunk, end_call
+        elif not spoke and not directives and not cancel_event.is_set() and not self._ending_or_transferring(session_id):
+            # Nothing reached the caller (e.g. the model's only output was a dropped text tool call): never go silent.
+            # A deliberate end or transfer with no transition line keeps its own wording (goodbye, transfer).
+            fallback_text = t(silent_turn_text, self._spoken_language(session_id))
+            async for chunk in self._synthesize_sentence_stream(fallback_text, session_id):
+                yield fallback_text, chunk, False
+                fallback_text = ""
+
+    def _ending_or_transferring(self, session_id: str) -> bool:
+        """The turn moved the call to an end or a transfer (workflow node or transfer tool)."""
+        state = self._session(session_id)
+        return bool(
+            self._workflow.pending_end or self._workflow.pending_transfer is not None
+            or state.pending_transfer is not None or state.transfer_requested
+        )
 
     def _local_tools(
         self, history: list[ChatMessage], store: list[ChatMessage] | None, session_id: str,
@@ -1364,7 +1404,7 @@ class PipelineConversationHandler:
             query = str(arguments.get("query") or "").strip()
             if not query:
                 return ToolResult(status=ToolStatus.INVALID_ARGUMENT, error="missing_query")
-            # Not _retrieve_context(): the model must distinguish "lookup failed" from "nothing found".
+            # The model must distinguish "lookup failed" from "nothing found".
             try:
                 context = await self._knowledge.retrieve(
                     self._tenant_slug, self._agent_slug, query, RetrievalPolicy(),
@@ -1415,30 +1455,15 @@ class PipelineConversationHandler:
                 payload["low_confidence"] = True
             if context.include_citations and context.sources:
                 payload["sources"] = [defang(title)[:120] for title in context.sources]
+            answer_in = self._session_language(session_id) or normalize_language(self._agent_language)
+            if answer_in:
+                payload["answer_in"] = language_name(answer_in)
             partial = context.status == "partial" or truncated
             return ToolResult(
                 status=ToolStatus.SUCCESS, payload=payload, outcome="partial" if partial else None,
             )
 
         return handler
-
-    async def _retrieve_context(self, query: str, session_id: str):
-        # A retrieval failure must never fail the turn.
-        try:
-            return await self._knowledge.retrieve(
-                self._tenant_slug, self._agent_slug, query, RetrievalPolicy(),
-            )
-        except Exception:
-            log.exception("Knowledge retrieval failed session=%s", session_id)
-            return None
-
-    @staticmethod
-    def _format_context(context) -> str:
-        text = "Relevant information that may help answer the caller's question:\n"
-        text += "\n\n".join(chunk.content for chunk in context.chunks)
-        if context.include_citations and context.sources:
-            text += "\n\nSources: " + ", ".join(context.sources)
-        return text
 
     async def _synthesize_sentence_stream(self, text: str, session_id: str) -> AsyncGenerator[bytes, None]:
         # Every text source reaches TTS here, so strip markdown once for all of them.
@@ -1465,7 +1490,10 @@ class PipelineConversationHandler:
         if state is None:
             state = _SessionState()
             if self._multilingual and self._default_language:
-                state.language = LanguageTracker(self._default_language, self._supported_languages)
+                state.language = LanguageTracker(
+                    self._default_language, self._supported_languages,
+                    unsupported_to_default=self._language_mode == "multilingual",
+                )
             self._sessions[session_id] = state
         return state
 

@@ -111,8 +111,11 @@ services:
       SMTP_FROM: ${SMTP_FROM:-no-reply@yuviz.local}
       # Mailpit offers no TLS; set SMTP_STARTTLS=true for any real provider.
       SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${CONFIG_PORT:-8000}:8000"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
     depends_on:
       init:
         condition: service_completed_successfully
