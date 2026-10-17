@@ -1254,6 +1254,14 @@ def test_the_admin_ui_prompt_builder_mirrors_the_speech_and_guardrail_blocks():
     source = path.read_text()
     assert _ts_block(source, "HUMAN_SPEECH_VOICE") == sp.HUMAN_SPEECH_VOICE
     assert _ts_block(source, "GUARDRAILS") == sp._GUARDRAILS
+    assert _ts_block(source, "KNOWLEDGE_RULE") == sp._KNOWLEDGE_RULE
+
+
+def test_the_admin_ui_prompt_builder_adds_the_knowledge_rule_under_what_callers_want():
+    path = pathlib.Path(__file__).parents[3] / "admin-ui" / "lib" / "systemPromptBuilder.ts"
+    source = path.read_text()
+    branch = source.split("if (inputs.hasKnowledgeBase) {", 1)[1].split("\n  }\n", 1)[0]
+    assert "wants.push(KNOWLEDGE_RULE)" in branch
 
 
 def test_the_admin_ui_prompt_builder_emits_the_required_headings_in_order():
