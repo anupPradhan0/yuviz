@@ -33,7 +33,9 @@ def test_create_and_decode_access_token_roundtrip():
 def test_decode_rejects_tampered_token():
     user = {"id": "1", "email": "a@example.com", "role": "admin", "tenant_id": None}
     token = auth.create_access_token(user)
-    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+    # Not the last char: it carries 2 unused base64 bits, so ~1 in 16 swaps decode to the same signature.
+    header, payload, sig = token.split(".")
+    tampered = f"{header}.{payload}.{'B' if sig[0] == 'A' else 'A'}{sig[1:]}"
     with pytest.raises(auth.InvalidTokenError):
         auth.decode_access_token(tampered)
 
