@@ -44,9 +44,14 @@ export function AgentStatusDialog({ agent, tenantSlug, onClose, onConfirm }: {
   const activatingDraft = !pausing && !agent.activated_at;
   const action = pausing ? "Pause" : activatingDraft ? "Go live with" : "Resume";
   const storedDirection = (agent as Agent & { direction?: "inbound" | "outbound" | "both" }).direction;
-  const direction = storedDirection ?? agentDirection(agent) ?? (campaigns?.some((campaign) => campaign.agent_id === agent.id) ? "outbound" : "inbound");
+  const inCampaign = campaigns?.some((campaign) => campaign.agent_id === agent.id);
+  const guessedDirection = agentDirection(agent);
+  const direction = storedDirection ?? (inCampaign
+    ? guessedDirection === "inbound" ? "both" : "outbound"
+    : guessedDirection ?? "inbound");
   const outcomes = numbers && agents ? pauseOutcomes(agent, agents, numbers) : null;
-  const missing = numbers && campaigns ? resumeMissing(agent, direction, numbers, campaigns) : null;
+  const runningCampaigns = campaigns?.filter((campaign) => campaign.agent_id === agent.id && campaign.status === "running");
+  const missing = numbers && agents && campaigns ? resumeMissing(agent, direction, agents, numbers, campaigns) : null;
   const canConfirm = !loading && !busy && (!pausing || outcomes !== null);
 
   const confirm = async () => {
@@ -72,11 +77,16 @@ export function AgentStatusDialog({ agent, tenantSlug, onClose, onConfirm }: {
       </button>
     </>}>
     {loading ? <p>Checking phone routing…</p> : pausing ? (
-      outcomes === null ? <p>Could not check phone routing. Try again before pausing.</p> :
-      outcomes.length ? <>
-        <p>Pausing removes this agent from call routing:</p>
-        <ul className="agent-status-impact">{outcomes.map((line) => <li key={line}>{line}</li>)}</ul>
-      </> : <p>This agent has no active phone numbers assigned. Browser and outbound calls will stop using it.</p>
+      outcomes === null ? <p>Could not check phone routing. Try again before pausing.</p> : <>
+        {outcomes.length ? <>
+          <p>Pausing changes routing for these numbers:</p>
+          <ul className="agent-status-impact">{outcomes.map((line) => <li key={line}>{line}</li>)}</ul>
+        </> : <p>No active phone number routes change when this agent pauses.</p>}
+        {campaigns === null ? <p>Could not check running campaigns.</p> : !!runningCampaigns?.length && <>
+          <p>Pausing this agent does not stop these running campaigns; they will continue dialing:</p>
+          <ul className="agent-status-impact">{runningCampaigns.map((campaign) => <li key={campaign.id}>{campaign.name}</li>)}</ul>
+        </>}
+      </>
     ) : missing === null ? <p>Phone setup could not be checked. Verify the agent’s numbers and campaigns before resuming.</p> :
       missing.length ? <>
         <p>This agent can be tested in the browser, but these items are needed for phone calls:</p>

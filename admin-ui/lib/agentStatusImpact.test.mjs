@@ -13,6 +13,10 @@ test("pausing names each active number and its actual next agent", () => {
   assert.deepEqual(pauseOutcomes(agent, [agent, { ...fallback, status: "inactive" }], [number]),
     ["+14155550100: calls won't reach an agent."]);
   assert.deepEqual(pauseOutcomes(agent, [agent, fallback], [{ ...number, status: "inactive" }]), []);
+  assert.deepEqual(pauseOutcomes(agent, [agent, fallback], [{ ...number, provider_sync: { ok: false } }]),
+    ["+14155550100: calls go to Backup."]);
+  assert.deepEqual(pauseOutcomes(agent, [agent, fallback], [{ ...number, fallback_agent_id: agent.id }]),
+    ["+14155550100: calls won't reach an agent."]);
 });
 
 test("pausing a backup explains whether the primary still answers", () => {
@@ -32,12 +36,27 @@ test("pausing the default agent includes numbers that reach it implicitly", () =
 });
 
 test("resuming checks inbound and outbound setup by direction", () => {
-  const campaign = { agent_id: "a", caller_id: number.did };
-  assert.equal(resumeMissing(agent, "inbound", [], []).length, 1);
-  assert.deepEqual(resumeMissing(agent, "outbound", [number], [campaign]), []);
-  assert.equal(resumeMissing(agent, "both", [], []).length, 2);
+  const campaign = { agent_id: "a", caller_id: "+1 (415) 555-0100", status: "running" };
+  const owned = { ...number, did: "14155550100" };
+  assert.equal(resumeMissing(agent, "inbound", [agent], [], []).length, 1);
+  assert.deepEqual(resumeMissing(agent, "outbound", [agent], [owned], [campaign]), []);
+  assert.equal(resumeMissing(agent, "both", [agent], [], []).length, 2);
   const unwired = { ...number, provider_sync: { ok: false } };
-  assert.equal(resumeMissing(agent, "inbound", [unwired], []).length, 1);
-  assert.equal(resumeMissing(agent, "outbound", [unwired], [campaign]).length, 1);
-  assert.deepEqual(resumeMissing(agent, "both", [{ ...number, provider_sync: { ok: true } }], [campaign]), []);
+  assert.equal(resumeMissing(agent, "inbound", [agent], [unwired], []).length, 1);
+  assert.equal(resumeMissing(agent, "outbound", [agent], [unwired], [campaign]).length, 1);
+  assert.deepEqual(resumeMissing(agent, "both", [agent], [{ ...owned, provider_sync: { ok: true } }], [campaign]), []);
+  assert.equal(resumeMissing(agent, "outbound", [agent], [owned], [{ ...campaign, status: "completed" }]).length, 1);
+  assert.equal(resumeMissing(agent, "outbound", [agent], [owned], [{ ...campaign, caller_id: "+14155550101" }]).length, 1);
+});
+
+test("resuming recognizes numbers reached through fallback and default routes", () => {
+  const paused = { ...agent, status: "inactive" };
+  const fallbackNumber = { ...number, agent_id: "b", fallback_agent_id: "a" };
+  assert.deepEqual(resumeMissing(paused, "inbound", [paused, { ...fallback, status: "inactive" }],
+    [fallbackNumber], []), []);
+  assert.equal(resumeMissing(paused, "inbound", [paused, fallback], [fallbackNumber], []).length, 1);
+
+  const defaultAgent = { ...paused, slug: "default" };
+  const implicit = { ...number, agent_id: null, fallback_agent_id: null };
+  assert.deepEqual(resumeMissing(defaultAgent, "inbound", [defaultAgent], [implicit], []), []);
 });
