@@ -1,5 +1,18 @@
 import type { Agent, Campaign, PhoneNumber } from "./api";
 
+type Direction = "inbound" | "outbound" | "both";
+
+export function statusDirection(
+  stored: Direction | undefined, guessed: "inbound" | "outbound" | null,
+  campaigns: Campaign[] | null, agentId: string,
+): Direction {
+  if (stored) return stored;
+  if (campaigns?.some((campaign) => campaign.agent_id === agentId)) {
+    return guessed === "inbound" ? "both" : "outbound";
+  }
+  return guessed ?? "inbound";
+}
+
 // Mirror the primary → fallback → default choice used by _load_route. The
 // selected agent's status is overridden to model either side of the switch.
 function routeFor(agents: Agent[], selected: Agent, selectedActive: boolean) {
@@ -43,7 +56,7 @@ export function pauseOutcomes(agent: Agent, agents: Agent[], numbers: PhoneNumbe
 }
 
 export function resumeMissing(
-  agent: Agent, direction: "inbound" | "outbound" | "both",
+  agent: Agent, direction: Direction,
   agents: Agent[], numbers: PhoneNumber[], campaigns: Campaign[],
 ): string[] {
   const missing: string[] = [];

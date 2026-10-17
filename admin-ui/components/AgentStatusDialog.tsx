@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Agent, ApiError, Campaign, PhoneNumber, listAgents, listCampaigns, listPhoneNumbers } from "@/lib/api";
 import { agentDirection } from "@/lib/agentTemplates";
-import { pauseOutcomes, resumeMissing } from "@/lib/agentStatusImpact";
+import { pauseOutcomes, resumeMissing, statusDirection } from "@/lib/agentStatusImpact";
 import { Modal } from "@/components/Modal";
 
 export function AgentStatusDialog({ agent, tenantSlug, onClose, onConfirm }: {
@@ -44,11 +44,7 @@ export function AgentStatusDialog({ agent, tenantSlug, onClose, onConfirm }: {
   const activatingDraft = !pausing && !agent.activated_at;
   const action = pausing ? "Pause" : activatingDraft ? "Go live with" : "Resume";
   const storedDirection = (agent as Agent & { direction?: "inbound" | "outbound" | "both" }).direction;
-  const inCampaign = campaigns?.some((campaign) => campaign.agent_id === agent.id);
-  const guessedDirection = agentDirection(agent);
-  const direction = storedDirection ?? (inCampaign
-    ? guessedDirection === "inbound" ? "both" : "outbound"
-    : guessedDirection ?? "inbound");
+  const direction = statusDirection(storedDirection, agentDirection(agent), campaigns, agent.id);
   const outcomes = numbers && agents ? pauseOutcomes(agent, agents, numbers) : null;
   const runningCampaigns = campaigns?.filter((campaign) => campaign.agent_id === agent.id && campaign.status === "running");
   const missing = numbers && agents && campaigns ? resumeMissing(agent, direction, agents, numbers, campaigns) : null;

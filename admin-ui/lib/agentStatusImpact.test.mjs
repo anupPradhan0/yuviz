@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { pauseOutcomes, resumeMissing } from "./agentStatusImpact.ts";
+import { pauseOutcomes, resumeMissing, statusDirection } from "./agentStatusImpact.ts";
 
 const agent = { id: "a", slug: "support", name: "Support", status: "active" };
 const fallback = { id: "b", slug: "backup", name: "Backup", status: "active" };
@@ -59,4 +59,12 @@ test("resuming recognizes numbers reached through fallback and default routes", 
   const defaultAgent = { ...paused, slug: "default" };
   const implicit = { ...number, agent_id: null, fallback_agent_id: null };
   assert.deepEqual(resumeMissing(defaultAgent, "inbound", [defaultAgent], [implicit], []), []);
+});
+
+test("stored direction wins, and a campaign adds outbound to a legacy inbound agent", () => {
+  const campaign = { agent_id: agent.id };
+  assert.equal(statusDirection("inbound", "outbound", [campaign], agent.id), "inbound");
+  assert.equal(statusDirection(undefined, "inbound", [campaign], agent.id), "both");
+  assert.equal(statusDirection(undefined, null, [campaign], agent.id), "outbound");
+  assert.equal(statusDirection(undefined, "inbound", [], agent.id), "inbound");
 });
