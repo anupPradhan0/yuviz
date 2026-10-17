@@ -135,6 +135,7 @@ export function scaffoldGraph(picks: CallFlowNodeType[], direction: string): Cal
         data: {
           name: BLOCKS.find((b) => b.type === type)?.name ?? type,
           prompt: DEFAULT_PROMPT[type] ?? "",
+          ...(type === "collect" ? { variable: "account_number", min_digits: 1, max_digits: 10 } : {}),
         },
         position: { x: x + 280, y: i * 150 },
       });
@@ -144,6 +145,11 @@ export function scaffoldGraph(picks: CallFlowNodeType[], direction: string): Cal
         target: id,
         data: { key: String(i + 1) },
       });
+      if (!TERMINAL.includes(type)) {
+        const endId = `hangup-b${i}`;
+        nodes.push({ id: endId, type: "hangup", data: { name: "end call" }, position: { x: x + 560, y: i * 150 } });
+        edges.push({ id: `e-${id}-${endId}`, source: id, target: endId });
+      }
     });
     // Without a timeout branch a menu just repeats and gives up.
     const bye = "hangup-timeout";

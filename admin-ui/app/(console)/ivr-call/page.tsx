@@ -76,15 +76,18 @@ export default function CallFlowsPage() {
   // Each tenant's fetch fails independently so one bad account never blanks the rest.
   useEffect(() => {
     if (tenantLoading) return;
+    let cancelled = false;
     const targets = isAllTenants ? allTenants : tenant ? [tenant] : [];
     if (targets.length === 0) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setFlows([]);
+      setLinked({});
       setLoading(false);
       return;
     }
 
     setLoading(true);
+    setLinked({});
     (async () => {
       const results = await Promise.allSettled(
         targets.map((t) => listCallFlows(t.slug).then((rows) => ({ t, rows }))),
@@ -100,6 +103,7 @@ export default function CallFlowsPage() {
           errs.push(`${targets[i].name}: ${r.reason instanceof ApiError ? r.reason.detail : String(r.reason)}`);
         }
       });
+      if (cancelled) return;
       setFlows(nextFlows);
       setError(errs.length > 0 ? errs.join("; ") : null);
       setLoading(false);
@@ -116,6 +120,7 @@ export default function CallFlowsPage() {
           }),
         ),
       );
+      if (cancelled) return;
       setLinked(
         Object.fromEntries(
           nextFlows.map((f) => {
@@ -133,6 +138,7 @@ export default function CallFlowsPage() {
         ),
       );
     })();
+    return () => { cancelled = true; };
   }, [tenant, allTenants, isAllTenants, tenantLoading]);
 
   const rows = useMemo(() => {
