@@ -39,7 +39,11 @@ and `SMTP_STARTTLS=true` in `deployment/.env`.
 Select the `default` agent → click **Test Agent** → allow microphone → talk.
 
 First run takes **10–30 minutes** (image build + ~3 GB of models).
-Every run after that takes **~75 seconds**.
+Later runs that rebuild images are much faster when the layer cache hits.
+For a quick restart with **no code/dependency changes**, use `--no-build`
+(after `--down`) so existing images are reused — typically well under a
+couple of minutes. The Ready banner prints per-phase timings (image build,
+container start, health checks).
 
 Short on CPU or disk? `--no-llm`, `--no-stt` and `--no-tts` leave out any of
 the local models — see [Turning off LLM, STT or TTS](#turning-off-llm-stt-or-tts).
@@ -272,12 +276,18 @@ Seven phases, each labelled so the script never looks hung:
 ```
 [1/7] Checking Docker...      versions, RAM, free disk, port conflicts
 [2/7] Creating .env...        generates secrets, backfills new keys
-[3/7] Building containers...  docker compose up -d --build
+[3/7] Building containers...  compose build (unless --no-build), then up -d
 [4/7] Downloading models...   llama3.2, whisper, kokoro (skips cached/disabled)
 [5/7] Waiting for services... polls each healthcheck
 [6/7] Running verification... proves STT, LLM and TTS actually work
-[7/7] Ready!                  prints the URL and login
+[7/7] Ready!                  prints the URL, login, and timing summary
 ```
+
+Phase 3 always rebuilds by default so local source and dependency changes
+land in the images. Pass `--no-build` only when the images are already
+current and you just want containers back after `--down`. Named volumes
+(`pgdata`, `hf-cache`, `ollama-models`, …) are kept either way — only
+`--clean` wipes them.
 
 Phase 6 matters more than it looks. A healthcheck only proves a process is
 listening — during development the Conversation Service reported healthy while
@@ -289,7 +299,8 @@ turned off (below) is skipped rather than failed.
 ### Flags
 
 ```bash
-./deployment/sh/dev.sh                 # start and verify
+./deployment/sh/dev.sh                 # start and verify (rebuilds images)
+./deployment/sh/dev.sh --no-build      # start existing images only (fast restart)
 ./deployment/sh/dev.sh --down          # stop, keep all data
 ./deployment/sh/dev.sh --clean         # stop and delete volumes (full reset)
 ./deployment/sh/dev.sh --logs          # tail all logs
@@ -301,6 +312,19 @@ turned off (below) is skipped rather than failed.
 ./deployment/sh/dev.sh --timeout 600   # slower machines or CI
 ./deployment/sh/dev.sh --version       # versions, for bug reports
 ```
+
+Typical fast restart (no rebuild, volumes kept):
+
+```bash
+./deployment/sh/dev.sh --down
+./deployment/sh/dev.sh --no-build --no-llm --no-stt --no-tts
+```
+
+`--no-build` reuses `yuviz-python:dev` and `yuviz-adminui:dev` as they are.
+If you changed source or dependencies, drop `--no-build` (or run a normal
+start once) so those changes are baked into the images again. If either
+image is missing, `--no-build` exits early with a clear error instead of
+starting a half-broken stack.
 
 Re-running is always safe. Existing models are skipped, `deployment/.env` is
 never overwritten, and the database bootstrap is idempotent.
@@ -392,7 +416,8 @@ deployment/
 ```
 
 `.dockerignore` stays at the repo root — Docker only reads it from the build
-context root.
+context root. It excludes generated junk that must not enter the Python
+image (notably `admin-ui/.next`, which can be multi‑GB on a developer machine).
 
 ---
 
@@ -487,8 +512,9 @@ On IPv6-only networks, IPv4-only hosts (github.com, HF's CDN) need working
 DNS64; test with `getent ahosts github.com`.
 
 **Edits to `init.sh` seem ignored** — it is baked into the image via
-`COPY . /app`. `dev.sh` always rebuilds, but a manual `docker compose up init`
-does not.
+`COPY . /app`. A normal `dev.sh` run rebuilds; `--no-build` does not, so
+source changes only show up after a rebuild. A manual `docker compose up init`
+also skips rebuild unless you pass `--build`.
 
 **Forgot the admin password** — use **Forgot password?** on the Sign In page;
 it emails a 6-digit code (needs working SMTP — in dev, read it in Mailpit).

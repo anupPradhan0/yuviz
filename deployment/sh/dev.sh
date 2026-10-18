@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # One-command local dev stack.
 #
-#   ./deployment/sh/dev.sh              bring up and verify
+#   ./deployment/sh/dev.sh              bring up and verify (rebuilds images)
+#   ./deployment/sh/dev.sh --no-build   start existing images only (fast restart)
 #   ./deployment/sh/dev.sh --down       stop, keep data
 #   ./deployment/sh/dev.sh --clean      stop and wipe volumes
 #   ./deployment/sh/dev.sh --logs       tail logs
@@ -16,13 +17,16 @@
 # Docker is the only prerequisite. On Windows use WSL2 or Git Bash.
 set -Eeuo pipefail
 
-DEV_SH_VERSION="1.0.0"
+DEV_SH_VERSION="1.1.0"
 MIN_DOCKER="20.10"
 MIN_COMPOSE="2.20"
 TOTAL_PHASES=7
 
 TIMEOUT=300
 VERBOSE=0
+# Default rebuilds so local code/deps land in images. Use --no-build after
+# --down when nothing changed and you only want containers back up.
+WANT_BUILD=1
 # --no-llm/--no-stt/--no-tts skip that leg's model download, startup and verification.
 WANT_LLM=1
 WANT_STT=1
@@ -32,6 +36,11 @@ OLLAMA_MODEL="llama3.2"
 ACTION="up"
 CURRENT_PHASE="startup"
 STARTED_WORK=0
+# Per-phase wall times (seconds), printed in the Ready banner.
+TIME_BUILD=""
+TIME_UP=""
+TIME_HEALTH=""
+TIME_TOTAL_START=0
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 COMPOSE_FILE="$ROOT/deployment/docker/docker-compose.yml"
@@ -52,6 +61,16 @@ info()   { printf '  %s\n' "$1"; }
 dim()    { printf '  %s%s%s\n' "$DIM" "$1" "$RESET"; }
 warn()   { printf '  %s!%s %s\n' "$YELLOW" "$RESET" "$1"; }
 fail()   { printf '\n%s✗ %s%s\n' "$RED" "$1" "$RESET" >&2; }
+
+now_s() { date +%s; }
+fmt_dur() {
+    local s="${1:-0}"
+    if [ "$s" -ge 60 ]; then
+        printf '%dm%02ds' "$((s / 60))" "$((s % 60))"
+    else
+        printf '%ds' "$s"
+    fi
+}
 
 run_quiet() {
     if [ "$VERBOSE" = "1" ]; then
@@ -105,6 +124,7 @@ while [ $# -gt 0 ]; do
         --down)    ACTION="down" ;;
         --clean)   ACTION="clean" ;;
         --logs)    ACTION="logs" ;;
+        --no-build) WANT_BUILD=0 ;;
         --no-llm)  WANT_LLM=0 ;;
         --no-stt)  WANT_STT=0 ;;
         --no-tts)  WANT_TTS=0 ;;
@@ -112,7 +132,7 @@ while [ $# -gt 0 ]; do
         --verbose) VERBOSE=1 ;;
         --timeout) TIMEOUT="${2:?--timeout needs a value in seconds}"; shift ;;
         --version) ACTION="version" ;;
-        -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) fail "unknown flag: $1 (try --help)"; exit 2 ;;
     esac
     shift
@@ -465,9 +485,9 @@ if [ "$OLLAMA_MODE" = "host" ] && ! curl -fsS -m 5 http://localhost:11434/api/ta
 fi
 
 # ── [3/7] ─────────────────────────────────────────────────────────────────────
+TIME_TOTAL_START=$(now_s)
 phase 3 "Building containers..."
 STARTED_WORK=1
-dim "first run installs Python deps — several minutes"
 if [ "$OLLAMA_MODE" = "off" ]; then
     # Omitting the profile doesn't stop an ollama left from an earlier run; models are kept.
     if [ -n "$(compose --profile ollama-container ps -aq ollama 2>/dev/null)" ]; then
@@ -475,8 +495,35 @@ if [ "$OLLAMA_MODE" = "off" ]; then
         ok "ollama stopped (models kept)"
     fi
 fi
-run_quiet compose "${COMPOSE_PROFILE[@]}" up -d --build
-ok "containers started"
+
+if [ "$WANT_BUILD" = "1" ]; then
+    dim "rebuilding images (skip with --no-build when nothing changed)"
+    dim "first run installs Python deps — several minutes"
+    t0=$(now_s)
+    run_quiet compose "${COMPOSE_PROFILE[@]}" build
+    TIME_BUILD=$(( $(now_s) - t0 ))
+    ok "images built ($(fmt_dur "$TIME_BUILD"))"
+else
+    # Explicit opt-in only — do not auto-skip builds just because tags exist.
+    missing=0
+    for img in yuviz-python:dev yuviz-adminui:dev; do
+        if ! docker image inspect "$img" >/dev/null 2>&1; then
+            printf '  %s✗%s missing image %s\n' "$RED" "$RESET" "$img" >&2
+            missing=1
+        fi
+    done
+    if [ "$missing" = "1" ]; then
+        fail "no images to start — run without --no-build once"
+        exit 1
+    fi
+    TIME_BUILD=0
+    ok "using existing images (--no-build)"
+fi
+
+t0=$(now_s)
+run_quiet compose "${COMPOSE_PROFILE[@]}" up -d
+TIME_UP=$(( $(now_s) - t0 ))
+ok "containers started ($(fmt_dur "$TIME_UP"))"
 
 # ── [4/7] ─────────────────────────────────────────────────────────────────────
 phase 4 "Downloading models..."
@@ -543,7 +590,7 @@ fi
 phase 5 "Waiting for services..."
 
 wait_healthy() {
-    local svc="$1" deadline=$(( $(date +%s) + TIMEOUT )) cid status
+    local svc="$1" deadline=$(( $(now_s) + TIMEOUT )) cid status
     while :; do
         cid=$(compose "${COMPOSE_PROFILE[@]}" ps -q "$svc" 2>/dev/null || true)
         if [ -n "$cid" ]; then
@@ -556,7 +603,7 @@ wait_healthy() {
                     return 1 ;;
             esac
         fi
-        if [ "$(date +%s)" -ge "$deadline" ]; then
+        if [ "$(now_s)" -ge "$deadline" ]; then
             fail "$svc failed to become healthy after ${TIMEOUT}s"
             echo "    docker compose -f $COMPOSE_FILE logs $svc" >&2
             echo "    slow machine or first-run download? retry with: --timeout $(( TIMEOUT * 2 ))" >&2
@@ -569,9 +616,12 @@ wait_healthy() {
 if [ "$WANT_STT" = "1" ] && [ "$WANT_TTS" = "1" ]; then
     dim "conversation loads its speech models before serving — slowest on first run"
 fi
+t0=$(now_s)
 for svc in postgres redis config knowledge toolexec conversation webcall admin-ui; do
     wait_healthy "$svc" || { cleanup_hint; exit 1; }
 done
+TIME_HEALTH=$(( $(now_s) - t0 ))
+ok "all services healthy ($(fmt_dur "$TIME_HEALTH"))"
 
 # ── [6/7] ─────────────────────────────────────────────────────────────────────
 phase 6 "Running verification..."
@@ -674,6 +724,7 @@ off_hint() {
     printf '%s' "$RESET"
 }
 
+TIME_TOTAL=$(( $(now_s) - TIME_TOTAL_START ))
 phase 7 "Ready!"
 cat <<EOF
 
@@ -684,13 +735,23 @@ $(leg_line STT "$WANT_STT")
 $(leg_line LLM "$WANT_LLM")
 $(leg_line TTS "$WANT_TTS")
 $(off_hint)
+  ${BOLD}Timing${RESET}
+    image build:       $(fmt_dur "${TIME_BUILD:-0}")$([ "$WANT_BUILD" = "0" ] && printf ' (skipped --no-build)')
+    container start:   $(fmt_dur "${TIME_UP:-0}")
+    health checks:     $(fmt_dur "${TIME_HEALTH:-0}")
+    total (phase 3–7): $(fmt_dur "$TIME_TOTAL")
+
   ${BOLD}Open: http://localhost:3000${RESET}
   First run shows "Create your administrator account" — pick your own
   email and password there; this stack ships with no default login.
   Then select the "default" agent → Click "Test Agent"
 
-  ${DIM}./deployment/sh/dev.sh --logs    tail logs
-  ./deployment/sh/dev.sh --down    stop
+  ${DIM}Fast restart (same images, volumes kept):
+  ./deployment/sh/dev.sh --down
+  ./deployment/sh/dev.sh --no-build --no-llm --no-stt --no-tts
+
+  After code or dependency changes, drop --no-build so images rebuild.
+  ./deployment/sh/dev.sh --logs    tail logs
   ./deployment/sh/dev.sh --clean   stop and wipe data${RESET}
 
 EOF
