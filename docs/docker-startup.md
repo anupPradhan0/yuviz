@@ -45,6 +45,15 @@ For a quick restart with **no code/dependency changes**, use `--no-build`
 couple of minutes. The Ready banner prints per-phase timings (image build,
 container start, health checks).
 
+```bash
+./deployment/sh/dev.sh --down
+./deployment/sh/dev.sh --no-build --no-llm --no-stt --no-tts
+```
+
+Default start still rebuilds images. Drop `--no-build` (or omit it) after
+source or dependency changes so those land in the images again. See
+[Flags](#flags) for the full list.
+
 Short on CPU or disk? `--no-llm`, `--no-stt` and `--no-tts` leave out any of
 the local models — see [Turning off LLM, STT or TTS](#turning-off-llm-stt-or-tts).
 
