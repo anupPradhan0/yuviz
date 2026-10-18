@@ -29,9 +29,21 @@ builds the images, pulls the models, waits for every service to report
 healthy, and then verifies STT, LLM and TTS actually work end to end before
 telling you it's ready. First run downloads ~3 GB of models and needs **16 GB
 of free disk** (~15.6 GB of images and models); later runs skip anything
-already cached.
+already cached. The Ready banner prints how long image build, container
+start, and health checks each took.
+
+By default every start rebuilds images so local code changes are picked up.
+After `--down`, if you have not changed source or dependencies, use
+`--no-build` for a fast restart that reuses existing images and keeps
+volumes (database + model caches):
 
 ```bash
+./deployment/sh/dev.sh --down
+./deployment/sh/dev.sh --no-build --no-llm --no-stt --no-tts
+```
+
+```bash
+./deployment/sh/dev.sh --no-build    # start existing images only (fast restart)
 ./deployment/sh/dev.sh --logs        # tail logs
 ./deployment/sh/dev.sh --down        # stop, keep data
 ./deployment/sh/dev.sh --clean       # stop and wipe volumes

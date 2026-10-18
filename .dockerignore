@@ -2,16 +2,32 @@ venv/
 **/node_modules/
 .git/
 .github/
+.cursor/
+.claude/
+.sdlc/
 
 # Fetched at build time (silero) or into named volumes at runtime.
 models/
 data/
+
+# Next.js / frontend build output — never needed in the Python image.
+# admin-ui/.next alone was ~3 GB and dominated every `docker compose build`.
+**/.next/
+**/out/
+**/*.tsbuildinfo
 
 __pycache__/
 **/__pycache__/
 *.pyc
 .pytest_cache/
 .mypy_cache/
+.tox/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage/
+*.egg-info/
+.test_durations
 
 build/
 CMakeFiles/
@@ -20,7 +36,6 @@ compile_commands.json
 
 .env
 **/.env
-.claude/
 .DS_Store
 *.swp
 
