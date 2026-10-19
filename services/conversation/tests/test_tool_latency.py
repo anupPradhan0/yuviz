@@ -73,6 +73,20 @@ def test_age_out_mixed_stale_and_fresh(monkeypatch):
     assert store.average_ms("t1", "a1", "tool") == 500.0
 
 
+def test_agent_average_ms_skips_aged_out_tools(monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(tool_latency_module.time, "monotonic", lambda: clock["t"])
+    store = ToolLatencyStore()
+    for _ in range(_MIN_SAMPLES):
+        store.record("t1", "a1", "old_tool", 100.0)
+    clock["t"] += _MAX_AGE_S + 1
+    for _ in range(_MIN_SAMPLES):
+        store.record("t1", "a1", "fresh_tool", 1000.0)
+    assert store.agent_average_ms("t1", "a1") == 1000.0
+    clock["t"] += _MAX_AGE_S + 1
+    assert store.agent_average_ms("t1", "a1") is None
+
+
 def test_per_tenant_lru_eviction():
     store = ToolLatencyStore()
     for i in range(_MAX_KEYS_PER_TENANT + 1):
@@ -202,3 +216,44 @@ def test_sweep_trigger_only_advances_on_accepted_records(monkeypatch):
         store.record("t1", "a1", "tool", -1.0)
 
     assert "stale" in store._tenants
+
+
+def test_agent_average_is_mean_of_per_tool_averages():
+    store = ToolLatencyStore()
+    for _ in range(_MIN_SAMPLES):
+        store.record("t1", "a1", "book", 1000.0)
+        store.record("t1", "a1", "lookup", 2000.0)
+        store.record("t1", "a2", "other", 9000.0)
+    assert store.agent_average_ms("t1", "a1") == 1500.0
+
+
+def test_agent_average_ignores_tool_below_min_samples():
+    store = ToolLatencyStore()
+    for _ in range(_MIN_SAMPLES):
+        store.record("t1", "a1", "book", 1000.0)
+    for _ in range(_MIN_SAMPLES - 1):
+        store.record("t1", "a1", "lookup", 5000.0)
+    assert store.agent_average_ms("t1", "a1") == 1000.0
+
+
+def test_agent_average_none_without_usable_history():
+    store = ToolLatencyStore()
+    assert store.agent_average_ms("t1", "a1") is None
+    store.record("t1", "a1", "book", 1000.0)
+    assert store.agent_average_ms("t1", "a1") is None
+    assert store.agent_average_ms("t1", "a2") is None
+
+
+def test_agent_average_none_for_empty_ids():
+    store = ToolLatencyStore()
+    for _ in range(_MIN_SAMPLES):
+        store.record("t1", "a1", "book", 1000.0)
+    assert store.agent_average_ms("", "a1") is None
+    assert store.agent_average_ms("t1", "") is None
+
+
+def test_agent_average_does_not_see_other_tenant():
+    store = ToolLatencyStore()
+    for _ in range(_MIN_SAMPLES):
+        store.record("t1", "a1", "book", 1000.0)
+    assert store.agent_average_ms("t2", "a1") is None

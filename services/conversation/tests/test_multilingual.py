@@ -14,6 +14,7 @@ from .. import language as lang_state
 from ..language import (
     LanguageTracker, UtteranceLanguage, fixed_language_instruction, reply_language_instruction, utterance_language,
 )
+from ..i18n import en, hi
 from ..pipeline import PipelineConversationHandler, _SENTENCE_RE
 from ..provider_bundle import ProviderBundle
 from ..providers.interfaces import INSTANCE_LANGUAGE, SttResult
@@ -424,7 +425,20 @@ async def test_first_turn_filler_follows_session_language():
     stt = _RecordingSTT([SttResult(text="नमस्ते जी", language="hi", language_confidence=1.0)])
     h = _handler(rc, stt, _LLM(), tts)
     await _turn(h, "s1")
-    assert tts.calls[0] == ("जी, एक पल।", "hi")
+    phrase, language = tts.calls[0]
+    assert phrase in {p for p, _ in hi.TOOL_FILLERS}
+    assert language == "hi"
+
+
+async def test_first_turn_filler_for_language_without_a_table_falls_back_to_english():
+    rc = await _runtime({"language": "fr", "supported_languages": ("fr", "en")})
+    tts = _RecordingTTS()
+    stt = _RecordingSTT([SttResult(text="bonjour", language="fr", language_confidence=1.0)])
+    h = _handler(rc, stt, _LLM(), tts)
+    await _turn(h, "s1")
+    phrase, language = tts.calls[0]
+    assert phrase in {p for p, _ in en.TOOL_FILLERS}
+    assert language == "fr"
 
 
 async def test_farewell_message_override_still_wins():

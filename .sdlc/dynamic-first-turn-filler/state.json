@@ -1,0 +1,177 @@
+{
+  "slug": "dynamic-first-turn-filler",
+  "base": "3ffc89108aa0775ff32d5f9bed681856b9e8c9c2",
+  "stage": "ship",
+  "status": "gate_ship",
+  "started_at": "2026-10-18T07:47:00Z",
+  "stages": {
+    "security_design": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "opus": 4939
+      },
+      "agents": [
+        "security_design:critic:r1"
+      ],
+      "artifact_written": true,
+      "findings_path": ".sdlc/dynamic-first-turn-filler/02-security.md",
+      "controls_verified": 9
+    },
+    "prd": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "AMBER",
+      "out_tokens": {
+        "sonnet": 4342,
+        "opus": 4232
+      },
+      "agents": [
+        "prd:author",
+        "prd:critic:r1"
+      ],
+      "artifact_written": true,
+      "findings_path": ".sdlc/dynamic-first-turn-filler/01-prd.review.md",
+      "controls_verified": 6
+    },
+    "_state_writes": {
+      "status": "pending",
+      "rounds": 0,
+      "verdict": null,
+      "out_tokens": {
+        "haiku": 71934
+      },
+      "agents": []
+    },
+    "design": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "AMBER",
+      "out_tokens": {
+        "opus": 25649
+      },
+      "agents": [
+        "design:author",
+        "design:critic:r1",
+        "design:feedback",
+        "design:critic:r1"
+      ],
+      "artifact_written": true,
+      "findings_path": ".sdlc/dynamic-first-turn-filler/02-design.review.md",
+      "controls_verified": 9
+    },
+    "plan": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "AMBER",
+      "out_tokens": {
+        "opus": 14251
+      },
+      "agents": [
+        "plan:author",
+        "plan:critic:r1"
+      ],
+      "artifact_written": true,
+      "findings_path": ".sdlc/dynamic-first-turn-filler/03-tasks.review.md",
+      "controls_verified": 6
+    },
+    "build": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "haiku": 2272,
+        "sonnet": 80067
+      },
+      "agents": [
+        "build:partition",
+        "build:Phase 4: Language-dynamic i18n (scope addendum):g1",
+        "build:Phase 4: Language-dynamic i18n (scope addendum):g2",
+        "build:fanin"
+      ]
+    },
+    "review": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "opus": 20125,
+        "sonnet": 8475
+      },
+      "agents": [
+        "review:size",
+        "review:backend"
+      ],
+      "started_at": "2026-10-18T11:34:43Z",
+      "ended_at": "2026-10-18T12:19:57Z"
+    },
+    "security_code": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {},
+      "agents": [],
+      "findings_path": ".sdlc/dynamic-first-turn-filler/05-security.md",
+      "started_at": "2026-10-18T11:34:43Z",
+      "controls_verified": 8,
+      "ended_at": "2026-10-18T12:19:57Z"
+    },
+    "test": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "sonnet": 2843
+      },
+      "agents": [
+        "test:r1"
+      ],
+      "started_at": "2026-10-18T12:20:32Z",
+      "result": "264 passed, 0 failed",
+      "command": "source venv/bin/activate; python -m pytest -q services/conversation/tests/{test_fillers,test_i18n,test_tool_latency,test_multilingual,test_pipeline}.py",
+      "ended_at": "2026-10-18T12:20:32Z"
+    },
+    "retro": {
+      "status": "pending",
+      "rounds": 0,
+      "verdict": null,
+      "out_tokens": {
+        "sonnet": 981
+      },
+      "agents": [
+        "retro"
+      ]
+    }
+  },
+  "open": [
+    {
+      "stage": "design",
+      "severity": "minor",
+      "finding": "PRD has no numbered addendum criteria for the language-dynamic scope; the only source is 00-request.md Addendum."
+    },
+    {
+      "stage": "design",
+      "severity": "minor",
+      "finding": "_validate discovery order: resolved by importing all, requiring en, then validating (accepted deviation: compares against real en.STRINGS)."
+    }
+  ],
+  "retro_sources": [],
+  "gates": {
+    "prd": "approved"
+  },
+  "build_phase_done": "Phase 4: Language-dynamic i18n (scope addendum)",
+  "verify": {
+    "result": "passed",
+    "command": "./venv/bin/python -m pytest -q (4788 passed, 6 skipped)",
+    "failures": [],
+    "changed_lines": 458,
+    "backend": 14,
+    "admin_ui": 0
+  },
+  "updated_at": "2026-10-18T12:21:03Z",
+  "lessons": [
+    "Sharpened lesson 19 in .sdlc/lessons.md with the dynamic-first-turn-filler evidence: design-named interface (shortest_tool_filler/_SHORTEST) and Test plan 6 and 8 dropped; the error path still returned English to a hi caller.",
+    "No new lessons: the docs list-vs-tuple mismatch was minor, a one-off."
+  ]
+}

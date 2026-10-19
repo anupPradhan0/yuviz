@@ -1,7 +1,8 @@
 import pytest
 
 from .. import fillers as fillers_module
-from ..fillers import _FALLBACK_FILLER, _TOOL_FILLERS, FillerSelector
+from ..fillers import _TOOL_FILLERS, FillerSelector
+from ..i18n import shortest_tool_filler
 
 
 def test_select_tool_filler_shorter_for_faster_average():
@@ -34,6 +35,6 @@ def test_select_tool_filler_handles_invalid_averages(average_ms):
 def test_select_tool_filler_fallback_on_raise(monkeypatch):
     monkeypatch.setattr(fillers_module, "_TOOL_FILLERS", None)
     selector = FillerSelector()
-    assert selector.select_tool_filler("book_appointment", None, 600.0) == _FALLBACK_FILLER
+    assert selector.select_tool_filler("book_appointment", None, 600.0) == shortest_tool_filler(None)
 
 

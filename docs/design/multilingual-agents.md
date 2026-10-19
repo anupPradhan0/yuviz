@@ -166,14 +166,25 @@ keep working unchanged.
   It isn't baked into `base_suffix`, so it changes when the session language does.
 - **Sentence splitter:** add the alternative `(?<=[।॥。！？])\s*`. No whitespace is needed after it,
   because CJK doesn't put a space there. The English abbreviation guards stay as they are.
-- **i18n:** a new `services/conversation/i18n/` with `en.py`, `hi.py` and `t(key, lang)`. Missing keys
-  and unknown languages fall back to `en`. The strings that move there:
+- **i18n:** a new `services/conversation/i18n/` with one module per language (`i18n/<code>.py`, discovered at
+  import) and `t(key, lang)`. Missing keys and unknown languages fall back to `en`. The strings that move there:
   - `_FALLBACK_GOODBYE`, `_MAX_DURATION_GOODBYE`, `_FALLBACK_LLM_ERROR`
-  - `_FIRST_TURN_FILLER`, `_TRANSFER_FAILED_FALLBACK`, `_BOOKING_FABRICATION_TRANSFER_ANNOUNCEMENT`
-  - the tool fillers (`FillerSelector.select_tool_filler(..., language=)`)
+  - `_TRANSFER_FAILED_FALLBACK`, `_BOOKING_FABRICATION_TRANSFER_ANNOUNCEMENT`
+  - the tool fillers (`FillerSelector.select_tool_filler(..., language=)`). The turn-1 filler uses
+    the same selector, so it follows the session language; with no latency history it takes the
+    tier at or below the default 1.6s target (the 1.5s phrases).
 
   The English text stays byte-identical. The agent's own `farewell_message` and
   `transfer_announcement` still take precedence.
+
+  **Adding a language.** Create `services/conversation/i18n/<code>.py` with:
+  - `STRINGS`, a dict holding any subset of the `en` keys. Missing keys fall back to `en`.
+  - `TOOL_FILLERS`, a non-empty tuple of `(phrase, seconds)` tuples, with phrase a non-empty string and seconds a finite number above 0 (not a bool).
+
+  `<code>` is the lowercase 2-3 letter base code (`pt.py`, not `pt_br.py`; regional callers like pt-BR resolve to it), and non-language helper modules or packages in `i18n/` must start with `_`. The file is picked up at import with no other edit. A malformed file fails startup and
+  `test_i18n`. Translations need native-speaker review. This covers spoken system strings only.
+  Enabling the language for agents still needs the `libs/config_sdk/languages.py` registry entry
+  plus provider support for it (lesson 46).
 - **Greeting:** the runtime accepts an optional `greeting_by_language` map from the API, rendered
   through the workflow's variables; otherwise the existing `runner.greeting()` is used. The editor
   exposes only the single greeting and no per-language greeting editor.

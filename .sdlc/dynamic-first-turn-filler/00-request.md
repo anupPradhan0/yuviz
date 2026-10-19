@@ -1,0 +1,4 @@
+Issue #98 (https://github.com/yuviz-ai/yuviz/issues/98) — base branch: redesign. Dynamic filler for first turn is hard coded "Mm-hmm, one moment." during initial warm-up when the caller starts speaking. Turn 1 always speaks the fixed phrase; the latency-aware FillerSelector only kicks in on tool calls on turns 2+ when latency history exists. Make the first-turn filler dynamic/latency-aware too (e.g. "One moment." if the tool usually takes ~1s, "Let me check..." if ~1.5s), falling back sensibly when there's no history. Code: services/conversation/fillers.py
+
+## Addendum (user, 2026-10-18)
+The filler must be dynamic per language, and the architecture must be dynamic: adding a language in future must be picked up automatically with no code change. Today i18n/__init__.py hardcodes {"en","hi"}, and fillers.py:20 has a hardcoded English fallback "One moment." spoken in every language.

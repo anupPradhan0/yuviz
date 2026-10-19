@@ -7,7 +7,7 @@ import logging
 import math
 import random
 
-from .i18n import tool_fillers
+from .i18n import shortest_tool_filler, tool_fillers
 
 log = logging.getLogger(__name__)
 
@@ -17,8 +17,6 @@ _TOOL_FILLERS: tuple[tuple[str, float], ...] = tool_fillers("en")
 # Uncalibrated tool: today's pool mid-length, not the 6s timeout ceiling.
 _DEFAULT_TARGET_S = 1.6
 
-_FALLBACK_FILLER = "One moment."
-
 
 class FillerSelector:
     def select_tool_filler(
@@ -26,7 +24,7 @@ class FillerSelector:
         language: str | None = None,
     ) -> str:
         """Never returns None — a tool call always gets a spoken filler.
-        Returns _FALLBACK_FILLER if anything inside raises."""
+        Returns the language's shortest filler if anything inside raises."""
         try:
             if average_ms is not None and math.isfinite(average_ms) and average_ms > 0:
                 target = average_ms / 1000
@@ -50,4 +48,4 @@ class FillerSelector:
             return random.choice(tier)[0]
         except Exception:
             log.exception("FillerSelector.select_tool_filler failed tool=%r", tool_name)
-            return _FALLBACK_FILLER
+            return shortest_tool_filler(language)

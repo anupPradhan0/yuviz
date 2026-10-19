@@ -28,19 +28,20 @@ from ..directives import (
     TransferType,
 )
 from .. import pipeline as pipeline_module
-from ..fillers import _TOOL_FILLERS
+from ..fillers import _DEFAULT_TARGET_S, FillerSelector, _TOOL_FILLERS
+from ..i18n import hi, shortest_tool_filler
 from ..language import fixed_language_instruction, reply_language_instruction
 from ..pipeline import (
     PipelineConversationHandler,
     _END_CALL_MARKER,
     _FALLBACK_GOODBYE,
-    _FIRST_TURN_FILLER,
     _TOOL_CALL_FILLER_MIN_GAP_S,
     _TRANSFER_FAILED_FALLBACK,
 )
 
 _TOOL_CALL_FILLERS = {t for t, _ in _TOOL_FILLERS}
 from ..provider_bundle import ProviderBundle
+from ..tool_latency import _MIN_SAMPLES, ToolLatencyStore
 from ..providers.interfaces import ChatMessage, SttResult
 from ..session import CallFsmState, ConversationSession, HandlerResponse, SessionContext
 from ..event_bus import (
@@ -140,7 +141,7 @@ def _make_handler(
     workflow: dict | None = None, node_tools: list[str] | None = None,
     node_knowledge: list[str] | None = None, transcripts=None,
     agent_language: str | None = None, language_mode: str | None = None,
-    supported_languages: tuple[str, ...] | None = None, **handler_kwargs,
+    supported_languages: tuple[str, ...] | None = None, agent_id: str = "a1", **handler_kwargs,
 ) -> PipelineConversationHandler:
     """Build a handler from a hand-built RuntimeConfig/ProviderBundle, no IConfigProvider."""
     now = datetime.now(timezone.utc)
@@ -162,7 +163,7 @@ def _make_handler(
         if node_knowledge is not None:
             start["data"]["knowledge_base_ids"] = node_knowledge
     agent = Agent(
-        id="a1", slug="test-agent", tenant_id="t1", name="Test Agent",
+        id=agent_id, slug="test-agent", tenant_id="t1", name="Test Agent",
         greeting=greeting, system_prompt=system_prompt, goodbye_grace_ms=goodbye_grace_ms,
         stt_config_id=None, llm_config_id=None, tts_config_id=None,
         status="active", config_version=1, updated_at=now,
@@ -268,8 +269,8 @@ async def test_first_turn_filler_spoken_before_the_real_response():
         pass
 
     spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
-    assert spoken_texts[0] == _FIRST_TURN_FILLER
-    assert spoken_texts.count(_FIRST_TURN_FILLER) == 1
+    assert spoken_texts[0] in _TOOL_CALL_FILLERS
+    assert sum(text in _TOOL_CALL_FILLERS for text in spoken_texts) == 1
 
 
 @pytest.mark.asyncio
@@ -285,7 +286,202 @@ async def test_first_turn_filler_not_repeated_on_later_turns():
         pass
 
     spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
-    assert spoken_texts.count(_FIRST_TURN_FILLER) == 1
+    assert spoken_texts[0] in _TOOL_CALL_FILLERS
+    assert sum(text in _TOOL_CALL_FILLERS for text in spoken_texts) == 1
+
+
+def _seed_latency(store: ToolLatencyStore, agent_id: str, elapsed_ms: float) -> None:
+    for _ in range(_MIN_SAMPLES):
+        store.record("t1", agent_id, "lookup", elapsed_ms)
+
+
+async def _first_turn_spoken(handler, tts) -> list[str]:
+    async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        pass
+    return [call.args[0] for call in tts.synthesize.await_args_list]
+
+
+def _tier(seconds: float) -> set[str]:
+    return {p for p, s in _TOOL_FILLERS if s == seconds}
+
+
+@pytest.mark.asyncio
+async def test_first_turn_filler_tier_follows_the_agents_own_latency():
+    store = ToolLatencyStore()
+    _seed_latency(store, "fast", 1000)
+    _seed_latency(store, "slow", 2400)
+
+    spoken = {}
+    for agent_id in ("fast", "slow"):
+        tts = _make_tts()
+        handler = _make_handler(
+            _make_stt("hi there"), _make_llm(["Real", " response", "."]), tts,
+            system_prompt="Be helpful.", agent_id=agent_id, tenant_id="t1", latency_store=store,
+        )
+        spoken[agent_id] = (await _first_turn_spoken(handler, tts))[0]
+
+    assert spoken["fast"] in _tier(1.0)
+    assert spoken["slow"] in _tier(2.4)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("latency_store", [None, ToolLatencyStore()], ids=["no_store", "empty_store"])
+async def test_first_turn_filler_without_latency_history_uses_default_tier(latency_store):
+    tts = _make_tts()
+    handler = _make_handler(
+        _make_stt("hi there"), _make_llm(["Real", " response", "."]), tts,
+        system_prompt="Be helpful.", tenant_id="t1", latency_store=latency_store,
+    )
+    spoken = await _first_turn_spoken(handler, tts)
+
+    default_tier = max(s for _, s in _TOOL_FILLERS if s <= _DEFAULT_TARGET_S)
+    assert spoken[0] in _tier(default_tier)
+    assert sum(text in _TOOL_CALL_FILLERS for text in spoken) == 1
+
+
+@pytest.mark.asyncio
+async def test_first_turn_without_a_latency_store_asks_the_selector_once_for_the_default_tier():
+    selector = FillerSelector()
+    calls = []
+    real = selector.select_tool_filler
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    selector.select_tool_filler = spy
+    tts = _make_tts()
+    handler = _make_handler(
+        _make_stt("hi there"), _make_llm(["Real", " response", "."]), tts,
+        system_prompt="Be helpful.", agent_language="hi", latency_store=None, filler_selector=selector,
+    )
+    spoken = await _first_turn_spoken(handler, tts)
+
+    assert len(calls) == 1
+    (_tool, _last, average_ms), kwargs = calls[0]
+    assert average_ms is None
+    assert kwargs == {"language": "hi"}
+    default_tier = max(s for _, s in hi.TOOL_FILLERS if s <= _DEFAULT_TARGET_S)
+    assert spoken[0] in {p for p, s in hi.TOOL_FILLERS if s == default_tier}
+
+
+@pytest.mark.asyncio
+async def test_first_turn_filler_selector_failure_still_speaks_one_filler_and_logs_once(
+    monkeypatch, caplog,
+):
+    def _boom(_seq):
+        raise RuntimeError("selector broke")
+
+    monkeypatch.setattr("services.conversation.fillers.random.choice", _boom)
+    tts = _make_tts()
+    handler = _make_handler(
+        _make_stt("hi there"), _make_llm(["Real", " response", "."]), tts,
+        system_prompt="Be helpful.", tenant_id="t1", latency_store=ToolLatencyStore(),
+    )
+    with caplog.at_level("ERROR", logger="services.conversation.fillers"):
+        spoken = await _first_turn_spoken(handler, tts)
+
+    fallback = shortest_tool_filler(None)
+    assert spoken[0] == fallback
+    assert spoken.count(fallback) == 1
+    assert len([r for r in caplog.records if r.name == "services.conversation.fillers"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_barge_in_after_first_turn_filler_plays_stops_audio_and_never_replays_the_filler():
+    """Cancel arrives once the filler chunk is yielded; the filler loop has no mid-chunk cancel check
+    (the base code had none either), so this proves no replay and no later audio, not mid-filler stop."""
+    tts = _make_tts()
+    handler = _make_handler(
+        _make_stt("hi there"), _make_llm(["Real", " response", "."]), tts, system_prompt="Be helpful.",
+    )
+    audio_after_cancel = 0
+    cancelled = False
+    async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        if cancelled and r.tts_payloads:
+            audio_after_cancel += 1
+        if not cancelled and r.tts_payloads:  # the filler chunk is being played
+            await handler.on_cancel("s1")
+            cancelled = True
+
+    assert cancelled
+    assert audio_after_cancel == 0
+    spoken = [call.args[0] for call in tts.synthesize.await_args_list]
+    assert spoken == [spoken[0]] and spoken[0] in _TOOL_CALL_FILLERS
+
+    # The next turn is not treated as a first turn: no second filler. History is cleared so only the
+    # flag (not the non-empty history) can suppress it.
+    assert handler._session("s1").first_turn_filler_spoken
+    handler._get_history("s1").clear()
+    tts.synthesize.reset_mock()
+    async for _ in handler.on_speech_ended("s1", _silence(), 200, -20.0):
+        pass
+    assert not any(c.args[0] in _TOOL_CALL_FILLERS for c in tts.synthesize.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_agents_sharing_selector_and_store_get_their_own_tier_filler():
+    store = ToolLatencyStore()
+    _seed_latency(store, "fast", 1000)
+    _seed_latency(store, "slow", 2400)
+    selector = FillerSelector()
+
+    events: list[str] = []
+
+    async def _run(agent_id):
+        tts = _make_tts()
+        stt = _make_stt("hi there")
+        real_finalize = stt.finalize_stream
+
+        async def _finalize(session_id, audio, sample_rate):
+            events.append(f"start:{agent_id}")
+            await asyncio.sleep(0)  # yield so the other session runs between start and end
+            result = await real_finalize(session_id, audio, sample_rate)
+            events.append(f"end:{agent_id}")
+            return result
+
+        stt.finalize_stream = _finalize
+        handler = _make_handler(
+            stt, _make_llm(["Real", " response", "."]), tts,
+            system_prompt="Be helpful.", agent_id=agent_id, tenant_id="t1",
+            latency_store=store, filler_selector=selector,
+        )
+        spoken = await _first_turn_spoken(handler, tts)
+        return spoken[0], handler._session("s1").tool_call_filler_last_phrase
+
+    (fast_spoken, fast_last), (slow_spoken, slow_last) = await asyncio.gather(_run("fast"), _run("slow"))
+
+    assert set(events[:2]) == {"start:fast", "start:slow"}  # sessions genuinely interleaved
+    assert fast_spoken in _tier(1.0) and fast_last == fast_spoken
+    assert slow_spoken in _tier(2.4) and slow_last == slow_spoken
+
+
+@pytest.mark.asyncio
+async def test_no_first_turn_filler_when_history_is_empty_but_flag_already_set():
+    tts = _make_tts()
+    handler = _make_handler(
+        _make_stt("hi there"), _make_llm(["Real", " response", "."]), tts, system_prompt="Be helpful.",
+    )
+    handler._session("s1").first_turn_filler_spoken = True
+    assert not handler._get_history("s1")
+
+    spoken = await _first_turn_spoken(handler, tts)
+
+    assert not any(t in _TOOL_CALL_FILLERS for t in spoken)
+
+
+@pytest.mark.asyncio
+async def test_no_first_turn_filler_when_flag_unset_but_history_exists():
+    tts = _make_tts()
+    handler = _make_handler(
+        _make_stt("hi there"), _make_llm(["Real", " response", "."]), tts, system_prompt="Be helpful.",
+    )
+    handler._get_history("s1").append(ChatMessage(role="user", content="earlier"))
+    assert not handler._session("s1").first_turn_filler_spoken
+
+    spoken = await _first_turn_spoken(handler, tts)
+
+    assert not any(t in _TOOL_CALL_FILLERS for t in spoken)
 
 
 @pytest.mark.asyncio
@@ -2169,6 +2365,8 @@ async def test_local_tool_completed_event_does_not_crash_the_pipeline():
         ToolTokenEvent(text="Thanks, moving on."),
     ])
     handler = _make_handler(stt, llm, tts, system_prompt="You are a scheduler.", tool_orchestrator=orchestrator)
+    # Skip the first-turn filler so only tool-call fillers are counted.
+    handler._session("s1").first_turn_filler_spoken = True
 
     responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
 
@@ -2192,6 +2390,8 @@ async def test_tool_call_filler_burst_within_one_turn_speaks_only_once():
         ToolTokenEvent(text="Done."),
     ])
     handler = _make_handler(stt, llm, tts, system_prompt="You are a scheduler.", tool_orchestrator=orchestrator)
+    # Skip the first-turn filler so only tool-call fillers are counted.
+    handler._session("s1").first_turn_filler_spoken = True
 
     async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
         pass
@@ -2199,6 +2399,36 @@ async def test_tool_call_filler_burst_within_one_turn_speaks_only_once():
     spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
     filler_count = sum(1 for t in spoken_texts if t in _TOOL_CALL_FILLERS)
     assert filler_count == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_call_filler_differs_from_the_first_turn_filler():
+    """The turn-1 phrase is remembered, so the same turn's tool filler cannot repeat it."""
+    from ..tool_latency import _MIN_SAMPLES, ToolLatencyStore
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+    from ..tools.llm_adapter import ToolCallStartedEvent
+
+    # 2400 ms is the longest phrase tier, which holds a single phrase.
+    store = ToolLatencyStore()
+    for _ in range(_MIN_SAMPLES):
+        store.record("t1", "a1", "book_appointment", 2400.0)
+    orchestrator = _FakeToolOrchestrator([
+        ToolCallStartedEvent(tool_name="book_appointment"),
+        ToolTokenEvent(text="Done."),
+    ])
+    tts = _make_tts(b"\x00" * 640)
+    handler = _make_handler(
+        _make_stt("book something"), _make_llm(["unused"]), tts,
+        system_prompt="You are a scheduler.", tool_orchestrator=orchestrator, latency_store=store, tenant_id="t1",
+    )
+
+    async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):
+        pass
+
+    spoken_texts = [call.args[0] for call in tts.synthesize.await_args_list]
+    fillers_spoken = [t for t in spoken_texts if t in _TOOL_CALL_FILLERS]
+    assert len(fillers_spoken) == 2
+    assert fillers_spoken[0] != fillers_spoken[1]
 
 
 @pytest.mark.asyncio
@@ -2213,6 +2443,8 @@ async def test_tool_call_filler_rotates_across_separate_tool_calls(monkeypatch):
     llm = _make_llm(["unused"])
     tts = _make_tts(b"\x00" * 640)
     handler = _make_handler(stt, llm, tts, system_prompt="You are a scheduler.")
+    # Skip the first-turn filler so only tool-call fillers are counted.
+    handler._session("s1").first_turn_filler_spoken = True
 
     handler._tool_orchestrator = _FakeToolOrchestrator([ToolCallStartedEvent(tool_name="book_appointment")])
     async for _ in handler.on_speech_ended("s1", _silence(), 300, -20.0):

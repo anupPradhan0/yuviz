@@ -5,7 +5,6 @@ STRINGS: dict[str, str] = {
     "fallback_goodbye": "धन्यवाद, नमस्ते।",
     "max_duration_goodbye": "इस कॉल का समय पूरा हो गया है। कॉल करने के लिए धन्यवाद, नमस्ते।",
     "fallback_llm_error": "माफ़ कीजिए, अभी थोड़ी दिक्कत हो रही है। क्या आप फिर से बता सकते हैं?",
-    "first_turn_filler": "जी, एक पल।",
     "transfer_failed_fallback": "माफ़ कीजिए, अभी आपको किसी एजेंट से जोड़ना संभव नहीं हो पाया।",
     "booking_fabrication_transfer_announcement": (
         "आपकी बुकिंग सही से हुई है, यह पक्का करने के लिए टीम के एक सदस्य से जाँच करवाई जा रही है — एक पल।"

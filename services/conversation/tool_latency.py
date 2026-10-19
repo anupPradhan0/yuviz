@@ -85,6 +85,24 @@ class ToolLatencyStore:
             return None
         return sum(ms for _, ms in samples) / len(samples)
 
+    def agent_average_ms(self, tenant_id: str, agent_id: str) -> float | None:
+        """Mean of the agent's per-tool averages; None when no tool has usable history."""
+        if not tenant_id or not tenant_id.strip() or not agent_id or not agent_id.strip():
+            return None
+
+        tenant_map = self._tenants.get(tenant_id)
+        if tenant_map is None:
+            return None
+
+        # average_ms may delete keys, so snapshot them first.
+        tool_names = [tool for agent, tool in tenant_map if agent == agent_id]
+        averages = [
+            avg
+            for tool in tool_names
+            if (avg := self.average_ms(tenant_id, agent_id, tool)) is not None
+        ]
+        return sum(averages) / len(averages) if averages else None
+
     def _sweep(self) -> None:
         now = time.monotonic()
         cutoff = now - _MAX_AGE_S

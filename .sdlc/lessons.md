@@ -144,7 +144,9 @@ Tags: [prd] [architect] [planner] [implementer] [critic] [security] [tester] [qa
     *Earned: the design specified a 10s SMTP timeout; the implementation shipped without one and
     every test still passed. Guided agent creation: PRD criterion 16 listed six speech behaviours,
     the build reused an old 2-line block, the approver passed it as "design gave no wording", and the
-    user found the prompts "not up to the mark" in hands-on testing.*
+    user found the prompts "not up to the mark" in hands-on testing. Dynamic first-turn filler: the design's
+    `shortest_tool_filler`/`_SHORTEST` and its Test plan 6 and 8 were both dropped, so the error path still
+    spoke English to a hi caller; round 4 caught it only by listing each named interface and test.*
 
 20. [architect][implementer][security] An outbound connection carrying a secret needs transport
     security requested explicitly — the client library will not do it for you. `smtplib` sends AUTH

@@ -246,9 +246,6 @@ _KNOWLEDGE_TOOL_MAX_TOKENS = int(os.environ.get("KNOWLEDGE_TOOL_MAX_TOKENS", "15
 # Words are no bound for CJK, minified JSON or base64 (no spaces), so characters are capped as well.
 _KNOWLEDGE_TOOL_MAX_CHARS = int(os.environ.get("KNOWLEDGE_TOOL_MAX_CHARS", "6000"))
 
-# Masks turn-1 LLM latency; generic so it fits any first utterance.
-_FIRST_TURN_FILLER = t("first_turn_filler", "en")
-
 # Auto-appended when a transfer is configured, so the destination comes only from config.
 # Condition is per-agent (agents.transfer_prompt); token mechanics are fixed.
 _TRANSFER_CONDITION_DEFAULT = (
@@ -782,8 +779,17 @@ class PipelineConversationHandler:
         history.append(ChatMessage(role="user", content=stt_result.text))
 
         if is_first_turn and not self._session(session_id).first_turn_filler_spoken:
-            self._session(session_id).first_turn_filler_spoken = True
-            first_turn_filler = t("first_turn_filler", self._spoken_language(session_id))
+            state = self._session(session_id)
+            state.first_turn_filler_spoken = True
+            average_ms = (
+                self._latency_store.agent_average_ms(self._tenant_id, self._agent_id or "")
+                if self._latency_store is not None else None
+            )
+            first_turn_filler = self._filler_selector.select_tool_filler(
+                "first_turn", state.tool_call_filler_last_phrase, average_ms,
+                language=self._spoken_language(session_id),
+            )
+            state.tool_call_filler_last_phrase = first_turn_filler
             async for chunk in self._synthesize_sentence_stream(first_turn_filler, session_id):
                 yield HandlerResponse(tts_payloads=[chunk])
 
