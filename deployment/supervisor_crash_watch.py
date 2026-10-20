@@ -7,6 +7,7 @@ import http.client
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -135,8 +136,9 @@ def notify(msg: str) -> None:
     subprocess.run(["osascript", "-e", f'display notification "{msg}" with title "yuviz crash-watch"'], **quiet)
 
 
-def stop_service(proxy, name: str, settle_s: float = 60.0) -> float | None:
-    """Idempotent. Returns supervisord's stop time once STOPPED, or None if it never got there."""
+def stop_service(proxy, name: str, settle_s: float = 60.0, kill_now: bool = False) -> float | None:
+    """Idempotent. Returns supervisord's stop time once STOPPED, or None if it never got there.
+    kill_now: a hung process can't shut down gracefully, so SIGKILL its group instead of waiting stopwaitsecs."""
     deadline = time.monotonic() + settle_s
     while time.monotonic() < deadline:
         info = proxy.supervisor.getProcessInfo(name)
@@ -144,11 +146,24 @@ def stop_service(proxy, name: str, settle_s: float = 60.0) -> float | None:
             return float(info["stop"])
         if info["statename"] in RUNNING_STATES:
             try:
-                proxy.supervisor.stopProcess(name, False)
+                proxy.supervisor.stopProcess(name, False)  # first, so supervisord treats the exit as a stop, not a crash
             except xmlrpc.client.Fault:
                 pass  # raced a state change; re-read
+        if kill_now and info["statename"] in RUNNING_STATES | {"STOPPING"}:
+            kill_group(int(info.get("pid") or 0))
         time.sleep(0.2)
     return None
+
+
+def kill_group(pid: int) -> None:
+    """supervisord makes each program its own process group led by the wrapper."""
+    if pid <= 1:
+        return
+    try:
+        if os.getpgid(pid) == pid:
+            os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def start_service(proxy, name: str) -> None:
@@ -330,6 +345,7 @@ def default_probes() -> dict:
         "campaigns": lambda: probe_http(f"http://{host}:{url_port('CAMPAIGNS_SERVICE_URL', 8400)}/health"),
         "toolexec": lambda: probe_http(f"http://{host}:{url_port('TOOLEXEC_SERVICE_URL', 8600)}/health"),
         "telephony": lambda: probe_http(f"http://{host}:{url_port('TELEPHONY_SERVICE_URL', 8750)}/health"),
+        "did": lambda: probe_http(f"http://{host}:{url_port('NEXT_PUBLIC_DID_SERVICE_URL', 8200)}/health"),
         "webcall": lambda: probe_http(f"http://{host}:{url_port('NEXT_PUBLIC_WEBCALL_URL', 8300)}/health"),
         "ollama": lambda: probe_http("http://127.0.0.1:11434/api/version"),
         "envoy": lambda: probe_http("http://127.0.0.1:9901/ready"),
@@ -462,7 +478,8 @@ class Watcher:
         with self.lock:
             self.armed.pop(name, None)
             action, delay = self.policy.on_exit(name, self.clock())
-        self._recover(name, "delay" if action == "restart" else action, delay, fatal=False, what="hung (no heartbeat)")
+        self._recover(name, "delay" if action == "restart" else action, delay, fatal=False, what="hung (no heartbeat)",
+                      kill_now=True)
 
     def _defer(self, name: str, start_at: float, calls: int | None) -> None:
         why = "live-call count unavailable" if calls is None else f"{calls} live calls"
@@ -474,14 +491,14 @@ class Watcher:
         msg = f"{name} is hung but restart is deferred ({why}); it will retry while it stays hung"
         notify(msg)
 
-    def _recover(self, name: str, action: str, delay: float, *, fatal: bool, what: str) -> None:
+    def _recover(self, name: str, action: str, delay: float, *, fatal: bool, what: str, kill_now: bool = False) -> None:
         with self.lock:
             s = self.policy.state(name)
             s.pending_at, s.pending_trial = self.clock() + delay, action == "open"
             s.stop_token = FATAL if fatal else None
             self.save()
         if not fatal:
-            token = stop_service(self.proxy(), name)
+            token = stop_service(self.proxy(), name, kill_now=kill_now)
             with self.lock:
                 s.stop_token = token
                 self.save()

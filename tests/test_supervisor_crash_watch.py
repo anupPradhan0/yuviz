@@ -436,3 +436,49 @@ def test_hung_gateway_restarts_even_with_live_calls(tmp_path):
         w.probe_once(probes)
     assert sup.stops == 1 and timers and timers[-1][0] == 0
 
+
+
+def test_a_hang_is_stopped_then_killed_at_once(tmp_path, monkeypatch):
+    killed = []
+    monkeypatch.setattr(cw.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(cw.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+
+    class Hung(_ProbeSupervisor):
+        def getProcessInfo(self, name):
+            return {**super().getProcessInfo(name), "pid": 4242}
+
+        def stopProcess(self, name, wait):
+            self.stops += 1
+            self.statename = "STOPPING"  # SIGTERM is ignored by a hung process
+            return True
+
+    sup, clock = Hung(start=50.0), [100.0]
+    w, _ = _watcher(tmp_path, sup, clock)
+    monkeypatch.setattr(cw.time, "sleep", lambda s: setattr(sup, "statename", "STOPPED"))
+    w.probe_once({"gw": lambda: True})
+    for _ in range(3):
+        w.probe_once({"gw": lambda: False})
+    assert sup.stops == 1 and killed == [(4242, cw.signal.SIGKILL)]
+
+
+def test_a_crash_is_stopped_gracefully_without_a_kill(tmp_path, monkeypatch):
+    killed = []
+    monkeypatch.setattr(cw.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(cw.os, "killpg", lambda pid, sig: killed.append(pid))
+
+    class Slow(_FakeSupervisor):
+        def getProcessInfo(self, name):
+            return {**super().getProcessInfo(name), "pid": 4242}
+
+        def stopProcess(self, name, wait):
+            self.stops += 1
+            self.statename = "STOPPING"
+            return True
+
+    sup, clock = Slow(), [100.0]
+    monkeypatch.setattr(cw.time, "sleep", lambda s: setattr(sup, "statename", "STOPPED"))
+    w, _ = _watcher(tmp_path, sup, clock)
+    w.on_event("PROCESS_STATE_EXITED", "gw", "0")
+    sup.statename = "STARTING"
+    w.on_event("PROCESS_STATE_EXITED", "gw", "0")
+    assert sup.stops == 1 and killed == []
