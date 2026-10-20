@@ -1,7 +1,8 @@
-"""Restart policy for supervisord: exponential backoff, then a half-open circuit breaker. stdout is the protocol; log to stderr."""
+"""Restart policy for supervisord: heartbeat, exponential backoff, half-open circuit breaker. stdout is the protocol; log to stderr."""
 from __future__ import annotations
 
 import argparse
+import errno
 import http.client
 import json
 import os
@@ -11,12 +12,19 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
+import uuid
 import xmlrpc.client
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 RUNNING_STATES = {"STARTING", "RUNNING", "BACKOFF"}
 FATAL = "FATAL"
+PROBE_INTERVAL_S = 10
+MISSES_TO_RESTART = 3
+STARTUP_DEADLINE_S = 300
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 @dataclass
@@ -149,14 +157,237 @@ def start_service(proxy, name: str) -> None:
             raise
 
 
+def probe_http(url: str, timeout: float = 3.0) -> bool:
+    """Any HTTP response proves the event loop answered. No proxy."""
+    try:
+        with _OPENER.open(url, timeout=timeout):
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def fetch_clusters(admin: str = "http://127.0.0.1:9901", timeout: float = 3.0) -> str | None:
+    try:
+        with _OPENER.open(f"{admin}/clusters", timeout=timeout) as r:
+            return r.read().decode(errors="replace")
+    except OSError:
+        return None
+
+
+class _ClusterCache:
+    """Both conversation probes run in the same round; one fetch serves both."""
+
+    def __init__(self, ttl_s: float = 2.0, fetch=fetch_clusters):
+        self.ttl_s, self.fetch = ttl_s, fetch
+        self._at, self._text = float("-inf"), None
+
+    def get(self) -> str | None:
+        now = time.monotonic()
+        if now - self._at > self.ttl_s:
+            self._text, self._at = self.fetch(), now
+        return self._text
+
+
+def envoy_health(text: str | None, addr: str) -> bool | None:
+    if text is None:
+        return None
+    for line in text.splitlines():
+        if f"::{addr}::health_flags::" in line:
+            flags = line.rsplit("::", 1)[1]
+            if flags == "healthy":
+                return True
+            return False if "failed_active_hc" in flags else None
+    return None
+
+
+def probe_envoy_host(addr: str, admin: str = "http://127.0.0.1:9901", timeout: float = 3.0) -> bool | None:
+    """Envoy's own gRPC health check for one upstream; None when Envoy can't say. No proxy."""
+    return envoy_health(fetch_clusters(admin, timeout), addr)
+
+
+def probe_esl(host: str, port: int, timeout: float = 3.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            data = b""
+            while b"auth/request" not in data:
+                chunk = sock.recv(256)
+                if not chunk:
+                    return False
+                data += chunk
+        return True
+    except OSError:
+        return False
+
+
+def probe_sip(host: str, port: int, timeout: float = 3.0) -> bool | None:
+    """SIP OPTIONS; any SIP reply means Kamailio is processing requests. None if network is down (bind fails)."""
+    tag, call_id = uuid.uuid4().hex[:8], uuid.uuid4().hex
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(timeout)
+            try:
+                sock.bind((host, 0))
+            except OSError as e:
+                if e.errno == errno.EADDRNOTAVAIL:
+                    return None
+                raise
+            lport = sock.getsockname()[1]
+            msg = (f"OPTIONS sip:{host}:{port} SIP/2.0\r\nVia: SIP/2.0/UDP {host}:{lport};branch=z9hG4bK{tag}\r\n"
+                   f"Max-Forwards: 70\r\nFrom: <sip:crash-watch@{host}>;tag={tag}\r\nTo: <sip:{host}:{port}>\r\n"
+                   f"Call-ID: {call_id}\r\nCSeq: 1 OPTIONS\r\nContent-Length: 0\r\n\r\n")
+            try:
+                sock.sendto(msg.encode(), (host, port))
+                return sock.recv(4096).startswith(b"SIP/2.0 ")
+            except socket.timeout:
+                return False
+            except OSError:
+                return None
+    except OSError:
+        return None
+
+
+def kamailio_listen(cfg: Path) -> tuple[str, int] | None:
+    try:
+        for line in cfg.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("listen=udp:"):
+                host, _, port = line[len("listen=udp:"):].rpartition(":")
+                return host, int(port)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+class _FileMemo:
+    """Re-parses a file only when its mtime changes."""
+
+    def __init__(self, path: Path, parse):
+        self.path, self.parse = path, parse
+        self._mtime, self._value = None, None
+
+    def get(self):
+        try:
+            mtime = self.path.stat().st_mtime_ns
+        except OSError:
+            return None
+        if mtime != self._mtime:
+            self._mtime, self._value = mtime, self.parse(self.path)
+        return self._value
+
+
+LIVE_CALLS_SQL = "SELECT count(*) FROM calls WHERE ended_at IS NULL AND started_at > now() - interval '2 hours'"
+
+
+def count_live_calls(dsn: str) -> int | None:
+    """None when the count can't be read; the caller then aborts the restart."""
+    try:
+        out = subprocess.run(["psql", dsn, "-tAX", "-c", LIVE_CALLS_SQL],
+                             capture_output=True, text=True, timeout=10, check=True)
+        return int(out.stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def dotenv(key: str, default: str, path: Path = Path(".env")) -> str:
+    if os.environ.get(key):
+        return os.environ[key]
+    try:
+        for line in path.read_text().splitlines():
+            if line.startswith(f"{key}="):
+                value = line.split("=", 1)[1].split(" #", 1)[0].strip().strip("'\"")
+                if value:
+                    return value
+    except OSError:
+        pass
+    return default
+
+
+def default_probes() -> dict:
+    host = dotenv("LISTEN_HOST", "127.0.0.1")
+    host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    esl = (dotenv("FREESWITCH_ESL_HOST", "127.0.0.1"), int(dotenv("FREESWITCH_ESL_PORT", "8022")))
+    clusters = _ClusterCache()
+    listen = _FileMemo(Path.home() / ".yuviz" / "kamailio" / "kamailio.cfg", kamailio_listen)
+    probes = {
+        "config": lambda: probe_http(f"http://{host}:8000/health"),
+        "knowledge": lambda: probe_http(f"http://{host}:8100/health"),
+        "campaigns": lambda: probe_http(f"http://{host}:8400/health"),
+        "toolexec": lambda: probe_http(f"http://{host}:8600/health"),
+        "telephony": lambda: probe_http(f"http://{host}:8750/health"),
+        "webcall": lambda: probe_http(f"http://{host}:8300/health"),
+        "ollama": lambda: probe_http("http://127.0.0.1:11434/api/version"),
+        "envoy": lambda: probe_http("http://127.0.0.1:9901/ready"),
+        "admin-ui": lambda: probe_http(f"http://{host}:3000/login", timeout=15),
+        "conversation-1": lambda: envoy_health(clusters.get(), "127.0.0.1:50051"),
+        "conversation-2": lambda: envoy_health(clusters.get(), "127.0.0.1:50052"),
+        "freeswitch": lambda: probe_esl(*esl),
+        "kamailio": lambda: (lambda a: probe_sip(*a) if a else None)(listen.get()),
+    }
+    return probes
+
+
 class Watcher:
-    def __init__(self, policy: Policy, proxy_factory, state_path: Path, schedule=None, clock=time.time):
+    def __init__(self, policy: Policy, proxy_factory, state_path: Path, schedule=None, clock=time.time, dispatch=None,
+                 live_calls=lambda: None):
         self.policy = policy
+        self.live_calls = live_calls
         self.proxy = proxy_factory  # one client per call: xmlrpc clients are not thread-safe
         self.state_path = state_path
         self.clock = clock
         self.schedule = schedule or self._timer
+        self.dispatch = dispatch or self._thread
         self.lock = threading.RLock()
+        self.misses: dict[str, int] = {}
+        self.armed: dict[str, float] = {}  # name -> start time it first passed a probe
+        self.alerted: dict[str, float] = {}
+        self.deferred: dict[str, float] = {}  # name -> start time we already announced a deferred restart for
+
+    def probe_once(self, probes: dict) -> None:
+        proxy = self.proxy()
+        for name, probe in probes.items():
+            try:
+                info = proxy.supervisor.getProcessInfo(name)
+            except xmlrpc.client.Fault:
+                continue
+            start = float(info["start"])
+            if info["statename"] != "RUNNING":
+                self.misses.pop(name, None)
+                continue
+            ok = probe()
+            if ok is None:
+                self.misses.pop(name, None)  # "in a row": an unknown round breaks the streak
+                continue  # can't tell, e.g. Envoy itself is down
+            if ok:
+                self.misses[name] = 0
+                self.armed[name] = start
+                continue
+            if self.armed.get(name) != start:
+                # Never answered since start: a slow starter or a wrong probe, so alert once, never restart.
+                if self.clock() - start >= STARTUP_DEADLINE_S and self.alerted.get(name) != start:
+                    self.alerted[name] = start
+                    msg = f"{name} has not passed its heartbeat in {STARTUP_DEADLINE_S}s since start; check it"
+                    log(msg)
+                    notify(msg)
+                continue
+            n = self.misses[name] = self.misses.get(name, 0) + 1
+            log(f"{name} missed heartbeat ({n}/{MISSES_TO_RESTART})")
+            if n >= MISSES_TO_RESTART:
+                self.misses[name] = 0
+                self.dispatch(self.on_hang, name, start)
+
+    def probe_loop(self, probes: dict, interval_s: float) -> None:
+        while True:
+            try:
+                self.probe_once(probes)
+            except Exception as exc:  # noqa: BLE001
+                log(f"heartbeat round failed: {exc!r}")
+            time.sleep(interval_s)
+
+    @staticmethod
+    def _thread(fn, *args) -> None:
+        threading.Thread(target=fn, args=args, daemon=True).start()
 
     @staticmethod
     def _timer(delay: float, fn) -> None:
@@ -187,29 +418,59 @@ class Watcher:
                     self.schedule(s.half_open_since + self.policy.window_s - now, lambda n=name: self.check_closed(n))
 
     def on_event(self, eventname: str, name: str, expected: str) -> None:
-        now = self.clock()
         with self.lock:
             if eventname == "PROCESS_STATE_EXITED" and expected == "0":
-                action, delay = self.policy.on_exit(name, now)
+                action, delay = self.policy.on_exit(name, self.clock())
             elif eventname == "PROCESS_STATE_FATAL":
                 action, delay = self.policy.on_fatal(name)
             else:
                 return
-            s = self.policy.state(name)
             if action == "restart":
                 log(f"{name} crashed; supervisord restarts it now")
                 self.save()
                 return
-            s.pending_at, s.pending_trial = now + delay, action == "open"
-            s.stop_token = FATAL if eventname == "PROCESS_STATE_FATAL" else None
-            self.save()  # intent first: a restart of this listener finds it
-        if eventname != "PROCESS_STATE_FATAL":
+        self._recover(name, action, delay, fatal=eventname == "PROCESS_STATE_FATAL", what="crashed again")
+
+    def on_hang(self, name: str, start_at: float) -> None:
+        """A hung process never exits, so it is stopped here and counted as a crash."""
+        try:
+            info = self.proxy().supervisor.getProcessInfo(name)
+        except xmlrpc.client.Fault:
+            return
+        if info["statename"] != "RUNNING" or float(info["start"]) != start_at:
+            return
+        calls = self.live_calls()
+        if calls is None or calls > 0:
+            self._defer(name, start_at, calls)
+            return
+        with self.lock:
+            self.armed.pop(name, None)
+            action, delay = self.policy.on_exit(name, self.clock())
+        self._recover(name, "delay" if action == "restart" else action, delay, fatal=False, what="hung (no heartbeat)")
+
+    def _defer(self, name: str, start_at: float, calls: int | None) -> None:
+        why = "live-call count unavailable" if calls is None else f"{calls} live calls"
+        log(f"{name} hung; restart deferred ({why})")
+        with self.lock:
+            if self.deferred.get(name) == start_at:
+                return
+            self.deferred[name] = start_at
+        msg = f"{name} is hung but restart is deferred ({why}); it will retry while it stays hung"
+        notify(msg)
+
+    def _recover(self, name: str, action: str, delay: float, *, fatal: bool, what: str) -> None:
+        with self.lock:
+            s = self.policy.state(name)
+            s.pending_at, s.pending_trial = self.clock() + delay, action == "open"
+            s.stop_token = FATAL if fatal else None
+            self.save()
+        if not fatal:
             token = stop_service(self.proxy(), name)
             with self.lock:
                 s.stop_token = token
                 self.save()
         if action == "delay":
-            log(f"{name} crashed again; restarting in {delay:.0f}s")
+            log(f"{name} {what}; restarting in {delay:.0f}s")
         else:
             msg = f"{name} keeps failing; circuit open, next trial start in {delay:.0f}s"
             log(msg)
@@ -263,15 +524,20 @@ def main() -> None:
     parser.add_argument("--cooldown", type=float, default=300)
     parser.add_argument("--cooldown-cap", type=float, default=3600)
     parser.add_argument("--state", type=Path, default=Path.home() / ".yuviz" / "crash-watch.json")
+    parser.add_argument("--no-heartbeat", action="store_true")
     args = parser.parse_args()
 
     policy = Policy(args.max_crashes, args.window, args.backoff_cap, args.cooldown, args.cooldown_cap)
     url = os.environ["SUPERVISOR_SERVER_URL"]
-    watcher = Watcher(policy, lambda: rpc_proxy(url), args.state)
+    dsn = dotenv("POSTGRES_DSN", f"postgresql://{os.environ.get('USER', '')}@localhost:5432/voiceai")
+    watcher = Watcher(policy, lambda: rpc_proxy(url), args.state, live_calls=lambda: count_live_calls(dsn))
     watcher.load()
     watcher.resume()
+    if not args.no_heartbeat:
+        threading.Thread(target=watcher.probe_loop, args=(default_probes(), PROBE_INTERVAL_S), daemon=True).start()
     me = os.environ.get("SUPERVISOR_PROCESS_NAME")
-    log(f"watching: backoff to {args.backoff_cap:.0f}s, circuit opens at {args.max_crashes} crashes in {args.window:.0f}s")
+    log(f"watching: backoff to {args.backoff_cap:.0f}s, circuit opens at {args.max_crashes} crashes in {args.window:.0f}s, "
+        f"heartbeat {'off' if args.no_heartbeat else f'every {PROBE_INTERVAL_S}s, restart after {MISSES_TO_RESTART} misses'}")
     while True:
         sys.stdout.write("READY\n")
         sys.stdout.flush()

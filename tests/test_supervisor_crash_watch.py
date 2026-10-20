@@ -82,7 +82,8 @@ class _FakeProxy:
 def _watcher(tmp_path, sup, clock):
     timers = []
     w = cw.Watcher(_policy(), lambda: _FakeProxy(sup), tmp_path / "state.json",
-                   schedule=lambda delay, fn: timers.append((delay, fn)), clock=lambda: clock[0])
+                   schedule=lambda delay, fn: timers.append((delay, fn)), clock=lambda: clock[0],
+                   dispatch=lambda fn, *args: fn(*args), live_calls=lambda: 0)
     return w, timers
 
 
@@ -184,3 +185,240 @@ def test_notify_prefers_terminal_notifier_and_opens_the_log(monkeypatch):
     monkeypatch.setattr(cw.os.path, "exists", lambda p: False)
     cw.notify("gw keeps failing")
     assert calls[-1][0] == "osascript"
+
+
+class _ProbeSupervisor(_FakeSupervisor):
+    def __init__(self, start=0.0):
+        super().__init__("RUNNING")
+        self.start = start
+
+    def getProcessInfo(self, name):
+        return {"statename": self.statename, "stop": self.stop, "start": self.start}
+
+
+def test_hang_is_restarted_after_three_misses_once_armed(tmp_path):
+    sup, clock = _ProbeSupervisor(start=50.0), [100.0]
+    w, timers = _watcher(tmp_path, sup, clock)
+    result = [True]
+    probes = {"gw": lambda: result[0]}
+    w.probe_once(probes)  # first pass arms it
+    result[0] = False
+    w.probe_once(probes)
+    w.probe_once(probes)
+    assert sup.stops == 0
+    w.probe_once(probes)
+    assert sup.stops == 1 and timers[-1][0] == 0  # first hang: restart at once
+    timers[-1][1]()
+    assert sup.starts == 1
+
+
+def test_a_service_that_never_passed_is_alerted_once_and_never_restarted(tmp_path, monkeypatch):
+    sup, clock = _ProbeSupervisor(start=100.0), [110.0]
+    w, _ = _watcher(tmp_path, sup, clock)
+    alerts = []
+    monkeypatch.setattr(cw, "notify", alerts.append)
+    for _ in range(10):
+        w.probe_once({"gw": lambda: False})  # slow starter, or a wrong probe
+    assert sup.stops == 0 and alerts == []
+    clock[0] = 100.0 + cw.STARTUP_DEADLINE_S + 1
+    for _ in range(10):
+        w.probe_once({"gw": lambda: False})
+    assert sup.stops == 0 and len(alerts) == 1
+
+
+def test_unknown_and_stopped_services_are_not_counted(tmp_path, capsys):
+    sup, clock = _ProbeSupervisor(start=50.0), [100.0]
+    w, timers = _watcher(tmp_path, sup, clock)
+    w.probe_once({"conv": lambda: True})
+    for _ in range(5):
+        w.probe_once({"conv": lambda: None})
+    sup.statename = "STOPPED"
+    timers.clear()
+    capsys.readouterr()
+    for _ in range(5):
+        w.probe_once({"conv": lambda: False})
+    assert sup.stops == 0 and timers == [] and "missed heartbeat" not in capsys.readouterr().err
+
+
+def test_probe_sip_treats_lost_address_as_unknown(monkeypatch):
+    import errno
+
+    class NoAddress:
+        def __init__(self, *args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def settimeout(self, timeout):
+            pass
+
+        def bind(self, addr):
+            raise OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")
+
+    monkeypatch.setattr(cw.socket, "socket", NoAddress)
+    assert cw.probe_sip("192.168.0.9", 5060) is None
+
+
+def test_probe_http_counts_any_response(tmp_path):
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(426 if self.path == "/ws" else 200)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    assert cw.probe_http(f"http://127.0.0.1:{port}/health") and cw.probe_http(f"http://127.0.0.1:{port}/ws")
+    srv.shutdown()
+    srv.server_close()
+    assert not cw.probe_http(f"http://127.0.0.1:{port}/health", timeout=1)
+
+
+def test_probe_esl_and_sip_against_fake_servers():
+    import socket
+    import threading
+
+    tcp = socket.create_server(("127.0.0.1", 0))
+    threading.Thread(target=lambda: tcp.accept()[0].sendall(b"Content-Type: auth/request\n\n"), daemon=True).start()
+    assert cw.probe_esl("127.0.0.1", tcp.getsockname()[1])
+    tcp.close()
+
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.bind(("127.0.0.1", 0))
+
+    def answer():
+        data, addr = udp.recvfrom(4096)
+        assert data.startswith(b"OPTIONS sip:")
+        udp.sendto(b"SIP/2.0 200 Keepalive\r\n\r\n", addr)
+
+    threading.Thread(target=answer, daemon=True).start()
+    assert cw.probe_sip("127.0.0.1", udp.getsockname()[1])
+    udp.close()
+    assert not cw.probe_esl("127.0.0.1", 1, timeout=1)
+
+
+def test_reads_envoy_health_and_kamailio_listen(tmp_path, monkeypatch):
+    class R:
+        def __init__(self, text):
+            self.text = text
+
+        def read(self):
+            return self.text.encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    text = ("conversation_svc::127.0.0.1:50051::health_flags::healthy\n"
+            "conversation_svc::127.0.0.1:50052::health_flags::/failed_active_hc\n")
+    monkeypatch.setattr(cw._OPENER, "open", lambda url, timeout=None: R(text))
+    assert cw.probe_envoy_host("127.0.0.1:50051") is True
+    assert cw.probe_envoy_host("127.0.0.1:50052") is False
+    assert cw.probe_envoy_host("127.0.0.1:59999") is None
+
+    cfg = tmp_path / "kamailio.cfg"
+    cfg.write_text("#!KAMAILIO\nlisten=udp:192.168.0.116:5060\n")
+    assert cw.kamailio_listen(cfg) == ("192.168.0.116", 5060)
+    assert cw.kamailio_listen(tmp_path / "missing.cfg") is None
+
+
+def test_probe_sip_treats_unreachable_network_as_unknown(monkeypatch):
+    import errno
+
+    class Unreachable:
+        def __init__(self, *args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def settimeout(self, timeout):
+            pass
+
+        def bind(self, addr):
+            pass
+
+        def getsockname(self):
+            return ("192.168.0.9", 40000)
+
+        def sendto(self, data, addr):
+            raise OSError(errno.ENETUNREACH, "Network is unreachable")
+
+    monkeypatch.setattr(cw.socket, "socket", Unreachable)
+    assert cw.probe_sip("192.168.0.9", 5060) is None
+
+
+def test_unknown_round_breaks_the_miss_streak(tmp_path):
+    sup, clock = _ProbeSupervisor(start=50.0), [100.0]
+    w, timers = _watcher(tmp_path, sup, clock)
+    w.probe_once({"gw": lambda: True})
+    results = iter([False, False, None, False, False])
+    for _ in range(5):
+        w.probe_once({"gw": lambda: next(results)})
+    assert sup.stops == 0 and timers == []
+
+
+def test_hang_restart_is_deferred_while_calls_are_live_then_proceeds(tmp_path):
+    sup, clock = _ProbeSupervisor(start=50.0), [100.0]
+    w, timers = _watcher(tmp_path, sup, clock)
+    calls = [2]
+    w.live_calls = lambda: calls[0]
+    result = [True]
+    probes = {"conv": lambda: result[0]}
+    w.probe_once(probes)
+    result[0] = False
+    for _ in range(3):
+        w.probe_once(probes)
+    assert sup.stops == 0 and timers == []
+    calls[0] = 0
+    for _ in range(3):
+        w.probe_once(probes)
+    assert sup.stops == 1 and timers and timers[-1][0] == 0
+
+
+def test_hang_restart_aborts_when_live_calls_are_unknown(tmp_path):
+    sup, clock = _ProbeSupervisor(start=50.0), [100.0]
+    w, timers = _watcher(tmp_path, sup, clock)
+    w.live_calls = lambda: None
+    result = [True]
+    probes = {"conv": lambda: result[0]}
+    w.probe_once(probes)
+    result[0] = False
+    for _ in range(3):
+        w.probe_once(probes)
+    assert sup.stops == 0 and timers == []
+
+
+def test_cluster_cache_fetches_once_per_round():
+    fetched = []
+    cache = cw._ClusterCache(ttl_s=60, fetch=lambda: fetched.append(1) or "x")
+    assert cache.get() == "x" and cache.get() == "x"
+    assert len(fetched) == 1
+
+
+def test_file_memo_reparses_only_on_change(tmp_path):
+    f = tmp_path / "k.cfg"
+    f.write_text("listen=udp:10.0.0.1:5060\n")
+    parsed = []
+    memo = cw._FileMemo(f, lambda p: parsed.append(1) or cw.kamailio_listen(p))
+    assert memo.get() == ("10.0.0.1", 5060) and memo.get() == ("10.0.0.1", 5060)
+    assert len(parsed) == 1
+    f.write_text("listen=udp:10.0.0.2:5060\n")
+    import os
+    os.utime(f, ns=(f.stat().st_atime_ns, f.stat().st_mtime_ns + 1_000_000_000))
+    assert memo.get() == ("10.0.0.2", 5060)
