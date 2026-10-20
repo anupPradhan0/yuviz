@@ -208,7 +208,8 @@ async def smoke_test(host: str, port: int, timeout_s: float) -> bool:
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Voice AI Gateway smoke test")
     p.add_argument("--host",    default="localhost", help="Gateway host (default: localhost)")
-    p.add_argument("--port",    type=int, default=8080, help="Gateway WebSocket port (default: 8080)")
+    p.add_argument("--port",    type=int, default=int(os.environ.get("GATEWAY_LISTEN_PORT") or 8080),
+                   help="Gateway WebSocket port (default: GATEWAY_LISTEN_PORT, else 8080)")
     p.add_argument("--timeout", type=float, default=45.0,
                    help="Max wait seconds (default: 45 — pipeline mode needs ~10-30s for STT+LLM+TTS)")
     return p.parse_args()

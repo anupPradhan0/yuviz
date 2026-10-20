@@ -6,6 +6,7 @@ Run: uvicorn services.campaigns.app:app --reload --port 8400
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 import asyncpg
@@ -41,7 +42,7 @@ app = FastAPI(title="Voice AI Platform — Campaign Service", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[o.strip() for o in os.environ.get("ADMIN_UI_ORIGINS", "http://localhost:3000").split(",") if o.strip()],
     allow_methods=["*"],
     allow_headers=["*"],
 )

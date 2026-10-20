@@ -20,6 +20,7 @@ protected:
 
     void SetUp() override {
         tmp_yaml_ = std::filesystem::temp_directory_path() / "test_gateway.yaml";
+        ::unsetenv("GATEWAY_LISTEN_PORT");  // a dev shell exports it from .env
     }
 
     void TearDown() override {
@@ -399,7 +400,7 @@ protected:
         ConfigTest::SetUp();
         for (const char* v : {"FREESWITCH_ESL_PASSWORD", "FREESWITCH_ESL_HOST", "FREESWITCH_ESL_PORT",
                               "SIP_PROXY_HOST", "SIP_PROXY_PORT", "CONVERSATION_SVC_TARGET", "REDIS_URL",
-                              "GATEWAY_LISTEN_HOST"}) {
+                              "GATEWAY_LISTEN_HOST", "GATEWAY_LISTEN_PORT"}) {
             ::unsetenv(v);
         }
     }
@@ -456,6 +457,20 @@ TEST_F(EslEnvConfigTest, WebSocketListensOnLoopbackUnlessGatewayListenHostIsSet)
     voiceai::Config cfg;
     cfg.load(tmp_yaml_.string());
     EXPECT_EQ(cfg.websocket().host, "192.168.0.116");
+}
+
+TEST_F(EslEnvConfigTest, GatewayListenPortOverridesYaml) {
+    ::setenv("FREESWITCH_ESL_PASSWORD", "p", 1);
+    write_yaml("gateway:\n  websocket:\n    port: 9090\n");
+    {
+        voiceai::Config cfg;
+        cfg.load(tmp_yaml_.string());
+        EXPECT_EQ(cfg.websocket().port, 9090);
+    }
+    ::setenv("GATEWAY_LISTEN_PORT", "8091", 1);
+    voiceai::Config cfg;
+    cfg.load(tmp_yaml_.string());
+    EXPECT_EQ(cfg.websocket().port, 8091);
 }
 
 TEST_F(EslEnvConfigTest, RedisUrlWithoutPortOrDbUsesDefaults) {

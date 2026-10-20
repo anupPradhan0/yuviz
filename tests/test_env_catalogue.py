@@ -16,8 +16,6 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[1]
 _EXAMPLE = _REPO / ".env.example"
 
-# Set per process by each start command, not a platform setting.
-_NOT_IN_CATALOGUE = {"PORT"}
 # Helpers that read os.environ by name (pipeline_config._env, email._env, ...).
 _ENV_HELPERS = {"_env", "_env_int", "_env_float", "_env_bool"}
 _SECRET_NAME = re.compile(r"(PASSWORD|SECRET|_KEY|TOKEN)$")
@@ -139,7 +137,7 @@ def test_every_env_var_the_services_read_is_in_env_example():
     )
     assert known <= unresolved, f"stale _DYNAMIC_READS entries: {sorted(known - unresolved)}"
     read |= {name for names in _DYNAMIC_READS.values() for name in names}
-    missing = read - set(_catalogue()) - _NOT_IN_CATALOGUE - _knowledge_doc_names()
+    missing = read - set(_catalogue()) - _knowledge_doc_names()
     assert not missing, f"read by code but not listed in .env.example or docs/knowledge-env-vars.md: {sorted(missing)}"
 
 

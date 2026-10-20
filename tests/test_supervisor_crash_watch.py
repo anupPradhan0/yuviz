@@ -422,3 +422,17 @@ def test_file_memo_reparses_only_on_change(tmp_path):
     import os
     os.utime(f, ns=(f.stat().st_atime_ns, f.stat().st_mtime_ns + 1_000_000_000))
     assert memo.get() == ("10.0.0.2", 5060)
+
+
+def test_hung_gateway_restarts_even_with_live_calls(tmp_path):
+    sup, clock = _ProbeSupervisor(start=50.0), [100.0]
+    w, timers = _watcher(tmp_path, sup, clock)
+    w.live_calls = lambda: 3
+    result = [True]
+    probes = {"gateway": lambda: result[0]}
+    w.probe_once(probes)
+    result[0] = False
+    for _ in range(3):
+        w.probe_once(probes)
+    assert sup.stops == 1 and timers and timers[-1][0] == 0
+

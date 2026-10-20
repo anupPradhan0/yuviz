@@ -106,6 +106,13 @@ _load_env() {
   export LISTEN_HOST="${LISTEN_HOST:-127.0.0.1}"
 }
 
+# Prints the port of URL $1, or $2 when it has none: one setting for the server and its callers.
+_url_port() {
+  local p=${1##*:}
+  p=${p%%/*}
+  case "$p" in ''|*[!0-9]*) echo "$2" ;; *) echo "$p" ;; esac
+}
+
 # Returns 1 with a pointer to .env when a setting is blank. Callers use
 # `_require X || return 0` so the hint stays on screen.
 _require() {

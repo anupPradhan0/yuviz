@@ -90,14 +90,14 @@ start_config_service() {
   # are saved with a "not synced" warning (number_sync.py).
   _require SECRET_ENCRYPTION_KEY JWT_SECRET || return 0
   cd "$REPO"
-  python3 -m uvicorn services.config.app:app --host "$LISTEN_HOST" --port 8000
+  python3 -m uvicorn services.config.app:app --host "$LISTEN_HOST" --port "$(_url_port "${CONFIG_SERVICE_URL:-}" 8000)"
 }
 
 # ── Block 6: Knowledge Service (REST API, port 8100) ──────────────────────────
 start_knowledge_service() {
   _require JWT_SECRET || return 0
   cd "$REPO"
-  python3 -m uvicorn services.knowledge.app:app --host "$LISTEN_HOST" --port 8100
+  python3 -m uvicorn services.knowledge.app:app --host "$LISTEN_HOST" --port "$(_url_port "${KNOWLEDGE_SERVICE_URL:-}" 8100)"
 }
 
 # ── Block 7: Knowledge ingestion worker (background job-queue poller) ────────
@@ -112,7 +112,7 @@ start_campaigns_service() {
   _require JWT_SECRET FREESWITCH_ESL_PASSWORD || return 0
   _warn_env_drift SIP_PROXY_HOST
   cd "$REPO"
-  python3 -m uvicorn services.campaigns.app:app --host "$LISTEN_HOST" --port 8400
+  python3 -m uvicorn services.campaigns.app:app --host "$LISTEN_HOST" --port "$(_url_port "${CAMPAIGNS_SERVICE_URL:-}" 8400)"
 }
 
 # ── Block 8b: Tool Execution Service (REST API, port 8600) — custom API chains ─
@@ -183,19 +183,22 @@ start_admin_ui() {
 # ── Verify: check all services are healthy ───────────────────────────────────
 verify() {
   echo "=== Port check ==="
-  for port in 3306 5060 5080 5432 6379 11434 8000 8100 8400 8600 8750 50051 50052 10000 8080 3000; do
+  for port in 3306 5060 5080 5432 6379 11434 \
+      "$(_url_port "${CONFIG_SERVICE_URL:-}" 8000)" "$(_url_port "${KNOWLEDGE_SERVICE_URL:-}" 8100)" \
+      "$(_url_port "${CAMPAIGNS_SERVICE_URL:-}" 8400)" "$(_url_port "${TOOLEXEC_SERVICE_URL:-}" 8600)" \
+      "$(_url_port "${TELEPHONY_SERVICE_URL:-}" 8750)" 50051 50052 10000 "${GATEWAY_LISTEN_PORT:-8080}" 3000; do
     nc -z localhost "$port" 2>/dev/null && echo "  :$port  OPEN" || echo "  :$port  CLOSED"
   done
 
   echo ""
   echo "=== Config / Knowledge / Campaigns Service health ==="
-  curl -s http://localhost:8000/health || echo "  Config Service not reachable"
+  curl -s "${CONFIG_SERVICE_URL:-http://localhost:8000}/health" || echo "  Config Service not reachable"
   echo ""
-  curl -s http://localhost:8100/health || echo "  Knowledge Service not reachable"
+  curl -s "${KNOWLEDGE_SERVICE_URL:-http://localhost:8100}/health" || echo "  Knowledge Service not reachable"
   echo ""
-  curl -sf http://localhost:8400/health || echo "  Campaigns Service not reachable"
+  curl -sf "${CAMPAIGNS_SERVICE_URL:-http://localhost:8400}/health" || echo "  Campaigns Service not reachable"
   echo ""
-  curl -s http://localhost:8600/health || echo "  Tool Execution Service not reachable"
+  curl -s "${TOOLEXEC_SERVICE_URL:-http://localhost:8600}/health" || echo "  Tool Execution Service not reachable"
 
   echo ""
   echo "=== Envoy upstream health ==="

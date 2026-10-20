@@ -73,6 +73,7 @@ void apply_env(GatewayConfig& cfg) {
     if (const char* v = env_value("CONVERSATION_SVC_TARGET")) cfg.conversation.endpoint = v;
     if (const char* v = env_value("REDIS_URL"))               apply_redis_url(cfg.redis, v);
     if (const char* v = env_value("GATEWAY_LISTEN_HOST"))     cfg.websocket.host = v;
+    if (const char* v = env_value("GATEWAY_LISTEN_PORT"))     cfg.websocket.port = parse_port("GATEWAY_LISTEN_PORT", v);
 }
 
 }  // namespace

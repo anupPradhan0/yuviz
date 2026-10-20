@@ -155,7 +155,7 @@ services:
     <<: *python-service
     command: ["python", "-m", "services.toolexec"]
     environment:
-      PORT: "8600"
+      TOOLEXEC_SERVICE_URL: http://toolexec:8600
       LISTEN_HOST: "0.0.0.0"   # inside the container; the host port is bounded by BIND_ADDR
       POSTGRES_DSN: ${POSTGRES_DSN}
       REDIS_URL: ${REDIS_URL}
@@ -255,7 +255,7 @@ services:
     <<: *python-service
     command: ["python", "-m", "services.telephony"]
     environment:
-      PORT: "8750"
+      TELEPHONY_SERVICE_URL: http://telephony:8750
       LISTEN_HOST: "0.0.0.0"   # inside the container; the host port is bounded by BIND_ADDR
       TELEPHONY_PUBLIC_BASE_URL: ${TELEPHONY_PUBLIC_BASE_URL:-}
       JWT_SECRET: ${JWT_SECRET}

@@ -274,7 +274,7 @@ def _health(connection: ServerConnection, request):
 
 async def main() -> None:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-    port = int(os.environ.get("PORT", "8300"))
+    port = urlparse(os.environ.get("NEXT_PUBLIC_WEBCALL_URL", "")).port or 8300
     host = os.environ.get("LISTEN_HOST", "127.0.0.1")
     async with serve(_handle_connection, host, port, process_request=_health):
         log.info("Webcall bridge listening on ws://%s:%d", host, port)

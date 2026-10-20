@@ -9,13 +9,14 @@ _sys.path.insert(0, _os.path.join(
 
 import logging
 import os
+from urllib.parse import urlparse
 
 import uvicorn
 
 
 def main() -> None:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-    port = int(os.environ.get("PORT", "8750"))
+    port = urlparse(os.environ.get("TELEPHONY_SERVICE_URL", "")).port or 8750
     uvicorn.run("services.telephony.app:app", host=os.environ.get("LISTEN_HOST", "127.0.0.1"), port=port, log_level="info")
 
 

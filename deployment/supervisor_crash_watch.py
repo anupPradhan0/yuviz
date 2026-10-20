@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import xmlrpc.client
@@ -24,6 +25,8 @@ FATAL = "FATAL"
 PROBE_INTERVAL_S = 10
 MISSES_TO_RESTART = 3
 STARTUP_DEADLINE_S = 300
+# A wedged Gateway never closes its calls rows, and its calls are already dead, so it restarts regardless.
+LIVE_CALL_EXEMPT = frozenset({"gateway"})
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -290,6 +293,14 @@ def count_live_calls(dsn: str) -> int | None:
         return None
 
 
+def url_port(key: str, default: int) -> int:
+    """Port of the .env URL a service's callers use, so the probe follows the service."""
+    try:
+        return urllib.parse.urlparse(dotenv(key, "")).port or default
+    except ValueError:
+        return default
+
+
 def dotenv(key: str, default: str, path: Path = Path(".env")) -> str:
     if os.environ.get(key):
         return os.environ[key]
@@ -308,21 +319,25 @@ def default_probes() -> dict:
     host = dotenv("LISTEN_HOST", "127.0.0.1")
     host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
     esl = (dotenv("FREESWITCH_ESL_HOST", "127.0.0.1"), int(dotenv("FREESWITCH_ESL_PORT", "8022")))
+    gw_host = dotenv("GATEWAY_LISTEN_HOST", "127.0.0.1")
+    gw_host = "127.0.0.1" if gw_host in ("0.0.0.0", "::", "") else gw_host
+    gw_port = dotenv("GATEWAY_LISTEN_PORT", "8080")
     clusters = _ClusterCache()
     listen = _FileMemo(Path.home() / ".yuviz" / "kamailio" / "kamailio.cfg", kamailio_listen)
     probes = {
-        "config": lambda: probe_http(f"http://{host}:8000/health"),
-        "knowledge": lambda: probe_http(f"http://{host}:8100/health"),
-        "campaigns": lambda: probe_http(f"http://{host}:8400/health"),
-        "toolexec": lambda: probe_http(f"http://{host}:8600/health"),
-        "telephony": lambda: probe_http(f"http://{host}:8750/health"),
-        "webcall": lambda: probe_http(f"http://{host}:8300/health"),
+        "config": lambda: probe_http(f"http://{host}:{url_port('CONFIG_SERVICE_URL', 8000)}/health"),
+        "knowledge": lambda: probe_http(f"http://{host}:{url_port('KNOWLEDGE_SERVICE_URL', 8100)}/health"),
+        "campaigns": lambda: probe_http(f"http://{host}:{url_port('CAMPAIGNS_SERVICE_URL', 8400)}/health"),
+        "toolexec": lambda: probe_http(f"http://{host}:{url_port('TOOLEXEC_SERVICE_URL', 8600)}/health"),
+        "telephony": lambda: probe_http(f"http://{host}:{url_port('TELEPHONY_SERVICE_URL', 8750)}/health"),
+        "webcall": lambda: probe_http(f"http://{host}:{url_port('NEXT_PUBLIC_WEBCALL_URL', 8300)}/health"),
         "ollama": lambda: probe_http("http://127.0.0.1:11434/api/version"),
         "envoy": lambda: probe_http("http://127.0.0.1:9901/ready"),
         "admin-ui": lambda: probe_http(f"http://{host}:3000/login", timeout=15),
         "conversation-1": lambda: envoy_health(clusters.get(), "127.0.0.1:50051"),
         "conversation-2": lambda: envoy_health(clusters.get(), "127.0.0.1:50052"),
         "freeswitch": lambda: probe_esl(*esl),
+        "gateway": lambda: probe_http(f"http://{gw_host}:{gw_port}/health"),
         "kamailio": lambda: (lambda a: probe_sip(*a) if a else None)(listen.get()),
     }
     return probes
@@ -439,10 +454,11 @@ class Watcher:
             return
         if info["statename"] != "RUNNING" or float(info["start"]) != start_at:
             return
-        calls = self.live_calls()
-        if calls is None or calls > 0:
-            self._defer(name, start_at, calls)
-            return
+        if name not in LIVE_CALL_EXEMPT:
+            calls = self.live_calls()
+            if calls is None or calls > 0:
+                self._defer(name, start_at, calls)
+                return
         with self.lock:
             self.armed.pop(name, None)
             action, delay = self.policy.on_exit(name, self.clock())

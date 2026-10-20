@@ -12,7 +12,7 @@
 --   - mod_audio_fork splits its API args on spaces, so the metadata JSON
 --     must not contain any.
 
-local gateway_ws = os.getenv("VOICE_AI_GATEWAY_WS") or "ws://127.0.0.1:8080"
+local gateway_ws = os.getenv("VOICE_AI_GATEWAY_WS") or ("ws://127.0.0.1:" .. (os.getenv("GATEWAY_LISTEN_PORT") or "8080"))
 
 local uuid = session:get_uuid()
 session:answer()

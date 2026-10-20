@@ -71,12 +71,14 @@ if ! grep -q 'mod_audio_fork' "$modules"; then
 fi
 
 # ESL on loopback only — the Gateway and campaigns service are on this host,
-# and ESL is remote control of the whole switch. Port 8022 is pinned by
-# config/gateway.yaml and services/campaigns/originate.py.
+# and ESL is remote control of the whole switch. The port is FREESWITCH_ESL_PORT
+# from .env (default 8022), which the Gateway, Campaigns and crash-watch also read.
+esl_port=$(grep -E '^FREESWITCH_ESL_PORT=' "$REPO_ROOT/.env" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]' || true)
+esl_port=${FREESWITCH_ESL_PORT:-${esl_port:-8022}}
 esl="$CONF/autoload_configs/event_socket.conf.xml"
 sed -i '' -e 's|name="listen-ip" value="[^"]*"|name="listen-ip" value="127.0.0.1"|' \
-          -e 's|name="listen-port" value="[^"]*"|name="listen-port" value="8022"|' "$esl"
-echo "  event_socket: 127.0.0.1:8022"
+          -e "s|name=\"listen-port\" value=\"[^\"]*\"|name=\"listen-port\" value=\"$esl_port\"|" "$esl"
+echo "  event_socket: 127.0.0.1:$esl_port"
 
 # The stock `internal` profile binds :5060, which is Kamailio's port on this
 # same host. Only `external` (:5080) is used — Kamailio dispatches to it.
@@ -125,6 +127,6 @@ echo ""
 # ── Step 3: sanity check ────────────────────────────────────────────────────
 echo "=== Step 3/3: check ==="
 echo "  Start with:  start_freeswitch   (from scripts/start_local.sh)"
-echo "  Then verify: fs_cli -P 8022 -x 'module_exists mod_audio_fork'"
+echo "  Then verify: fs_cli -P $esl_port -x 'module_exists mod_audio_fork'"
 echo ""
 echo "Done."

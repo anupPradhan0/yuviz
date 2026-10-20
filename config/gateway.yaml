@@ -1,8 +1,7 @@
 # Addresses and secrets come from .env (CONVERSATION_SVC_TARGET, REDIS_URL,
-# FREESWITCH_ESL_*, SIP_PROXY_*); this file only tunes behaviour.
+# FREESWITCH_ESL_*, SIP_PROXY_*, GATEWAY_LISTEN_*); this file only tunes behaviour.
 gateway:
   websocket:
-    port: 8080
     max_connections: 1000
     timeout_ms: 30000
     metadata_wait_ms: 1500
