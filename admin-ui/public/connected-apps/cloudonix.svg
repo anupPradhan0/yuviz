@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <title>Cloudonix</title>
+  <defs><clipPath id="circle"><circle cx="256" cy="256" r="256"/></clipPath></defs>
+  <g clip-path="url(#circle)">
+    <circle cx="256" cy="256" r="256" fill="#009A96"/>
+    <path fill="#FFF" d="M174 13.5A256 256 0 0 0 66 84l125 168L61 424a256 256 0 0 0 105 71.5L277 336V178L174 13.5Z"/>
+    <path fill="#FFF" d="M390 85.5h56a256 256 0 0 1 28 35.5l-96 127 102 134a256 256 0 0 1-25 33h-57L319 306V198l71-112.5Z"/>
+  </g>
+</svg>

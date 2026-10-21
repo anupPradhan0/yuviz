@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 447 447" fill="none">
+  <title>Zoho CRM</title>
+  <g transform="rotate(-7 223.5 223.5)" stroke-width="58">
+    <path stroke="#ED1C24" d="M223.5 75H118C94.25 75 75 94.25 75 118v105.5"/>
+    <path stroke="#089949" d="M223.5 75H329c23.75 0 43 19.25 43 43v105.5"/>
+    <path stroke="#226DB4" d="M372 223.5V329c0 23.75-19.25 43-43 43H223.5"/>
+    <path stroke="#F9B21D" d="M223.5 372H118c-23.75 0-43-19.25-43-43V223.5"/>
+  </g>
+</svg>

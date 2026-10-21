@@ -1,7 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { ApiError, getCurrentUser } from "@/lib/api";
+import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import { Check, Plus, Search } from "lucide-react";
+import { ApiError, listCarriers, listTelephonyConfigs, deleteCarrier, deleteTelephonyConfig } from "@/lib/api";
+import { CallingAppModal, CallingAccount } from "@/components/CallingAppModal";
+import { AppCard, availabilityLabel, filterApps, oauthAuthorizationUrl, workAppCards } from "@/lib/connectedApps";
 import {
   ConnectorPreset,
   CustomApi,
@@ -19,31 +23,28 @@ import {
   removeConnectorPreset,
 } from "@/lib/toolexecApi";
 import { Modal } from "@/components/Modal";
+import { AppIcon } from "@/components/AppIcon";
+import { ConnectedAppsHeading } from "@/components/ConnectedAppsHeading";
+import { CALLING_APPS, CARRIER_PROVIDERS, callingAppLabel } from "@/lib/callingApps";
+import { useConnectionAccess } from "@/lib/useConnectionAccess";
+import { makePresetDraft, presetDraftKey, readPresetDraft } from "@/lib/connectorDraft";
 
-// What the callback page needs after the provider sends the browser back: the
-// tenant is the one this page was showing, and returnTo is where to land.
+// OAuth callbacks return to the tenant and route stored here.
 export const OAUTH_CONTEXT_KEY = "yuviz_oauth_context";
 export interface OAuthContext {
   tenantId: string;
   provider: string;
   returnTo: string;
+  presetKey?: string | null;
 }
-
-const STATUS_BADGE: Record<OAuthConnection["status"], { label: string; cls: string }> = {
-  connected: { label: "Connected", cls: "green" },
-  reconnect_needed: { label: "Reconnect needed", cls: "amber" },
-  disconnected: { label: "Disconnected", cls: "gray" },
-};
-
-// Catalogue entries that ship dark: each is shown as "Not available" until the
-// server lists it, so an operator's env switch is the only thing that turns it on.
-const DARK_ENTRIES = [
-  { label: "Cal.com", isLive: (providers: OAuthProvider[]) => providers.some((p) => p.key === "calcom") },
-  { label: "Dynamics 365", isLive: (_: OAuthProvider[], presets: ConnectorPreset[]) => presets.some((p) => p.key === "dynamics_crm") },
-];
 
 // The preset 409s the server uses to say a Google grant is missing or too narrow.
 const CONNECTOR_REQUIRED = new Set(["connector_required", "connector_scope_required"]);
+type AppResource = "providers" | "presets" | "connections" | "apis" | "carrier" | "telephony_config";
+const RESOURCE_LABELS: Record<AppResource, string> = {
+  providers: "Available apps", presets: "App tools", connections: "Connected work accounts",
+  apis: "Configured tools", carrier: "Carrier connections", telephony_config: "Calling connections",
+};
 
 type FieldDef = {
   name: string;
@@ -51,13 +52,11 @@ type FieldDef = {
   hint?: string;
   type?: "text" | "password" | "number" | "select";
   options?: string[];
-  // Hidden fields are neither shown nor sent: the server rejects a field that
-  // does not belong to the chosen provider.
+  // Hide and omit fields that do not belong to the selected provider.
   when?: (values: Record<string, string>) => boolean;
 };
 
-// Read off services/toolexec/schemas.py's setup models; the server validates
-// every value again, so these only decide what to ask for.
+// These fields mirror the toolexec setup models.
 const PRESET_FIELDS: Record<string, FieldDef[]> = {
   calendar_booking: [
     { name: "calendar_id", label: "Calendar ID", hint: "\"primary\" is the connected account's own calendar" },
@@ -68,7 +67,7 @@ const PRESET_FIELDS: Record<string, FieldDef[]> = {
   ],
   whatsapp_confirmation: [
     { name: "provider", label: "WhatsApp provider", type: "select", options: ["gupshup", "interakt", "meta"] },
-    { name: "api_key", label: "API key", type: "password", hint: "Stored encrypted; it is never shown again" },
+    { name: "api_key", label: "Secret key", type: "password", hint: "Stored encrypted; it is never shown again" },
     { name: "template", label: "Approved template name" },
     { name: "language", label: "Template language", hint: "e.g. en or en_US" },
     { name: "param_count", label: "Template variables", type: "number", hint: "0 to 5, filled in by the agent" },
@@ -117,76 +116,152 @@ export function ConnectorsPanel({
   tenantId,
   connectOpen = false,
   onConnectClose,
+  onManageChange,
+  manageApp,
 }: {
   tenantId: string;
+  manageApp?: string;
   connectOpen?: boolean;
   onConnectClose?: () => void;
+  onManageChange: (app: string | null) => void;
 }) {
+  const [callingAccounts, setCallingAccounts] = useState<CallingAccount[]>([]);
+  const [callingLoaded, setCallingLoaded] = useState({ carrier: false, telephony_config: false });
+  const access = useConnectionAccess();
+  const { canManage, isSuperadmin } = access;
+  const [query, setQuery] = useState("");
+  const [segment, setSegment] = useState("All");
+  const [category, setCategory] = useState("All");
+  const [callingForm, setCallingForm] = useState<{ provider: string; account?: CallingAccount } | null>(null);
   const [providers, setProviders] = useState<OAuthProvider[]>([]);
   const [connections, setConnections] = useState<OAuthConnection[]>([]);
   const [presets, setPresets] = useState<ConnectorPreset[]>([]);
   const [apis, setApis] = useState<CustomApi[]>([]);
-  const [canManage, setCanManage] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [presetsLoaded, setPresetsLoaded] = useState(false);
+  const [loadErrors, setLoadErrors] = useState<Partial<Record<AppResource, string>>>({});
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [showPhoneNumbersLink, setShowPhoneNumbersLink] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
 
   const [applying, setApplying] = useState<ConnectorPreset | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
 
+  const [oauthIntro, setOauthIntro] = useState<{ provider: OAuthProvider; presetKey: string | null; changing: boolean } | null>(null);
+  const oauthRequest = useRef<AbortController | null>(null);
+  const oauthLeaving = useRef(false);
+  const [whatsAppStep, setWhatsAppStep] = useState<"key" | "messaging">("key");
   const [pasting, setPasting] = useState<OAuthProvider | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [keyError, setKeyError] = useState<string | null>(null);
 
-  // The four reads are independent: one failing must not blank what the
-  // others returned.
-  const refresh = async () => {
-    const [p, c, pr, a] = await Promise.allSettled([
-      listOAuthProviders(),
-      listOAuthConnections(tenantId),
-      listConnectorPresets(),
-      listCustomApis(tenantId),
-    ]);
-    if (p.status === "fulfilled") setProviders(p.value);
-    if (c.status === "fulfilled") setConnections(c.value);
-    if (pr.status === "fulfilled") setPresets(pr.value);
-    if (a.status === "fulfilled") setApis(a.value);
-    const failed = [p, c, pr, a].find((r) => r.status === "rejected");
-    setError(failed ? errorText(failed.reason) : null);
-    setLoading(false);
+  const refresh = async (resources: AppResource[]) => {
+    const requests: Record<AppResource, () => Promise<void>> = {
+      providers: async () => setProviders(await listOAuthProviders()),
+      presets: async () => { setPresets(await listConnectorPresets()); setPresetsLoaded(true); },
+      connections: async () => setConnections(await listOAuthConnections(tenantId)),
+      apis: async () => setApis(await listCustomApis(tenantId)),
+      carrier: async () => {
+        const records = await listCarriers(tenantId);
+        setCallingAccounts((previous) => [...previous.filter((account) => account.kind !== "carrier"),
+          ...records.map((record): CallingAccount => ({ kind: "carrier", record }))]);
+        setCallingLoaded((previous) => ({ ...previous, carrier: true }));
+      },
+      telephony_config: async () => {
+        const records = await listTelephonyConfigs(tenantId);
+        setCallingAccounts((previous) => [...previous.filter((account) => account.kind !== "telephony_config"),
+          ...records.map((record): CallingAccount => ({ kind: "telephony_config", record }))]);
+        setCallingLoaded((previous) => ({ ...previous, telephony_config: true }));
+      },
+    };
+    const results = await Promise.allSettled(resources.map((resource) => requests[resource]()));
+    setLoadErrors((previous) => {
+      const next = { ...previous };
+      results.forEach((result, index) => {
+        const resource = resources[index];
+        if (result.status === "fulfilled") delete next[resource];
+        else next[resource] = errorText(result.reason);
+      });
+      return next;
+    });
   };
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    refresh();
-    getCurrentUser()
-      .then((u) => setCanManage(u.role === "superadmin" || u.role === "admin"))
-      .catch(() => setCanManage(false));
+    void refresh(["providers", "presets", "connections", "apis", "carrier", "telephony_config"]).finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenantId]);
 
-  const connectionFor = (provider: string) => connections.find((c) => c.provider === provider && c.status !== "disconnected");
+  useEffect(() => {
+    if (applying?.key !== "whatsapp_confirmation") return;
+    document.getElementById(whatsAppStep === "key" ? "preset-api_key" : "preset-provider")?.focus();
+  }, [applying?.key, whatsAppStep]);
+
+  useEffect(() => {
+    // Clear pending OAuth state when the browser returns from the provider.
+    const resetOAuth = () => {
+      oauthLeaving.current = false;
+      oauthRequest.current?.abort();
+      oauthRequest.current = null;
+      setBusy((current) => current?.startsWith("connect:") ? null : current);
+    };
+    window.addEventListener("pageshow", resetOAuth);
+    return () => {
+      window.removeEventListener("pageshow", resetOAuth);
+      oauthRequest.current?.abort();
+      oauthRequest.current = null;
+    };
+  }, []);
+
+  const closeOAuth = () => {
+    if (oauthLeaving.current) window.stop();
+    oauthLeaving.current = false;
+    oauthRequest.current?.abort();
+    oauthRequest.current = null;
+    setBusy((current) => current?.startsWith("connect:") ? null : current);
+    if (oauthIntro?.presetKey) {
+      setApplying(presets.find((preset) => preset.key === oauthIntro.presetKey) ?? null);
+      window.sessionStorage.removeItem(presetDraftKey(tenantId));
+    }
+    setOauthIntro(null);
+    setError(null);
+  };
+
+  const closeManage = () => onManageChange(null);
+
   const rowsFor = (presetKey: string) => apis.filter((a) => a.preset_key === presetKey);
   const providerLabel = (key: string) => providers.find((p) => p.key === key)?.label ?? key;
-  // Presets that need a provider this deployment has not configured cannot work.
-  const usablePresets = useMemo(
-    () => presets.filter((p) => p.provider === null || providers.some((x) => x.key === p.provider)),
-    [presets, providers],
-  );
-
-  const connect = async (provider: string, presetKey: string | null) => {
+  const connect = async (provider: string, presetKey: string | null, chooseAccount = false) => {
+    if (oauthRequest.current || oauthLeaving.current) return;
+    const request = new AbortController();
+    oauthRequest.current = request;
+    let timedOut = false;
+    const timeout = window.setTimeout(() => { timedOut = true; request.abort(); }, 15_000);
     setBusy(`connect:${provider}`);
     setError(null);
     try {
-      const { authorize_url } = await authorizeOAuthConnection(tenantId, provider, presetKey);
-      const context: OAuthContext = { tenantId, provider, returnTo: "/integrations" };
+      const { authorize_url } = await authorizeOAuthConnection(tenantId, provider, presetKey, request.signal);
+      if (request.signal.aborted || oauthRequest.current !== request) return;
+      const context: OAuthContext = { tenantId, provider, returnTo: "/integrations", presetKey };
+      const draft = presetKey ? makePresetDraft(presetKey, values) : null;
+      if (draft) window.sessionStorage.setItem(presetDraftKey(tenantId), JSON.stringify(draft));
       window.sessionStorage.setItem(OAUTH_CONTEXT_KEY, JSON.stringify(context));
-      window.location.assign(authorize_url);
+      oauthLeaving.current = true;
+      window.location.assign(oauthAuthorizationUrl(authorize_url, provider, chooseAccount));
     } catch (e) {
-      setError(errorText(e));
-      setBusy(null);
+      oauthLeaving.current = false;
+      if (oauthRequest.current !== request) return;
+      if (!request.signal.aborted || timedOut) {
+        setError(timedOut ? "Opening this app took too long. Please try again." : errorText(e));
+      }
+    } finally {
+      window.clearTimeout(timeout);
+      if (!oauthLeaving.current && oauthRequest.current === request) {
+        oauthRequest.current = null;
+        setBusy((current) => current === `connect:${provider}` ? null : current);
+      }
     }
   };
 
@@ -198,7 +273,7 @@ export function ConnectorsPanel({
       await connectApiKey(tenantId, pasting.key, apiKey.trim());
       setPasting(null);
       setApiKey("");
-      await refresh();
+      await refresh(["connections"]);
     } catch (e) {
       setKeyError(errorText(e));
     } finally {
@@ -214,10 +289,11 @@ export function ConnectorsPanel({
     setError(null);
     try {
       await disconnectOAuthConnection(tenantId, connection.id);
+      setShowPhoneNumbersLink(false);
       setNotice(
         `${providerLabel(connection.provider)} disconnected. To finish, also remove Yuviz from the connected apps in that provider account.`,
       );
-      await refresh();
+      await refresh(["connections", "apis"]);
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -229,6 +305,7 @@ export function ConnectorsPanel({
     setApplying(preset);
     setValues(presetDefaults(preset.key));
     setFormError(null);
+    setWhatsAppStep("key");
   };
 
   const apply = async () => {
@@ -236,14 +313,19 @@ export function ConnectorsPanel({
     setBusy(`apply:${applying.key}`);
     setFormError(null);
     try {
-      await applyConnectorPreset(tenantId, setupFor(applying.key, values));
+      const setup = setupFor(applying.key, values);
+      await applyConnectorPreset(tenantId, setup);
       setApplying(null);
-      setNotice(`${applying.title} is set up. Attach its tools to an agent from the agent's Tools tab.`);
-      await refresh();
+      setShowPhoneNumbersLink(false);
+      setValues({});
+      setNotice(`${applying.title} is on. Add it to an agent from the agent’s Tools tab.`);
+      await refresh(["apis"]);
     } catch (e) {
       if (e instanceof ApiError && e.status === 409 && CONNECTOR_REQUIRED.has(e.detail) && applying.provider) {
-        // Authorize with this preset's scopes; the admin applies again on return.
-        await connect(applying.provider, applying.key);
+        // Request this preset's scopes before it is applied.
+        const provider = providers.find((p) => p.key === applying.provider);
+        if (provider) { setApplying(null); setOauthIntro({ provider, presetKey: applying.key, changing: false }); }
+        else setFormError("This app needs setup by a platform admin before you can connect.");
         return;
       }
       setFormError(errorText(e));
@@ -259,7 +341,7 @@ export function ConnectorsPanel({
     try {
       await removeConnectorPreset(tenantId, preset.key);
       setNotice(null);
-      await refresh();
+      await refresh(["apis"]);
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -267,11 +349,26 @@ export function ConnectorsPanel({
     }
   };
 
+  const restoredDraft = useRef(false);
+  useEffect(() => {
+    if (loading || !presetsLoaded || restoredDraft.current) return;
+    restoredDraft.current = true;
+    const draft = readPresetDraft(window.sessionStorage, tenantId);
+    const preset = draft && presets.find((entry) => entry.key === draft.presetKey);
+    if (!draft || !preset) return;
+    window.sessionStorage.removeItem(presetDraftKey(tenantId));
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setApplying(preset);
+    setValues(draft.values);
+    setFormError("Your settings were restored. Review them and try turning on the tool again.");
+  }, [loading, presetsLoaded, presets, tenantId]);
+
   if (loading) {
     return (
-      <div className="card">
-        <div className="empty-state">Loading integrations…</div>
-      </div>
+      <>
+        <ConnectedAppsHeading />
+        <div className="card"><div className="empty-state">Loading integrations…</div></div>
+      </>
     );
   }
 
@@ -279,127 +376,147 @@ export function ConnectorsPanel({
     (f) => (!f.when || f.when(values)) && !values[f.name]?.trim(),
   );
 
-  const providerList = (
-    <>
-      {providers.length === 0 && (
-        <div className="empty-state">
-          No account providers are configured on this platform yet. Ask a platform operator to set one up.
+  const cards: AppCard[] = [
+    ...CALLING_APPS.map((app): AppCard => {
+      const count = callingAccounts.filter((a) => a.record.provider === app.key).length;
+      return { id: `calling:${app.key}`, label: app.label, description: app.description,
+        icon: app.icon, category: "Calling", connected: count > 0,
+        reconnect: false, available: callingLoaded[CARRIER_PROVIDERS.includes(app.key) ? "carrier" : "telephony_config"], calling: app.key, count };
+    }),
+    ...workAppCards(providers, connections, presets, apis),
+  ];
+  const choosingApp = connectOpen && canManage && !oauthIntro && !applying && !pasting && !callingForm;
+  const needsConnectPermission = connectOpen && access.checked && !access.loading && !canManage;
+  const visible = filterApps(cards, query, segment, category);
+  const managed = cards.find((app) => app.id === manageApp);
+  const canEdit = (app: AppCard) => canManage && (app.calling !== "native" || isSuperadmin);
+  const startConnect = (app: AppCard) => {
+    onConnectClose?.();
+    closeManage();
+    if (app.calling) setCallingForm({ provider: app.calling });
+    else if (app.preset) openApply(app.preset);
+    else if (app.provider?.auth_kind === "api_key") {
+      setPasting(app.provider); setApiKey(""); setKeyError(null);
+    } else if (app.provider) setOauthIntro({ provider: app.provider, presetKey: null, changing: app.id === "google" && !!app.accounts?.length });
+  };
+  const disconnectCalling = async (account: CallingAccount) => {
+    if (!window.confirm(`Disconnect “${account.record.name}”? You can connect it again later.`)) return;
+    setBusy(`disconnect:${account.record.id}`);
+    setError(null);
+    try {
+      if (account.kind === "carrier") await deleteCarrier(account.record.id);
+      else await deleteTelephonyConfig(account.record.id);
+      setShowPhoneNumbersLink(false);
+      setNotice(`${account.record.name} disconnected.`);
+      await refresh([account.kind]);
+    } catch (e) { setError(errorText(e)); }
+    finally { setBusy(null); }
+  };
+
+  const searchInput = <label className="connected-apps-search"><Search size={16} aria-hidden="true" />
+    <input type="search" aria-label="Search apps" placeholder="Connect an app" value={query} onChange={(e) => setQuery(e.target.value)} />
+  </label>;
+  const catalog = <>
+    <ConnectedAppsHeading>{searchInput}</ConnectedAppsHeading>
+    <div className="connected-apps-toolbar">
+      <div className="connected-apps-segments" aria-label="Connection status">
+        {["All", "Connected", "Not connected"].map((value) => <button key={value} type="button" aria-pressed={segment === value}
+          className={segment === value ? "on" : ""} onClick={() => { setSegment(value); if (value === "All") setCategory("All"); }}>
+          {value} · {cards.filter((app) => value === "All" || (value === "Connected" ? app.connected : !app.connected)).length}
+        </button>)}
+      </div>
+      <div className="connected-apps-categories" aria-label="App category">
+        {["Calling", "Work", "Messaging"].map((value) => <button key={value} type="button" aria-pressed={category === value}
+          className={category === value ? "on" : ""} onClick={() => setCategory((current) => current === value ? "All" : value)}>{value}</button>)}
+      </div>
+    </div>
+    <div className="connected-apps-grid">
+      {visible.map((app) => <article key={app.id} className={`connected-app-card${app.connected ? " connected" : ""}`}>
+        <div className="connected-app-icon"><AppIcon icon={app.icon} /></div>
+        <div className="connected-app-copy"><h2>{app.label}</h2><p>{app.description}</p></div>
+        {!!app.accounts?.length && <div className="connected-app-account" title={app.accounts.map((a) => a.account_label ?? "Account connected").join(", ")}>
+          {app.accounts.length === 1 ? app.accounts[0].account_label ?? "Account connected" : `${app.accounts[0].account_label ?? "Account connected"} +${app.accounts.length - 1} more`}
+        </div>}
+        {!!app.tools?.length && <div className="form-hint">{app.tools.map((tool) => <div key={tool.key}>{tool.label}: {tool.configured ? "Configured" : "Not set up"}</div>)}</div>}
+        {!app.available && !app.comingSoon && !app.connected && <span className="connected-app-setup-hint">{app.calling ? "Try refreshing to load this app." : "A platform admin needs to enable this app."}</span>}
+        {app.calling === "native" && !isSuperadmin && !app.connected && <span className="form-hint">Ask a platform admin to connect.</span>}
+        <div className="connected-app-actions">
+          {app.connected || app.reconnect ? <>
+            <button type="button" className={`connected-app-status${app.reconnect ? " reconnect" : ""}`} onClick={() => onManageChange(app.id)} aria-label={`Manage ${app.label}`}>
+              {app.reconnect ? "Reconnect needed" : <><Check size={14} />{app.count && (app.calling || app.count > 1) ? `${app.count} connected` : "Connected"}</>}
+            </button>
+            {canEdit(app) && app.available && app.calling !== "native" && <button type="button" className="connected-app-add" disabled={busy !== null} title={app.id === "google" ? "Change Google account" : app.calling ? `Connect another ${app.label} account` : `Manage ${app.label}`}
+              aria-label={app.calling || app.id === "google" ? (app.id === "google" ? "Change Google account" : `Connect another ${app.label} account`) : `Manage ${app.label}`} onClick={() => app.calling || app.id === "google" ? startConnect(app) : onManageChange(app.id)}><Plus size={16} /></button>}
+          </> : !app.available ? <span className="connected-app-soon">{availabilityLabel(app)}</span>
+          : <button type="button" className="connected-app-connect" disabled={!canEdit(app) || busy !== null} onClick={() => startConnect(app)}>
+            <Plus size={14} />{app.preset && app.id !== "whatsapp_confirmation" ? "Turn on" : "Connect"}
+          </button>}
         </div>
-      )}
-      {providers.map((provider) => {
-        const connection = connectionFor(provider.key);
-        const status = connection ? STATUS_BADGE[connection.status] : null;
-        return (
-          <div key={provider.key} className="kb-row">
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 500 }}>{provider.label}</div>
-              <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>
-                {connection ? (connection.account_label ?? "Account connected") : "Not connected"}
-              </div>
-            </div>
-            {status && <span className={`badge ${status.cls}`}>{status.label}</span>}
-            {canManage && (
-              <>
-                <button
-                  className="btn btn-indigo btn-sm"
-                  disabled={busy !== null}
-                  onClick={() => {
-                    if (provider.auth_kind !== "api_key") return connect(provider.key, null);
-                    onConnectClose?.();
-                    setPasting(provider);
-                    setApiKey("");
-                    setKeyError(null);
-                  }}
-                >
-                  {connection ? "Reconnect" : "Connect"}
-                </button>
-                {connection && (
-                  <button
-                    className="btn btn-danger btn-sm"
-                    disabled={busy !== null}
-                    onClick={() => disconnect(connection)}
-                  >
-                    Disconnect
-                  </button>
-                )}
-              </>
-            )}
-          </div>
-        );
-      })}
-      {DARK_ENTRIES.filter((entry) => !entry.isLive(providers, presets)).map((entry) => (
-        <div key={entry.label} className="kb-row">
-          <div style={{ flex: 1, fontWeight: 500 }}>{entry.label}</div>
-          <span className="badge gray">Not available</span>
-        </div>
-      ))}
-    </>
-  );
+      </article>)}
+    </div>
+    {visible.length === 0 && <div className="empty-state">No apps match your search and filters.<button className="btn btn-ghost btn-sm" onClick={() => { setQuery(""); setSegment("All"); setCategory("All"); }}>Clear filters</button></div>}
+  </>;
 
   return (
     <>
-      {error && <div className="error-banner">{error}</div>}
-      {notice && <div className="info-banner">{notice}</div>}
-
-      <div id="connect" className="card" style={{ marginBottom: 14, scrollMarginTop: 16 }}>
-        <div className="card-hdr">
-          <div className="card-title">Connected accounts</div>
-        </div>
-        <div className="card-body">{providerList}</div>
-      </div>
-
-      <Modal open={connectOpen && canManage} title="Connect an app" onClose={() => onConnectClose?.()}>
-        {error && <div className="error-banner">{error}</div>}
-        <div className="form-hint" style={{ marginBottom: 10 }}>
-          Most apps send you there to approve access, then bring you back here. Some ask for an API key instead.
-        </div>
-        {providerList}
+      {error && <div className="error-banner" role="alert">{error}</div>}
+      {Object.entries(loadErrors).map(([resource, message]) => <div key={resource} className="error-banner" role="alert">
+        {RESOURCE_LABELS[resource as AppResource]} could not be loaded: {message} <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => void refresh([resource as AppResource])}>Retry</button>
+      </div>)}
+      {access.error && <div className="error-banner" role="alert">{access.error} <button className="btn btn-ghost btn-sm" disabled={access.loading} onClick={() => void access.retry()}>{access.loading ? "Checking…" : "Retry permissions"}</button></div>}
+      {notice && <div className="info-banner" role="status">{notice} {showPhoneNumbersLink && <Link href="/telephony">Go to Phone Numbers</Link>}</div>}
+      {!choosingApp && catalog}
+      <Modal className="connected-app-dialog" trapFocus open={choosingApp} title="Connect an app" onClose={() => onConnectClose?.()}>
+        <p className="form-hint" style={{ marginBottom: 12 }}>Choose an app to connect your account.</p>
+        {catalog}
       </Modal>
-
-      <div className="card">
-        <div className="card-hdr">
-          <div className="card-title">Ready-made tools</div>
-        </div>
-        <div className="card-body">
-          {usablePresets.length === 0 && <div className="empty-state">No ready-made tools are available yet.</div>}
-          {usablePresets.map((preset) => {
-            const rows = rowsFor(preset.key);
-            const connection = preset.provider ? connectionFor(preset.provider) : null;
-            const needsReconnect = preset.provider !== null && rows.length > 0 && connection?.status !== "connected";
-            return (
-              <div key={preset.key} className="kb-row">
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 500 }}>{preset.title}</div>
-                  <div style={{ fontSize: ".7rem", color: "var(--text-3)" }}>
-                    {rows.length > 0 ? rows.map((r) => r.name).join(", ") : "Not set up"}
-                    {preset.provider && ` · uses ${providerLabel(preset.provider)}`}
-                  </div>
-                </div>
-                {needsReconnect && preset.provider && (
-                  <span className="badge amber">Disabled: reconnect {providerLabel(preset.provider)}</span>
-                )}
-                {rows.length > 0 && <span className="badge green">Set up</span>}
-                {canManage && (
-                  <button
-                    className={`btn btn-sm ${rows.length > 0 ? "btn-ghost" : "btn-indigo"}`}
-                    disabled={busy !== null}
-                    onClick={() => openApply(preset)}
-                  >
-                    {rows.length > 0 ? "Apply again" : "Apply"}
-                  </button>
-                )}
-                {canManage && rows.length > 0 && (
-                  <button className="btn btn-danger btn-sm" disabled={busy !== null} onClick={() => remove(preset)}>
-                    Remove
-                  </button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
+      <Modal className="connected-app-dialog" trapFocus open={connectOpen && !access.checked} title="Check your permissions" onClose={() => onConnectClose?.()}>
+        {access.error ? <div role="alert">{access.error} <button className="btn btn-primary btn-sm" disabled={access.loading} onClick={() => void access.retry()}>{access.loading ? "Checking…" : "Retry permissions"}</button></div> : <p>Checking your permissions…</p>}
+      </Modal>
+      <Modal className="connected-app-dialog" trapFocus open={needsConnectPermission} title="Ask an account admin" onClose={() => onConnectClose?.()} footer={<button className="btn btn-ghost btn-sm" onClick={() => onConnectClose?.()}>Close</button>}>
+        <p className="form-hint">An account admin needs to connect a calling provider before you can add a phone number.</p>
+      </Modal>
+      <Modal className="connected-app-dialog" trapFocus open={!!managed} title={`Manage ${managed?.label ?? "app"}`} onClose={() => { if (!busy) closeManage(); }}>
+        {error && <div className="error-banner" role="alert">{error}</div>}
+        {managed?.calling ? <>
+          <p className="form-hint">Manage your connected accounts here. Go to Phone Numbers to buy, add or route numbers.</p>
+          {callingAccounts.filter((a) => a.record.provider === managed.calling).map((account) => <div className="kb-row connected-app-manage-row" key={`${account.kind}:${account.record.id}`}>
+            <div style={{ flex: 1, minWidth: 0 }}><b>{account.record.name}</b><div className="form-hint">Connected</div></div>
+            {canEdit(managed) && <>
+              <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => { closeManage(); setCallingForm({ provider: managed.calling!, account }); }}>Manage</button>
+              <button className="btn btn-danger btn-sm" disabled={busy !== null} onClick={() => disconnectCalling(account)}>Disconnect</button>
+            </>}
+            <Link className="btn btn-ghost btn-sm" href={`/telephony?config=${account.kind}:${account.record.id}`}>Phone Numbers</Link>
+          </div>)}
+          {canEdit(managed) && managed.available && managed.calling !== "native" && <button className="btn btn-primary btn-sm" disabled={busy !== null} onClick={() => startConnect(managed)}>+ Connect another account</button>}
+        </> : managed && <>
+          {managed.provider && <>
+            {connections.filter((c) => c.provider === managed.provider?.key && c.status !== "disconnected").map((c) => <div className="kb-row connected-app-manage-row" key={c.id}>
+              <div className="connected-app-manage-identity" style={{ flex: 1 }}><b>{c.account_label ?? managed.label}</b><div className="form-hint">{c.status === "connected" ? "Connected" : "Reconnect needed"}</div></div>
+              {canManage && managed.available && <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => startConnect(managed)}>Reconnect</button>}
+              {canManage && <button className="btn btn-danger btn-sm" disabled={busy !== null} onClick={() => disconnect(c)}>Disconnect</button>}
+            </div>)}
+            {canManage && managed.available && <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => startConnect(managed)}>{managed.id === "google" ? "Change Google account" : `Reconnect ${managed.label}`}</button>}
+          </>}
+          {presets.filter((p) => managed.preset ? p.key === managed.preset.key : p.provider === managed.provider?.key).map((preset) => <div className="kb-row connected-app-manage-row" key={preset.key}>
+            <div style={{ flex: 1 }}><b>{preset.title}</b><div className="form-hint">{rowsFor(preset.key).length ? "Turned on" : "Not turned on"}</div></div>
+            {canManage && <>
+              <button className="btn btn-primary btn-sm" disabled={busy !== null} onClick={() => { closeManage(); openApply(preset); }}>{rowsFor(preset.key).length ? "Update" : "Turn on"}</button>
+              {rowsFor(preset.key).length > 0 && <button className="btn btn-danger btn-sm" disabled={busy !== null} onClick={() => remove(preset)}>Turn off</button>}
+            </>}
+          </div>)}
+        </>}
+      </Modal>
+      {callingForm && <CallingAppModal key={callingForm.account?.record.id ?? callingForm.provider} tenantId={tenantId} {...callingForm}
+        onClose={() => setCallingForm(null)} onSaved={(name) => {
+          setShowPhoneNumbersLink(true);
+          setNotice(`${callingAppLabel(callingForm.provider)} is connected as “${name}”. Next, buy or add a number on Phone Numbers.`);
+          setCallingForm(null); void refresh([CARRIER_PROVIDERS.includes(callingForm.provider) ? "carrier" : "telephony_config"]);
+        }} />}
 
       <Modal
+        className="connected-app-dialog"
+        trapFocus
         open={pasting !== null}
         title={pasting ? `Connect ${pasting.label}` : ""}
         onClose={() => setPasting(null)}
@@ -420,56 +537,87 @@ export function ConnectorsPanel({
           use it can read and change everything that account can. Revoke it in {pasting?.label} to cut access.
         </div>
         <div className="form-group">
-          <label className="form-label">
-            API key<span className="hint"> Stored encrypted; it is never shown again</span>
+          <label className="form-label" htmlFor="app-secret-key">
+            Secret key<span className="hint"> Stored encrypted; it is never shown again</span>
           </label>
           <input
             className="form-input"
+            id="app-secret-key"
             type="password"
-            autoComplete="off"
+            autoComplete="new-password"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
           />
         </div>
       </Modal>
 
+      <Modal className="connected-app-dialog connected-app-oauth-dialog" trapFocus open={oauthIntro !== null}
+        title={oauthIntro?.changing ? `Change ${oauthIntro.provider.label} account` : `Connect ${oauthIntro?.provider.label ?? "app"}`}
+        onClose={closeOAuth}
+        footer={<button className="btn btn-ghost btn-sm" onClick={closeOAuth}>Cancel</button>}>
+        {error && <div className="error-banner" role="alert">{error}</div>}
+        <div className="connected-app-oauth">
+          <AppIcon icon={oauthIntro?.provider.key ?? "google"} size={44} />
+          <h2>Continue with {oauthIntro?.provider.label}</h2>
+          <p>{oauthIntro?.provider.key === "google" ? "Yuviz wants to use Google Calendar and Sheets for this account." : `Connect your ${oauthIntro?.provider.label} account to use it with your agents.`} You’ll approve access on {oauthIntro?.provider.label}, then return here.</p>
+          {oauthIntro?.changing && <p>One Google account can be connected at a time. Choose the same account to reconnect, or choose another to replace it. Calendar and Sheets tools will use the account you choose.</p>}
+          <button className="btn btn-primary" disabled={busy !== null} onClick={() => { if (oauthIntro) void connect(oauthIntro.provider.key, oauthIntro.presetKey, oauthIntro.changing); }}>
+            {busy?.startsWith("connect:") ? "Opening…" : `Continue with ${oauthIntro?.provider.label}`}
+          </button>
+          <span className="form-hint">Opens in this window · cancel anytime</span>
+        </div>
+      </Modal>
+
       <Modal
+        className="connected-app-dialog"
+        trapFocus
         open={applying !== null}
-        title={applying ? `Set up ${applying.title}` : ""}
-        onClose={() => setApplying(null)}
+        title={applying ? (applying.key === "whatsapp_confirmation" ? (whatsAppStep === "key" ? "Connect WhatsApp" : "Turn on WhatsApp messaging") : `Turn on ${applying.title}`) : ""}
+        onClose={() => { if (!busy) { setApplying(null); setValues({}); } }}
         footer={
           <>
-            <button className="btn btn-ghost btn-sm" onClick={() => setApplying(null)}>
-              Cancel
-            </button>
+            {applying?.key === "whatsapp_confirmation" && whatsAppStep === "messaging" && <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => setWhatsAppStep("key")}>Back</button>}
+            <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => { setApplying(null); setValues({}); }}>Cancel</button>
             <button
               className="btn btn-primary btn-sm"
-              onClick={apply}
-              disabled={busy !== null || missingRequired}
+              onClick={() => applying?.key === "whatsapp_confirmation" && whatsAppStep === "key" ? setWhatsAppStep("messaging") : void apply()}
+              disabled={busy !== null || (applying?.key === "whatsapp_confirmation" && whatsAppStep === "key" ? !values.api_key?.trim() : missingRequired)}
             >
-              {busy?.startsWith("apply:") ? "Applying…" : "Apply"}
+              {busy?.startsWith("apply:") ? "Saving…" : applying?.key === "whatsapp_confirmation" ? (whatsAppStep === "key" ? "Continue" : "Turn on messaging") : "Turn on"}
             </button>
           </>
         }
       >
         {formError && <div className="error-banner">{formError}</div>}
-        {applying && (
+        {applying?.key === "whatsapp_confirmation" && <>
+          <ol className="connected-app-steps" aria-label="WhatsApp setup progress">
+            <li aria-current={whatsAppStep === "key" ? "step" : undefined}>1 · Enter secret key</li>
+            <li aria-current={whatsAppStep === "messaging" ? "step" : undefined}>2 · Turn on messaging</li>
+          </ol>
+          {whatsAppStep === "key" ? <div className="info-banner">This key can act as the whole WhatsApp account. Revoke it with your messaging provider to cut access.</div>
+            : <div className="info-banner">Key entered. Choose your messaging service and approved template below. Your key and settings are saved when you turn on messaging.</div>}
+        </>}
+        {applying?.provider && (
           <div className="form-hint" style={{ marginBottom: 10 }}>
             {applying.provider
-              ? `Needs a connected ${providerLabel(applying.provider)} account. If it is not connected yet, you will be sent to ${providerLabel(applying.provider)} to approve access, then come back and apply again.`
-              : "Needs no connected account."}
+              ? `Needs a connected ${providerLabel(applying.provider)} account. If it is not connected yet, you will be sent to ${providerLabel(applying.provider)} to approve access, then return here to turn it on.`
+              : "Enter the details below to connect and turn on messaging."}
           </div>
         )}
+        {applying?.provider === "google" && <p className="connected-app-selected-account">
+          Google account: <strong>{connections.find((c) => c.provider === "google" && c.status === "connected")?.account_label ?? "Connect Google to choose an account"}</strong>
+        </p>}
         {(PRESET_FIELDS[applying?.key ?? ""] ?? [])
-          .filter((f) => !f.when || f.when(values))
+          .filter((f) => (!f.when || f.when(values)) && (applying?.key !== "whatsapp_confirmation" || (whatsAppStep === "key" ? f.name === "api_key" : f.name !== "api_key")))
           .map((f) => (
             <div key={f.name} className="form-group">
-              <label className="form-label">
+              <label className="form-label" htmlFor={`preset-${f.name}`}>
                 {f.label}
                 {f.hint && <span className="hint"> {f.hint}</span>}
               </label>
               {f.type === "select" ? (
                 <select
+                  id={`preset-${f.name}`}
                   className="form-select"
                   value={values[f.name] ?? ""}
                   onChange={(e) => setValues({ ...values, [f.name]: e.target.value })}
@@ -482,6 +630,7 @@ export function ConnectorsPanel({
                 </select>
               ) : (
                 <input
+                  id={`preset-${f.name}`}
                   className="form-input"
                   type={f.type ?? "text"}
                   autoComplete="off"

@@ -1,8 +1,9 @@
 "use client";
 
 import { Suspense } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { ConnectorsPanel } from "@/components/ConnectorsPanel";
+import { ConnectedAppsHeading } from "@/components/ConnectedAppsHeading";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 
 export default function IntegrationsPage() {
@@ -16,37 +17,41 @@ export default function IntegrationsPage() {
 function Integrations() {
   const { tenant, isAllTenants, loading, error } = useActiveTenant();
   const searchParams = useSearchParams();
-  const router = useRouter();
 
   return (
     <>
       {error && <div className="error-banner">{error}</div>}
 
-      <div style={{ marginBottom: 18 }}>
-        <h1 style={{ fontSize: "1.5rem", fontWeight: 600, letterSpacing: "-.025em", margin: 0, color: "var(--text)" }}>
-          Connected Apps
-        </h1>
-        <div className="form-hint" style={{ marginTop: 4 }}>
-          {tenant ? `Connected accounts and ready-made tools for ${tenant.name}.` : "Connected accounts and ready-made tools."}
-        </div>
-      </div>
+      {(!tenant || loading) && <ConnectedAppsHeading />}
 
       {loading ? (
         <div className="card">
-          <div className="empty-state">Loading integrations…</div>
+          <div className="empty-state">Loading apps…</div>
         </div>
       ) : tenant ? (
         <ConnectorsPanel
           key={tenant.id}
           tenantId={tenant.id}
+          manageApp={searchParams.get("manage") ?? undefined}
           connectOpen={searchParams.get("add") === "1"}
-          onConnectClose={() => router.replace("/integrations")}
+          onConnectClose={() => window.history.replaceState(null, "", "/integrations")}
+          onManageChange={(app) => {
+            const params = new URLSearchParams(window.location.search);
+            params.delete("add");
+            if (app) params.set("manage", app);
+            else params.delete("manage");
+            window.history.replaceState(null, "", `/integrations${params.size ? `?${params}` : ""}`);
+          }}
         />
       ) : (
         <div className="empty-state">
           {isAllTenants
-            ? "Pick a single tenant from the header switcher to manage its integrations."
-            : "No account selected."}
+            ? searchParams.get("add") === "1"
+              ? "Pick a single tenant from the header switcher before connecting a calling app to add a phone number."
+              : "Pick a single tenant from the header switcher to manage its integrations."
+            : searchParams.get("add") === "1"
+              ? "Select an account before connecting a calling app to add a phone number."
+              : "No account selected."}
         </div>
       )}
     </>
