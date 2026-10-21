@@ -276,10 +276,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (user?.role !== "superadmin") return;
-    const onSwitch = () => {
-      setCanAddPhoneNumber(false);
-      setActiveTenantId(resolveActiveTenantId(tenants));
-    };
+    const onSwitch = () => setActiveTenantId(resolveActiveTenantId(tenants));
     window.addEventListener("yuviz:active-tenant", onSwitch);
     return () => window.removeEventListener("yuviz:active-tenant", onSwitch);
   }, [user, tenants, resolveActiveTenantId]);
