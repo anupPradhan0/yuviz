@@ -8,7 +8,7 @@ import {
   Agent, ApiError, AvailableNumber, Call, PhoneNumber, PurchasedNumber, ProviderSync,
   createPhoneNumber, deletePhoneNumber, listAgents, listCalls, listCarriers,
   listPhoneNumbers, listPurchasedNumbers, listTelephonyConfigs, purchaseNumber,
-  releaseNumber, searchAvailableNumbers, syncPhoneNumber, updatePhoneNumber,
+  releaseNumber, searchAvailableNumbers, syncPhoneNumber, syncTelephonyNumbers, updatePhoneNumber,
 } from "@/lib/api";
 import { COUNTRY_DIAL_CODES } from "@/lib/countries";
 import { Modal } from "@/components/Modal";
@@ -80,6 +80,7 @@ export default function TelephonyPage() {
   const [reloadKey, setReloadKey] = useState(0);
   const [editId, setEditId] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [resyncing, setResyncing] = useState(false);
   const refresh = () => setReloadKey((k) => k + 1);
 
   useEffect(() => {
@@ -161,6 +162,25 @@ export default function TelephonyPage() {
     return () => setTopbarActionEnabled?.(false);
   }, [canAddNumber, setTopbarActionEnabled]);
   const listUrl = selectedKey ? `/telephony?config=${encodeURIComponent(selectedKey)}` : "/telephony";
+  const canResync = access.canManage && !!selectedConfig && autoSyncs(selectedConfig) && visibleNumbers.length > 0;
+  const resync = async (config: ConfigRow) => {
+    setResyncing(true);
+    setNotice(null);
+    try {
+      const { results, application } = await syncTelephonyNumbers(config.id);
+      const failed = results.filter((r) => !r.ok);
+      setNotice(application && !application.ok
+        ? { ok: false, text: `${config.providerLabel} kept the old address for every number here: ${application.message ?? "unknown error"}` }
+        : failed.length === 0
+          ? { ok: true, text: `${fmtInt(results.length)} number${results.length === 1 ? "" : "s"} re-synced with ${config.providerLabel}.` }
+          : { ok: false, text: failed.map((r) => `${r.did}: ${r.message ?? "unknown error"}`).join(" ") });
+      refresh();
+    } catch (e) {
+      setNotice({ ok: false, text: errorText(e) });
+    } finally {
+      setResyncing(false);
+    }
+  };
   const openAdd = (mode: NumberMode) => window.history.pushState(null, "", `${listUrl}${selectedKey ? "&" : "?"}${mode === "buy" ? "buy" : "add"}=1`);
 
   return (
@@ -203,7 +223,10 @@ export default function TelephonyPage() {
                 </div>
                 {selectedKey && <div className="phone-numbers-filter">
                   <span>{selectedConfig ? `Through ${selectedConfig.providerLabel} · ${selectedConfig.name}` : "This calling app is unavailable in the selected account."}</span>
-                  <Link href="/telephony" className="btn btn-ghost btn-sm">Show all numbers</Link>
+                  <span className="phone-numbers-actions">
+                    {canResync && <button className="btn btn-ghost btn-sm" disabled={resyncing} title={`Point every number here at this platform in ${selectedConfig.providerLabel} again, e.g. after the public URL changed`} onClick={() => void resync(selectedConfig)}>{resyncing ? "Re-syncing…" : "Re-sync numbers"}</button>}
+                    <Link href="/telephony" className="btn btn-ghost btn-sm">Show all numbers</Link>
+                  </span>
                 </div>}
                 {visibleNumbers.length === 0 ? <div className="empty-state phone-numbers-empty">
                   <Phone size={24} aria-hidden="true" />
@@ -222,7 +245,7 @@ export default function TelephonyPage() {
                       {isAllTenants && <td>{n.tenantName}</td>}
                       <td><CallingAppIdentity config={configFor(n)} /></td>
                       <td>{n.answers ?? <span className="badge amber" title="No agent chosen for this number. Calls use the account default if available.">Not set</span>}</td>
-                      <td><span className={`badge ${n.status === "active" ? "green" : "gray"}`} title={n.status === "suspended" ? "Suspended — this number cannot take calls" : undefined}>{n.status === "active" ? "On" : "Off"}</span>{n.provider_sync?.ok === false && <div className="phone-number-sublabel"><span className="badge amber" title="Open Edit to fix where calls are sent">Needs a fix</span></div>}</td>
+                      <td><span className={`badge ${n.status === "active" ? "green" : "gray"}`} title={n.status === "suspended" ? "Suspended — this number cannot take calls" : undefined}>{n.status === "active" ? "On" : "Off"}</span>{routingIssue(n, configFor(n)) && <div className="phone-number-sublabel"><span className="badge amber" title="Open Edit to see how calls reach this number">{routingIssue(n, configFor(n))}</span></div>}</td>
                       <td className="phone-number-calls" title={`Based on the latest ${CALL_WINDOW} calls per account`}>{n.recentCalls === null ? "—" : fmtInt(n.recentCalls)}</td>
                       <td className="phone-number-calls"><button className="btn btn-ghost btn-sm" disabled={!access.canManage} aria-label={`Edit ${n.did}`} onClick={() => setEditId(n.id)}>Edit</button></td>
                     </tr>)}</tbody>
@@ -262,6 +285,16 @@ function webhookUrlFor(config: ConfigRow): string | null {
   if (config.kind !== "telephony_config") return null;
   if (config.provider === "cloudonix") return `${process.env.NEXT_PUBLIC_CLOUDONIX_SERVICE_URL || ""}/cloudonix/voice/${config.id}`;
   return null;
+}
+
+// REST calling apps whose inbound routing the platform sets up itself.
+const autoSyncs = (config: ConfigRow | null) =>
+  config?.kind === "telephony_config" && config.provider !== NATIVE && !MANUAL_SETUP_PROVIDERS.has(config.provider);
+
+// Why a number may not receive calls yet; matches the Edit dialog's routing section.
+function routingIssue(n: PhoneNumber, config: ConfigRow | null): string | null {
+  if (config?.kind === "telephony_config" && MANUAL_SETUP_PROVIDERS.has(config.provider)) return "Manual setup";
+  return autoSyncs(config) && !n.provider_sync?.ok ? "Needs a fix" : null;
 }
 
 function AddNumberModal({ initialMode, configs, initialConfigKey, agentsByTenant, showTenant, onClose, onCreated }: {
@@ -584,23 +617,25 @@ function EditNumberModal({
         </>
       )}
 
-      {syncsWithProvider && !manualSetup && !sync?.ok && (
+      {syncsWithProvider && !manualSetup && (
         <>
-          <div style={sectionTitle}>Needs a fix</div>
+          <div style={sectionTitle}>{sync?.ok ? `Calls from ${providerLabel}` : "Needs a fix"}</div>
           <div
-            className={sync ? "error-banner" : undefined}
+            className={sync?.ok ? "info-banner" : sync ? "error-banner" : undefined}
             style={{ display: "flex", alignItems: "flex-start", gap: 10, ...(sync ? {} : { fontSize: ".8rem", color: "var(--text-2)" }) }}
           >
             <div style={{ flex: 1, lineHeight: 1.5 }}>
               {!sync
                 ? `${providerLabel} hasn't been told to send this number's calls here yet.`
-                : `${providerLabel} isn't sending this number's calls here: ${sync.message ?? "unknown error"}`}
+                : sync.ok
+                  ? `${providerLabel} sends this number's calls here.`
+                  : `${providerLabel} isn't sending this number's calls here: ${sync.message ?? "unknown error"}`}
               {sync?.at && (
                 <div style={{ fontSize: ".7rem", opacity: 0.75 }}>Last checked {new Date(sync.at).toLocaleString()}</div>
               )}
             </div>
             <button className="btn btn-ghost btn-sm" onClick={handleRetry} disabled={busy !== null}>
-              {busy === "sync" ? "Retrying…" : "Retry"}
+              {busy === "sync" ? "Syncing…" : sync?.ok ? "Sync again" : "Retry"}
             </button>
           </div>
         </>
