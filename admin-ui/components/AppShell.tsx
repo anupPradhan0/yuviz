@@ -7,6 +7,7 @@ import { Check, ChevronDown, Moon, Sun } from "lucide-react";
 import { getCurrentUser, isConsoleRole, listAllUsageTrend, listTenants, Tenant, User } from "@/lib/api";
 import { clearToken, getToken } from "@/lib/auth";
 import { clearAllAgentDrafts } from "@/lib/agentDraft";
+import { PhoneNumberActionContext } from "@/lib/phoneNumberAction";
 import { BrandMark } from "@/components/BrandMark";
 
 // Shared with other pages' tenant pickers (e.g. Live Calls) so they stay in sync with the header.
@@ -194,6 +195,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     typeof document !== "undefined" && document.documentElement.dataset.theme === "dark" ? "dark" : "light",
   );
   const [search, setSearch] = useState("");
+  const [canAddPhoneNumber, setCanAddPhoneNumber] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
@@ -274,7 +276,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (user?.role !== "superadmin") return;
-    const onSwitch = () => setActiveTenantId(resolveActiveTenantId(tenants));
+    const onSwitch = () => {
+      setCanAddPhoneNumber(false);
+      setActiveTenantId(resolveActiveTenantId(tenants));
+    };
     window.addEventListener("yuviz:active-tenant", onSwitch);
     return () => window.removeEventListener("yuviz:active-tenant", onSwitch);
   }, [user, tenants, resolveActiveTenantId]);
@@ -357,6 +362,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   );
 
   return (
+    <PhoneNumberActionContext.Provider value={setCanAddPhoneNumber}>
     <div className={`app-shell${navOpen ? " nav-open" : ""}`}>
       <button className="nav-scrim" aria-label="Close menu" onClick={() => setNavOpen(false)} />
 
@@ -488,11 +494,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <span>{Math.round(monthMinutes).toLocaleString("en-IN")} min this month</span>
               </Link>
             )}
-            {cta && (
+            {cta && (pathname === "/telephony" && !canAddPhoneNumber ? (
+              <button type="button" className="topbar-cta" disabled title="Connect a calling app on Connected Apps before adding a number">
+                {cta.label}
+              </button>
+            ) : (
               <Link href={cta.href} className="topbar-cta">
                 {cta.label}
               </Link>
-            )}
+            ))}
             <div className="account-menu-wrap" ref={accountMenuRef}>
               <button
                 className="account-trigger"
@@ -540,5 +550,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="content">{children}</div>
       </div>
     </div>
+    </PhoneNumberActionContext.Provider>
   );
 }

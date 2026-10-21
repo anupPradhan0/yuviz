@@ -1559,6 +1559,8 @@ body {
   text-decoration: none; white-space: nowrap; transition: opacity .14s;
 }
 .topbar-cta:hover { opacity: .88; }
+button.topbar-cta { border: 0; font-family: inherit; }
+.topbar-cta:disabled { opacity: .45; cursor: not-allowed; }
 .topbar-usage-pill {
   display: flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: 99px;
   border: 1px solid var(--border); background: var(--bg); font-size: .76rem; font-weight: 600;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Phone, Plus, Search } from "lucide-react";
@@ -14,6 +14,7 @@ import { COUNTRY_DIAL_CODES } from "@/lib/countries";
 import { Modal } from "@/components/Modal";
 import { CALLING_APPS, callingAppLabel } from "@/lib/callingApps";
 import { useConnectionAccess } from "@/lib/useConnectionAccess";
+import { PhoneNumberActionContext } from "@/lib/phoneNumberAction";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 
 const NATIVE = "native";
@@ -66,6 +67,7 @@ function CallingAppIdentity({ config }: { config: ConfigRow | null }) {
 export default function TelephonyPage() {
   const { tenant, allTenants, isAllTenants, loading: tenantLoading, error: tenantError } = useActiveTenant();
   const access = useConnectionAccess();
+  const setTopbarActionEnabled = useContext(PhoneNumberActionContext);
   const searchParams = useSearchParams();
   const selectedKey = searchParams.get("config");
   const mode: NumberMode | null = searchParams.get("buy") === "1" ? "buy" : searchParams.get("add") === "1" ? "manual" : null;
@@ -153,6 +155,11 @@ export default function TelephonyPage() {
   const editNumber = numbers.find((n) => n.id === editId) ?? null;
   const configFor = (n: NumberRow) => configs.find((c) => c.key === n.configKey) ?? null;
   const busy = loading || tenantLoading;
+  const canAddNumber = !busy && access.canManage && availableConfigs.length > 0;
+  useEffect(() => {
+    setTopbarActionEnabled?.(canAddNumber);
+    return () => setTopbarActionEnabled?.(false);
+  }, [canAddNumber, setTopbarActionEnabled]);
   const listUrl = selectedKey ? `/telephony?config=${encodeURIComponent(selectedKey)}` : "/telephony";
   const openAdd = (mode: NumberMode) => window.history.pushState(null, "", `${listUrl}${selectedKey ? "&" : "?"}${mode === "buy" ? "buy" : "add"}=1`);
 
@@ -163,10 +170,11 @@ export default function TelephonyPage() {
           <h1>Phone Numbers</h1>
           <p>Numbers your agents can answer. Need Twilio or another line? Connect it on <Link href={CONNECTED_CALLING_APPS_URL}>Connected Apps</Link>.</p>
         </div>
-        <div className="phone-numbers-actions">
-          <button className="btn btn-ghost btn-sm" disabled={busy || !access.canManage || !availableConfigs.length} onClick={() => openAdd("manual")}>Add number</button>
-          <button className="btn btn-primary btn-sm" disabled={busy || !access.canManage || !canBuy} title={!canBuy && !busy ? "Connect Twilio, Plivo, or Vonage on Connected Apps to buy a number" : undefined} onClick={() => openAdd("buy")}><Plus size={14} /> Buy number</button>
-        </div>
+        {canAddNumber && canBuy && (
+          <div className="phone-numbers-actions">
+            <button className="btn btn-primary btn-sm" onClick={() => openAdd("buy")}><Plus size={14} /> Buy number</button>
+          </div>
+        )}
       </div>
       {(error || tenantError) && <div className="error-banner" role="alert">{error || tenantError} <button className="btn btn-ghost btn-sm" onClick={refresh}>Retry</button></div>}
       {access.error && <div className="error-banner" role="alert">{access.error} <button className="btn btn-ghost btn-sm" disabled={access.loading} onClick={() => void access.retry()}>Retry permissions</button></div>}
