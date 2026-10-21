@@ -1,996 +1,417 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeft } from "lucide-react";
+import { useSearchParams } from "next/navigation";
+import { Phone, Plus, Search } from "lucide-react";
 import {
-  Agent,
-  ApiError,
-  AvailableNumber,
-  Call,
-  Carrier,
-  PhoneNumber,
-  PhoneNumberCreate,
-  PurchasedNumber,
-  Tenant,
-  TelephonyConfig,
-  createPhoneNumber,
-  deletePhoneNumber,
-  ProviderSync,
-  syncPhoneNumber,
-  syncTelephonyNumbers,
-  listAgents,
-  listCalls,
-  listCarriers,
-  listPhoneNumbers,
-  listPurchasedNumbers,
-  listTelephonyConfigs,
-  purchaseNumber,
-  releaseNumber,
-  searchAvailableNumbers,
-  updatePhoneNumber,
+  Agent, ApiError, AvailableNumber, Call, PhoneNumber, PurchasedNumber, ProviderSync,
+  createPhoneNumber, deletePhoneNumber, listAgents, listCalls, listCarriers,
+  listPhoneNumbers, listPurchasedNumbers, listTelephonyConfigs, purchaseNumber,
+  releaseNumber, searchAvailableNumbers, syncPhoneNumber, syncTelephonyNumbers, updatePhoneNumber,
 } from "@/lib/api";
+import { COUNTRY_DIAL_CODES } from "@/lib/countries";
 import { Modal } from "@/components/Modal";
-import { CallingAppChooser } from "@/components/CallingAppChooser";
-import { callingAppLabel } from "@/lib/callingApps";
+import { CALLING_APPS, callingAppLabel } from "@/lib/callingApps";
 import { useConnectionAccess } from "@/lib/useConnectionAccess";
+import { PhoneNumberActionContext } from "@/lib/phoneNumberAction";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 
-// The platform's own Kamailio + FreeSWITCH: no credentials, superadmin-only.
-const NATIVE = "native" as const;
-
-// Recent calls per account used for activity columns; there's no per-DID aggregate endpoint.
+const NATIVE = "native";
+const CONNECTED_CALLING_APPS_URL = "/integrations?category=calling";
 const CALL_WINDOW = 200;
-
-const fmtInt = (n: number) => n.toLocaleString("en-IN");
+const regionNames = new Intl.DisplayNames(["en"], { type: "region" });
+const COUNTRIES = COUNTRY_DIAL_CODES.map(([code]) => ({ code, name: regionNames.of(code) ?? code }))
+  .sort((a, b) => a.name.localeCompare(b.name, "en"));
+const MANUAL_SETUP_PROVIDERS = new Set(["cloudonix"]);
 const digits = (s: string | null | undefined) => (s ?? "").replace(/\D/g, "");
-const providerLabelFor = (_kind: "carrier" | "telephony_config", provider: string) => callingAppLabel(provider);
-
-type SyncNotice = { ok: boolean; text: string };
-
-// What the provider was told when a number was added or re-synced.
-const noticeFor = (provider: string, did: string, sync: ProviderSync): SyncNotice =>
-  sync.ok
-    ? { ok: true, text: `${did}: ${provider} now sends this number's calls here.` }
-    : { ok: false, text: `${did} was saved, but ${provider} wasn't updated: ${sync.message ?? "unknown error"}` };
-
-type TrunkHealth = "healthy" | "degraded" | "standby";
-
-const HEALTH_BADGE: Record<TrunkHealth, { label: string; cls: string }> = {
-  healthy: { label: "Healthy", cls: "green" },
-  degraded: { label: "Degraded", cls: "amber" },
-  standby: { label: "Standby", cls: "gray" },
-};
+const fmtInt = (n: number) => n.toLocaleString("en-IN");
+const errorText = (e: unknown) => e instanceof ApiError ? e.detail : String(e);
 
 type ConfigKind = "carrier" | "telephony_config";
-
 interface ConfigRow {
   kind: ConfigKind;
   id: string;
-  /** `${kind}:${id}` — the value carried in the `?config=` query param. */
   key: string;
   name: string;
-  providerLabel: string;
   provider: string;
+  providerLabel: string;
   tenantId: string;
   tenantName: string;
-  accountRef: string | null;
-  isDefaultOutbound: boolean;
-  dids: number;
-  activeDids: number;
-  suspendedDids: number;
-  calls: number;
-  health: TrunkHealth;
-  carrier: Carrier | null;
-  telephonyConfig: TelephonyConfig | null;
 }
-
 interface NumberRow extends PhoneNumber {
   tenantName: string;
-  configKind: ConfigKind | null;
-  configId: string | null;
+  configKey: string | null;
   configName: string | null;
-  routesTo: string;
-  inbound: number;
-  outbound: number;
+  providerLabel: string;
+  answers: string | null;
+  recentCalls: number | null;
 }
+type AgentList = { agents: Agent[]; ok: boolean };
+type Notice = { ok: boolean; text: string };
+type NumberMode = "manual" | "buy";
 
-function parseConfigKey(key: string | null): { kind: ConfigKind; id: string } | null {
-  if (!key) return null;
-  const [kind, id] = key.split(":");
-  if ((kind === "carrier" || kind === "telephony_config") && id) return { kind, id };
-  return null;
-}
-
-/** One configuration card: identity, health, and the three counts this
-    platform can actually answer. Channel capacity, ASR and MOS are not on
-    the carrier/telephony_config record and no telemetry feed writes them —
-    the card states that once, below the grid, instead of drawing plausible
-    numbers. */
-function ConfigCard({
-  config, totalCalls, showTenant, onOpen,
-}: { config: ConfigRow; totalCalls: number; showTenant: boolean; onOpen: () => void }) {
-  const badge = HEALTH_BADGE[config.health];
-  const sharePct = totalCalls > 0 ? (config.calls / totalCalls) * 100 : 0;
+function CallingAppIdentity({ config }: { config: ConfigRow | null }) {
+  const app = CALLING_APPS.find((a) => a.key === (config?.provider ?? NATIVE));
   return (
-    <div
-      className="card"
-      style={{ padding: "14px 16px", flex: "1 1 260px", minWidth: 240, cursor: "pointer" }}
-      onClick={onOpen}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-        <span
-          style={{
-            width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
-            background: config.health === "healthy" ? "var(--green)" : config.health === "degraded" ? "var(--amber)" : "var(--text-3)",
-          }}
-        />
-        <span style={{ fontSize: ".85rem", fontWeight: 600, color: "var(--text)" }}>{config.name}</span>
-        <span style={{ fontSize: ".7rem", color: "var(--text-3)" }}>· {config.providerLabel}</span>
-      </div>
-      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
-        <span className={`badge ${badge.cls}`}>{badge.label}</span>
-        {config.isDefaultOutbound && <span className="badge amber">Default outbound</span>}
-        {showTenant && <span className="badge gray">{config.tenantName}</span>}
-      </div>
-      <div style={{ fontFamily: "var(--mono)", fontSize: ".68rem", color: "var(--text-3)", marginBottom: 12, wordBreak: "break-all" }}>
-        {config.accountRef ?? "no account reference"}
-      </div>
-      <div style={{ display: "flex", gap: 18 }}>
-        <Metric label="DIDs" value={fmtInt(config.dids)} />
-        <Metric label="Active" value={fmtInt(config.activeDids)} />
-        <Metric label="Calls" value={fmtInt(config.calls)} />
-      </div>
-      <div style={{ height: 3, borderRadius: 2, background: "var(--surf-3)", margin: "12px 0 8px" }}>
-        {totalCalls > 0 && (
-          <div style={{ width: `${Math.min(100, sharePct)}%`, height: "100%", borderRadius: 2, background: "var(--cyan)" }} />
-        )}
-      </div>
-      <div style={{ fontSize: ".68rem", color: "var(--text-3)" }}>
-        {totalCalls > 0
-          ? `${sharePct.toFixed(0)}% of the account's recent calls matched this configuration's DIDs`
-          : "no calls in the recent window"}
-        {config.suspendedDids > 0 && ` · ${fmtInt(config.suspendedDids)} suspended DID${config.suspendedDids === 1 ? "" : "s"}`}
-      </div>
-    </div>
+    <span className="phone-number-app">
+      {app && <span className="phone-number-app-icon">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={`/connected-apps/${app.icon}.svg`} alt="" width={14} height={14} />
+      </span>}
+      <span>{config?.providerLabel ?? "Local phone"}{config && config.name !== config.providerLabel && <span className="phone-number-muted"> · {config.name}</span>}</span>
+    </span>
   );
 }
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <div style={{ fontSize: ".64rem", fontWeight: 600, letterSpacing: ".04em", textTransform: "uppercase", color: "var(--text-3)" }}>
-        {label}
-      </div>
-      <div style={{ fontSize: "1.15rem", fontWeight: 600, color: "var(--text)", fontVariantNumeric: "tabular-nums", lineHeight: 1.3 }}>
-        {value}
-      </div>
-    </div>
-  );
-}
-
-const STATUS_BADGE: Record<PhoneNumber["status"], string> = { active: "green", inactive: "gray", suspended: "amber" };
-const statusBadge = (s: PhoneNumber["status"]) => <span className={`badge ${STATUS_BADGE[s]}`}>{s}</span>;
-
-const typeBadge = (n: NumberRow) => {
-  if (n.inbound > 0 && n.outbound > 0) return <span className="badge cyan">Both</span>;
-  if (n.inbound > 0) return <span className="badge green">Inbound</span>;
-  if (n.outbound > 0) return <span className="badge amber">Outbound</span>;
-  return <span className="badge gray">No traffic</span>;
-};
 
 export default function TelephonyPage() {
-  const { tenant, allTenants, isPlatformScoped, isAllTenants, loading: tenantLoading } = useActiveTenant();
-  const router = useRouter();
+  const { tenant, allTenants, isAllTenants, loading: tenantLoading, error: tenantError } = useActiveTenant();
+  const access = useConnectionAccess();
+  const setTopbarActionEnabled = useContext(PhoneNumberActionContext);
   const searchParams = useSearchParams();
-  const selectedKey = parseConfigKey(searchParams.get("config"));
-
+  const selectedKey = searchParams.get("config");
+  const mode: NumberMode | null = searchParams.get("buy") === "1" ? "buy" : searchParams.get("add") === "1" ? "manual" : null;
   const [configs, setConfigs] = useState<ConfigRow[]>([]);
   const [numbers, setNumbers] = useState<NumberRow[]>([]);
-  const [agentsByTenant, setAgentsByTenant] = useState<Record<string, { agents: Agent[]; ok: boolean }>>({});
-  /** Calls fetched per account id; denominator for each config's share (same window as DID counts). */
-  const [callsByTenant, setCallsByTenant] = useState<Record<string, number>>({});
+  const [agentsByTenant, setAgentsByTenant] = useState<Record<string, AgentList>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [resyncing, setResyncing] = useState(false);
   const refresh = () => setReloadKey((k) => k + 1);
 
-  const [numberSearch, setNumberSearch] = useState("");
-  const [editNumber, setEditNumber] = useState<NumberRow | null>(null);
-  // Lives here, not in ConfigDetail: a refresh briefly unmounts the detail view.
-  const [syncNotice, setSyncNotice] = useState<SyncNotice | null>(null);
-  const access = useConnectionAccess();
-  const { isSuperadmin } = access;
-
-  // Each account's fetch settles independently so one failing tenant doesn't blank the page.
   useEffect(() => {
     if (tenantLoading) return;
     const targets = isAllTenants ? allTenants : tenant ? [tenant] : [];
-    if (targets.length === 0) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setConfigs([]);
-      setNumbers([]);
-      setLoading(false);
-      return;
-    }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     let cancelled = false;
     (async () => {
-      const results = await Promise.allSettled(
-        targets.map(async (t) => {
-          const [carriers, telephonyConfigs, phoneNumbers, agentList, calls] = await Promise.all([
-            listCarriers(t.id),
-            listTelephonyConfigs(t.id),
-            listPhoneNumbers(t.id),
-            // Routing/activity failures degrade to "—" instead of failing the page.
-            listAgents(t.slug).then((a) => ({ ok: true, agents: a })).catch(() => ({ ok: false, agents: [] as Agent[] })),
-            listCalls(t.slug, { limit: CALL_WINDOW }).then((r) => r.items).catch((): Call[] => []),
-          ]);
-          return { t, carriers, telephonyConfigs, phoneNumbers, agents: agentList.agents, agentsOk: agentList.ok, calls };
-        }),
-      );
+      const results = await Promise.allSettled(targets.map(async (t) => {
+        const [carriers, connections, phoneNumbers, agents, calls] = await Promise.all([
+          listCarriers(t.id), listTelephonyConfigs(t.id), listPhoneNumbers(t.id),
+          listAgents(t.slug).then((agents) => ({ agents, ok: true })).catch(() => ({ agents: [] as Agent[], ok: false })),
+          listCalls(t.slug, { limit: CALL_WINDOW }).then((r): Call[] | null => r.items).catch(() => null),
+        ]);
+        return { t, carriers, connections, phoneNumbers, agents, calls };
+      }));
       if (cancelled) return;
-
       const configRows: ConfigRow[] = [];
       const numberRows: NumberRow[] = [];
-      const callTotals: Record<string, number> = {};
-      const agentsMap: Record<string, { agents: Agent[]; ok: boolean }> = {};
-      const errs: string[] = [];
-
-      results.forEach((r, i) => {
-        if (r.status !== "fulfilled") {
-          errs.push(`${targets[i].name}: ${r.reason instanceof ApiError ? r.reason.detail : String(r.reason)}`);
+      const agentsMap: Record<string, AgentList> = {};
+      const errors: string[] = [];
+      results.forEach((result, i) => {
+        if (result.status !== "fulfilled") {
+          errors.push(`${targets[i].name}: ${errorText(result.reason)}`);
           return;
         }
-        const { t, carriers, telephonyConfigs, phoneNumbers, agents, agentsOk, calls } = r.value;
-        callTotals[t.id] = calls.length;
-        agentsMap[t.id] = { agents, ok: agentsOk };
-        const agentName = (id: string | null) => (id ? agents.find((a) => a.id === id)?.name ?? null : null);
-
-        // Numbers are free-text from the gateway; compare digits only.
-        const inboundByDid = new Map<string, number>();
-        const outboundByDid = new Map<string, number>();
-        for (const c of calls) {
-          const to = digits(c.called_number);
-          const from = digits(c.caller_number);
-          if (to) inboundByDid.set(to, (inboundByDid.get(to) ?? 0) + 1);
-          if (from) outboundByDid.set(from, (outboundByDid.get(from) ?? 0) + 1);
+        const { t, carriers, connections, phoneNumbers, agents, calls } = result.value;
+        agentsMap[t.id] = agents;
+        const tenantConfigs: ConfigRow[] = [
+          ...carriers.map((c) => ({ kind: "carrier" as const, id: c.id, name: c.name, provider: c.provider })),
+          ...connections.map((c) => ({ kind: "telephony_config" as const, id: c.id, name: c.name, provider: c.provider })),
+        ].map((c) => ({ ...c, key: `${c.kind}:${c.id}`, providerLabel: callingAppLabel(c.provider), tenantId: t.id, tenantName: t.name }));
+        configRows.push(...tenantConfigs);
+        const activity = new Map<string, number>();
+        for (const call of calls ?? []) {
+          for (const key of new Set([digits(call.called_number), digits(call.caller_number)])) {
+            if (key) activity.set(key, (activity.get(key) ?? 0) + 1);
+          }
         }
-
-        const rowsForTenant = phoneNumbers.map((n): NumberRow => {
-          const key = digits(n.did);
-          const carrier = carriers.find((c) => c.id === n.carrier_id) ?? null;
-          const telephonyConfig = telephonyConfigs.find((c) => c.id === n.telephony_config_id) ?? null;
-          const primary = agentName(n.agent_id);
-          const fallback = agentName(n.fallback_agent_id);
+        numberRows.push(...phoneNumbers.map((n): NumberRow => {
+          const config = tenantConfigs.find((c) => c.kind === "carrier" ? c.id === n.carrier_id : c.id === n.telephony_config_id);
+          const agent = agents.agents.find((a) => a.id === n.agent_id);
+          const fallback = agents.agents.find((a) => a.id === n.fallback_agent_id);
           return {
-            ...n,
-            tenantName: t.name,
-            configKind: carrier ? "carrier" : telephonyConfig ? "telephony_config" : null,
-            configId: carrier?.id ?? telephonyConfig?.id ?? null,
-            configName: carrier?.name ?? telephonyConfig?.name ?? null,
-            // Unresolvable agent_id shows "—", never "Account default agent".
-            routesTo: !agentsOk && (n.agent_id || n.fallback_agent_id)
-              ? "—"
-              : primary ?? (fallback ? `${fallback} (fallback)` : "Account default agent"),
-            inbound: inboundByDid.get(key) ?? 0,
-            outbound: outboundByDid.get(key) ?? 0,
+            ...n, tenantName: t.name, configKey: config?.key ?? null, configName: config?.name ?? null,
+            providerLabel: config?.providerLabel ?? "Local phone",
+            answers: !agents.ok ? "Unavailable" : agent?.name ?? (fallback ? `${fallback.name} (backup)` : n.agent_id ? "Unavailable agent" : null),
+            recentCalls: calls === null ? null : activity.get(digits(n.did)) ?? 0,
           };
-        });
-        numberRows.push(...rowsForTenant);
-
-        const buildConfig = (
-          kind: ConfigKind, id: string, name: string, provider: string, accountRef: string | null,
-          isDefaultOutbound: boolean, dids: NumberRow[], carrier: Carrier | null, telephonyConfig: TelephonyConfig | null,
-        ): ConfigRow => {
-          const suspended = dids.filter((d) => d.status === "suspended").length;
-          const active = dids.filter((d) => d.status === "active").length;
-          return {
-            kind, id, key: `${kind}:${id}`, name, providerLabel: providerLabelFor(kind, provider), provider,
-            tenantId: t.id, tenantName: t.name, accountRef, isDefaultOutbound,
-            dids: dids.length, activeDids: active, suspendedDids: suspended,
-            calls: dids.reduce((sum, d) => sum + d.inbound + d.outbound, 0),
-            // telephony_configs have real health status; carriers fall back to the DID-count heuristic.
-            health: telephonyConfig
-              ? (telephonyConfig.health?.status ?? "standby")
-              : dids.length === 0 ? "standby" : suspended > 0 ? "degraded" : active > 0 ? "healthy" : "standby",
-            carrier, telephonyConfig,
-          };
-        };
-
-        for (const c of carriers) {
-          configRows.push(
-            buildConfig("carrier", c.id, c.name, c.provider, c.carrier_account_ref ?? c.auth_id ?? null, false,
-              rowsForTenant.filter((n) => n.carrier_id === c.id), c, null),
-          );
-        }
-        for (const tc of telephonyConfigs) {
-          const domain = tc.credentials?.domain;
-          configRows.push(
-            buildConfig("telephony_config", tc.id, tc.name, tc.provider, typeof domain === "string" ? domain : null,
-              tc.is_default_outbound, rowsForTenant.filter((n) => n.telephony_config_id === tc.id), null, tc),
-          );
-        }
+        }));
       });
-
       setConfigs(configRows);
       setNumbers(numberRows);
-      setCallsByTenant(callTotals);
       setAgentsByTenant(agentsMap);
-      setError(errs.length > 0 ? errs.join("; ") : null);
+      setError(errors.length ? errors.join("; ") : null);
       setLoading(false);
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [tenant, allTenants, isAllTenants, tenantLoading, reloadKey]);
 
-  const visibleConfigs = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    const matched = q
-      ? configs.filter((c) => `${c.name} ${c.providerLabel} ${c.tenantName}`.toLowerCase().includes(q))
-      : configs;
-    return [...matched].sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name));
-  }, [configs, search]);
-
-  const configFor = (n: NumberRow) => configs.find((c) => c.kind === n.configKind && c.id === n.configId) ?? null;
-
+  const selectedConfig = configs.find((c) => c.key === selectedKey);
+  const availableConfigs = configs.filter((c) => access.isSuperadmin || !(c.kind === "telephony_config" && c.provider === NATIVE));
+  const canBuy = availableConfigs.some((c) => c.kind === "carrier");
   const visibleNumbers = useMemo(() => {
-    const q = numberSearch.trim().toLowerCase();
+    const q = search.trim().toLowerCase();
     const qDigits = digits(q);
-    const matched = q
-      ? numbers.filter((n) =>
-          `${n.did} ${n.region ?? ""} ${n.configName ?? ""} ${n.routesTo} ${n.tenantName} ${n.status}`.toLowerCase().includes(q)
-          || (qDigits.length > 0 && digits(n.did).includes(qDigits)))
-      : numbers;
-    return [...matched].sort((a, b) => a.tenantName.localeCompare(b.tenantName) || a.did.localeCompare(b.did));
-  }, [numbers, numberSearch]);
-
-  const selectedConfig = selectedKey ? configs.find((c) => c.key === `${selectedKey.kind}:${selectedKey.id}`) ?? null : null;
-  const wantsAdd = searchParams.get("add") === "1";
-  const connectCalling = wantsAdd && !selectedKey && !loading && !access.loading
-    && !configs.some((config) => isSuperadmin || !(config.kind === "telephony_config" && config.provider === NATIVE));
-
-  // "+ Add Number" from the top bar: open the first connection's add-number dialog, or connect a carrier first.
+    return numbers.filter((n) => (!selectedKey || n.configKey === selectedKey) && (!q ||
+      `${n.did} ${n.region ?? ""} ${n.configName ?? ""} ${n.providerLabel} ${n.answers ?? "not set"} ${n.tenantName} ${n.status === "active" ? "on" : "off"}`.toLowerCase().includes(q) ||
+      (qDigits.length > 0 && digits(n.did).includes(qDigits))))
+      .sort((a, b) => a.tenantName.localeCompare(b.tenantName) || a.did.localeCompare(b.did));
+  }, [numbers, search, selectedKey]);
+  const editNumber = numbers.find((n) => n.id === editId) ?? null;
+  const configFor = (n: NumberRow) => configs.find((c) => c.key === n.configKey) ?? null;
+  const busy = loading || tenantLoading;
+  const canAddNumber = !busy && access.canManage && availableConfigs.length > 0;
   useEffect(() => {
-    if (!wantsAdd || loading || access.loading) return;
-    if (selectedKey) {
-      router.replace(`/telephony?config=${encodeURIComponent(`${selectedKey.kind}:${selectedKey.id}`)}`);
-      return;
+    setTopbarActionEnabled?.(canAddNumber);
+    return () => setTopbarActionEnabled?.(false);
+  }, [canAddNumber, setTopbarActionEnabled]);
+  const listUrl = selectedKey ? `/telephony?config=${encodeURIComponent(selectedKey)}` : "/telephony";
+  const canResync = access.canManage && !!selectedConfig && autoSyncs(selectedConfig) && visibleNumbers.length > 0;
+  const resync = async (config: ConfigRow) => {
+    setResyncing(true);
+    setNotice(null);
+    try {
+      const { results, application } = await syncTelephonyNumbers(config.id);
+      const failed = results.filter((r) => !r.ok);
+      setNotice(application && !application.ok
+        ? { ok: false, text: `${config.providerLabel} kept the old address for every number here: ${application.message ?? "unknown error"}` }
+        : failed.length === 0
+          ? { ok: true, text: `${fmtInt(results.length)} number${results.length === 1 ? "" : "s"} re-synced with ${config.providerLabel}.` }
+          : { ok: false, text: failed.map((r) => `${r.did}: ${r.message ?? "unknown error"}`).join(" ") });
+      refresh();
+    } catch (e) {
+      setNotice({ ok: false, text: errorText(e) });
+    } finally {
+      setResyncing(false);
     }
-    const target = configs.find(
-      (c) => isSuperadmin || !(c.kind === "telephony_config" && c.provider === NATIVE),
-    );
-    if (target) {
-      router.replace(`/telephony?config=${encodeURIComponent(target.key)}&add=1`);
-    }
-  }, [wantsAdd, loading, selectedKey, configs, isSuperadmin, access.loading, router]);
-
-  const accountLine = isAllTenants
-    ? `Phone numbers, call activity and routing across ${allTenants.length} account${allTenants.length === 1 ? "" : "s"}.`
-    : tenant
-      ? `Phone numbers, call activity and routing for ${tenant.name}.${isPlatformScoped ? " Switch accounts from the header." : ""}`
-      : "Phone numbers, call activity and routing.";
-
-  if (selectedKey && !loading) {
-    return selectedConfig ? (
-      <ConfigDetail
-        config={selectedConfig}
-        numbers={numbers.filter((n) => n.configKind === selectedConfig.kind && n.configId === selectedConfig.id)}
-        tenant={allTenants.find((t) => t.id === selectedConfig.tenantId) ?? null}
-        agents={agentsByTenant[selectedConfig.tenantId]?.agents ?? []}
-        isSuperadmin={isSuperadmin}
-        openAddNumber={wantsAdd}
-        syncNotice={syncNotice}
-        onSyncNotice={setSyncNotice}
-        onBack={() => { setSyncNotice(null); router.push("/telephony"); }}
-        onChanged={refresh}
-      />
-    ) : (
-      <div className="card">
-        <div className="empty-state">
-          Configuration not found — it may have been removed, or belongs to an account outside the current
-          selection.
-        </div>
-        <button className="btn btn-ghost btn-sm" onClick={() => router.push("/telephony")} style={{ marginTop: 10 }}>
-          Back to Phone Numbers
-        </button>
-      </div>
-    );
-  }
+  };
+  const openAdd = (mode: NumberMode) => window.history.pushState(null, "", `${listUrl}${selectedKey ? "&" : "?"}${mode === "buy" ? "buy" : "add"}=1`);
 
   return (
     <>
-      {error && <div className="error-banner">{error}</div>}
-      {syncNotice && <div className={syncNotice.ok ? "info-banner" : "error-banner"} role="status">{syncNotice.text}</div>}
-      {access.error && !connectCalling && <div className="error-banner" role="alert">{access.error} <button className="btn btn-ghost btn-sm" disabled={access.loading} onClick={() => void access.retry()}>Retry permissions</button></div>}
-      {connectCalling && <CallingAppChooser tenants={allTenants} tenantId={tenant?.id} access={access} onClose={() => router.replace("/telephony")} onSaved={(name) => {
-        router.replace("/telephony");
-        setSyncNotice({ ok: true, text: `${name} connected. Open the connection below to buy or add a phone number.` });
-        refresh();
-      }} />}
-
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
+      <div className="phone-numbers-heading">
         <div>
-          <h1 style={{ fontSize: "1.5rem", fontWeight: 600, letterSpacing: "-.025em", margin: 0, color: "var(--text)" }}>Phone Numbers</h1>
-          <div className="form-hint" style={{ marginTop: 4 }}>{accountLine}</div>
+          <h1>Phone Numbers</h1>
+          <p>Numbers your agents can answer. Need Twilio or another line? Connect it on <Link href={CONNECTED_CALLING_APPS_URL}>Connected Apps</Link>.</p>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          {isSuperadmin && <Link href="/live-calls" className="btn btn-ghost btn-sm">Live calls</Link>}
-        </div>
+        {canAddNumber && canBuy && (
+          <div className="phone-numbers-actions">
+            <button className="btn btn-primary btn-sm" onClick={() => openAdd("buy")}><Plus size={14} /> Buy number</button>
+          </div>
+        )}
       </div>
+      {(error || tenantError) && <div className="error-banner" role="alert">{error || tenantError} <button className="btn btn-ghost btn-sm" onClick={refresh}>Retry</button></div>}
+      {access.error && <div className="error-banner" role="alert">{access.error} <button className="btn btn-ghost btn-sm" disabled={access.loading} onClick={() => void access.retry()}>Retry permissions</button></div>}
+      {notice && <div className={notice.ok ? "info-banner" : "error-banner"} role="status">{notice.text}</div>}
 
-      {loading ? (
-        <div className="card">
-          <div className="empty-state">Loading telephony…</div>
-        </div>
-      ) : (
+      {busy ? <div className="card"><div className="empty-state" role="status">Loading phone numbers…</div></div> : (
         <>
-          <div className="card">
-            <div className="card-hdr">
-              <span className="card-title">Connected calling apps</span>
-              <span className="card-sub" style={{ marginLeft: "auto" }}>
-                {fmtInt(visibleConfigs.length)} of {fmtInt(configs.length)} configured
-              </span>
-              <input
-                className="form-input"
-                style={{ width: 200 }}
-                placeholder="Search calling apps"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
-              <Link className="btn btn-ghost btn-sm" href="/integrations">Manage connected apps</Link>
-            </div>
-
-            {visibleConfigs.length === 0 ? (
-              <div className="empty-state">
-                {configs.length === 0
-                  ? "No calling apps connected yet. Connect an app on Connected Apps, then come back to buy or add a number."
-                  : `No configurations match "${search}".`}
+          {configs.length > 0 && <div className="info-banner phone-numbers-connection-note">
+            <span>{configs.length === 1 ? `${configs[0].providerLabel} is connected as “${configs[0].name}”.` : `${fmtInt(configs.length)} calling apps connected${isAllTenants ? " across your accounts" : ""}.`}</span>
+            <Link href={CONNECTED_CALLING_APPS_URL}>Manage on Connected Apps</Link>
+          </div>}
+          <div className="card phone-numbers-card">
+            {configs.length === 0 && numbers.length === 0 && !error && !tenantError ? (
+              <div className="empty-state phone-numbers-empty">
+                <Phone size={24} aria-hidden="true" />
+                <h2>Connect a calling app first</h2>
+                <p>Link Twilio, Plivo, or Local phone on Connected Apps. Then come back here to buy or add a number.</p>
+                <Link className="btn btn-primary btn-sm" href={CONNECTED_CALLING_APPS_URL}>Go to Connected Apps</Link>
               </div>
             ) : (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 12, padding: 16 }}>
-                {visibleConfigs.map((c) => (
-                  <ConfigCard
-                    key={c.key}
-                    config={c}
-                    totalCalls={callsByTenant[c.tenantId] ?? 0}
-                    showTenant={isAllTenants}
-                    onOpen={() => router.push(`/telephony?config=${c.key}`)}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-          <div className="form-hint" style={{ margin: "10px 0 18px" }}>
-            Counts cover the most recent {fmtInt(CALL_WINDOW)} calls per account. Channel capacity, ASR and MOS need a
-            carrier telemetry feed, which is not connected to this console yet.
-          </div>
-
-          <div className="card">
-            <div className="card-hdr">
-              <span className="card-title">All numbers</span>
-              <span className="card-sub" style={{ marginLeft: "auto" }}>
-                {fmtInt(visibleNumbers.length)} of {fmtInt(numbers.length)}
-              </span>
-              <input
-                className="form-input"
-                style={{ width: 200 }}
-                placeholder="Search numbers or agents"
-                value={numberSearch}
-                onChange={(e) => setNumberSearch(e.target.value)}
-              />
-            </div>
-            {visibleNumbers.length === 0 ? (
-              <div className="empty-state">
-                {numbers.length === 0
-                  ? "No numbers yet. Choose a connected calling app above to buy or add one."
-                  : `No numbers match "${numberSearch}".`}
-              </div>
-            ) : (
-              <div style={{ overflowX: "auto" }}>
-                <table className="tbl">
-                  <thead>
-                    <tr>
-                      <th>Number</th>
-                      {isAllTenants && <th>Account</th>}
-                      <th>Calling app</th>
-                      <th>Routes to</th>
-                      <th>Status</th>
-                      <th>Provider routing</th>
-                      <th style={{ textAlign: "right" }}>Calls (recent)</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {visibleNumbers.map((n) => {
-                      const cfg = configFor(n);
-                      return (
-                        <tr key={n.id}>
-                          <td className="bold mono" style={{ color: "var(--text)" }}>
-                            {n.did}
-                            {n.region && <div style={{ fontFamily: "inherit", fontWeight: 400, fontSize: ".7rem", color: "var(--text-3)" }}>{n.region}</div>}
-                          </td>
-                          {isAllTenants && <td>{n.tenantName}</td>}
-                          <td>
-                            {cfg ? (
-                              <Link href={`/telephony?config=${cfg.key}`} style={{ color: "var(--text)" }}>
-                                {cfg.name} <span style={{ color: "var(--text-3)" }}>· {cfg.providerLabel}</span>
-                              </Link>
-                            ) : (
-                              <i style={{ color: "var(--text-3)" }}>none</i>
-                            )}
-                          </td>
-                          <td>{n.routesTo}</td>
-                          <td>{statusBadge(n.status)}</td>
-                          <td>{syncBadge(n, cfg)}</td>
-                          <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtInt(n.inbound + n.outbound)}</td>
-                          <td>
-                            <button className="btn btn-ghost btn-sm" onClick={() => setEditNumber(n)}>Edit</button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+              <>
+                <div className="card-hdr">
+                  <h2 className="card-title">Your numbers</h2>
+                  <span className="card-sub">{search || selectedKey ? `${fmtInt(visibleNumbers.length)} of ${fmtInt(numbers.length)}` : `${fmtInt(numbers.length)} number${numbers.length === 1 ? "" : "s"}`}</span>
+                  <label className="phone-numbers-search"><Search size={14} aria-hidden="true" /><input type="search" aria-label="Search numbers or agents" placeholder="Search numbers or agents" value={search} onChange={(e) => setSearch(e.target.value)} /></label>
+                </div>
+                {selectedKey && <div className="phone-numbers-filter">
+                  <span>{selectedConfig ? `Through ${selectedConfig.providerLabel} · ${selectedConfig.name}` : "This calling app is unavailable in the selected account."}</span>
+                  <span className="phone-numbers-actions">
+                    {canResync && <button className="btn btn-ghost btn-sm" disabled={resyncing} title={`Point every number here at this platform in ${selectedConfig.providerLabel} again, e.g. after the public URL changed`} onClick={() => void resync(selectedConfig)}>{resyncing ? "Re-syncing…" : "Re-sync numbers"}</button>}
+                    <Link href="/telephony" className="btn btn-ghost btn-sm">Show all numbers</Link>
+                  </span>
+                </div>}
+                {visibleNumbers.length === 0 ? <div className="empty-state phone-numbers-empty">
+                  <Phone size={24} aria-hidden="true" />
+                  <h2>{search || selectedKey ? "No matching numbers" : "Your first number starts here"}</h2>
+                  <p>{search ? `No numbers match “${search}”. Try another number or agent.` : selectedKey ? "This calling app has no numbers to show." : "Buy a new number or add one you already have, then choose which agent answers."}</p>
+                  {search ? <button className="btn btn-ghost btn-sm" onClick={() => setSearch("")}>Clear search</button> : access.canManage && availableConfigs.length > 0 ? <button className="btn btn-primary btn-sm" onClick={() => openAdd(canBuy ? "buy" : "manual")}>{canBuy ? "Buy number" : "Add number"}</button> : configs.length > 0 ? <p>{access.canManage ? "Local numbers are added by the platform. You can choose who answers once a number is assigned." : "Ask an account admin to add a number."}</p> : null}
+                </div> : <div className="phone-numbers-table-wrap">
+                  <table className="tbl">
+                    <thead><tr>
+                      <th scope="col">Number</th>{isAllTenants && <th scope="col">Account</th>}
+                      <th scope="col">Through</th><th scope="col">Answers</th><th scope="col">Status</th>
+                      <th scope="col" className="phone-number-calls" title={`Based on the latest ${CALL_WINDOW} calls per account`}>Recent calls</th><th scope="col" aria-label="Actions" />
+                    </tr></thead>
+                    <tbody>{visibleNumbers.map((n) => <tr key={n.id}>
+                      <td><span className="phone-number-address">{n.did}</span><div className="phone-number-sublabel">{n.region || "No label yet"}</div></td>
+                      {isAllTenants && <td>{n.tenantName}</td>}
+                      <td><CallingAppIdentity config={configFor(n)} /></td>
+                      <td>{n.answers ?? <span className="badge amber" title="No agent chosen for this number. Calls use the account default if available.">Not set</span>}</td>
+                      <td><span className={`badge ${n.status === "active" ? "green" : "gray"}`} title={n.status === "suspended" ? "Suspended — this number cannot take calls" : undefined}>{n.status === "active" ? "On" : "Off"}</span>{routingIssue(n, configFor(n)) && <div className="phone-number-sublabel"><span className="badge amber" title="Open Edit to see how calls reach this number">{routingIssue(n, configFor(n))}</span></div>}</td>
+                      <td className="phone-number-calls" title={`Based on the latest ${CALL_WINDOW} calls per account`}>{n.recentCalls === null ? "—" : fmtInt(n.recentCalls)}</td>
+                      <td className="phone-number-calls"><button className="btn btn-ghost btn-sm" disabled={!access.canManage} aria-label={`Edit ${n.did}`} onClick={() => setEditId(n.id)}>Edit</button></td>
+                    </tr>)}</tbody>
+                  </table>
+                </div>}
+              </>
             )}
           </div>
         </>
       )}
-
-      <EditNumberModal
-        target={editNumber}
-        config={editNumber ? configFor(editNumber) : null}
-        agents={editNumber ? agentsByTenant[editNumber.tenant_id]?.agents ?? [] : []}
-        isSuperadmin={isSuperadmin}
-        onClose={() => setEditNumber(null)}
-        onChanged={refresh}
-      />
-
+      {!busy && !editNumber && mode && access.canManage && availableConfigs.length > 0 && <AddNumberModal
+        key={`${tenant?.id ?? "all"}:${mode}:${selectedKey ?? ""}`}
+        initialMode={mode} configs={availableConfigs} initialConfigKey={selectedKey}
+        agentsByTenant={agentsByTenant} showTenant={isAllTenants}
+        onClose={() => window.history.replaceState(null, "", listUrl)}
+        onCreated={(created, config) => {
+          window.history.replaceState(null, "", "/telephony");
+          setNotice(created.provider_sync?.ok === false
+            ? { ok: false, text: `${created.did} was added, but ${config.providerLabel} needs a fix before calls can arrive. Open Edit to retry.` }
+            : { ok: true, text: `${created.did} was added. Choose who answers below.` });
+          setEditId(created.id);
+          refresh();
+        }}
+      />}
+      {!busy && editNumber && <EditNumberModal
+        key={editNumber.id} target={editNumber} config={configFor(editNumber)}
+        agents={agentsByTenant[editNumber.tenant_id]?.agents ?? []}
+        agentsOk={agentsByTenant[editNumber.tenant_id]?.ok ?? false}
+        isSuperadmin={access.isSuperadmin} onClose={() => setEditId(null)}
+        onChanged={refresh} onSaved={(text) => setNotice({ ok: true, text })}
+      />}
     </>
   );
 }
 
 function webhookUrlFor(config: ConfigRow): string | null {
   if (config.kind !== "telephony_config") return null;
-  if (config.provider === "cloudonix") {
-    const base = process.env.NEXT_PUBLIC_CLOUDONIX_SERVICE_URL || "";
-    return `${base}/cloudonix/voice/${config.id}`;
-  }
-  if (config.provider === "vobiz") {
-    // Route shape: /{provider}/voice/{account_ref} (docs/telephony.md).
-    const base = process.env.NEXT_PUBLIC_VOBIZ_SERVICE_URL || "";
-    return `${base}/vobiz/voice/${config.id}`;
-  }
+  if (config.provider === "cloudonix") return `${process.env.NEXT_PUBLIC_CLOUDONIX_SERVICE_URL || ""}/cloudonix/voice/${config.id}`;
   return null;
 }
 
-function ConfigDetail({
-  config, numbers, tenant, agents, isSuperadmin, openAddNumber, syncNotice, onSyncNotice, onBack, onChanged,
-}: {
-  config: ConfigRow; numbers: NumberRow[]; tenant: Tenant | null; agents: Agent[]; isSuperadmin: boolean;
-  openAddNumber: boolean;
-  syncNotice: SyncNotice | null; onSyncNotice: (n: SyncNotice | null) => void;
-  onBack: () => void; onChanged: () => void;
-}) {
-  const isNative = config.kind === "telephony_config" && config.provider === NATIVE;
-  const syncsWithProvider = config.kind === "telephony_config" && !isNative;
-  // REST providers whose inbound routing the platform sets up itself.
-  const autoSyncs = syncsWithProvider && !MANUAL_SETUP_PROVIDERS.has(config.provider);
-  const [resyncing, setResyncing] = useState(false);
+// REST calling apps whose inbound routing the platform sets up itself.
+const autoSyncs = (config: ConfigRow | null) =>
+  config?.kind === "telephony_config" && config.provider !== NATIVE && !MANUAL_SETUP_PROVIDERS.has(config.provider);
 
-  const handleResync = async () => {
-    setResyncing(true);
-    onSyncNotice(null);
-    try {
-      const { results, application } = await syncTelephonyNumbers(config.id);
-      const failed = results.filter((r) => !r.ok);
-      onSyncNotice(
-        application && !application.ok
-          ? { ok: false, text: `${config.providerLabel} kept the old address for every number here: ${application.message ?? "unknown error"}` }
-          : results.length === 0
-          ? { ok: true, text: "No numbers on this configuration to sync." }
-          : failed.length === 0
-            ? { ok: true, text: `${results.length} number${results.length === 1 ? "" : "s"} re-synced with ${config.providerLabel}.` }
-            : { ok: false, text: failed.map((r) => noticeFor(config.providerLabel, r.did, r).text).join(" ") },
-      );
-    } catch (e) {
-      setError(e instanceof ApiError ? e.detail : String(e));
-    } finally {
-      setResyncing(false);
-    }
-  };
-  const [error, setError] = useState<string | null>(null);
-  const [addOpen, setAddOpen] = useState(openAddNumber);
-  const [purchased, setPurchased] = useState<PurchasedNumber[]>([]);
-  const [editTarget, setEditTarget] = useState<NumberRow | null>(null);
-
-  useEffect(() => {
-    if (config.kind !== "carrier" || !tenant) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setPurchased([]);
-      return;
-    }
-    let cancelled = false;
-    listPurchasedNumbers(tenant.id)
-      .then((p) => { if (!cancelled) setPurchased(p); })
-      .catch(() => { if (!cancelled) setPurchased([]); });
-    return () => { cancelled = true; };
-  }, [config.kind, config.id, tenant]);
-
-  const purchasedFor = (n: NumberRow) =>
-    purchased.find((p) => p.carrier_id === config.id && digits(p.phone_number) === digits(n.did));
-
-  return (
-    <>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18, flexWrap: "wrap" }}>
-        <button className="btn btn-ghost btn-sm" onClick={onBack}><ArrowLeft size={13} /> Phone Numbers</button>
-        <h1 style={{ fontSize: "1.3rem", fontWeight: 600, letterSpacing: "-.025em", margin: 0, color: "var(--text)" }}>
-          {config.name}
-        </h1>
-        <span className="badge indigo">{config.providerLabel}</span>
-        {config.isDefaultOutbound && <span className="badge amber">Default outbound</span>}
-      </div>
-
-      {error && <div className="error-banner">{error}</div>}
-      {syncNotice && <div className={syncNotice.ok ? "info-banner" : "error-banner"}>{syncNotice.text}</div>}
-
-      <div className="info-banner" style={{ marginBottom: 16 }}>
-        {config.providerLabel} is connected. {isNative && "Phone numbers are assigned by the platform; account admins can manage each number’s agent and status. "}
-        <Link href={`/integrations?manage=calling:${config.provider}`}>Manage this app on Connected Apps</Link>.
-        {webhookUrlFor(config) && <div style={{ marginTop: 8 }}>
-          <strong>Inbound webhook (POST): </strong><code style={{ overflowWrap: "anywhere" }}>{webhookUrlFor(config)}</code>
-        </div>}
-      </div>
-
-      <div className="card">
-        <div className="card-hdr">
-          <span className="card-title">Phone numbers</span>
-          <span className="card-sub">{fmtInt(numbers.length)} DID{numbers.length === 1 ? "" : "s"}</span>
-          {autoSyncs && numbers.length > 0 && (
-            <button
-              className="btn btn-ghost btn-sm"
-              style={{ marginLeft: "auto" }}
-              onClick={handleResync}
-              disabled={resyncing}
-              title={`Point every number here at this platform in ${config.providerLabel} again, e.g. after the public URL changed`}
-            >
-              {resyncing ? "Re-syncing…" : "Re-sync numbers"}
-            </button>
-          )}
-          {(!isNative || isSuperadmin) && (
-            <button
-              className="btn btn-primary btn-sm"
-              style={{ marginLeft: autoSyncs && numbers.length > 0 ? 8 : "auto" }}
-              onClick={() => setAddOpen(true)}
-            >
-              + Add phone number
-            </button>
-          )}
-        </div>
-        {numbers.length === 0 ? (
-          <div className="empty-state">No phone numbers on this configuration yet.</div>
-        ) : (
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th>Address</th>
-                <th>Label</th>
-                <th>Status</th>
-                <th>Inbound agent</th>
-                {syncsWithProvider && <th>{config.providerLabel} routing</th>}
-                <th>Traffic</th>
-                <th style={{ textAlign: "right" }}>Calls (recent)</th>
-                {config.kind === "carrier" && <th>Purchased</th>}
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {numbers.map((n) => {
-                const p = config.kind === "carrier" ? purchasedFor(n) : undefined;
-                return (
-                  <tr key={n.id}>
-                    <td className="bold mono" style={{ color: "var(--text)" }}>{n.did}</td>
-                    <td>{n.region || <i style={{ color: "var(--text-3)" }}>none</i>}</td>
-                    <td>{statusBadge(n.status)}</td>
-                    <td>{n.routesTo}</td>
-                    {syncsWithProvider && <td>{syncBadge(n, config)}</td>}
-                    <td>{typeBadge(n)}</td>
-                    <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                      {fmtInt(n.inbound + n.outbound)}
-                    </td>
-                    {config.kind === "carrier" && (
-                      <td>{p ? new Date(p.purchased_at).toLocaleDateString() : "—"}</td>
-                    )}
-                    <td>
-                      <button className="btn btn-ghost btn-sm" onClick={() => setEditTarget(n)}>Edit</button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-
-      {tenant && (
-        <AddNumberModal
-          open={addOpen}
-          onClose={() => setAddOpen(false)}
-          config={config}
-          tenant={tenant}
-          agents={agents}
-          onCreated={(did, sync) => {
-            setAddOpen(false);
-            onSyncNotice(sync ? noticeFor(config.providerLabel, did, sync) : null);
-            onChanged();
-          }}
-        />
-      )}
-
-      <EditNumberModal
-        target={editTarget}
-        config={config}
-        agents={agents}
-        isSuperadmin={isSuperadmin}
-        onClose={() => setEditTarget(null)}
-        onChanged={onChanged}
-      />
-    </>
-  );
+// Why a number may not receive calls yet; matches the Edit dialog's routing section.
+function routingIssue(n: PhoneNumber, config: ConfigRow | null): string | null {
+  if (config?.kind === "telephony_config" && MANUAL_SETUP_PROVIDERS.has(config.provider)) return "Manual setup";
+  return autoSyncs(config) && !n.provider_sync?.ok ? "Needs a fix" : null;
 }
 
-function AddNumberModal({
-  open, onClose, config, tenant, agents, onCreated,
-}: {
-  open: boolean; onClose: () => void; config: ConfigRow; tenant: Tenant; agents: Agent[];
-  onCreated: (did: string, sync?: ProviderSync) => void;
+function AddNumberModal({ initialMode, configs, initialConfigKey, agentsByTenant, showTenant, onClose, onCreated }: {
+  initialMode: NumberMode; configs: ConfigRow[]; initialConfigKey: string | null;
+  agentsByTenant: Record<string, AgentList>; showTenant: boolean; onClose: () => void;
+  onCreated: (created: PhoneNumber, config: ConfigRow) => void;
 }) {
-  const [tab, setTab] = useState<"manual" | "buy">("manual");
-  const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState(initialMode);
+  const [configKey, setConfigKey] = useState(initialConfigKey ?? "");
+  const [locked, setLocked] = useState(false);
+  const [pending, setPending] = useState(false);
+  const choices = configs.filter((c) => mode !== "buy" || c.kind === "carrier");
+  const config = choices.find((c) => c.key === configKey) ?? choices[0];
+  return <Modal open title={mode === "buy" ? "Buy a number" : "Add a number"} className="phone-number-dialog" trapFocus onClose={() => { if (!pending) onClose(); }}>
+    <div className="phone-number-tabs" role="group" aria-label="How to add a number">
+      <button className={`btn btn-sm ${mode === "buy" ? "btn-primary" : "btn-ghost"}`} aria-pressed={mode === "buy"} disabled={locked || !configs.some((c) => c.kind === "carrier")} onClick={() => setMode("buy")}>Buy a new one</button>
+      <button className={`btn btn-sm ${mode === "manual" ? "btn-primary" : "btn-ghost"}`} aria-pressed={mode === "manual"} disabled={locked} onClick={() => setMode("manual")}>I already have one</button>
+    </div>
+    {config ? <>
+      <div className="form-group">
+        <label className="form-label" htmlFor="number-connection">{mode === "buy" ? "Buy through" : "Through"}</label>
+        <select id="number-connection" className="form-select" value={config.key} disabled={locked} onChange={(e) => setConfigKey(e.target.value)}>
+          {choices.map((c) => <option key={c.key} value={c.key}>{c.providerLabel} · {c.name}{showTenant ? ` · ${c.tenantName}` : ""}</option>)}
+        </select>
+      </div>
+      <NumberForm key={`${config.key}:${mode}`} mode={mode} config={config} agents={agentsByTenant[config.tenantId]} onClose={onClose} onCreated={(n) => onCreated(n, config)} onLock={(locked, pending) => { setLocked(locked); setPending(pending); }} />
+    </> : <div className="empty-state phone-numbers-empty"><h2>{mode === "buy" ? "Connect a calling app to buy numbers" : "Connect a calling app first"}</h2><p>{mode === "buy" ? "Connect Twilio, Plivo, or Vonage to buy a number here. You can add an existing number through your other connected apps." : "Connect an app before adding a number."}</p><Link className="btn btn-primary btn-sm" href={CONNECTED_CALLING_APPS_URL}>Go to Connected Apps</Link></div>}
+  </Modal>;
+}
 
-  // Manual tab
+function NumberForm({ mode, config, agents, onClose, onCreated, onLock }: {
+  mode: NumberMode; config: ConfigRow; agents: AgentList | undefined;
+  onClose: () => void; onCreated: (created: PhoneNumber) => void; onLock: (locked: boolean, pending: boolean) => void;
+}) {
   const [did, setDid] = useState("");
   const [region, setRegion] = useState("");
   const [agentId, setAgentId] = useState("");
-  const [active, setActive] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
+  const [country, setCountry] = useState("US");
+  const [areaCode, setAreaCode] = useState("");
+  const [results, setResults] = useState<AvailableNumber[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [buying, setBuying] = useState<string | null>(null);
+  const [bought, setBought] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmation, setConfirmation] = useState<string | null>(null);
+  const connection = config.kind === "carrier" ? { carrier_id: config.id } : { telephony_config_id: config.id };
+  const lock = (value: boolean) => { setBusy(value); onLock(value, value); };
 
-  // Buy tab (carrier-backed only) — moved from SipPanel unchanged in behavior.
-  const [buyCountry, setBuyCountry] = useState("US");
-  const [buyAreaCode, setBuyAreaCode] = useState("");
-  const [searchResults, setSearchResults] = useState<AvailableNumber[] | null>(null);
-  const [searching, setSearching] = useState(false);
-  const [purchasingNumber, setPurchasingNumber] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setTab("manual");
-    setError(null);
-    setDid("");
-    setRegion("");
-    setAgentId("");
-    setActive(true);
-    setBuyCountry("US");
-    setBuyAreaCode("");
-    setSearchResults(null);
-  }, [open]);
-
-  const handleManualCreate = async () => {
-    setSubmitting(true);
-    setError(null);
-    try {
-      const body: PhoneNumberCreate = {
-        did,
-        region: region || undefined,
-        agent_id: agentId || undefined,
-        status: active ? "active" : "inactive",
-        ...(config.kind === "carrier" ? { carrier_id: config.id } : { telephony_config_id: config.id }),
-      };
-      const created = await createPhoneNumber(tenant.id, body);
-      onCreated(created.did, created.provider_sync ?? undefined);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.detail : String(e));
-    } finally {
-      setSubmitting(false);
-    }
+  const add = async (phone: string) => createPhoneNumber(config.tenantId, {
+    ...connection, did: phone.trim(), region: region.trim() || undefined, agent_id: agentId || undefined, status: "active",
+  });
+  const handleAdd = async () => {
+    lock(true); setError(null);
+    try { onCreated(await add(did)); }
+    catch (e) { setError(errorText(e)); }
+    finally { lock(false); }
   };
-
   const handleSearch = async () => {
-    setSearching(true);
-    setError(null);
-    setSearchResults(null);
-    try {
-      const results = await searchAvailableNumbers(tenant.id, {
-        carrier_id: config.id, country: buyCountry, area_code: buyAreaCode || undefined, limit: 10,
-      });
-      setSearchResults(results);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.detail : String(e));
-    } finally {
-      setSearching(false);
-    }
+    lock(true); setError(null); setResults(null); setConfirmation(null);
+    try { setResults(await searchAvailableNumbers(config.tenantId, { carrier_id: config.id, country, area_code: areaCode.trim() || undefined, limit: 10 })); }
+    catch (e) { setError(errorText(e)); }
+    finally { lock(false); }
   };
-
-  const handlePurchase = async (phoneNumber: string) => {
-    if (!window.confirm(`Purchase ${phoneNumber}? This charges your carrier account for real.`)) return;
-    setPurchasingNumber(phoneNumber);
-    setError(null);
+  const handleBuy = async (phone: string) => {
+    lock(true); setBuying(phone); setError(null); setConfirmation(null);
+    let purchased = bought;
     try {
-      await purchaseNumber(tenant.id, { carrier_id: config.id, phone_number: phoneNumber });
-      const created = await createPhoneNumber(tenant.id, { did: phoneNumber, carrier_id: config.id, status: "active" });
-      onCreated(created.did, created.provider_sync ?? undefined);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.detail : String(e));
-    } finally {
-      setPurchasingNumber(null);
-    }
-  };
-
-  return (
-    <Modal
-      open={open}
-      title="Add Phone Number"
-      onClose={onClose}
-      footer={
-        tab === "manual" ? (
-          <>
-            <button className="btn btn-ghost btn-sm" onClick={onClose}>Cancel</button>
-            <button className="btn btn-primary btn-sm" onClick={handleManualCreate} disabled={submitting || !did}>
-              {submitting ? "Adding…" : "Add Number"}
-            </button>
-          </>
-        ) : (
-          <button className="btn btn-ghost btn-sm" onClick={onClose}>Close</button>
-        )
+      if (!purchased) {
+        const result = await purchaseNumber(config.tenantId, { carrier_id: config.id, phone_number: phone });
+        purchased = result.phone_number;
+        setBought(purchased);
       }
-    >
-      {error && <div className="error-banner">{error}</div>}
+      onCreated(await add(purchased));
+    } catch (e) { setError(purchased ? `${purchased} is already bought, but could not be added to your list. Finish adding it below; you won't be charged again. ${errorText(e)}` : errorText(e)); }
+    finally { setBusy(false); setBuying(null); onLock(purchased !== null, false); }
+  };
 
-      <p style={{ fontSize: ".78rem", color: "var(--text-3)", marginTop: -4, marginBottom: 14 }}>
-        {config.provider === NATIVE
-          ? "A local SIP number or extension on the platform's FreeSWITCH. It only receives calls if the platform's SIP proxy routes it there (locally: 5000–5009)."
-          : "PSTN numbers (E.164), SIP URIs (sip:user@host), and SIP extensions are all supported."}
-      </p>
-
-      {config.kind === "carrier" && (
-        <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-          <button className={`btn btn-sm ${tab === "manual" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("manual")}>
-            Enter manually
-          </button>
-          <button className={`btn btn-sm ${tab === "buy" ? "btn-primary" : "btn-ghost"}`} onClick={() => setTab("buy")}>
-            Buy a new number
-          </button>
-        </div>
-      )}
-
-      {tab === "manual" ? (
-        <>
-          <div className="form-group">
-            <label className="form-label">
-              Address <span className="required">*</span>
-              <span className="hint">E.164, SIP URI or extension — e.g. 5000, +14085551000</span>
-            </label>
-            <input
-              className="form-input" style={{ fontFamily: "var(--mono)" }} value={did} onChange={(e) => setDid(e.target.value)}
-              placeholder="+19781899185, sip:101@asterisk.local, or 101"
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Label <span className="hint">optional — free text, e.g. a region or team name</span></label>
-            <input className="form-input" value={region} onChange={(e) => setRegion(e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Inbound agent</label>
-            <select className="form-select" value={agentId} onChange={(e) => setAgentId(e.target.value)}>
-              <option value="">— none (routes to default) —</option>
-              {agents.map((a) => (
-                <option key={a.id} value={a.id}>{a.name}</option>
-              ))}
-            </select>
-          </div>
-          <div
-            className="form-group"
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "space-between",
-              padding: "12px 0", borderTop: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
-            }}
-          >
-            <label className="form-label" style={{ marginBottom: 0 }}>Active</label>
-            <label className="toggle-switch">
-              <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} />
-              <span className="toggle-slider" />
-            </label>
-          </div>
-        </>
-      ) : (
-        <>
-          <div className="form-group">
-            <label className="form-label">Country</label>
-            <input className="form-input" value={buyCountry} onChange={(e) => setBuyCountry(e.target.value.toUpperCase())} maxLength={2} />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Area Code (optional)</label>
-            <input className="form-input" value={buyAreaCode} onChange={(e) => setBuyAreaCode(e.target.value)} placeholder="415" />
-          </div>
-          <button className="btn btn-primary btn-sm" onClick={handleSearch} disabled={searching}>
-            {searching ? "Searching…" : "Search"}
-          </button>
-
-          {searchResults !== null && (
-            <div style={{ marginTop: 16 }}>
-              {searchResults.length === 0 ? (
-                <div className="empty-state">No numbers found — try a different area code.</div>
-              ) : (
-                <table className="tbl">
-                  <thead>
-                    <tr>
-                      <th>Number</th>
-                      <th>Region</th>
-                      <th>Capabilities</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {searchResults.map((r) => (
-                      <tr key={r.phone_number}>
-                        <td className="bold mono">{r.phone_number}</td>
-                        <td>{r.region ?? "—"}</td>
-                        <td>
-                          {r.capabilities.map((cap) => (
-                            <span key={cap} className="badge gray" style={{ marginRight: 4 }}>{cap}</span>
-                          ))}
-                        </td>
-                        <td style={{ textAlign: "right" }}>
-                          <button className="btn btn-primary btn-sm" onClick={() => handlePurchase(r.phone_number)} disabled={purchasingNumber !== null}>
-                            {purchasingNumber === r.phone_number ? "Purchasing…" : "Purchase"}
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          )}
-        </>
-      )}
-    </Modal>
-  );
+  return <>
+    {error && <div className="error-banner" role="alert">{error}</div>}
+    {mode === "manual" ? <>
+      <div className="form-group">
+        <label className="form-label" htmlFor="number-address">Phone number <span className="required">*</span></label>
+        <input id="number-address" className="form-input phone-number-address" required value={did} disabled={busy} onChange={(e) => setDid(e.target.value)} placeholder={config.provider === NATIVE ? "5001" : "+14155550199"} aria-describedby="number-address-hint" />
+        <p id="number-address-hint" className="form-hint">{config.provider === NATIVE ? "Enter a local extension or phone address assigned by the platform." : "Include the country code, like +1… You can also use a phone extension or SIP address."}</p>
+      </div>
+      <div className="form-group">
+        <label className="form-label" htmlFor="number-label">Label <span className="hint">optional</span></label>
+        <input id="number-label" className="form-input" value={region} disabled={busy} onChange={(e) => setRegion(e.target.value)} placeholder="e.g. West coast sales" />
+      </div>
+      <div className="form-group">
+        <label className="form-label" htmlFor="number-agent">Who answers</label>
+        <select id="number-agent" className="form-select" value={agentId} disabled={busy || !agents?.ok} onChange={(e) => setAgentId(e.target.value)}>
+          <option value="">Choose later (use account default)</option>
+          {agents?.agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+        </select>
+        {!agents?.ok && <p className="form-hint">Agents could not be loaded. You can choose who answers after adding the number.</p>}
+      </div>
+      <div className="phone-number-form-actions"><button className="btn btn-ghost btn-sm" disabled={busy} onClick={onClose}>Cancel</button><button className="btn btn-primary btn-sm" disabled={busy || !did.trim()} onClick={handleAdd}>{busy ? "Adding…" : "Add number"}</button></div>
+    </> : <>
+      <p className="phone-number-buy-hint">This uses your {config.providerLabel} account and may charge that account.</p>
+      <div className="phone-number-country-row">
+        <div className="form-group"><label className="form-label" htmlFor="number-country">Country</label><select id="number-country" className="form-select" value={country} disabled={busy || !!bought} onChange={(e) => { setCountry(e.target.value); setResults(null); setConfirmation(null); }}>{COUNTRIES.map((c) => <option key={c.code} value={c.code}>{c.name}</option>)}</select></div>
+        <div className="form-group"><label className="form-label" htmlFor="number-area">Area code <span className="hint">optional</span></label><input id="number-area" className="form-input" value={areaCode} disabled={busy || !!bought} onChange={(e) => { setAreaCode(e.target.value); setResults(null); setConfirmation(null); }} placeholder="415" /></div>
+      </div>
+      <button className="btn btn-primary btn-sm" disabled={busy || !!bought || !/^[A-Z]{2}$/.test(country)} onClick={handleSearch}>{busy && !buying ? "Searching…" : "Show available numbers"}</button>
+      {results !== null && <div className="phone-number-results" aria-live="polite">
+        {results.length === 0 ? <p className="empty-state">No numbers found. Try a different country or area code.</p> : results.map((r) => <div className="phone-number-buy-row" key={r.phone_number}>
+          <div><span className="phone-number-address">{r.phone_number}</span><div className="phone-number-sublabel">{[r.region, r.monthly_price ? `${r.monthly_price} / month` : null].filter(Boolean).join(" · ")}</div></div>
+          <button className="btn btn-primary btn-sm" disabled={busy || !!bought} onClick={() => setConfirmation(r.phone_number)} aria-label={`Buy ${r.phone_number}`}>{buying === r.phone_number ? "Buying…" : "Buy"}</button>
+        </div>)}
+      </div>}
+      {confirmation && <div className="phone-number-buy-confirm" role="status"><p>Buy <strong className="phone-number-address">{confirmation}</strong>? Your {config.providerLabel} account will be charged.</p><div className="phone-numbers-actions"><button className="btn btn-ghost btn-sm" onClick={() => setConfirmation(null)}>Cancel</button><button className="btn btn-primary btn-sm" onClick={() => void handleBuy(confirmation)}>Confirm buy</button></div></div>}
+      {bought && !busy && <button className="btn btn-primary btn-sm" onClick={() => void handleBuy(bought)}>Finish adding {bought}</button>}
+      <div className="phone-number-form-actions"><p className="form-hint">Next you’ll choose who answers</p><button className="btn btn-ghost btn-sm" disabled={busy} onClick={onClose}>{bought ? "Close" : "Cancel"}</button></div>
+    </>}
+  </>;
 }
-
-type SyncState = "synced" | "failed" | "pending" | "manual" | "none";
-
-// Providers whose inbound routing the platform can't set itself yet.
-const MANUAL_SETUP_PROVIDERS = new Set(["cloudonix"]);
-
-// Whether the provider has been told to send this number's calls here.
-function syncStateOf(n: PhoneNumber, config: ConfigRow | null): SyncState {
-  if (!config || config.kind !== "telephony_config" || config.provider === NATIVE) return "none";
-  if (MANUAL_SETUP_PROVIDERS.has(config.provider)) return "manual";
-  if (!n.provider_sync) return "pending";
-  return n.provider_sync.ok ? "synced" : "failed";
-}
-
-const SYNC_BADGE: Record<Exclude<SyncState, "none">, { label: string; cls: string }> = {
-  synced: { label: "Synced", cls: "green" },
-  failed: { label: "Sync failed", cls: "red" },
-  pending: { label: "Not synced", cls: "gray" },
-  manual: { label: "Manual setup", cls: "amber" },
-};
-
-const syncBadge = (n: PhoneNumber, config: ConfigRow | null) => {
-  const state = syncStateOf(n, config);
-  if (state === "none") return <span style={{ color: "var(--text-3)" }}>—</span>;
-  const b = SYNC_BADGE[state];
-  return <span className={`badge ${b.cls}`} title={n.provider_sync?.message ?? undefined}>{b.label}</span>;
-};
-
 type RemoveMode = "remove_rest" | "release" | "remove_local" | "remove_plain" | "local_locked";
 
 function removeModeFor(config: ConfigRow | null, purchase: PurchasedNumber | undefined, isSuperadmin: boolean): RemoveMode {
@@ -1000,22 +421,21 @@ function removeModeFor(config: ConfigRow | null, purchase: PurchasedNumber | und
   return purchase ? "release" : "remove_plain";
 }
 
-/** Everything about one number: identity, routing, status, provider sync,
-    and removing it. Opened from a configuration's table or All numbers. */
+/** Number routing and removal reuse the existing provider-specific APIs. */
 function EditNumberModal({
-  target, config, agents, isSuperadmin, onClose, onChanged,
+  target, config, agents, agentsOk, isSuperadmin, onClose, onChanged, onSaved,
 }: {
-  target: NumberRow | null; config: ConfigRow | null; agents: Agent[]; isSuperadmin: boolean;
-  onClose: () => void; onChanged: () => void;
+  target: NumberRow; config: ConfigRow | null; agents: Agent[]; agentsOk: boolean; isSuperadmin: boolean;
+  onClose: () => void; onChanged: () => void; onSaved: (text: string) => void;
 }) {
-  const [agentId, setAgentId] = useState("");
-  const [fallbackAgentId, setFallbackAgentId] = useState("");
-  const [region, setRegion] = useState("");
-  const [status, setStatus] = useState<PhoneNumber["status"]>("active");
-  const [sync, setSync] = useState<ProviderSync | null>(null);
+  const [agentId, setAgentId] = useState(target.agent_id ?? "");
+  const [fallbackAgentId, setFallbackAgentId] = useState(target.fallback_agent_id ?? "");
+  const [region, setRegion] = useState(target.region ?? "");
+  const [status, setStatus] = useState<PhoneNumber["status"]>(target.status);
+  const [sync, setSync] = useState<ProviderSync | null>(target.provider_sync ?? null);
   const [purchase, setPurchase] = useState<PurchasedNumber | undefined>(undefined);
   // Whether this carrier number was bought through us; unknown until loaded.
-  const [purchaseLookup, setPurchaseLookup] = useState<"loading" | "failed" | "done">("done");
+  const [purchaseLookup, setPurchaseLookup] = useState<"loading" | "failed" | "done">(config?.kind === "carrier" ? "loading" : "done");
   // Set when the provider refused to detach: the admin may remove it anyway.
   const [detachRefused, setDetachRefused] = useState<string | null>(null);
   const [busy, setBusy] = useState<null | "save" | "sync" | "remove">(null);
@@ -1025,19 +445,6 @@ function EditNumberModal({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!target) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setAgentId(target.agent_id ?? "");
-    setFallbackAgentId(target.fallback_agent_id ?? "");
-    setRegion(target.region ?? "");
-    setStatus(target.status);
-    setSync(target.provider_sync ?? null);
-    setPurchase(undefined);
-    setConfirmRemove(false);
-    setDetachRefused(null);
-    setDirty(false);
-    setError(null);
-    setPurchaseLookup(config?.kind === "carrier" ? "loading" : "done");
     if (config?.kind !== "carrier") return;
     let cancelled = false;
     listPurchasedNumbers(target.tenant_id)
@@ -1055,22 +462,23 @@ function EditNumberModal({
   }, [target, config]);
 
   const close = () => {
+    if (busy !== null) return;
     onClose();
     if (dirty) onChanged();
   };
   const fail = (e: unknown) => setError(e instanceof ApiError ? e.detail : String(e));
 
   const handleSave = async () => {
-    if (!target) return;
     setBusy("save");
     setError(null);
     try {
       await updatePhoneNumber(target.id, {
         agent_id: agentId || null,
         fallback_agent_id: fallbackAgentId || null,
-        region: region || undefined,
+        region: region.trim(),
         status,
       });
+      onSaved(agentId && status === "active" ? `${agents.find((a) => a.id === agentId)?.name ?? "Your chosen agent"} now answers ${target.did}.` : `${target.did} was updated.`);
       onClose();
       onChanged();
     } catch (e) {
@@ -1081,7 +489,6 @@ function EditNumberModal({
   };
 
   const handleRetry = async () => {
-    if (!target) return;
     setBusy("sync");
     setError(null);
     try {
@@ -1098,7 +505,6 @@ function EditNumberModal({
   const mode = removeModeFor(config, purchase, isSuperadmin);
 
   const handleRemove = async (force = false) => {
-    if (!target) return;
     setBusy("remove");
     setError(null);
     try {
@@ -1121,8 +527,6 @@ function EditNumberModal({
   const syncsWithProvider = config?.kind === "telephony_config" && config.provider !== NATIVE;
   const manualSetup = config !== null && MANUAL_SETUP_PROVIDERS.has(config.provider);
   const sectionTitle = { fontSize: ".68rem", fontWeight: 600, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--text-3)", margin: "18px 0 8px" } as const;
-  const rowStyle = { display: "flex", gap: 10, padding: "5px 0", fontSize: ".8rem" } as const;
-  const labelStyle = { color: "var(--text-3)", width: 120, flexShrink: 0 } as const;
 
   const REMOVE_COPY: Record<Exclude<RemoveMode, "local_locked">, { button: string; explain: string }> = {
     remove_rest: {
@@ -1147,81 +551,65 @@ function EditNumberModal({
 
   return (
     <Modal
-      open={target !== null}
-      title={`Edit DID — ${target?.did ?? ""}`}
+      open
+      title={target.did}
+      className="phone-number-dialog"
+      trapFocus
       onClose={close}
       footer={
         <>
-          <button className="btn btn-ghost btn-sm" onClick={close}>Cancel</button>
+          {mode !== "local_locked" && <button className="btn btn-ghost btn-sm phone-number-remove" onClick={() => setConfirmRemove(true)} disabled={busy !== null || removeBlocked}>Remove</button>}
+          <button className="btn btn-ghost btn-sm" onClick={close} disabled={busy !== null}>Cancel</button>
           <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={busy !== null}>
-            {busy === "save" ? "Saving…" : "Save Changes"}
+            {busy === "save" ? "Saving…" : "Save"}
           </button>
         </>
       }
     >
-      {error && <div className="error-banner">{error}</div>}
+      {error && <div className="error-banner" role="alert">{error}</div>}
 
-      <div style={{ ...sectionTitle, marginTop: 0 }}>Number</div>
-      <div style={rowStyle}>
-        <div style={labelStyle}>Address</div>
-        <div style={{ fontFamily: "var(--mono)", color: "var(--text)" }}>{target?.did}</div>
-      </div>
-      <div style={rowStyle}>
-        <div style={labelStyle}>Configuration</div>
-        <div style={{ color: "var(--text)" }}>
-          {config ? <>{config.name} <span style={{ color: "var(--text-3)" }}>· {config.providerLabel}</span></> : <i style={{ color: "var(--text-3)" }}>none (local SIP)</i>}
-        </div>
-      </div>
-      <div style={rowStyle}>
-        <div style={labelStyle}>Account</div>
-        <div style={{ color: "var(--text)" }}>{target?.tenantName}</div>
-      </div>
-      {purchase && (
-        <div style={rowStyle}>
-          <div style={labelStyle}>Purchased</div>
-          <div style={{ color: "var(--text)" }}>{new Date(purchase.purchased_at).toLocaleDateString()}</div>
-        </div>
-      )}
-
-      <div style={sectionTitle}>Routing</div>
+      <div className="phone-number-editor-through"><span className="phone-number-muted">Through </span><CallingAppIdentity config={config} /></div>
+      <fieldset className="phone-number-fields" disabled={busy !== null}>
       <div className="form-group">
-        <label className="form-label">Label <span className="hint">free text, e.g. a region or team name</span></label>
-        <input className="form-input" value={region} onChange={(e) => setRegion(e.target.value)} />
+        <label className="form-label" htmlFor="edit-number-label">Label <span className="hint">optional</span></label>
+        <input id="edit-number-label" className="form-input" value={region} onChange={(e) => setRegion(e.target.value)} />
       </div>
       <div className="form-group">
-        <label className="form-label">Inbound agent</label>
-        <select className="form-select" value={agentId} onChange={(e) => setAgentId(e.target.value)}>
-          <option value="">— none (routes to default) —</option>
+        <label className="form-label" htmlFor="edit-number-agent">Who answers</label>
+        <select id="edit-number-agent" className="form-select" disabled={!agentsOk} value={agentId} onChange={(e) => setAgentId(e.target.value)}>
+          <option value="">Not set (use account default)</option>
+          {agentId && !agents.some((a) => a.id === agentId) && <option value={agentId}>Current agent (unavailable)</option>}
           {agents.map((a) => (
             <option key={a.id} value={a.id}>{a.name}</option>
           ))}
         </select>
       </div>
       <div className="form-group">
-        <label className="form-label">
-          Fallback agent <span className="hint">used if the primary agent is unavailable or inactive</span>
+        <label className="form-label" htmlFor="edit-number-fallback">
+          If that agent can’t take it <span className="hint">optional</span>
         </label>
-        <select className="form-select" value={fallbackAgentId} onChange={(e) => setFallbackAgentId(e.target.value)}>
-          <option value="">— none —</option>
+        <select id="edit-number-fallback" className="form-select" disabled={!agentsOk} value={fallbackAgentId} onChange={(e) => setFallbackAgentId(e.target.value)}>
+          <option value="">No backup agent</option>
+          {fallbackAgentId && !agents.some((a) => a.id === fallbackAgentId) && <option value={fallbackAgentId}>Current backup (unavailable)</option>}
           {agents.map((a) => (
             <option key={a.id} value={a.id}>{a.name}</option>
           ))}
         </select>
       </div>
-      <div className="form-group">
-        <label className="form-label">
-          Status <span className="hint">inactive and suspended numbers don&apos;t take calls</span>
+      {!agentsOk && <p className="form-hint">Agents could not be loaded. Your current choices will be kept. Close and retry loading the page to change them.</p>}
+      <div className="phone-number-status-row">
+        <label htmlFor="edit-number-on">This number is {status === "active" ? "on" : "off"}</label>
+        <label className="toggle-switch">
+          <input id="edit-number-on" type="checkbox" checked={status === "active"} onChange={(e) => setStatus(e.target.checked ? "active" : "inactive")} />
+          <span className="toggle-slider" />
         </label>
-        <select className="form-select" value={status} onChange={(e) => setStatus(e.target.value as PhoneNumber["status"])}>
-          <option value="active">active</option>
-          <option value="inactive">inactive</option>
-          <option value="suspended">suspended</option>
-        </select>
       </div>
+      {status === "suspended" && <p className="form-hint">This number is suspended. Turn it on to resume calls.</p>}
+      </fieldset>
 
       {syncsWithProvider && manualSetup && config && (
         <>
-          <div style={sectionTitle}>{providerLabel} routing</div>
+          <div style={sectionTitle}>Finish setting up calls</div>
           <div className="form-hint" style={{ lineHeight: 1.6 }}>
             Set up once in {providerLabel}: add this number to your Voice Application and set the application&apos;s URL to{" "}
             <span style={{ fontFamily: "var(--mono)", color: "var(--text)", wordBreak: "break-all" }}>{webhookUrlFor(config)}</span> (POST).
@@ -1231,7 +619,7 @@ function EditNumberModal({
 
       {syncsWithProvider && !manualSetup && (
         <>
-          <div style={sectionTitle}>{providerLabel} routing</div>
+          <div style={sectionTitle}>{sync?.ok ? `Calls from ${providerLabel}` : "Needs a fix"}</div>
           <div
             className={sync?.ok ? "info-banner" : sync ? "error-banner" : undefined}
             style={{ display: "flex", alignItems: "flex-start", gap: 10, ...(sync ? {} : { fontSize: ".8rem", color: "var(--text-2)" }) }}
@@ -1253,13 +641,12 @@ function EditNumberModal({
         </>
       )}
 
-      <div style={{ ...sectionTitle, color: "var(--red)" }}>Danger zone</div>
       {mode === "local_locked" ? (
         <div className="form-hint" style={{ lineHeight: 1.6 }}>
-          Local numbers are assigned and removed by the platform. To stop taking calls on it, set its status to inactive.
+          Local numbers are assigned and removed by the platform. To stop taking calls on it, turn it off above.
         </div>
-      ) : (
-        <div style={{ display: "flex", alignItems: "center", gap: 12, border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px" }}>
+      ) : (confirmRemove || detachRefused) && (
+        <div className="phone-number-remove-confirm">
           <div className="form-hint" style={{ flex: 1, lineHeight: 1.5, margin: 0 }}>
             {detachRefused ? (
               <span style={{ color: "var(--red)" }}>
@@ -1275,17 +662,13 @@ function EditNumberModal({
                 {busy === "remove" ? "Removing…" : "Remove anyway"}
               </button>
             </div>
-          ) : confirmRemove ? (
+          ) : (
             <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
               <button className="btn btn-ghost btn-sm" onClick={() => setConfirmRemove(false)} disabled={busy !== null}>Keep</button>
               <button className="btn btn-danger btn-sm" onClick={() => handleRemove()} disabled={busy !== null || removeBlocked}>
                 {busy === "remove" ? "Removing…" : `Yes, ${REMOVE_COPY[mode].button.toLowerCase()}`}
               </button>
             </div>
-          ) : (
-            <button className="btn btn-danger btn-sm" style={{ flexShrink: 0 }} onClick={() => setConfirmRemove(true)} disabled={busy !== null || removeBlocked}>
-              {REMOVE_COPY[mode].button}
-            </button>
           )}
         </div>
       )}

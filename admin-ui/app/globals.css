@@ -1559,6 +1559,8 @@ body {
   text-decoration: none; white-space: nowrap; transition: opacity .14s;
 }
 .topbar-cta:hover { opacity: .88; }
+button.topbar-cta { border: 0; font-family: inherit; }
+.topbar-cta:disabled { opacity: .45; cursor: not-allowed; }
 .topbar-usage-pill {
   display: flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: 99px;
   border: 1px solid var(--border); background: var(--bg); font-size: .76rem; font-weight: 600;
@@ -1958,3 +1960,67 @@ body {
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .connected-app-icon img[src$="/plivo.svg"] { filter: invert(1); }
 }
+/* Phone Numbers: the console list and number dialogs. */
+.phone-numbers-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin-bottom: 18px; }
+.phone-numbers-heading h1 { font-size: 1.5rem; font-weight: 600; letter-spacing: -.025em; margin: 0 0 5px; color: var(--text); }
+.phone-numbers-heading p { font-size: .78rem; color: var(--text-3); margin: 0; max-width: 620px; line-height: 1.6; }
+.phone-numbers-heading a, .phone-numbers-connection-note a { color: var(--cyan); }
+.phone-numbers-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.phone-numbers-connection-note { display: flex; align-items: center; gap: 6px 14px; flex-wrap: wrap; }
+.phone-numbers-connection-note a { font-weight: 600; }
+.phone-numbers-card { overflow: hidden; }
+.phone-numbers-card .card-title { margin: 0; }
+.phone-numbers-card .card-hdr { flex-wrap: wrap; }
+.phone-numbers-search { display: flex; align-items: center; gap: 7px; color: var(--text-3); background: var(--surf-2); border: 1px solid var(--border-2); border-radius: var(--rs); padding: 7px 10px; }
+.phone-numbers-search input { background: transparent; border: 0; outline: none; font: inherit; font-size: .76rem; color: var(--text); width: 185px; min-width: 0; }
+.phone-numbers-search:focus-within { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.phone-numbers-table-wrap { overflow-x: auto; }
+.phone-numbers-card .tbl { min-width: 720px; }
+.phone-numbers-card .tbl tbody tr:hover td { cursor: default; }
+.phone-number-address { font-family: var(--mono); font-size: .78rem; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.phone-number-sublabel { font-family: var(--font); font-size: .7rem; color: var(--text-3); margin-top: 4px; font-weight: 400; }
+.phone-number-app { display: inline-flex; align-items: center; gap: 7px; }
+.phone-number-app-icon { display: inline-grid; place-items: center; width: 23px; height: 23px; background: var(--surf-2); border-radius: 6px; flex-shrink: 0; }
+.phone-number-app-icon img { object-fit: contain; }
+.phone-number-muted { color: var(--text-3); }
+.phone-numbers-card .tbl .phone-number-calls { text-align: right; font-variant-numeric: tabular-nums; }
+.phone-numbers-empty > svg { margin: 0 auto 14px; color: var(--cyan); }
+.phone-numbers-empty h2 { font-size: 1rem; color: var(--text); font-weight: 600; margin: 0 0 7px; }
+.phone-numbers-empty p { max-width: 380px; margin: 0 auto 16px; line-height: 1.6; }
+.phone-numbers-filter { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--border-2); color: var(--text-2); font-size: .75rem; }
+.phone-number-dialog { width: 520px; display: flex; flex-direction: column; overflow: hidden; max-height: 85dvh; }
+.phone-number-dialog .modal-hdr, .phone-number-dialog .modal-footer { flex-shrink: 0; }
+.phone-number-dialog .modal-body { overflow-y: auto; overscroll-behavior: contain; }
+.phone-number-dialog .modal-title { overflow-wrap: anywhere; }
+.phone-number-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 18px; }
+.phone-number-form-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding-top: 14px; border-top: 1px solid var(--border); margin-top: 18px; }
+.phone-number-form-actions p { margin: 0 auto 0 0; }
+.phone-number-buy-hint { font-size: .76rem; color: var(--text-3); margin: 0 0 16px; line-height: 1.6; }
+.phone-number-country-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.phone-number-results { margin-top: 16px; }
+.phone-number-buy-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border-2); }
+.phone-number-buy-row:last-child { border-bottom: 0; }
+.phone-number-buy-confirm { padding: 12px; border: 1px solid var(--cyan-border); border-radius: var(--rs); background: var(--cyan-dim); margin-top: 12px; font-size: .78rem; }
+.phone-number-buy-confirm p { margin: 0 0 12px; line-height: 1.6; }
+.phone-number-buy-confirm .phone-numbers-actions { justify-content: flex-end; }
+.phone-number-editor-through { color: var(--text-2); font-size: .78rem; margin: 0 0 18px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.phone-number-fields { padding: 0; margin: 0; border: 0; min-width: 0; }
+.phone-number-status-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin: 16px 0; font-size: .78rem; font-weight: 600; color: var(--text); }
+.phone-number-dialog .phone-number-remove { color: var(--red); margin-right: auto; }
+.phone-number-remove-confirm { display: flex; gap: 12px; flex-wrap: wrap; border: 1px solid var(--red-border); border-radius: var(--rs); padding: 12px; margin-top: 16px; }
+@media (max-width: 600px) {
+  .phone-numbers-heading { gap: 14px; }
+  .phone-numbers-actions { width: 100%; }
+  .phone-numbers-actions .btn { flex: 1; justify-content: center; min-height: 40px; }
+  .phone-numbers-search { width: 100%; }
+  .phone-numbers-search input { width: 100%; font-size: 16px; }
+  .phone-numbers-filter { flex-wrap: wrap; }
+  .phone-number-dialog { width: calc(100vw - 24px); max-width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }
+  .phone-number-dialog .modal-hdr, .phone-number-dialog .modal-body { padding: 14px; }
+  .phone-number-dialog .modal-footer { padding: 12px 14px; flex-wrap: wrap; }
+  .phone-number-dialog .btn, .phone-numbers-card .btn { min-height: 40px; }
+  .phone-number-dialog .modal-close { min-width: 36px; min-height: 36px; }
+  .phone-number-dialog .form-label { flex-wrap: wrap; }
+}
+.phone-number-dialog .toggle-switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; z-index: 1; cursor: pointer; }
+.phone-number-dialog .toggle-switch input:focus-visible + .toggle-slider { outline: 2px solid var(--cyan); outline-offset: 3px; }

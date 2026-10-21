@@ -118,8 +118,12 @@ export function ConnectorsPanel({
   onConnectClose,
   onManageChange,
   manageApp,
+  category = "All",
+  onCategoryChange,
 }: {
   tenantId: string;
+  category?: AppCard["category"] | "All";
+  onCategoryChange: (category: AppCard["category"] | "All") => void;
   manageApp?: string;
   connectOpen?: boolean;
   onConnectClose?: () => void;
@@ -131,7 +135,6 @@ export function ConnectorsPanel({
   const { canManage, isSuperadmin } = access;
   const [query, setQuery] = useState("");
   const [segment, setSegment] = useState("All");
-  const [category, setCategory] = useState("All");
   const [callingForm, setCallingForm] = useState<{ provider: string; account?: CallingAccount } | null>(null);
   const [providers, setProviders] = useState<OAuthProvider[]>([]);
   const [connections, setConnections] = useState<OAuthConnection[]>([]);
@@ -421,13 +424,13 @@ export function ConnectorsPanel({
     <div className="connected-apps-toolbar">
       <div className="connected-apps-segments" aria-label="Connection status">
         {["All", "Connected", "Not connected"].map((value) => <button key={value} type="button" aria-pressed={segment === value}
-          className={segment === value ? "on" : ""} onClick={() => { setSegment(value); if (value === "All") setCategory("All"); }}>
+          className={segment === value ? "on" : ""} onClick={() => { setSegment(value); if (value === "All") onCategoryChange("All"); }}>
           {value} · {cards.filter((app) => value === "All" || (value === "Connected" ? app.connected : !app.connected)).length}
         </button>)}
       </div>
       <div className="connected-apps-categories" aria-label="App category">
-        {["Calling", "Work", "Messaging"].map((value) => <button key={value} type="button" aria-pressed={category === value}
-          className={category === value ? "on" : ""} onClick={() => setCategory((current) => current === value ? "All" : value)}>{value}</button>)}
+        {(["Calling", "Work", "Messaging"] as const).map((value) => <button key={value} type="button" aria-pressed={category === value}
+          className={category === value ? "on" : ""} onClick={() => onCategoryChange(category === value ? "All" : value)}>{value}</button>)}
       </div>
     </div>
     <div className="connected-apps-grid">
@@ -454,7 +457,7 @@ export function ConnectorsPanel({
         </div>
       </article>)}
     </div>
-    {visible.length === 0 && <div className="empty-state">No apps match your search and filters.<button className="btn btn-ghost btn-sm" onClick={() => { setQuery(""); setSegment("All"); setCategory("All"); }}>Clear filters</button></div>}
+    {visible.length === 0 && <div className="empty-state">No apps match your search and filters.<button className="btn btn-ghost btn-sm" onClick={() => { setQuery(""); setSegment("All"); onCategoryChange("All"); }}>Clear filters</button></div>}
   </>;
 
   return (
