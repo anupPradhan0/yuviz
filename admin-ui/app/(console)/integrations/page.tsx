@@ -17,6 +17,13 @@ export default function IntegrationsPage() {
 function Integrations() {
   const { tenant, isAllTenants, loading, error } = useActiveTenant();
   const searchParams = useSearchParams();
+  const category = (["Calling", "Work", "Messaging"] as const)
+    .find((value) => value.toLowerCase() === searchParams.get("category")?.toLowerCase()) ?? "All";
+  const updateParams = (update: (params: URLSearchParams) => void) => {
+    const params = new URLSearchParams(window.location.search);
+    update(params);
+    window.history.replaceState(null, "", `/integrations${params.size ? `?${params}` : ""}`);
+  };
 
   return (
     <>
@@ -32,16 +39,19 @@ function Integrations() {
         <ConnectorsPanel
           key={tenant.id}
           tenantId={tenant.id}
+          category={category}
+          onCategoryChange={(value) => updateParams((params) => {
+            if (value === "All") params.delete("category");
+            else params.set("category", value.toLowerCase());
+          })}
           manageApp={searchParams.get("manage") ?? undefined}
           connectOpen={searchParams.get("add") === "1"}
-          onConnectClose={() => window.history.replaceState(null, "", "/integrations")}
-          onManageChange={(app) => {
-            const params = new URLSearchParams(window.location.search);
+          onConnectClose={() => updateParams((params) => params.delete("add"))}
+          onManageChange={(app) => updateParams((params) => {
             params.delete("add");
             if (app) params.set("manage", app);
             else params.delete("manage");
-            window.history.replaceState(null, "", `/integrations${params.size ? `?${params}` : ""}`);
-          }}
+          })}
         />
       ) : (
         <div className="empty-state">
