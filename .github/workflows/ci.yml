@@ -75,6 +75,7 @@ jobs:
           psql voiceai -v ON_ERROR_STOP=1 -f database/schema.sql
           psql voiceai -v ON_ERROR_STOP=1 -f database/knowledge_schema.sql
           psql voiceai -v ON_ERROR_STOP=1 -f database/telephony_schema.sql
+          psql voiceai -v ON_ERROR_STOP=1 -f database/clinic_schema.sql
           psql voiceai -v ON_ERROR_STOP=1 -v yuviz_app_password=testpw -f database/rls.sql
 
       # libs/vad_sdk resolves models/silero_vad.onnx from the repo root; the test suite
