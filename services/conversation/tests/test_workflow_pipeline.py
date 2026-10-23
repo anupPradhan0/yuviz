@@ -168,7 +168,7 @@ async def test_an_end_call_marker_survives_a_transition_in_the_same_turn():
     """[[END_CALL]] must still hang up if transition speech yields in the same turn."""
     llm = _ScriptedToolLLM([
         [
-            TokenEvent(text="All set. [[END_CALL]]"),
+            TokenEvent(text="All set. Goodbye. [[END_CALL]]"),
             ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_to_book", arguments={}),
         ],
         [],
@@ -180,6 +180,35 @@ async def test_an_end_call_marker_survives_a_transition_in_the_same_turn():
     assert any(r.end_call for r in responses), (
         "the hang-up was lost — transition speech reset end_call"
     )
+
+
+async def test_a_marker_only_reply_after_farewell_transition_speech_still_hangs_up():
+    graph = {**GRAPH, "edges": [
+        {**GRAPH["edges"][0], "data": {
+            **GRAPH["edges"][0]["data"], "transition_speech": "Thanks for calling, goodbye."}},
+        GRAPH["edges"][1],
+    ]}
+    llm = _ScriptedToolLLM([
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_to_book", arguments={})],
+        [TokenEvent(text="[[END_CALL]]")],
+    ])
+    handler = _handler(llm, _RecordingPolicyResolver(), workflow=graph)
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+
+    assert any(r.end_call for r in responses)
+
+
+async def test_a_scripted_agents_marker_only_reply_hangs_up_after_a_non_farewell_transition():
+    llm = _ScriptedToolLLM([
+        [ToolCallEvent(tool_call_id="t1", tool_name="goto_wants_to_book", arguments={})],
+        [TokenEvent(text="[[END_CALL]]")],
+    ])
+    handler = _handler(llm, _RecordingPolicyResolver(), farewell_message="Thanks for calling. Goodbye!")
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 1200, -20.0)]
+
+    assert any(r.end_call for r in responses), "the transition speech made the scripted farewell lose the hang-up"
 
 
 async def test_workflow_transfer_node_surfaces_a_transfer_request():

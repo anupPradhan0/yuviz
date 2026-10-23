@@ -7,6 +7,8 @@ STRINGS: dict[str, str] = {
     "max_duration_goodbye": "We're at the time limit for this call now. Thanks for calling — goodbye.",
     # Spoken when the LLM stream raises mid-turn, so the caller doesn't hear dead air.
     "fallback_llm_error": "Sorry, I'm having a little trouble right now. Could you say that again?",
+    # Spoken when a lone [[END_CALL]] is rejected (the caller did not say goodbye): the call stays open.
+    "end_call_check": "Is there anything else I can help you with?",
     # Used if the LLM produces no apology text after a failed transfer.
     "transfer_failed_fallback": "I'm sorry, I couldn't connect you to an agent right now.",
     # Replaces transfer_announcement for a fabrication-triggered transfer.
@@ -24,4 +26,34 @@ TOOL_FILLERS: tuple[tuple[str, float], ...] = (
     ("Give me a moment.", 1.5),
     ("Sure, let me look into that.", 2.0),
     ("One moment while I take care of that.", 2.4),
+)
+
+# Phrases that mean the caller is wrapping up, and phrases that sound like the agent signing off.
+CLOSURE_PHRASES: tuple[str, ...] = (
+    "bye",
+    "goodbye",
+    "that's all",
+    "thats all",
+    "that is all",
+    "that's it",
+    "no more questions",
+    "nothing else",
+    "i'm done",
+    "thanks",
+    "thank you",
+    "okay thanks",
+)
+FAREWELL_PHRASES: tuple[str, ...] = (
+    "goodbye",
+    "bye",
+    "take care",
+    "have a great day",
+    "have a nice day",
+    "have a good day",
+    "thanks for calling",
+    "thank you for calling",
+    "have a wonderful day",
+    "have a lovely day",
+    "talk to you soon",
+    "see you",
 )

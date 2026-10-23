@@ -1,7 +1,8 @@
 """Spoken system strings (fillers, goodbyes, fallbacks) per language.
 
 One module per language (i18n/<code>.py) exposing STRINGS (key -> text) and
-TOOL_FILLERS ((phrase, approx spoken seconds), ...). Every module is discovered and
+TOOL_FILLERS ((phrase, approx spoken seconds), ...). They may also expose CLOSURE_PHRASES and
+FAREWELL_PHRASES (tuples of phrases; required on en) for the end-call guard. Every module is discovered and
 validated at import, so a malformed one fails startup. Missing languages or keys
 fall back to English. Agent-level overrides (farewell_message, transfer_announcement) are
 applied by the caller and always win over these.
@@ -10,6 +11,7 @@ applied by the caller and always win over these.
 from __future__ import annotations
 
 import importlib
+import logging
 import math
 import pkgutil
 from collections.abc import Iterable
@@ -18,6 +20,10 @@ from types import ModuleType
 from libs.config_sdk.languages import normalize_language
 
 from . import en
+
+log = logging.getLogger(__name__)
+
+_PHRASE_TABLES = ("CLOSURE_PHRASES", "FAREWELL_PHRASES")
 
 
 def _validate(code: str, module: ModuleType) -> None:
@@ -47,6 +53,12 @@ def _validate(code: str, module: ModuleType) -> None:
         raise ValueError(
             f"i18n module {code!r}: TOOL_FILLERS must be a non-empty tuple of (phrase, seconds > 0) pairs"
         )
+    for attr in _PHRASE_TABLES:
+        phrases = getattr(module, attr, None)
+        if phrases is None and code != "en":
+            continue
+        if not isinstance(phrases, tuple) or not phrases or not all(isinstance(p, str) and p for p in phrases):
+            raise ValueError(f"i18n module {code!r}: {attr} must be a non-empty tuple of non-empty strings")
 
 
 def _discover(path: Iterable[str], package: str) -> dict[str, ModuleType]:
@@ -60,6 +72,9 @@ def _discover(path: Iterable[str], package: str) -> dict[str, ModuleType]:
         raise ValueError(f"i18n package {package!r}: no en module found")
     for code, module in tables.items():
         _validate(code, module)
+        missing = [attr for attr in _PHRASE_TABLES if not hasattr(module, attr)]
+        if missing:
+            log.warning("i18n module %r has no %s; the end-call guard accepts the marker without a phrase check", code, ", ".join(missing))
     return tables
 
 
@@ -86,3 +101,19 @@ def tool_fillers(language: str | None) -> tuple[tuple[str, float], ...]:
 def shortest_tool_filler(language: str | None) -> str:
     """The language's shortest tool filler, else English's."""
     return _SHORTEST.get(normalize_language(language) or "en", _SHORTEST["en"])
+
+
+def has_phrase_tables(language: str | None) -> bool:
+    """Whether the language has its own closure and farewell phrase tables (English counts)."""
+    table = _TABLES.get(normalize_language(language) or "en")
+    return all(hasattr(table, attr) for attr in _PHRASE_TABLES)
+
+
+def closure_phrases(language: str | None) -> tuple[str, ...]:
+    table = _TABLES.get(normalize_language(language) or "en")
+    return getattr(table, "CLOSURE_PHRASES", None) or en.CLOSURE_PHRASES
+
+
+def farewell_phrases(language: str | None) -> tuple[str, ...]:
+    table = _TABLES.get(normalize_language(language) or "en")
+    return getattr(table, "FAREWELL_PHRASES", None) or en.FAREWELL_PHRASES

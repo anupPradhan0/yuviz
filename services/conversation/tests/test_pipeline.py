@@ -31,7 +31,7 @@ from ..directives import (
 )
 from .. import pipeline as pipeline_module
 from ..fillers import _DEFAULT_TARGET_S, FillerSelector, _TOOL_FILLERS
-from ..i18n import hi, shortest_tool_filler, tool_fillers
+from ..i18n import hi, shortest_tool_filler, t, tool_fillers
 from ..language import fixed_language_instruction, reply_language_instruction
 from ..pipeline import (
     PipelineConversationHandler,
@@ -143,7 +143,7 @@ def _make_handler(
     has_booking_tool: bool = False,
     workflow: dict | None = None, node_tools: list[str] | None = None,
     node_knowledge: list[str] | None = None, transcripts=None,
-    agent_language: str | None = None, language_mode: str | None = None,
+    agent_language: str | None = None, language_mode: str | None = None, stt_language: str | None = None,
     supported_languages: tuple[str, ...] | None = None, agent_id: str = "a1", **handler_kwargs,
 ) -> PipelineConversationHandler:
     """Build a handler from a hand-built RuntimeConfig/ProviderBundle, no IConfigProvider."""
@@ -185,7 +185,7 @@ def _make_handler(
             workflow=workflow, workflow_draft=workflow,
         ),
         media=MediaInfo(
-            voice=None, language=None,
+            voice=None, language=None, stt_language=stt_language,
             supported_languages=supported_languages or (),
             default_language=supported_languages[0] if supported_languages else None,
         ),
@@ -872,21 +872,53 @@ async def test_pipeline_history_accumulates():
 
 
 @pytest.mark.asyncio
-async def test_pipeline_marker_only_reply_gets_fallback_audio():
-    """A marker-only LLM reply still gets fallback goodbye audio before end_call=True,
-    since the servicer drops EndCall when no TTS was sent."""
+async def test_pipeline_marker_only_reply_without_closure_stays_open(caplog):
+    """A marker-only reply to a non-closing caller is not a hangup: the call stays open and the
+    "anything else?" check is spoken instead of the goodbye or an error apology."""
     stt = _make_stt("tear down the call")
     llm = _make_llm([_END_CALL_MARKER])        # marker only, nothing spoken
     tts = _make_tts(b"\x00" * 640)
 
     handler = _make_handler(stt, llm, tts)
-    responses = []
-    async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0):
-        responses.append(r)
+    with caplog.at_level("INFO", logger=pipeline_module.log.name):
+        responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    assert not any(r.end_call for r in responses)
+    synthesized = [c.args[0] for c in tts.synthesize.await_args_list]
+    assert t("end_call_check", "en") in synthesized
+    assert t("fallback_llm_error", "en") not in synthesized
+    assert _FALLBACK_GOODBYE not in synthesized
+    assert not any(_END_CALL_MARKER in (m.content or "") for m in handler._get_history("s1") if m.role == "assistant")
+    rejections = [r for r in caplog.records if "end_call_rejected reason=marker_only session=" in r.getMessage()]
+    assert len(rejections) == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_free_text_agent_language_keeps_the_end_call_guard():
+    """agents.language='English' normalizes to nothing but must not switch the guard off: the English
+    phrase tables apply, so a marker after a non-farewell to a non-closing caller is rejected."""
+    llm = _make_llm(["Okay, noted. ", _END_CALL_MARKER])
+    handler = _make_handler(
+        _make_stt("I want to reschedule"), llm, _make_tts(b"\x00" * 640), agent_language="English",
+    )
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+    assert not any(r.end_call for r in responses)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_marker_only_reply_to_closing_caller_gets_fallback_goodbye(caplog):
+    """A marker-only reply to a caller who said goodbye still hangs up, with fallback goodbye
+    audio before end_call=True, since the servicer drops EndCall when no TTS was sent."""
+    stt = _make_stt("goodbye")
+    llm = _make_llm([_END_CALL_MARKER])
+    tts = _make_tts(b"\x00" * 640)
+
+    handler = _make_handler(stt, llm, tts)
+    with caplog.at_level("INFO", logger=pipeline_module.log.name):
+        responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
 
     end_call_responses = [r for r in responses if r.end_call]
     assert end_call_responses, "expected an end_call response"
-
     tts_responses = [r for r in responses if r.tts_payloads]
     assert tts_responses, "expected fallback TTS audio so tts_started_sent flips true"
 
@@ -896,6 +928,64 @@ async def test_pipeline_marker_only_reply_gets_fallback_audio():
     assert any(responses.index(r) < end_call_index for r in tts_responses)
 
     tts.synthesize.assert_any_call(_FALLBACK_GOODBYE, 16_000)
+    assert "end_call_rejected" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stt_language, caller, reply", [
+    ("es", "Gracias, adiós.", "Perfecto, que tenga un buen día."),
+    ("hi-IN", "मुझे बुकिंग करनी है।", "आपकी बुकिंग हो गई।"),
+])
+async def test_guard_uses_the_provider_row_language_when_the_agent_has_none(stt_language, caller, reply):
+    """A legacy agent with agents.language NULL and its language only on the STT row has no phrase
+    table for es, so the marker is trusted; hi uses the hi table, where this caller is no closure."""
+    handler = _make_handler(
+        _make_stt(caller), _make_llm([reply, " ", _END_CALL_MARKER]), _make_tts(b"\x00" * 640),
+        stt_language=stt_language,
+    )
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+    assert any(r.end_call for r in responses) == stt_language.startswith("es")
+
+
+@pytest.mark.asyncio
+async def test_pipeline_question_with_marker_is_spoken_without_hangup(caplog):
+    """A reply that ends in a question never hangs up; the marker is dropped, the question kept,
+    and neither transcript string reaches the log."""
+    caller = "my secret phrase"
+    reply = "Can I help with anything else?"
+    stt = _make_stt(caller)
+    llm = _make_llm([reply, " ", _END_CALL_MARKER])
+    tts = _make_tts(b"\x00" * 640)
+
+    handler = _make_handler(stt, llm, tts)
+    with caplog.at_level("INFO", logger=pipeline_module.log.name):
+        responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    assert not any(r.end_call for r in responses)
+    assert reply in [c.args[0] for c in tts.synthesize.await_args_list]
+    history = handler._get_history("s1")
+    assert history[-1].role == "assistant"
+    assert reply in history[-1].content
+    assert not any(_END_CALL_MARKER in (m.content or "") for m in history if m.role == "assistant")
+    rejection_lines = [r.getMessage() for r in caplog.records if "end_call_rejected" in r.getMessage()]
+    assert len(rejection_lines) == 1 and "reason=question" in rejection_lines[0]
+    assert caller not in rejection_lines[0]
+    assert reply not in rejection_lines[0]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_guard_is_not_consulted_without_a_marker(monkeypatch):
+    """A turn with no [[END_CALL]] never reaches the guard."""
+    def _spy(*args, **kwargs):
+        raise AssertionError("the end-call guard ran on a turn with no marker")
+
+    monkeypatch.setattr(pipeline_module, "_end_call_rejection", _spy)
+    handler = _make_handler(_make_stt("hello"), _make_llm(["Hi", " there", "!"]), _make_tts(b"\x00" * 640))
+
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+
+    assert any(r.tts_payloads for r in responses)
+    assert not any(r.end_call for r in responses)
 
 
 def _make_spy_llm(tokens: list[str]) -> tuple[MagicMock, list[int]]:
@@ -1449,6 +1539,20 @@ async def test_on_transfer_failed_falls_back_when_llm_produces_nothing():
     history = handler._get_history("s1")
     assert len(history) == 2
     assert history[1].content == _TRANSFER_FAILED_FALLBACK
+
+
+@pytest.mark.asyncio
+async def test_on_transfer_failed_marker_only_reply_speaks_the_transfer_apology_once():
+    """A marker-only recovery reply is rejected, but the transfer-failed apology plays, not the
+    main-turn "anything else?" check, and on_transfer_failed adds no second fallback."""
+    tts = _make_tts(b"\x00" * 640)
+    handler = _make_handler(_make_stt(), _make_llm([_END_CALL_MARKER]), tts)
+    async for _ in handler.on_transfer_failed("s1", "+15551234567", "esl_unreachable"):
+        pass
+
+    synthesized = [c.args[0] for c in tts.synthesize.await_args_list]
+    assert synthesized.count(_TRANSFER_FAILED_FALLBACK) == 1
+    assert t("end_call_check", "en") not in synthesized
 
 
 @pytest.mark.asyncio
@@ -2490,6 +2594,7 @@ def test_no_scripted_messages_keeps_spoken_word_instructions():
         transfer_type="cold", transfer_destination="1001",
     )
     assert "after your spoken words" in handler._workflow.system_prompt()
+    assert "must include a brief goodbye" in handler._workflow.system_prompt()
     assert "reply with ONLY" not in handler._workflow.system_prompt()
 
 
@@ -2511,6 +2616,41 @@ async def test_farewell_message_synthesized_on_end_call():
     synthesized = [c.args[0] for c in tts.synthesize.await_args_list]
     assert "Thanks for calling Yovanex. Goodbye!" in synthesized
     assert _FALLBACK_GOODBYE not in synthesized
+
+
+@pytest.mark.asyncio
+async def test_scripted_farewell_ends_call_without_a_closing_caller():
+    """A scripted agent's farewell is system-spoken, so the closure/farewell phrase checks do not apply."""
+    llm = _make_llm(["Thank you for your time. ", "[[END_CALL]]"])
+    tts = _make_tts(b"\x11" * 640)
+    handler = _make_handler(
+        _make_stt("okay thanks"), llm, tts, system_prompt="You are Alex.",
+        farewell_message="Thanks for calling Yovanex. Goodbye!",
+    )
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+    assert any(r.end_call for r in responses)
+    assert "Thanks for calling Yovanex. Goodbye!" in [c.args[0] for c in tts.synthesize.await_args_list]
+
+
+@pytest.mark.asyncio
+async def test_scripted_agent_trailing_question_still_vetoes_end_call(caplog):
+    llm = _make_llm(["Anything else I can help with? ", "[[END_CALL]]"])
+    handler = _make_handler(
+        _make_stt("I want to book"), llm, _make_tts(b"\x11" * 640), system_prompt="You are Alex.",
+        farewell_message="Thanks for calling Yovanex. Goodbye!",
+    )
+    with caplog.at_level("INFO", logger=pipeline_module.log.name):
+        responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+    assert not any(r.end_call for r in responses)
+    assert "end_call_rejected reason=question" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_thanking_caller_and_wonderful_day_reply_end_the_call():
+    llm = _make_llm(["Your appointment is booked for Tuesday at 3. Have a wonderful day! ", "[[END_CALL]]"])
+    handler = _make_handler(_make_stt("Great, thanks."), llm, _make_tts(b"\x00" * 640))
+    responses = [r async for r in handler.on_speech_ended("s1", _silence(), 200, -20.0)]
+    assert any(r.end_call for r in responses)
 
 
 @pytest.mark.asyncio
@@ -2883,7 +3023,7 @@ async def test_end_call_suppressed_on_fabricated_claim_below_escalation_threshol
     llm = _make_llm(["should never be called"])
     tts = _make_tts(b"\x00" * 640)
     orchestrator = _FakeToolOrchestrator([
-        ToolTokenEvent(text="Booked! Your appointment is confirmed. [[END_CALL]]"),
+        ToolTokenEvent(text="Booked! Your appointment is confirmed. Goodbye. [[END_CALL]]"),
     ])
     handler = _make_handler(
         stt, llm, tts, system_prompt="You are a scheduler.",
@@ -2899,6 +3039,24 @@ async def test_end_call_suppressed_on_fabricated_claim_below_escalation_threshol
 
 
 @pytest.mark.asyncio
+async def test_tool_orchestrator_question_with_marker_is_rejected(caplog):
+    """The guard also covers the tool-orchestrator token path: a question plus the marker stays open."""
+    from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
+
+    orchestrator = _FakeToolOrchestrator([ToolTokenEvent(text="Anything else I can do? [[END_CALL]]")])
+    handler = _make_handler(
+        _make_stt("check my order"), _make_llm(["should never be called"]), _make_tts(b"\x00" * 640),
+        system_prompt="You are a scheduler.", tool_orchestrator=orchestrator,
+    )
+
+    with caplog.at_level("INFO", logger=pipeline_module.log.name):
+        responses = [r async for r in handler.on_speech_ended("s1", _silence(), 300, -20.0)]
+
+    assert not any(r.end_call for r in responses)
+    assert "end_call_rejected reason=question" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_pending_transfer_survives_same_turn_end_call_marker():
     """A pending transfer wins over a same-turn [[END_CALL]]: no end_call, transfer_request still yielded."""
     from ..tools.llm_adapter import TokenEvent as ToolTokenEvent
@@ -2907,7 +3065,7 @@ async def test_pending_transfer_survives_same_turn_end_call_marker():
     llm = _make_llm(["should never be called"])
     tts = _make_tts(b"\x00" * 640)
     orchestrator = _FakeToolOrchestrator([
-        ToolTokenEvent(text="Booked! Your appointment is confirmed. [[END_CALL]]"),
+        ToolTokenEvent(text="Booked! Your appointment is confirmed. Goodbye. [[END_CALL]]"),
     ])
     handler = _make_handler(
         stt, llm, tts, system_prompt="You are a scheduler.",

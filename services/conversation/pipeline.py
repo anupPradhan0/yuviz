@@ -34,7 +34,7 @@ from .directives import (
 )
 from . import phrase_audio
 from .fillers import FillerSelector
-from .i18n import t, tool_fillers
+from .i18n import closure_phrases, farewell_phrases, has_phrase_tables, t, tool_fillers
 from .guardrails import GuardrailCounter, GuardrailDetector
 from . import language as lang_state
 from .language import LanguageTracker, fixed_language_instruction, reply_language_instruction, script_language, utterance_language
@@ -237,9 +237,45 @@ def _build_end_call_instruction(condition: str | None, scripted: bool = False) -
     return (
         f"\n\n{cond}, end your "
         f"final reply with the exact token {_END_CALL_MARKER} on its own, after "
-        "your spoken words. Only use this token when you are truly ending the "
+        "your spoken words, which must include a brief goodbye. Only use this token when you are truly ending the "
         "call — never say it out loud or explain it to the caller."
     )
+
+
+_QUESTION_ENDINGS = ("?", "？", "؟")
+_PHRASE_SPLIT_RE = re.compile(r'[\s.,!?;:…।॥؟？"“”()—–-]+')
+
+
+def _phrase_tokens(text: str) -> str:
+    """Casefolded tokens joined by single spaces and padded with a space at each end, so
+    ` phrase ` in the result is a whole-token match (a word-boundary regex breaks inside Devanagari words)."""
+    tokens = _PHRASE_SPLIT_RE.split(text.casefold().replace("’", "'"))
+    return " " + " ".join(tok for tok in tokens if tok) + " "
+
+
+def _last_sentence(reply_text: str) -> str:
+    sentences = [p.strip().strip("\"'“”‘’") for p in _SENTENCE_RE.split(reply_text)]
+    return next((p for p in reversed(sentences) if p), "")
+
+
+def _end_call_rejection(reply_text: str, caller_text: str, language: str | None) -> str | None:
+    """Why an [[END_CALL]] marker should not hang up, or None to honour it."""
+    last_sentence = _last_sentence(reply_text)
+    if last_sentence.endswith(_QUESTION_ENDINGS):
+        return "question"
+    if language is None or not has_phrase_tables(language):
+        # No known language or phrase table (es, fr, ja, zh, ...): English phrases cannot match a native goodbye,
+        # so trust the marker.
+        return None
+    # Only the caller's last sentence counts: "Thank you. I also want to reschedule" is not a closure.
+    caller = _phrase_tokens(_last_sentence(caller_text))
+    if any(_phrase_tokens(p) in caller for p in closure_phrases(language) + closure_phrases("en")):
+        return None
+    last = _phrase_tokens(last_sentence)
+    if any(_phrase_tokens(p) in last for p in farewell_phrases(language) + farewell_phrases("en")):
+        return None
+    return "no_closure" if last_sentence else "marker_only"
+
 
 # Spoken system strings live in i18n/ per language; these are the English texts.
 # Spoken when END_CALL comes with no text: the servicer drops EndCall unless some TTS was sent.
@@ -552,6 +588,14 @@ class PipelineConversationHandler:
         # Spoken system strings: the session language, else an explicit agents.language.
         # Never a provider row's language, so agents without one keep their English strings.
         self._strings_language = normalize_language(runtime_config.agent.language) or "en"
+        # The [[END_CALL]] guard's language for a single-language agent: agents.language, else the provider rows'
+        # (resolve_languages' order), English when none is set. An explicit "multi" is None: no phrase table applies.
+        # Legacy free text ("English") normalizes to nothing and falls through to the next source.
+        set_languages = [lang for lang in (self._agent_language, stt_language, tts_language) if lang]
+        self._guard_language: str | None = next(
+            (normalize_language(lang) for lang in set_languages if normalize_language(lang) or lang.lower() == "multi"),
+            "en",
+        )
         if self._multilingual:
             log.info(
                 "Multilingual agent %s: default=%s supported=%s stt_language=%s voice_overrides=%s",
@@ -875,7 +919,6 @@ class PipelineConversationHandler:
         directives: list[Directive] = []
         full_response: list[str] = []
         tool_calls_made: list[str] = []
-        end_call = False
         any_audio = False
         llm_t0 = time.monotonic()
         first_token_at: float | None = None
@@ -888,7 +931,8 @@ class PipelineConversationHandler:
         async def _produce() -> None:
             try:
                 async for item in self._llm_to_tts(
-                    messages_for_llm, cancel_event, session_id, directives, tool_calls_made, store=history,
+                    messages_for_llm, cancel_event, session_id, directives, tool_calls_made,
+                    store=history, caller_text=stt_result.text,
                 ):
                     await items.put(item)
                 await items.put(_STREAM_END)
@@ -917,12 +961,11 @@ class PipelineConversationHandler:
                 if isinstance(item, Exception):
                     log.error("LLM/TTS pipeline failed session=%s", session_id, exc_info=item)
                     break
-                chunk, tts_audio, marker_seen = item
+                chunk, tts_audio, _marker_seen = item
                 now = time.monotonic()
                 if first_token_at is None:
                     first_token_at = now
                 full_response.append(chunk)
-                end_call = marker_seen
                 if tts_audio:
                     if first_audio_at is None:
                         first_audio_at = now
@@ -935,6 +978,8 @@ class PipelineConversationHandler:
             # at this turn itself. The callback reads its outcome so nothing is logged as never retrieved.
             producer.cancel()
             producer.add_done_callback(lambda task: task.cancelled() or task.exception())
+        # Read after the stream: the guard may have removed a marker yielded mid-stream.
+        end_call = any(isinstance(d, EndCallDirective) for d in directives)
 
         # Transitions queue extract/summarize; start after the live generate.
         # on_speech_ended/on_cancel interrupt them before the next turn.
@@ -1402,12 +1447,15 @@ class PipelineConversationHandler:
         store:        list[ChatMessage] | None = None,
         carry_taint:  bool = False,
         silent_turn_text: str = "fallback_llm_error",
+        caller_text:  str = "",
     ) -> AsyncGenerator[tuple[str, bytes, bool], None]:
         """Stream LLM tokens and synthesize per sentence, yielding (raw_token, tts_bytes, end_call).
         Directives are stripped before TTS and appended to `directives` in place.
         A turn that says nothing and carries no directive speaks the `silent_turn_text` string instead."""
         stream_buf  = StreamBuffer()
         text_buffer = ""  # directive-free text awaiting a sentence boundary
+        reply_text = ""   # every directive-free token of the reply, for the end-call guard
+        transition_text = ""  # transition speech the caller heard; the guard reads it ahead of the reply
         if tool_calls_made is None:
             tool_calls_made = []
         # end_call latched so transition speech / filler cannot clear [[END_CALL]].
@@ -1425,6 +1473,7 @@ class PipelineConversationHandler:
                     if speech:
                         self._workflow.pending_speech = None
                         spoke = True
+                        transition_text += f"{speech} "
                         # Yield text once so full_response/history/transcript record it.
                         first = True
                         async for chunk in self._synthesize_sentence_stream(speech, session_id):
@@ -1463,6 +1512,7 @@ class PipelineConversationHandler:
                 result = DirectiveParser.parse(stream_buf.feed(token))
                 directives.extend(result.directives)
                 text_buffer += result.clean_text
+                reply_text += result.clean_text
                 spoke = spoke or bool(result.clean_text.strip())
                 end_call = any(isinstance(d, EndCallDirective) for d in directives)
                 if result.directives:
@@ -1490,7 +1540,27 @@ class PipelineConversationHandler:
                     fallback_text = ""  # yielded once — see full_response.append(chunk) at the call site
 
         # An unclosed "[[" was prose, not a directive.
-        text_buffer += stream_buf.flush()
+        tail = stream_buf.flush()
+        text_buffer += tail
+        reply_text += tail
+
+        end_call_rejected = False
+        if not cancel_event.is_set() and any(isinstance(d, EndCallDirective) for d in directives):
+            scripted = self._farewell_message is not None
+            full_reply = transition_text + reply_text
+            if scripted:
+                # The system speaks the farewell, so only a question in the reply says the call is not over.
+                # A marker-only reply hands the farewell to the fallback, whatever the transition said.
+                asks = _last_sentence(full_reply).endswith(_QUESTION_ENDINGS)
+                rejection = "question" if asks and reply_text.strip() else None
+            else:
+                rejection = _end_call_rejection(
+                    full_reply, caller_text, self._session_language(session_id) or self._guard_language,
+                )
+            if rejection is not None:
+                end_call_rejected = True
+                directives[:] = [d for d in directives if not isinstance(d, EndCallDirective)]
+                log.info("end_call_rejected reason=%s session=%s", rejection, session_id)
 
         end_call = any(isinstance(d, EndCallDirective) for d in directives)
         if text_buffer.strip() and not cancel_event.is_set():
@@ -1499,7 +1569,10 @@ class PipelineConversationHandler:
         elif not spoke and not directives and not cancel_event.is_set() and not self._ending_or_transferring(session_id):
             # Nothing reached the caller (e.g. the model's only output was a dropped text tool call): never go silent.
             # A deliberate end or transfer with no transition line keeps its own wording (goodbye, transfer).
-            fallback_text = t(silent_turn_text, self._spoken_language(session_id))
+            # A rejected marker on a main turn is not an error: ask whether the caller needs anything else.
+            # Other callers (transfer recovery) keep their own wording.
+            fallback_key = "end_call_check" if end_call_rejected and silent_turn_text == "fallback_llm_error" else silent_turn_text
+            fallback_text = t(fallback_key, self._spoken_language(session_id))
             async for chunk in self._synthesize_sentence_stream(fallback_text, session_id):
                 yield fallback_text, chunk, False
                 fallback_text = ""

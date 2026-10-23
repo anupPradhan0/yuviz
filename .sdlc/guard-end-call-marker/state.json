@@ -1,0 +1,147 @@
+{
+  "slug": "guard-end-call-marker",
+  "base": "9b90f7dfd607f5e2862ad2323a501f671ba2cad5",
+  "stage": "ship",
+  "status": "gate_ship",
+  "started_at": "2026-10-21T07:28:14Z",
+  "stages": {
+    "security_design": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "opus": 2714
+      },
+      "agents": [],
+      "artifact_written": true,
+      "controls_verified": 6
+    },
+    "prd": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "sonnet": 22720,
+        "opus": 24317
+      },
+      "agents": [],
+      "artifact_written": true
+    },
+    "_state_writes": {
+      "status": "pending",
+      "rounds": 0,
+      "verdict": null,
+      "out_tokens": {
+        "haiku": 64723
+      },
+      "agents": []
+    },
+    "design": {
+      "status": "passed",
+      "rounds": 2,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "opus": 29230
+      },
+      "agents": [],
+      "artifact_written": true
+    },
+    "plan": {
+      "status": "passed",
+      "rounds": 2,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "opus": 12971
+      },
+      "agents": [],
+      "artifact_written": true
+    },
+    "build": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "haiku": 2301,
+        "sonnet": 34572
+      },
+      "agents": []
+    },
+    "review": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "AMBER",
+      "out_tokens": {
+        "opus": 58891,
+        "sonnet": 8926
+      },
+      "agents": [
+        "review:size",
+        "review:backend"
+      ],
+      "started_at": "2026-10-21T16:40:35Z",
+      "ended_at": "2026-10-21T17:02:06Z"
+    },
+    "security_code": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {},
+      "agents": [],
+      "started_at": "2026-10-21T16:40:35Z",
+      "findings_path": ".sdlc/guard-end-call-marker/05-security.md",
+      "controls_verified": 7,
+      "ended_at": "2026-10-21T17:02:06Z"
+    },
+    "test": {
+      "status": "passed",
+      "rounds": 1,
+      "verdict": "GREEN",
+      "out_tokens": {
+        "sonnet": 5579
+      },
+      "agents": [
+        "test:r1"
+      ],
+      "started_at": "2026-10-21T18:10:04Z",
+      "result": "255 passed, 0 failed",
+      "command": "cd services/conversation && pytest -q tests/test_end_call_guard.py tests/test_pipeline.py tests/test_workflow_pipeline.py tests/test_i18n.py",
+      "ended_at": "2026-10-21T18:10:04Z"
+    },
+    "retro": {
+      "status": "pending",
+      "rounds": 0,
+      "verdict": null,
+      "out_tokens": {
+        "sonnet": 574
+      },
+      "agents": []
+    }
+  },
+  "open": [
+    {
+      "stage": "review:backend",
+      "severity": "minor",
+      "finding": ".sdlc/guard-end-call-marker/02-design.md:Interfaces + Test plan 3/4 — The design disagrees with itself and with the code (lesson 32): Interfaces specifies a 4-arg `_end_call_rejection(..., scripted)` with a scripted= exact call, and Test plan rows say fr gives no_closure and that scripted=True/False are unit-tested, but the built 3-arg function handles scripted mode inline and fails open for fr (es/de/ja/zh too), so a fix round following Interfaces could stop those agents from ever ending a call."
+    },
+    {
+      "stage": "review:backend",
+      "severity": "minor",
+      "finding": ".sdlc/dynamic-first-turn-filler/state.json, .sdlc/turn1-neutral-filler/, CLAUDE.md — This branch carries work the design did not ask for: another feature's ship-gate state and run report, an untracked turn1-neutral-filler PRD set, a postmerge review and a new root CLAUDE.md, all of which would merge unreviewed under the #128 end-call fix if committed with this PR."
+    }
+  ],
+  "retro_sources": [],
+  "gates": {
+    "prd": "approved"
+  },
+  "build_phase_done": "Phase 3: Wire the guard into the turn",
+  "verify": {
+    "result": "passed",
+    "command": "./venv/bin/python -m pytest -q --timeout=60 services/conversation (1261 passed); ./venv/bin/python -m pytest -q --timeout=180 services/config (1103 passed)",
+    "failures": [],
+    "changed_lines": 884,
+    "backend": 14,
+    "admin_ui": 0
+  },
+  "pr": "https://github.com/yuviz-ai/yuviz/pull/143",
+  "updated_at": "2026-10-21T18:10:04Z"
+}

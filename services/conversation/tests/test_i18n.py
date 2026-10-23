@@ -199,3 +199,36 @@ def test_importing_the_package_registers_every_language_without_a_lookup():
     env = {**os.environ, "PYTHONPATH": str(root)}
     done = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
+
+
+def test_module_without_phrase_tables_warns_once_and_falls_back_to_english(tmp_path, monkeypatch, caplog):
+    name, pkg = _make_package(tmp_path, monkeypatch, {"xx": _VALID_XX})
+    with caplog.at_level("WARNING", logger=i18n.log.name):
+        tables = i18n._discover([str(pkg)], name)
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "'xx'" in warnings[0].getMessage()
+    assert "CLOSURE_PHRASES" in warnings[0].getMessage() and "FAREWELL_PHRASES" in warnings[0].getMessage()
+
+    monkeypatch.setattr(i18n, "_TABLES", tables)
+    assert i18n.closure_phrases("xx") == tables["en"].CLOSURE_PHRASES
+    assert i18n.farewell_phrases("xx") == tables["en"].FAREWELL_PHRASES
+
+
+def test_deployed_languages_ship_their_own_phrase_tables():
+    assert i18n.closure_phrases("hi") == hi.CLOSURE_PHRASES != en.CLOSURE_PHRASES
+    assert i18n.farewell_phrases("hi") == hi.FAREWELL_PHRASES != en.FAREWELL_PHRASES
+
+
+@pytest.mark.parametrize("bad", ['"bye"', "()", '("bye", 3)', '("",)'], ids=["str", "empty", "non-str", "blank"])
+def test_malformed_phrase_table_fails_discovery(tmp_path, monkeypatch, bad):
+    name, pkg = _make_package(tmp_path, monkeypatch, {"xx": f"{_VALID_XX}\nCLOSURE_PHRASES = {bad}\n"})
+    with pytest.raises(ValueError, match=r"'xx'.*CLOSURE_PHRASES must be a non-empty tuple"):
+        i18n._discover([str(pkg)], name)
+
+
+def test_english_must_define_phrase_tables(tmp_path, monkeypatch):
+    name, pkg = _make_package(tmp_path, monkeypatch, {})
+    (pkg / "en.py").write_text((pkg / "en.py").read_text().replace("FAREWELL_PHRASES", "OTHER_PHRASES"))
+    with pytest.raises(ValueError, match=r"'en'.*FAREWELL_PHRASES must be a non-empty tuple"):
+        i18n._discover([str(pkg)], name)
