@@ -65,7 +65,11 @@ function Integrations() {
               : "No account selected."}
         </div>
       )}
-      {tenant && !loading && <details id="custom-tools" className="knowledge-custom-tools"><summary>Custom API tools</summary><p className="form-hint">Manage custom tools here, then turn them on from the agent’s Tools settings.</p><CustomApisPanel key={tenant.id} tenantId={tenant.id} /></details>}
+      {tenant && !loading && (
+        <section id="custom-tools" className="connected-api-tools" aria-labelledby="custom-api-tools-title">
+          <CustomApisPanel key={tenant.id} tenantId={tenant.id} />
+        </section>
+      )}
     </>
   );
 }

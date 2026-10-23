@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { X } from "lucide-react";
+import { CodeXml, Plus, X } from "lucide-react";
 import { ApiError } from "@/lib/api";
 import {
   CustomApi,
@@ -302,19 +302,21 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
   const perStepMs = form.timeout_ms.trim() ? Number(form.timeout_ms) : DEFAULT_STEP_TIMEOUT_MS;
   const worstCaseMs = estimatedLevels * perStepMs;
 
-  if (loading) return <div className="empty-state">Loading…</div>;
-
   return (
     <div className="cols">
       <div className="col-main">
         <div className="card">
-          <div className="card-hdr">
-            <div className="card-title">Custom APIs</div>
-            <div className="card-sub">endpoints this tenant has registered</div>
-            <button className="btn btn-primary btn-sm" onClick={openCreate}>
-              + New API
+          <div className="card-hdr custom-api-heading">
+            <span className="custom-api-icon" aria-hidden="true"><CodeXml size={22} /></span>
+            <div className="custom-api-copy">
+              <h2 id="custom-api-tools-title">Custom API tools</h2>
+              <p>Connect your own APIs, then enable them in your agent’s Tools settings.</p>
+            </div>
+            <button className="btn btn-primary btn-sm" onClick={openCreate} disabled={loading}>
+              <Plus size={16} aria-hidden="true" /> New API
             </button>
           </div>
+          {loading && <div className="empty-state" role="status">Loading custom APIs…</div>}
           {customApisError && <div className="error-banner">{customApisError}</div>}
 
           {customApis.map((api) => (
@@ -342,7 +344,7 @@ export function CustomApisPanel({ tenantId }: { tenantId: string }) {
             </div>
           ))}
 
-          {customApis.length === 0 && !customApisError && <div className="empty-state">No custom APIs registered yet.</div>}
+          {!loading && customApis.length === 0 && !customApisError && <div className="empty-state">No custom APIs yet. Add an API to let your agents look up information or take actions in your systems.</div>}
         </div>
       </div>
 
