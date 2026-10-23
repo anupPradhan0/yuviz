@@ -29,7 +29,7 @@ import {
   uploadDocument,
 } from "@/lib/knowledgeApi";
 import { replaceKnowledgeFile } from "@/lib/replaceKnowledgeFile";
-import { FILE_STATUS } from "@/lib/knowledgePresentation";
+import { FILE_STATUS, mergeKnowledgeFolderRows } from "@/lib/knowledgePresentation";
 import {
   AddSourceModal,
   ACCEPTED_DOC_ACCEPT,
@@ -269,16 +269,16 @@ export default function KnowledgeBasesPage() {
           ? "Couldn’t update some preparing files. We’ll try again automatically."
           : null);
         setSources((current) => {
-          const next = current.filter((source) => !updates.has(source.kb_id));
+          const updatedRows = new Map<string, SourceRow[]>();
           for (const [kbId, docs] of updates) {
             const kb = kbs.find((folder) => folder.id === kbId);
             if (!kb) continue;
             const agents = current.find((source) => source.kb_id === kbId)?.agents ?? null;
-            next.push(...docs.map((doc) => ({
+            updatedRows.set(kbId, docs.map((doc) => ({
               ...doc, kbName: kb.name, tenantName: kb.tenantName, agents,
             })));
           }
-          return next;
+          return mergeKnowledgeFolderRows(current, updatedRows);
         });
         setEmptyKbs((current) => [
           ...current.filter((kb) => !updates.has(kb.id)),
