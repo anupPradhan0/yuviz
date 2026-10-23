@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -8,6 +8,8 @@ import {
   FileText,
   FolderOpen,
   Plus,
+  RefreshCw,
+  BookOpen,
   Search,
   Users,
 } from "lucide-react";
@@ -230,13 +232,6 @@ export default function KnowledgeBasesPage() {
     router.replace("/knowledge-bases");
   }, [searchParams, sources, router]);
 
-  const stats = useMemo(
-    () => ({
-      ready: sources.filter((s) => s.status === "ready").length,
-      inUse: sources.filter((s) => s.agents?.some((a) => a.enabled)).length,
-    }),
-    [sources],
-  );
   const filtered = sources.filter((s) =>
     `${s.title} ${s.kbName} ${s.tenantName}`
       .toLowerCase()
@@ -378,32 +373,13 @@ export default function KnowledgeBasesPage() {
   };
 
   return (
-    <>
+    <div className="knowledge-library">
       <div className="knowledge-heading">
         <div>
           <h1>Knowledge</h1>
           <p>
             Files your agents use to answer questions — FAQs, prices, policies.
           </p>
-        </div>
-      </div>
-      <div className="kb-stat-row knowledge-stats">
-        <div className="kb-stat">
-          <div className="kb-stat-label">Files</div>
-          <div className="kb-stat-value">{loading ? "—" : sources.length}</div>
-          <div className="kb-stat-sub">{stats.ready} ready for agents</div>
-        </div>
-        <div className="kb-stat">
-          <div className="kb-stat-label">Folders</div>
-          <div className="kb-stat-value">{loading ? "—" : kbs.length}</div>
-          <div className="kb-stat-sub">Groups of related files</div>
-        </div>
-        <div className="kb-stat">
-          <div className="kb-stat-label">In use</div>
-          <div className="kb-stat-value">{loading ? "—" : stats.inUse}</div>
-          <div className="kb-stat-sub">
-            Files turned on for at least one agent
-          </div>
         </div>
       </div>
       {(pageError || accountError) && (
@@ -420,7 +396,13 @@ export default function KnowledgeBasesPage() {
         <div className="card-hdr">
           <h2 className="card-title">Your files</h2>
           <span className="card-sub">
-            {sources.length} {sources.length === 1 ? "file" : "files"}
+            {loading || tenantLoading ? "Loading…" : (
+              <>
+                {sources.length} {sources.length === 1 ? "file" : "files"}
+                {" · "}
+                {kbs.length} {kbs.length === 1 ? "folder" : "folders"}
+              </>
+            )}
           </span>
           <label className="knowledge-search">
             <Search size={14} />
@@ -436,6 +418,10 @@ export default function KnowledgeBasesPage() {
             disabled={loading}
             onClick={() => refresh()}
           >
+            <RefreshCw
+              size={13}
+              className={loading ? "knowledge-refreshing" : undefined}
+            />{" "}
             Refresh
           </button>
         </div>
@@ -479,16 +465,29 @@ export default function KnowledgeBasesPage() {
                   return (
                     <tr key={s.id}>
                       <td>
-                        <div className="bold">{s.title}</div>
-                        <div className="kb-source-sub">
-                          {sourceType(s)}
-                          {s.byte_size != null
-                            ? ` · ${(s.byte_size / 1024).toFixed(1)} KB`
-                            : ""}
+                        <div className="knowledge-library-file">
+                          <span className="knowledge-library-file-icon">
+                            <FileText size={18} />
+                          </span>
+                          <div>
+                            <div className="bold">{s.title}</div>
+                            <div className="kb-source-sub">
+                              {sourceType(s)}
+                              {s.byte_size != null
+                                ? ` · ${(s.byte_size / 1024).toFixed(1)} KB`
+                                : ""}
+                            </div>
+                          </div>
                         </div>
                       </td>
                       <td>
-                        <Link href={folderHref(s.kb_id)}>{s.kbName}</Link>
+                        <Link
+                          className="knowledge-library-folder"
+                          href={folderHref(s.kb_id)}
+                        >
+                          <FolderOpen size={13} />
+                          {s.kbName}
+                        </Link>
                         {isAllTenants && (
                           <div className="kb-source-sub">{s.tenantName}</div>
                         )}
@@ -501,11 +500,27 @@ export default function KnowledgeBasesPage() {
                         </span>
                       </td>
                       <td>
-                        {agents == null
-                          ? "Couldn’t check"
-                          : agents.length
-                            ? agents.map((a) => a.agent_name).join(", ")
-                            : "Not used yet"}
+                        {agents == null ? (
+                          <span className="knowledge-library-muted">
+                            Couldn’t check
+                          </span>
+                        ) : agents.length ? (
+                          <span
+                            className="knowledge-library-used"
+                            title={agents.map((a) => a.agent_name).join(", ")}
+                          >
+                            <Users size={13} />
+                            <span>
+                              {agents.length === 1
+                                ? agents[0].agent_name
+                                : `${agents.length} agents`}
+                            </span>
+                          </span>
+                        ) : (
+                          <span className="knowledge-library-muted">
+                            Not used yet
+                          </span>
+                        )}
                       </td>
                       <td className="kb-source-sub">{timeAgo(s.created_at)}</td>
                       <td>
@@ -552,11 +567,21 @@ export default function KnowledgeBasesPage() {
           ))}
         </details>
       )}
-      <p className="form-hint knowledge-handoff">
-        To let an agent use these files,{" "}
-        <Link href="/agents">open the agent</Link> → Knowledge → turn the folder
-        on.
-      </p>
+      <div className="knowledge-library-guide">
+        <span className="knowledge-library-guide-icon">
+          <BookOpen size={18} />
+        </span>
+        <div>
+          <strong>Put your knowledge to work</strong>
+          <p>
+            Open an agent → Knowledge → turn a folder on so it can answer from
+            your files.
+          </p>
+        </div>
+        <Link href="/agents">
+          Go to agents <ArrowUpRight size={14} />
+        </Link>
+      </div>
 
       <Modal
         open={!!managed && !deleteTarget}
@@ -804,6 +829,6 @@ export default function KnowledgeBasesPage() {
           </div>
         )}
       </Modal>
-    </>
+    </div>
   );
 }
