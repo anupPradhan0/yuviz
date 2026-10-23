@@ -1,11 +1,12 @@
 "use client";
 
-import { useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { ApiError, Tenant } from "@/lib/api";
 import {
   createKnowledgeBase,
   deleteKnowledgeBase,
   KnowledgeBase,
+  listKnowledgeBases,
   uploadDocument,
 } from "@/lib/knowledgeApi";
 import { Modal } from "@/components/Modal";
@@ -100,7 +101,43 @@ export function AddSourceModal({
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  const tenantKbs = knowledgeBases.filter((kb) => kb.tenant_id === tenantId);
+  const [folderList, setFolderList] = useState<{
+    tenantId: string;
+    rows: KnowledgeBase[];
+    loading: boolean;
+    error: string | null;
+  }>({
+    tenantId,
+    rows: knowledgeBases.filter((kb) => kb.tenant_id === tenantId),
+    loading: true,
+    error: null,
+  });
+  const [folderReload, setFolderReload] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    if (!tenantId) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFolderList({ tenantId, rows: [], loading: true, error: null });
+    listKnowledgeBases(tenantId)
+      .then((rows) => {
+        if (!cancelled)
+          setFolderList({ tenantId, rows, loading: false, error: null });
+      })
+      .catch((error) => {
+        if (!cancelled)
+          setFolderList({
+            tenantId,
+            rows: [],
+            loading: false,
+            error: error instanceof ApiError ? error.detail : String(error),
+          });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId, folderReload]);
+  const tenantKbs = folderList.tenantId === tenantId ? folderList.rows : [];
+  const foldersLoading = folderList.tenantId !== tenantId || folderList.loading;
 
   const handleFileChange = (f: File | null) => {
     setFile(null);
@@ -117,9 +154,13 @@ export function AddSourceModal({
   const canSubmit =
     canManage &&
     !!tenantId &&
+    !foldersLoading &&
+    !folderList.error &&
     !!file &&
     !fileError &&
-    (target !== "new" || !!newName.trim());
+    (target === "new"
+      ? !!newName.trim()
+      : tenantKbs.some((kb) => kb.id === target));
 
   const handleSubmit = async () => {
     if (!file || !canSubmit || submitting) return;
@@ -137,6 +178,7 @@ export function AddSourceModal({
           : { id: target };
       if (target === "new") createdKbId = kb.id;
       await uploadDocument(kb.id, file, file.name);
+      createdKbId = null;
       onCreated();
       onClose();
     } catch (e) {
@@ -212,7 +254,11 @@ export function AddSourceModal({
         </>
       }
     >
-      {submitError && <div className="error-banner">{submitError}</div>}
+      {submitError && (
+        <div className="error-banner" role="alert">
+          {submitError}
+        </div>
+      )}
 
       <fieldset className="knowledge-fields" disabled={submitting}>
         {tenants.length > 1 && (
@@ -247,9 +293,14 @@ export function AddSourceModal({
             id={`${fieldId}-folder`}
             className="form-select"
             value={target}
+            disabled={!tenantId || foldersLoading || !!folderList.error}
             onChange={(e) => setTarget(e.target.value)}
           >
-            <option value="new">+ Create a new folder</option>
+            <option value="new">
+              {foldersLoading && tenantId
+                ? "Loading folders…"
+                : "+ Create a new folder"}
+            </option>
             {tenantKbs.map((kb) => (
               <option key={kb.id} value={kb.id}>
                 {kb.name}
@@ -257,6 +308,18 @@ export function AddSourceModal({
             ))}
           </select>
         </div>
+
+        {folderList.error && (
+          <div className="error-banner" role="alert">
+            Couldn’t load folders: {folderList.error}{" "}
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => setFolderReload((value) => value + 1)}
+            >
+              Try again
+            </button>
+          </div>
+        )}
 
         {target === "new" && (
           <div className="form-group">
@@ -305,7 +368,10 @@ export function AddSourceModal({
               hidden
               type="file"
               accept={ACCEPTED_DOC_ACCEPT}
-              onChange={(e) => handleFileChange(e.target.files?.[0] || null)}
+              onChange={(e) => {
+                handleFileChange(e.target.files?.[0] || null);
+                e.target.value = "";
+              }}
             />
             {file && <div className="knowledge-selected-file">{file.name}</div>}
             <div className="form-hint">

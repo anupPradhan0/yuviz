@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -28,6 +28,7 @@ import {
   updateDocument,
   uploadDocument,
 } from "@/lib/knowledgeApi";
+import { replaceKnowledgeFile } from "@/lib/replaceKnowledgeFile";
 import { FILE_STATUS } from "@/lib/knowledgePresentation";
 import {
   AddSourceModal,
@@ -86,6 +87,7 @@ export default function KnowledgeBasesPage() {
   const [managedId, setManagedId] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState("");
   const [saving, setSaving] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [tenantErrors, setTenantErrors] = useState<string[]>([]);
   const [canManage, setCanManage] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -101,8 +103,14 @@ export default function KnowledgeBasesPage() {
   const replaceInputRef = useRef<HTMLInputElement>(null);
   const pendingReplaceId = useRef<string | null>(null);
   const refreshId = useRef<symbol | null>(null);
+  const tenantScope = useMemo(
+    () => ({ tenant, allTenants, isAllTenants }),
+    [tenant, allTenants, isAllTenants],
+  );
+  const activeScope = useRef<typeof tenantScope | null>(null);
 
   const refresh = async (background = false) => {
+    if (activeScope.current !== tenantScope) return;
     const requestId = Symbol();
     refreshId.current = requestId;
     if (!background) setLoading(true);
@@ -135,6 +143,8 @@ export default function KnowledgeBasesPage() {
             })),
           );
         } else {
+          if (background)
+            nextKbs.push(...kbs.filter((kb) => kb.tenant_id === t.id));
           const reason = result.reason;
           nextTenantErrors.push(
             `Couldn't load folders for ${t.name}: ${reason instanceof ApiError ? reason.detail : String(reason)}`,
@@ -152,6 +162,10 @@ export default function KnowledgeBasesPage() {
       const nextSources: SourceRow[] = [];
       docResults.forEach((result, i) => {
         if (result.status !== "fulfilled") {
+          if (background)
+            nextSources.push(
+              ...sources.filter((source) => source.kb_id === nextKbs[i].id),
+            );
           nextTenantErrors.push(
             `Couldn’t load files in ${nextKbs[i].name}. Please refresh to try again.`,
           );
@@ -193,6 +207,16 @@ export default function KnowledgeBasesPage() {
 
   useEffect(() => {
     if (tenantLoading) return;
+    activeScope.current = tenantScope;
+    pendingReplaceId.current = null;
+    // Reset actions when the header account selection changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setActionError(null);
+    setSaving(false);
+    setRetryingSource(null);
+    setReplacingSource(null);
+    setRemovingSource(null);
+    setRemovingKb(null);
     setManagedId(null);
     setDeleteTarget(null);
     setAddSourceOpen(false);
@@ -207,9 +231,10 @@ export default function KnowledgeBasesPage() {
       });
     return () => {
       refreshId.current = null;
+      activeScope.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tenant, allTenants, isAllTenants, tenantLoading]);
+  }, [tenant, allTenants, isAllTenants, tenantLoading, tenantScope]);
 
   const preparing = sources.some(
     (s) => s.status === "pending" || s.status === "processing",
@@ -227,6 +252,8 @@ export default function KnowledgeBasesPage() {
     const id = searchParams.get("manage");
     const file = sources.find((s) => s.id === id);
     if (!file) return;
+    // Consume a Manage deep link after its file has loaded.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setManagedId(file.id);
     setDisplayName(file.title);
     router.replace("/knowledge-bases");
@@ -249,23 +276,33 @@ export default function KnowledgeBasesPage() {
   const saveName = async () => {
     if (!managed || !displayName.trim() || busy) return;
     setSaving(true);
+    setActionError(null);
     try {
       await updateDocument(managed.id, { title: displayName.trim() });
       await refresh(true);
-      setManagedId(null);
+      if (activeScope.current === tenantScope) setManagedId(null);
     } catch (e) {
-      setTenantErrors((errs) => [
-        ...errs,
-        e instanceof ApiError ? e.detail : String(e),
-      ]);
+      if (activeScope.current === tenantScope)
+        setActionError(e instanceof ApiError ? e.detail : String(e));
     } finally {
-      setSaving(false);
+      if (activeScope.current === tenantScope) setSaving(false);
     }
   };
 
   const removeEmptyKb = async (kb: KbRow) => {
     try {
-      const agents = await listKbAgents(kb.id);
+      const [files, agents] = await Promise.all([
+        listDocuments(kb.id),
+        listKbAgents(kb.id),
+      ]);
+      if (activeScope.current !== tenantScope) return;
+      if (files.length > 0) {
+        setActionError(
+          "This folder now contains files. Open the folder to manage them before removing it.",
+        );
+        await refresh(true);
+        return;
+      }
       const affected = agents.length
         ? ` Agents linked to this folder: ${agents.map((a) => a.agent_name).join(", ")}.`
         : "";
@@ -276,10 +313,9 @@ export default function KnowledgeBasesPage() {
       )
         return;
     } catch {
-      setTenantErrors((errs) => [
-        ...errs,
+      setActionError(
         "Couldn’t check which agents use this folder. Please try again before removing it.",
-      ]);
+      );
       return;
     }
     setRemovingKb(kb.id);
@@ -287,12 +323,10 @@ export default function KnowledgeBasesPage() {
       await deleteKnowledgeBase(kb.id);
       await refresh();
     } catch (e) {
-      setTenantErrors((errs) => [
-        ...errs,
-        e instanceof ApiError ? e.detail : String(e),
-      ]);
+      if (activeScope.current === tenantScope)
+        setActionError(e instanceof ApiError ? e.detail : String(e));
     } finally {
-      setRemovingKb(null);
+      if (activeScope.current === tenantScope) setRemovingKb(null);
     }
   };
 
@@ -306,12 +340,10 @@ export default function KnowledgeBasesPage() {
       await deleteDocument(id);
       await refresh();
     } catch (e) {
-      setTenantErrors((errs) => [
-        ...errs,
-        e instanceof ApiError ? e.detail : String(e),
-      ]);
+      if (activeScope.current === tenantScope)
+        setActionError(e instanceof ApiError ? e.detail : String(e));
     } finally {
-      setRemovingSource(null);
+      if (activeScope.current === tenantScope) setRemovingSource(null);
     }
   };
 
@@ -321,12 +353,10 @@ export default function KnowledgeBasesPage() {
       await retryDocument(source.id);
       await refresh();
     } catch (e) {
-      setTenantErrors((errs) => [
-        ...errs,
-        e instanceof ApiError ? e.detail : String(e),
-      ]);
+      if (activeScope.current === tenantScope)
+        setActionError(e instanceof ApiError ? e.detail : String(e));
     } finally {
-      setRetryingSource(null);
+      if (activeScope.current === tenantScope) setRetryingSource(null);
     }
   };
 
@@ -342,34 +372,43 @@ export default function KnowledgeBasesPage() {
     e.target.value = "";
     const reason = rejectionReasonFor(file);
     if (reason) {
-      setTenantErrors((errs) => [...errs, reason]);
+      setActionError(reason);
       return;
     }
     const source = sources.find((s) => s.id === docId);
     if (!source) return;
     setReplacingSource(docId);
-    const message = (e: unknown) =>
-      e instanceof ApiError ? e.detail : String(e);
-    let failure: string | null = null;
+    setActionError(null);
     try {
-      const fresh = await uploadDocument(source.kb_id, file, source.title, {
-        language: source.language,
-        tags: source.tags,
-      });
-      if (source.usage_mode !== "auto")
-        await updateDocument(fresh.id, { usage_mode: source.usage_mode });
-      try {
-        await deleteDocument(docId);
-      } catch (e) {
-        failure = `New file uploaded, but the old copy of "${source.title}" could not be removed: ${message(e)}`;
+      await replaceKnowledgeFile(
+        source,
+        file,
+        { uploadDocument, listDocuments, updateDocument, deleteDocument },
+        {
+          isCurrent: () => activeScope.current === tenantScope,
+        },
+      );
+    } catch (error) {
+      if (activeScope.current === tenantScope)
+        setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (activeScope.current === tenantScope) {
+        await refresh(true);
+        setReplacingSource(null);
+        pendingReplaceId.current = null;
       }
-    } catch (e) {
-      failure = message(e);
     }
-    await refresh();
-    if (failure) setTenantErrors((errs) => [...errs, failure!]);
-    setReplacingSource(null);
-    pendingReplaceId.current = null;
+  };
+
+  const prepareDelete = async (source: SourceRow) => {
+    let agents: KbAgent[] | null = null;
+    try {
+      agents = await listKbAgents(source.kb_id);
+    } catch {
+      /* The confirmation explicitly reports unknown usage. */
+    }
+    if (activeScope.current === tenantScope)
+      setDeleteTarget({ ...source, agents });
   };
 
   return (
@@ -385,6 +424,11 @@ export default function KnowledgeBasesPage() {
       {(pageError || accountError) && (
         <div className="error-banner" role="alert">
           {pageError || accountError}
+        </div>
+      )}
+      {actionError && (
+        <div className="error-banner" role="alert">
+          {actionError}
         </div>
       )}
       {tenantErrors.map((msg, i) => (
@@ -546,6 +590,7 @@ export default function KnowledgeBasesPage() {
                           className="btn btn-ghost btn-sm"
                           disabled={removingSource === s.id}
                           onClick={() => {
+                            setActionError(null);
                             setManagedId(s.id);
                             setDisplayName(s.title);
                           }}
@@ -632,6 +677,11 @@ export default function KnowledgeBasesPage() {
       >
         {managed && (
           <>
+            {actionError && (
+              <div className="error-banner" role="alert">
+                {actionError}
+              </div>
+            )}
             {tenantErrors.map((message, i) => (
               <div key={i} className="error-banner" role="alert">
                 {message}
@@ -741,7 +791,7 @@ export default function KnowledgeBasesPage() {
                   <button
                     className="btn btn-danger btn-sm"
                     disabled={busy}
-                    onClick={() => setDeleteTarget(managed)}
+                    onClick={() => prepareDelete(managed)}
                   >
                     Remove
                   </button>

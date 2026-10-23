@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -11,9 +11,17 @@ import {
   Users,
 } from "lucide-react";
 import { Modal } from "@/components/Modal";
+import { replaceKnowledgeFile } from "@/lib/replaceKnowledgeFile";
 import { FILE_STATUS } from "@/lib/knowledgePresentation";
 import { useParams } from "next/navigation";
-import { Agent, ApiError, listAgents, listTenants, Tenant } from "@/lib/api";
+import {
+  Agent,
+  ApiError,
+  getCurrentUser,
+  listAgents,
+  listTenants,
+  Tenant,
+} from "@/lib/api";
 import {
   assignKnowledgeBase,
   deleteDocument,
@@ -56,36 +64,83 @@ export default function KnowledgeBaseDetailPage() {
   const [managedId, setManagedId] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState("");
   const [busy, setBusy] = useState(false);
+  const [canManage, setCanManage] = useState(false);
+  const folderScope = useMemo(() => ({ tenantSlug, kbId }), [tenantSlug, kbId]);
+  const activeScope = useRef<typeof folderScope | null>(null);
   const uploadInput = useRef<HTMLInputElement>(null);
   const replaceInput = useRef<HTMLInputElement>(null);
+  const docsRequest = useRef(0);
+  const agentsRequest = useRef(0);
 
   const refreshAgents = () => {
     if (!kbId) return;
+    const request = ++agentsRequest.current;
     return listKbAgents(kbId)
       .then((rows) => {
+        if (
+          activeScope.current !== folderScope ||
+          request !== agentsRequest.current
+        )
+          return;
         setAgents(rows);
         setAgentsError(null);
       })
-      .catch((e) =>
-        setAgentsError(e instanceof ApiError ? e.detail : String(e)),
-      );
+      .catch((e) => {
+        if (
+          activeScope.current === folderScope &&
+          request === agentsRequest.current
+        )
+          setAgentsError(e instanceof ApiError ? e.detail : String(e));
+      });
   };
 
   const refreshDocs = () => {
     if (!kbId) return;
+    const request = ++docsRequest.current;
     return listDocuments(kbId)
       .then((rows) => {
+        if (
+          activeScope.current !== folderScope ||
+          request !== docsRequest.current
+        )
+          return;
         setDocs(rows);
         setDocsError(null);
       })
-      .catch((e) => setDocsError(e instanceof ApiError ? e.detail : String(e)));
+      .catch((e) => {
+        if (
+          activeScope.current === folderScope &&
+          request === docsRequest.current
+        )
+          setDocsError(e instanceof ApiError ? e.detail : String(e));
+      });
   };
 
   useEffect(() => {
     let cancelled = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
+    activeScope.current = folderScope;
     setNotFound(false);
+    setCanManage(false);
+    setKb(null);
+    setDocs([]);
+    setAgents([]);
+    setTenantAgents([]);
+    setManagedId(null);
+    setUploadOpen(false);
+    setUploadFile(null);
+    setActionError(null);
+    setDocsError(null);
+    setAgentsError(null);
+    setBusy(false);
+    setUploading(false);
+    getCurrentUser()
+      .then((user) => {
+        if (!cancelled)
+          setCanManage(user.role === "admin" || user.role === "superadmin");
+      })
+      .catch(() => {});
     listTenants()
       .then(async (tenants) => {
         const t = tenants.find((x) => x.slug === tenantSlug);
@@ -93,7 +148,8 @@ export default function KnowledgeBaseDetailPage() {
           if (!cancelled) setNotFound(true);
           return;
         }
-        if (!cancelled) setTenant(t);
+        if (cancelled) return;
+        setTenant(t);
         const kbs = await listKnowledgeBases(t.id);
         const found = kbs.find((x) => x.id === kbId);
         if (cancelled) return;
@@ -106,21 +162,27 @@ export default function KnowledgeBaseDetailPage() {
           refreshDocs(),
           refreshAgents(),
           listAgents(t.slug)
-            .then(setTenantAgents)
-            .catch((e) =>
-              setAgentsError(e instanceof ApiError ? e.detail : String(e)),
-            ),
+            .then((rows) => {
+              if (!cancelled) setTenantAgents(rows);
+            })
+            .catch((e) => {
+              if (!cancelled)
+                setAgentsError(e instanceof ApiError ? e.detail : String(e));
+            }),
         ]);
       })
-      .catch(() => setNotFound(true))
+      .catch(() => {
+        if (!cancelled) setNotFound(true);
+      })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
     return () => {
       cancelled = true;
+      activeScope.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tenantSlug, kbId]);
+  }, [tenantSlug, kbId, folderScope]);
 
   useEffect(() => {
     if (
@@ -129,14 +191,25 @@ export default function KnowledgeBaseDetailPage() {
       )
     )
       return;
-    const timer = setTimeout(refreshDocs, 4000);
-    return () => clearTimeout(timer);
+    let running = false;
+    const timer = setInterval(async () => {
+      if (running) return;
+      running = true;
+      try {
+        await refreshDocs();
+      } finally {
+        running = false;
+      }
+    }, 4000);
+    return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [docs, kbId]);
+  }, [docs, kbId, folderScope]);
 
   const handleDeleteDoc = async (doc: KbDocument) => {
+    if (!canManage) return;
     try {
       const affected = await listKbAgents(kbId);
+      if (activeScope.current !== folderScope) return;
       const names = affected.map((a) => a.agent_name).join(", ");
       if (
         !confirm(
@@ -152,10 +225,11 @@ export default function KnowledgeBaseDetailPage() {
     }
     try {
       await deleteDocument(doc.id);
-      setManagedId(null);
+      if (activeScope.current === folderScope) setManagedId(null);
       await refreshDocs();
     } catch (e) {
-      setActionError(e instanceof ApiError ? e.detail : String(e));
+      if (activeScope.current === folderScope)
+        setActionError(e instanceof ApiError ? e.detail : String(e));
     }
   };
 
@@ -172,33 +246,36 @@ export default function KnowledgeBaseDetailPage() {
   };
 
   const handleUpload = async () => {
-    if (!uploadFile || !kbId || uploading) return;
+    if (!canManage || !uploadFile || !kbId || uploading) return;
     setUploading(true);
     setActionError(null);
     try {
       await uploadDocument(kbId, uploadFile, uploadFile.name);
+      if (activeScope.current !== folderScope) return;
       setUploadFile(null);
       setUploadOpen(false);
       await refreshDocs();
     } catch (e) {
-      setActionError(e instanceof ApiError ? e.detail : String(e));
+      if (activeScope.current === folderScope)
+        setActionError(e instanceof ApiError ? e.detail : String(e));
     } finally {
-      setUploading(false);
+      if (activeScope.current === folderScope) setUploading(false);
     }
   };
 
   const handleAttach = async (agentId: string) => {
-    if (!kbId) return;
+    if (!canManage || !kbId) return;
     try {
       await assignKnowledgeBase(agentId, kbId);
       refreshAgents();
     } catch (e) {
-      setActionError(e instanceof ApiError ? e.detail : String(e));
+      if (activeScope.current === folderScope)
+        setActionError(e instanceof ApiError ? e.detail : String(e));
     }
   };
 
   const handleDetach = async (agent: KbAgent) => {
-    if (!kbId) return;
+    if (!canManage || !kbId) return;
     if (
       !confirm(
         `Turn off and remove this folder from "${agent.agent_name}"? The agent will stop using its files. The files stay in Knowledge.`,
@@ -209,22 +286,26 @@ export default function KnowledgeBaseDetailPage() {
       await detachKnowledgeBase(agent.agent_id, kbId);
       refreshAgents();
     } catch (e) {
-      setActionError(e instanceof ApiError ? e.detail : String(e));
+      if (activeScope.current === folderScope)
+        setActionError(e instanceof ApiError ? e.detail : String(e));
     }
   };
 
   const managed = docs.find((doc) => doc.id === managedId);
   const runFileAction = async (action: () => Promise<unknown>) => {
-    if (busy) return;
+    if (!canManage || busy) return;
     setBusy(true);
     setActionError(null);
     try {
       await action();
-      await refreshDocs();
     } catch (e) {
-      setActionError(e instanceof ApiError ? e.detail : String(e));
+      if (activeScope.current === folderScope)
+        setActionError(e instanceof ApiError ? e.detail : String(e));
     } finally {
-      setBusy(false);
+      if (activeScope.current === folderScope) {
+        await refreshDocs();
+        setBusy(false);
+      }
     }
   };
 
@@ -236,20 +317,15 @@ export default function KnowledgeBaseDetailPage() {
       return;
     }
     await runFileAction(async () => {
-      const fresh = await uploadDocument(kbId, file, managed.title, {
-        language: managed.language,
-        tags: managed.tags,
-      });
-      if (managed.usage_mode !== "auto")
-        await updateDocument(fresh.id, { usage_mode: managed.usage_mode });
-      try {
-        await deleteDocument(managed.id);
-      } catch {
-        throw new Error(
-          "The replacement was uploaded, but the old file could not be removed. Both copies are in this folder; remove the old one when you’re ready.",
-        );
-      }
-      setManagedId(null);
+      await replaceKnowledgeFile(
+        managed,
+        file,
+        { uploadDocument, listDocuments, updateDocument, deleteDocument },
+        {
+          isCurrent: () => activeScope.current === folderScope,
+        },
+      );
+      if (activeScope.current === folderScope) setManagedId(null);
     });
   };
 
@@ -343,6 +419,7 @@ export default function KnowledgeBaseDetailPage() {
           </label>
           <button
             className="btn btn-ghost btn-sm"
+            disabled={!canManage}
             onClick={() => {
               setActionError(null);
               setUploadFileError(null);
@@ -440,6 +517,7 @@ export default function KnowledgeBaseDetailPage() {
           </span>
           {unattachedAgents.length > 0 && (
             <select
+              disabled={!canManage}
               aria-label="Add agent to folder"
               className="form-select knowledge-folder-agent-select"
               defaultValue=""
@@ -494,6 +572,7 @@ export default function KnowledgeBaseDetailPage() {
               </span>
               <button
                 className="btn btn-ghost btn-sm"
+                disabled={!canManage}
                 onClick={() => handleDetach(a)}
               >
                 Remove from agent
@@ -603,14 +682,14 @@ export default function KnowledgeBaseDetailPage() {
             </button>
             <button
               className="btn btn-primary btn-sm"
-              disabled={busy || !displayName.trim()}
+              disabled={!canManage || busy || !displayName.trim()}
               onClick={() =>
                 runFileAction(async () => {
                   if (managed)
                     await updateDocument(managed.id, {
                       title: displayName.trim(),
                     });
-                  setManagedId(null);
+                  if (activeScope.current === folderScope) setManagedId(null);
                 })
               }
             >
@@ -626,48 +705,71 @@ export default function KnowledgeBaseDetailPage() {
                 {actionError}
               </div>
             )}
-            <p className="knowledge-upload-folder">
-              {kb.name} ·{" "}
+            <div className="knowledge-manage-meta">
+              <div className="knowledge-manage-folder">
+                <FolderOpen size={17} />
+                <div>
+                  <span>Folder</span>
+                  <Link href={`/knowledge-bases/${tenantSlug}/${kbId}`}>
+                    {kb.name}
+                  </Link>
+                </div>
+              </div>
               <span className={`badge ${FILE_STATUS[managed.status].color}`}>
                 {FILE_STATUS[managed.status].label}
               </span>
-            </p>
-            <label className="form-label" htmlFor="folder-file-name">
-              Display name
-            </label>
-            <input
-              id="folder-file-name"
-              className="form-input"
-              value={displayName}
-              disabled={busy}
-              onChange={(e) => setDisplayName(e.target.value)}
-            />
-            <label className="knowledge-reading-option">
+            </div>
+            <div className="knowledge-manage-section">
+              <label className="form-label" htmlFor="folder-file-name">
+                Display name
+              </label>
               <input
-                type="checkbox"
-                checked={managed.usage_mode === "prompt"}
-                disabled={
-                  busy ||
-                  (managed.status !== "ready" &&
-                    managed.status !== "ready_degraded")
-                }
-                onChange={() =>
-                  runFileAction(() =>
-                    updateDocument(managed.id, {
-                      usage_mode:
-                        managed.usage_mode === "prompt" ? "auto" : "prompt",
-                    }),
-                  )
-                }
+                id="folder-file-name"
+                className="form-input"
+                value={displayName}
+                disabled={!canManage || busy}
+                onChange={(e) => setDisplayName(e.target.value)}
               />
-              <span>
-                Read for every question
-                <small>
-                  Otherwise, agents read this file when it’s relevant to the
-                  caller’s question.
-                </small>
-              </span>
-            </label>
+            </div>
+            <div className="knowledge-manage-section">
+              <h3 className="knowledge-manage-label">
+                How agents read this file
+              </h3>
+              <label className="knowledge-reading-option knowledge-reading-card">
+                <input
+                  type="checkbox"
+                  checked={managed.usage_mode === "prompt"}
+                  disabled={
+                    !canManage ||
+                    busy ||
+                    (managed.status !== "ready" &&
+                      managed.status !== "ready_degraded")
+                  }
+                  onChange={() =>
+                    runFileAction(() =>
+                      updateDocument(managed.id, {
+                        usage_mode:
+                          managed.usage_mode === "prompt" ? "auto" : "prompt",
+                      }),
+                    )
+                  }
+                />
+                <span>
+                  Read for every question
+                  <small>
+                    When off, agents read this file only when it’s relevant to
+                    the caller’s question.
+                  </small>
+                </span>
+              </label>
+            </div>
+            {(managed.status === "pending" ||
+              managed.status === "processing") && (
+              <p className="knowledge-manage-preparing">
+                We’re preparing this file. Reading preferences and replacement
+                become available when it’s ready.
+              </p>
+            )}
             {(managed.status === "failed" ||
               managed.status === "ready_degraded") && (
               <p className="knowledge-file-warning">
@@ -676,35 +778,44 @@ export default function KnowledgeBaseDetailPage() {
                   : "Some of this file may be unreadable. Check the original and replace it if needed."}
               </p>
             )}
-            <div className="knowledge-manage-actions">
-              <button
-                className="btn btn-ghost btn-sm"
-                disabled={
-                  busy ||
-                  managed.status === "pending" ||
-                  managed.status === "processing"
-                }
-                onClick={() => replaceInput.current?.click()}
-              >
-                Replace file
-              </button>
-              {managed.retryable && (
-                <button
-                  className="btn btn-ghost btn-sm"
-                  disabled={busy}
-                  onClick={() => runFileAction(() => retryDocument(managed.id))}
-                >
-                  Try again
-                </button>
-              )}
-              <button
-                className="btn btn-danger btn-sm"
-                disabled={busy}
-                onClick={() => runFileAction(() => handleDeleteDoc(managed))}
-              >
-                Remove file
-              </button>
-            </div>
+            {canManage && (
+              <div className="knowledge-manage-file-actions">
+                <h3 className="knowledge-manage-label">File actions</h3>
+                <div className="knowledge-manage-actions">
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    disabled={
+                      busy ||
+                      managed.status === "pending" ||
+                      managed.status === "processing"
+                    }
+                    onClick={() => replaceInput.current?.click()}
+                  >
+                    Replace file
+                  </button>
+                  {managed.retryable && (
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      disabled={busy}
+                      onClick={() =>
+                        runFileAction(() => retryDocument(managed.id))
+                      }
+                    >
+                      Try again
+                    </button>
+                  )}
+                  <button
+                    className="btn btn-danger btn-sm"
+                    disabled={busy}
+                    onClick={() =>
+                      runFileAction(() => handleDeleteDoc(managed))
+                    }
+                  >
+                    Remove file
+                  </button>
+                </div>
+              </div>
+            )}
           </>
         )}
       </Modal>

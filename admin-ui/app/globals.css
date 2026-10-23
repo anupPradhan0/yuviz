@@ -2231,3 +2231,5 @@ button.topbar-cta { border: 0; font-family: inherit; }
   .knowledge-dialog .knowledge-manage-folder { max-width: 100%; }
   .knowledge-dialog .knowledge-manage-actions > .btn { flex: 1 1 120px; }
 }
+.knowledge-reading-card { margin-top: 0; padding: 14px; background: var(--surf-2); border: 1px solid var(--border-2); border-radius: var(--rs); }
+.knowledge-reading-card input { flex-shrink: 0; }
