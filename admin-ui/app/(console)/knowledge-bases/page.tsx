@@ -92,6 +92,7 @@ export default function KnowledgeBasesPage() {
   const [canManage, setCanManage] = useState(false);
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
   const [addSourceOpen, setAddSourceOpen] = useState(false);
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -103,6 +104,7 @@ export default function KnowledgeBasesPage() {
   const replaceInputRef = useRef<HTMLInputElement>(null);
   const pendingReplaceId = useRef<string | null>(null);
   const refreshId = useRef<symbol | null>(null);
+  const fullRefreshPending = useRef(false);
   const tenantScope = useMemo(
     () => ({ tenant, allTenants, isAllTenants }),
     [tenant, allTenants, isAllTenants],
@@ -113,8 +115,10 @@ export default function KnowledgeBasesPage() {
     if (activeScope.current !== tenantScope) return;
     const requestId = Symbol();
     refreshId.current = requestId;
+    fullRefreshPending.current = true;
     if (!background) setLoading(true);
     setPageError(null);
+    setPollError(null);
     setTenantErrors([]);
     // Each tenant's fetch fails independently below (Promise.allSettled).
     const fetchedTenants = isAllTenants ? allTenants : tenant ? [tenant] : [];
@@ -123,6 +127,7 @@ export default function KnowledgeBasesPage() {
       setSources([]);
       setEmptyKbs([]);
       setLoading(false);
+      fullRefreshPending.current = false;
       return;
     }
     try {
@@ -201,7 +206,10 @@ export default function KnowledgeBasesPage() {
       if (requestId === refreshId.current)
         setPageError(e instanceof ApiError ? e.detail : String(e));
     } finally {
-      if (requestId === refreshId.current) setLoading(false);
+      if (requestId === refreshId.current) {
+        fullRefreshPending.current = false;
+        setLoading(false);
+      }
     }
   };
 
@@ -241,12 +249,47 @@ export default function KnowledgeBasesPage() {
   );
   useEffect(() => {
     if (!preparing) return;
-    const timer = setTimeout(() => {
-      void refresh(true);
+    const folderIds = [...new Set(sources
+      .filter((source) => source.status === "pending" || source.status === "processing")
+      .map((source) => source.kb_id))];
+    let cancelled = false;
+    let running = false;
+    const timer = setInterval(async () => {
+      if (running || fullRefreshPending.current) return;
+      running = true;
+      const requestId = refreshId.current;
+      try {
+        const results = await Promise.allSettled(folderIds.map(listDocuments));
+        if (cancelled || activeScope.current !== tenantScope || requestId !== refreshId.current) return;
+        const updates = new Map<string, KbDocument[]>();
+        results.forEach((result, i) => {
+          if (result.status === "fulfilled") updates.set(folderIds[i], result.value);
+        });
+        setPollError(results.some((result) => result.status === "rejected")
+          ? "Couldn’t update some preparing files. We’ll try again automatically."
+          : null);
+        setSources((current) => {
+          const next = current.filter((source) => !updates.has(source.kb_id));
+          for (const [kbId, docs] of updates) {
+            const kb = kbs.find((folder) => folder.id === kbId);
+            if (!kb) continue;
+            const agents = current.find((source) => source.kb_id === kbId)?.agents ?? null;
+            next.push(...docs.map((doc) => ({
+              ...doc, kbName: kb.name, tenantName: kb.tenantName, agents,
+            })));
+          }
+          return next;
+        });
+        setEmptyKbs((current) => [
+          ...current.filter((kb) => !updates.has(kb.id)),
+          ...kbs.filter((kb) => updates.get(kb.id)?.length === 0),
+        ]);
+      } finally {
+        running = false;
+      }
     }, 4000);
-    return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preparing, sources, tenant, allTenants, isAllTenants]);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [preparing, sources, kbs, tenantScope]);
 
   useEffect(() => {
     const id = searchParams.get("manage");
@@ -431,6 +474,7 @@ export default function KnowledgeBasesPage() {
           {actionError}
         </div>
       )}
+      {pollError && <div className="error-banner" role="alert">{pollError}</div>}
       {tenantErrors.map((msg, i) => (
         <div key={i} className="error-banner" role="alert">
           {msg}

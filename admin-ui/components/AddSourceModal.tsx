@@ -172,7 +172,7 @@ export function AddSourceModal({
       const kb =
         target === "new"
           ? await createKnowledgeBase(tenantId, {
-              slug: `${deriveSlug(newName).slice(0, 60) || "folder"}-${crypto.randomUUID().slice(0, 8)}`,
+              slug: `${deriveSlug(newName).slice(0, 60) || "folder"}-${Math.random().toString(36).slice(2, 10)}`,
               name: newName.trim(),
             })
           : { id: target };

@@ -27,13 +27,14 @@ export async function replaceKnowledgeFile(
   const wait =
     options.wait ??
     (() => new Promise<void>((resolve) => setTimeout(resolve, 2000)));
-  let uploaded = false;
+  let replacement: KbDocument | null = null;
+  let originalRemovalStarted = false;
   try {
     if (!isCurrent())
       throw new Error(
         "The folder or account changed before replacement started.",
       );
-    let replacement = await api.uploadDocument(
+    replacement = await api.uploadDocument(
       original.kb_id,
       file,
       original.title,
@@ -42,7 +43,6 @@ export async function replaceKnowledgeFile(
         tags: original.tags,
       },
     );
-    uploaded = true;
     for (
       let check = 0;
       replacement.status === "pending" || replacement.status === "processing";
@@ -54,7 +54,7 @@ export async function replaceKnowledgeFile(
         );
       if (check >= (options.checks ?? 15)) {
         throw new Error(
-          "The replacement is still preparing. Check it in the file list before removing the original.",
+          "The replacement took too long to prepare.",
         );
       }
       await wait();
@@ -62,8 +62,9 @@ export async function replaceKnowledgeFile(
         throw new Error(
           "The folder or account changed before replacement finished.",
         );
-      const current = (await api.listDocuments(original.kb_id)).find(
-        (doc) => doc.id === replacement.id,
+      const replacementId: string = replacement.id;
+      const current: KbDocument | undefined = (await api.listDocuments(original.kb_id)).find(
+        (doc) => doc.id === replacementId,
       );
       if (!current) throw new Error("The replacement could not be found.");
       replacement = current;
@@ -74,7 +75,7 @@ export async function replaceKnowledgeFile(
       );
     if (replacement.status !== "ready") {
       throw new Error(
-        "The replacement could not be fully prepared. Check or retry it in the file list.",
+        "The replacement could not be fully prepared.",
       );
     }
     // Preserve always-read behaviour only after preparation has succeeded.
@@ -88,6 +89,7 @@ export async function replaceKnowledgeFile(
         "The folder or account changed before replacement finished.",
       );
     try {
+      originalRemovalStarted = true;
       await api.deleteDocument(original.id);
     } catch {
       // A lost response cannot tell us whether DELETE reached the server.
@@ -96,9 +98,24 @@ export async function replaceKnowledgeFile(
       );
     }
   } catch (error) {
-    if (!uploaded) throw error;
+    if (!replacement || originalRemovalStarted) throw error;
     const detail = error instanceof Error ? error.message : String(error);
-    if (detail.startsWith("The replacement is ready, but removal")) throw error;
-    throw new Error(`${detail} The original file has been kept.`);
+    // Pending and degraded uploads can later be retrieved alongside the original.
+    // Roll back only while we know the original has never been removed.
+    if (replacement.status !== "failed") {
+      try {
+        await api.deleteDocument(replacement.id);
+      } catch {
+        throw new Error(
+          `${detail} The original file has been kept, but removal of the new file could not be confirmed. Both copies may be available to agents. Check the file list and remove the new file before trying again.`,
+        );
+      }
+      throw new Error(
+        `${detail} The original file has been kept. The new file was discarded; try again.`,
+      );
+    }
+    throw new Error(
+      `${detail} The original file has been kept. The new file failed preparation; check or remove it in the file list.`,
+    );
   }
 }

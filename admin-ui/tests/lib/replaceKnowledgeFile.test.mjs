@@ -30,7 +30,9 @@ for (const status of ["failed", "ready_degraded", "pending"]) {
   test(`a ${status} replacement preserves the original`, async () => {
     const { api, events } = setup(["pending", status]);
     await assert.rejects(replaceKnowledgeFile(original, file, api, { wait, checks: 2 }), /original file has been kept/);
-    assert(!events.some(([event]) => event === "delete" || event === "update"));
+    assert(!events.some(([event, id]) => event === "delete" && id === "old"));
+    assert(!events.some(([event]) => event === "update"));
+    assert.deepEqual(events.filter(([event]) => event === "delete"), status === "failed" ? [] : [["delete", "new"]]);
   });
 }
 test("a polling or metadata failure preserves the original", async () => {
@@ -38,14 +40,14 @@ test("a polling or metadata failure preserves the original", async () => {
     const { api, events } = setup(["pending", "ready"]);
     api[fail] = async () => { throw new Error("offline"); };
     await assert.rejects(replaceKnowledgeFile(original, file, api, { wait }), /original file has been kept/);
-    assert(!events.some(([event]) => event === "delete"));
+    assert.deepEqual(events.filter(([event]) => event === "delete"), [["delete", "new"]]);
   }
 });
 test("switching accounts while preparing never removes the original", async () => {
   const { api, events } = setup(["pending", "ready"]);
   let current = true;
   await assert.rejects(replaceKnowledgeFile(original, file, api, { wait: async () => { current = false; }, isCurrent: () => current }), /account changed/);
-  assert(!events.some(([event]) => event === "delete"));
+  assert.deepEqual(events.filter(([event]) => event === "delete"), [["delete", "new"]]);
 });
 test("a failed original cleanup reports both copies without deleting the replacement", async () => {
   const { api } = setup(["ready"]);
@@ -53,4 +55,39 @@ test("a failed original cleanup reports both copies without deleting the replace
   api.deleteDocument = async (id) => { deleted.push(id); throw new Error("Could not remove old copy."); };
   await assert.rejects(replaceKnowledgeFile(original, file, api, { wait }), /removal of the original could not be confirmed/);
   assert.deepEqual(deleted, ["old"]);
+});
+
+test("a timeout discards the pending replacement and explains the rollback", async () => {
+  const { api, events } = setup(["pending"]);
+  await assert.rejects(replaceKnowledgeFile(original, file, api, { wait, checks: 2 }), /new file was discarded; try again/);
+  assert.deepEqual(events.filter(([event]) => event === "delete"), [["delete", "new"]]);
+});
+
+test("a degraded replacement is discarded before it can remain alongside the original", async () => {
+  const { api, events } = setup(["pending", "ready_degraded"]);
+  await assert.rejects(replaceKnowledgeFile(original, file, api, { wait }), /new file was discarded/);
+  assert.deepEqual(events.filter(([event]) => event === "delete"), [["delete", "new"]]);
+});
+
+test("a failed rollback warns that both copies may be available to agents", async () => {
+  const { api } = setup(["ready_degraded"]);
+  const deleted = [];
+  api.deleteDocument = async (id) => { deleted.push(id); throw new Error("offline"); };
+  await assert.rejects(replaceKnowledgeFile(original, file, api, { wait }), /Both copies may be available to agents/);
+  assert.deepEqual(deleted, ["new"]);
+});
+
+test("an account switch while copying reading preferences discards only the replacement", async () => {
+  const { api, events } = setup(["ready"]);
+  let current = true;
+  api.updateDocument = async () => { current = false; };
+  await assert.rejects(replaceKnowledgeFile(original, file, api, { wait, isCurrent: () => current }), /new file was discarded/);
+  assert.deepEqual(events.filter(([event]) => event === "delete"), [["delete", "new"]]);
+});
+
+test("an upload failure does not attempt to delete either file", async () => {
+  const { api, events } = setup(["pending"]);
+  api.uploadDocument = async () => { throw new Error("Upload failed"); };
+  await assert.rejects(replaceKnowledgeFile(original, file, api, { wait }), /Upload failed/);
+  assert.deepEqual(events, []);
 });
