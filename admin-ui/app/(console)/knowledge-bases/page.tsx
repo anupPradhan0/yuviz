@@ -1,11 +1,16 @@
 "use client";
 
-// Knowledge: document sources and tenant-level custom APIs (attached per agent in AgentCustomApisPanel).
-// Stats show only stored values; storage/retrieval aren't metered.
-
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { RefreshCw, Upload } from "lucide-react";
+import Link from "next/link";
+import {
+  ArrowUpRight,
+  FileText,
+  FolderOpen,
+  Plus,
+  Search,
+  Users,
+} from "lucide-react";
 import { ApiError, getCurrentUser } from "@/lib/api";
 import { useActiveTenant } from "@/lib/useActiveTenant";
 import {
@@ -21,9 +26,12 @@ import {
   updateDocument,
   uploadDocument,
 } from "@/lib/knowledgeApi";
-import { CustomApi, listCustomApis } from "@/lib/toolexecApi";
-import { AddSourceModal, ACCEPTED_DOC_ACCEPT } from "@/components/AddSourceModal";
-import { CustomApisPanel } from "@/components/CustomApisPanel";
+import { FILE_STATUS } from "@/lib/knowledgePresentation";
+import {
+  AddSourceModal,
+  ACCEPTED_DOC_ACCEPT,
+  rejectionReasonFor,
+} from "@/components/AddSourceModal";
 import { Modal } from "@/components/Modal";
 
 interface KbRow extends KnowledgeBase {
@@ -38,16 +46,6 @@ interface SourceRow extends KbDocument {
   agents: KbAgent[] | null;
 }
 
-type Tab = "sources" | "apis";
-
-const STATUS_BADGE: Record<string, string> = {
-  ready: "green",
-  ready_degraded: "amber",
-  processing: "amber",
-  pending: "amber",
-  failed: "red",
-};
-
 function timeAgo(iso: string): string {
   const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
   if (mins < 1) return "just now";
@@ -57,35 +55,42 @@ function timeAgo(iso: string): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-/** "Upload" for a file, otherwise the content type — what the source IS,
- *  not the MIME string, which reads as noise in a table. */
 function sourceType(doc: KbDocument): string {
   const ct = (doc.content_type || "").toLowerCase();
   if (ct.includes("pdf")) return "PDF";
   if (ct.includes("markdown") || ct.includes("md")) return "Markdown";
-  if (ct.includes("plain") || ct.includes("text")) return "Text";
   if (ct.includes("csv")) return "CSV";
+  if (ct.includes("plain") || ct.includes("text")) return "Text";
   if (ct.includes("word") || ct.includes("docx")) return "Word";
-  return ct ? ct.split("/").pop()! : "Upload";
+  if (ct.includes("presentation")) return "PowerPoint";
+  if (ct.includes("spreadsheet")) return "Excel";
+  return "File";
 }
 
 export default function KnowledgeBasesPage() {
-  const { tenant, allTenants, isAllTenants, loading: tenantLoading } = useActiveTenant();
+  const {
+    tenant,
+    allTenants,
+    isAllTenants,
+    loading: tenantLoading,
+    error: accountError,
+  } = useActiveTenant();
   const [kbs, setKbs] = useState<KbRow[]>([]);
   const [sources, setSources] = useState<SourceRow[]>([]);
   const [emptyKbs, setEmptyKbs] = useState<KbRow[]>([]);
   const [removingKb, setRemovingKb] = useState<string | null>(null);
   const [removingSource, setRemovingSource] = useState<string | null>(null);
-  const [apis, setApis] = useState<CustomApi[]>([]);
+  const [search, setSearch] = useState("");
+  const [managedId, setManagedId] = useState<string | null>(null);
+  const [displayName, setDisplayName] = useState("");
+  const [saving, setSaving] = useState(false);
   const [tenantErrors, setTenantErrors] = useState<string[]>([]);
   const [canManage, setCanManage] = useState(false);
   const [loading, setLoading] = useState(true);
-  // Page-level error only for listTenants(); everything downstream depends on it.
   const [pageError, setPageError] = useState<string | null>(null);
   const [addSourceOpen, setAddSourceOpen] = useState(false);
   const searchParams = useSearchParams();
   const router = useRouter();
-  const [tab, setTab] = useState<Tab>(searchParams.get("tab") === "apis" ? "apis" : "sources");
 
   const [deleteTarget, setDeleteTarget] = useState<SourceRow | null>(null);
 
@@ -93,97 +98,204 @@ export default function KnowledgeBasesPage() {
   const [replacingSource, setReplacingSource] = useState<string | null>(null);
   const replaceInputRef = useRef<HTMLInputElement>(null);
   const pendingReplaceId = useRef<string | null>(null);
+  const refreshId = useRef<symbol | null>(null);
 
-  const refresh = async () => {
-    setLoading(true);
+  const refresh = async (background = false) => {
+    const requestId = Symbol();
+    refreshId.current = requestId;
+    if (!background) setLoading(true);
     setPageError(null);
     setTenantErrors([]);
     // Each tenant's fetch fails independently below (Promise.allSettled).
     const fetchedTenants = isAllTenants ? allTenants : tenant ? [tenant] : [];
     if (fetchedTenants.length === 0) {
+      setKbs([]);
+      setSources([]);
+      setEmptyKbs([]);
       setLoading(false);
       return;
     }
     try {
-      const kbResults = await Promise.allSettled(fetchedTenants.map((t) => listKnowledgeBases(t.id)));
+      const kbResults = await Promise.allSettled(
+        fetchedTenants.map((t) => listKnowledgeBases(t.id)),
+      );
+      if (requestId !== refreshId.current) return;
       const nextKbs: KbRow[] = [];
       const nextTenantErrors: string[] = [];
       kbResults.forEach((result, i) => {
         const t = fetchedTenants[i];
         if (result.status === "fulfilled") {
-          nextKbs.push(...result.value.map((kb) => ({ ...kb, tenantName: t.name, tenantSlug: t.slug })));
+          nextKbs.push(
+            ...result.value.map((kb) => ({
+              ...kb,
+              tenantName: t.name,
+              tenantSlug: t.slug,
+            })),
+          );
         } else {
           const reason = result.reason;
           nextTenantErrors.push(
-            `Couldn't load knowledge bases for ${t.name}: ${reason instanceof ApiError ? reason.detail : String(reason)}`,
+            `Couldn't load folders for ${t.name}: ${reason instanceof ApiError ? reason.detail : String(reason)}`,
           );
         }
       });
-      setKbs(nextKbs);
-      setTenantErrors(nextTenantErrors);
 
-      const [docResults, agentResults, apiResults] = await Promise.all([
+      const [docResults, agentResults] = await Promise.all([
         Promise.allSettled(nextKbs.map((kb) => listDocuments(kb.id))),
         Promise.allSettled(nextKbs.map((kb) => listKbAgents(kb.id))),
-        Promise.allSettled(fetchedTenants.map((t) => listCustomApis(t.id))),
       ]);
 
+      if (requestId !== refreshId.current) return;
+      setKbs(nextKbs);
       const nextSources: SourceRow[] = [];
       docResults.forEach((result, i) => {
-        if (result.status !== "fulfilled") return;
+        if (result.status !== "fulfilled") {
+          nextTenantErrors.push(
+            `Couldn’t load files in ${nextKbs[i].name}. Please refresh to try again.`,
+          );
+          return;
+        }
         const kb = nextKbs[i];
-        const agents = agentResults[i].status === "fulfilled"
-          ? (agentResults[i] as PromiseFulfilledResult<KbAgent[]>).value
-          : null;
+        const agents =
+          agentResults[i].status === "fulfilled"
+            ? (agentResults[i] as PromiseFulfilledResult<KbAgent[]>).value
+            : null;
         nextSources.push(
-          ...result.value.map((d) => ({ ...d, kbName: kb.name, tenantName: kb.tenantName, agents })),
+          ...result.value.map((d) => ({
+            ...d,
+            kbName: kb.name,
+            tenantName: kb.tenantName,
+            agents,
+          })),
         );
       });
       setSources(nextSources);
       // Empty KBs (usually failed uploads) are listed so they can be removed.
       setEmptyKbs(
-        nextKbs.filter((kb) => !nextSources.some((src) => src.kb_id === kb.id)),
+        nextKbs.filter(
+          (_, i) =>
+            docResults[i].status === "fulfilled" &&
+            (docResults[i] as PromiseFulfilledResult<KbDocument[]>).value
+              .length === 0,
+        ),
       );
 
-      setApis(
-        apiResults.flatMap((r) => (r.status === "fulfilled" ? r.value : [])),
-      );
+      setTenantErrors(nextTenantErrors);
     } catch (e) {
-      setPageError(e instanceof ApiError ? e.detail : String(e));
+      if (requestId === refreshId.current)
+        setPageError(e instanceof ApiError ? e.detail : String(e));
     } finally {
-      setLoading(false);
+      if (requestId === refreshId.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     if (tenantLoading) return;
-     
+    setManagedId(null);
+    setDeleteTarget(null);
+    setAddSourceOpen(false);
     refresh();
     getCurrentUser()
-      .then((me) => setCanManage(me.role === "superadmin" || me.role === "admin"))
+      .then((me) =>
+        setCanManage(me.role === "superadmin" || me.role === "admin"),
+      )
       .catch(() => {
         // Leave canManage false — same "fail closed on write controls" as
         // every other page's canManage check.
       });
+    return () => {
+      refreshId.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant, allTenants, isAllTenants, tenantLoading]);
 
-  const stats = useMemo(() => {
-    const ready = sources.filter((s) => s.status === "ready" || s.status === "ready_degraded").length;
-    const chunks = sources.reduce((n, s) => n + (s.chunk_count ?? 0), 0);
-    // "Chained" = a param comes from another API's response; chain_levels is only the depth budget.
-    const chained = apis.filter((a) => (a.params ?? []).some((p) => p.source === "upstream")).length;
-    return { ready, chunks, chained };
-  }, [sources, apis]);
+  const preparing = sources.some(
+    (s) => s.status === "pending" || s.status === "processing",
+  );
+  useEffect(() => {
+    if (!preparing) return;
+    const timer = setTimeout(() => {
+      void refresh(true);
+    }, 4000);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preparing, sources, tenant, allTenants, isAllTenants]);
+
+  useEffect(() => {
+    const id = searchParams.get("manage");
+    const file = sources.find((s) => s.id === id);
+    if (!file) return;
+    setManagedId(file.id);
+    setDisplayName(file.title);
+    router.replace("/knowledge-bases");
+  }, [searchParams, sources, router]);
+
+  const stats = useMemo(
+    () => ({
+      ready: sources.filter((s) => s.status === "ready").length,
+      inUse: sources.filter((s) => s.agents?.some((a) => a.enabled)).length,
+    }),
+    [sources],
+  );
+  const filtered = sources.filter((s) =>
+    `${s.title} ${s.kbName} ${s.tenantName}`
+      .toLowerCase()
+      .includes(search.trim().toLowerCase()),
+  );
+  const managed = sources.find((s) => s.id === managedId);
+  const busy =
+    saving || !!retryingSource || !!replacingSource || !!removingSource;
+  const folderHref = (kbId: string) => {
+    const kb = kbs.find((kb) => kb.id === kbId);
+    return kb
+      ? `/knowledge-bases/${kb.tenantSlug}/${kb.id}`
+      : "/knowledge-bases";
+  };
+  const saveName = async () => {
+    if (!managed || !displayName.trim() || busy) return;
+    setSaving(true);
+    try {
+      await updateDocument(managed.id, { title: displayName.trim() });
+      await refresh(true);
+      setManagedId(null);
+    } catch (e) {
+      setTenantErrors((errs) => [
+        ...errs,
+        e instanceof ApiError ? e.detail : String(e),
+      ]);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const removeEmptyKb = async (kb: KbRow) => {
-    if (!window.confirm(`Delete the empty knowledge base "${kb.name}"?`)) return;
+    try {
+      const agents = await listKbAgents(kb.id);
+      const affected = agents.length
+        ? ` Agents linked to this folder: ${agents.map((a) => a.agent_name).join(", ")}.`
+        : "";
+      if (
+        !window.confirm(
+          `Remove the empty folder "${kb.name}"?${affected} This cannot be undone.`,
+        )
+      )
+        return;
+    } catch {
+      setTenantErrors((errs) => [
+        ...errs,
+        "Couldn’t check which agents use this folder. Please try again before removing it.",
+      ]);
+      return;
+    }
     setRemovingKb(kb.id);
     try {
       await deleteKnowledgeBase(kb.id);
       await refresh();
     } catch (e) {
-      setTenantErrors((errs) => [...errs, e instanceof ApiError ? e.detail : String(e)]);
+      setTenantErrors((errs) => [
+        ...errs,
+        e instanceof ApiError ? e.detail : String(e),
+      ]);
     } finally {
       setRemovingKb(null);
     }
@@ -193,12 +305,16 @@ export default function KnowledgeBasesPage() {
     if (!deleteTarget) return;
     const id = deleteTarget.id;
     setDeleteTarget(null);
+    setManagedId(null);
     setRemovingSource(id);
     try {
       await deleteDocument(id);
       await refresh();
     } catch (e) {
-      setTenantErrors((errs) => [...errs, e instanceof ApiError ? e.detail : String(e)]);
+      setTenantErrors((errs) => [
+        ...errs,
+        e instanceof ApiError ? e.detail : String(e),
+      ]);
     } finally {
       setRemovingSource(null);
     }
@@ -210,7 +326,10 @@ export default function KnowledgeBasesPage() {
       await retryDocument(source.id);
       await refresh();
     } catch (e) {
-      setTenantErrors((errs) => [...errs, e instanceof ApiError ? e.detail : String(e)]);
+      setTenantErrors((errs) => [
+        ...errs,
+        e instanceof ApiError ? e.detail : String(e),
+      ]);
     } finally {
       setRetryingSource(null);
     }
@@ -226,17 +345,24 @@ export default function KnowledgeBasesPage() {
     const docId = pendingReplaceId.current;
     if (!file || !docId) return;
     e.target.value = "";
+    const reason = rejectionReasonFor(file);
+    if (reason) {
+      setTenantErrors((errs) => [...errs, reason]);
+      return;
+    }
     const source = sources.find((s) => s.id === docId);
     if (!source) return;
     setReplacingSource(docId);
-    const message = (e: unknown) => (e instanceof ApiError ? e.detail : String(e));
+    const message = (e: unknown) =>
+      e instanceof ApiError ? e.detail : String(e);
     let failure: string | null = null;
     try {
       const fresh = await uploadDocument(source.kb_id, file, source.title, {
         language: source.language,
         tags: source.tags,
       });
-      if (source.usage_mode !== "auto") await updateDocument(fresh.id, { usage_mode: source.usage_mode });
+      if (source.usage_mode !== "auto")
+        await updateDocument(fresh.id, { usage_mode: source.usage_mode });
       try {
         await deleteDocument(docId);
       } catch (e) {
@@ -251,188 +377,337 @@ export default function KnowledgeBasesPage() {
     pendingReplaceId.current = null;
   };
 
-  if (pageError) {
-    return (
-      <div className="error-banner">
-        Couldn&apos;t load accounts: {pageError}{" "}
-        <button className="btn btn-ghost btn-sm" onClick={refresh}>Retry</button>
-      </div>
-    );
-  }
-
   return (
     <>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 18 }}>
+      <div className="knowledge-heading">
         <div>
-          <h1 style={{ fontSize: "1.5rem", fontWeight: 600, margin: 0 }}>Knowledge</h1>
-          <div className="form-hint" style={{ marginTop: 4 }}>
-            Added once for the account and attached to as many agents as you like — one ingestion,
-            one index.
+          <h1>Knowledge</h1>
+          <p>
+            Files your agents use to answer questions — FAQs, prices, policies.
+          </p>
+        </div>
+      </div>
+      <div className="kb-stat-row knowledge-stats">
+        <div className="kb-stat">
+          <div className="kb-stat-label">Files</div>
+          <div className="kb-stat-value">{loading ? "—" : sources.length}</div>
+          <div className="kb-stat-sub">{stats.ready} ready for agents</div>
+        </div>
+        <div className="kb-stat">
+          <div className="kb-stat-label">Folders</div>
+          <div className="kb-stat-value">{loading ? "—" : kbs.length}</div>
+          <div className="kb-stat-sub">Groups of related files</div>
+        </div>
+        <div className="kb-stat">
+          <div className="kb-stat-label">In use</div>
+          <div className="kb-stat-value">{loading ? "—" : stats.inUse}</div>
+          <div className="kb-stat-sub">
+            Files turned on for at least one agent
           </div>
         </div>
       </div>
-
-      <div className="kb-stat-row">
-        <div className="kb-stat">
-          <div className="kb-stat-label">Sources</div>
-          <div className="kb-stat-value">{sources.length}</div>
-          <div className="kb-stat-sub">{stats.ready} ready to serve</div>
+      {(pageError || accountError) && (
+        <div className="error-banner" role="alert">
+          {pageError || accountError}
         </div>
-        <div className="kb-stat">
-          <div className="kb-stat-label">Indexed chunks</div>
-          <div className="kb-stat-value">{stats.chunks.toLocaleString()}</div>
-          <div className="kb-stat-sub">across all sources</div>
-        </div>
-        <div className="kb-stat">
-          <div className="kb-stat-label">Knowledge bases</div>
-          <div className="kb-stat-value">{kbs.length}</div>
-          <div className="kb-stat-sub">
-            {isAllTenants ? `across ${allTenants.length} tenants` : `in ${tenant?.name ?? "this account"}`}
-          </div>
-        </div>
-        <div className="kb-stat">
-          <div className="kb-stat-label">APIs</div>
-          <div className="kb-stat-value">{apis.length}</div>
-          <div className="kb-stat-sub">
-            {stats.chained} fed by another API
-          </div>
-        </div>
-      </div>
-
+      )}
       {tenantErrors.map((msg, i) => (
-        <div key={i} className="error-banner">{msg}</div>
+        <div key={i} className="error-banner" role="alert">
+          {msg}
+        </div>
       ))}
-
-      <div className="tabs">
-        <button className={`tab${tab === "sources" ? " active" : ""}`} onClick={() => setTab("sources")}>
-          Sources
-        </button>
-        <button className={`tab${tab === "apis" ? " active" : ""}`} onClick={() => setTab("apis")}>
-          APIs
-        </button>
-      </div>
-
-      {tab === "sources" && (
-        <div className="card">
-          {loading ? (
-            <div className="empty-state">Loading…</div>
-          ) : sources.length === 0 && emptyKbs.length === 0 ? (
-            <div className="empty-state">
-              No sources yet. Add one and it&apos;s chunked, embedded, and available to every agent
-              you attach it to.
-            </div>
-          ) : (
+      <div className="card knowledge-card">
+        <div className="card-hdr">
+          <h2 className="card-title">Your files</h2>
+          <span className="card-sub">
+            {sources.length} {sources.length === 1 ? "file" : "files"}
+          </span>
+          <label className="knowledge-search">
+            <Search size={14} />
+            <input
+              aria-label="Search files"
+              placeholder="Search files…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </label>
+          <button
+            className="btn btn-ghost btn-sm"
+            disabled={loading}
+            onClick={() => refresh()}
+          >
+            Refresh
+          </button>
+        </div>
+        {loading || tenantLoading ? (
+          <div className="empty-state">Loading files…</div>
+        ) : sources.length === 0 ? (
+          <div className="empty-state knowledge-empty">
+            <FileText size={28} />
+            <h3>No files yet</h3>
+            <p>Add a file so your agents can answer from your docs.</p>
+            {canManage && (
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={() => setAddSourceOpen(true)}
+                disabled={!allTenants.length}
+              >
+                <Plus size={14} /> Add file
+              </button>
+            )}
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="empty-state">No files match your search.</div>
+        ) : (
+          <div className="knowledge-table-wrap">
             <table className="tbl">
               <thead>
                 <tr>
-                  <th>Source</th><th>Type</th><th>Size</th><th>Status</th><th>Uploaded</th><th>Indexed</th><th>Used by</th><th>Actions</th>
+                  <th>File</th>
+                  <th>Folder</th>
+                  <th>Status</th>
+                  <th>Used by</th>
+                  <th>Added</th>
+                  <th>
+                    <span className="sr-only">Manage</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {emptyKbs.map((kb) => (
-                  <tr key={kb.id}>
-                    <td>
-                      <div className="bold">{kb.name}</div>
-                      <div className="kb-source-sub">
-                        Knowledge base · created {timeAgo(kb.created_at)}
-                      </div>
-                    </td>
-                    <td>—</td>
-                    <td>—</td>
-                    <td><span className="badge gray">empty</span></td>
-                    <td>—</td>
-                    <td className="kb-source-sub">No documents in it yet</td>
-                    <td><span className="kb-source-sub">—</span></td>
-                    <td>
-                      {canManage && (
-                        <button
-                          className="btn btn-danger btn-sm"
-                          disabled={removingKb === kb.id}
-                          onClick={() => removeEmptyKb(kb)}
+                {filtered.map((s) => {
+                  const agents = s.agents?.filter((a) => a.enabled);
+                  return (
+                    <tr key={s.id}>
+                      <td>
+                        <div className="bold">{s.title}</div>
+                        <div className="kb-source-sub">
+                          {sourceType(s)}
+                          {s.byte_size != null
+                            ? ` · ${(s.byte_size / 1024).toFixed(1)} KB`
+                            : ""}
+                        </div>
+                      </td>
+                      <td>
+                        <Link href={folderHref(s.kb_id)}>{s.kbName}</Link>
+                        {isAllTenants && (
+                          <div className="kb-source-sub">{s.tenantName}</div>
+                        )}
+                      </td>
+                      <td>
+                        <span
+                          className={`badge ${FILE_STATUS[s.status].color}`}
                         >
-                          {removingKb === kb.id ? "Deleting…" : "Delete"}
+                          {FILE_STATUS[s.status].label}
+                        </span>
+                      </td>
+                      <td>
+                        {agents == null
+                          ? "Couldn’t check"
+                          : agents.length
+                            ? agents.map((a) => a.agent_name).join(", ")
+                            : "Not used yet"}
+                      </td>
+                      <td className="kb-source-sub">{timeAgo(s.created_at)}</td>
+                      <td>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          disabled={removingSource === s.id}
+                          onClick={() => {
+                            setManagedId(s.id);
+                            setDisplayName(s.title);
+                          }}
+                        >
+                          Manage
                         </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-                {sources.map((s) => (
-                  <tr key={s.id}>
-                    <td>
-                      <div className="bold">{s.title}</div>
-                      <div className="kb-source-sub">
-                        {s.kbName} · updated {timeAgo(s.updated_at)}
-                      </div>
-                    </td>
-                    <td>{sourceType(s)}</td>
-                    <td className="mono">{s.byte_size != null ? `${(s.byte_size / 1024).toFixed(1)} KB` : "—"}</td>
-                    <td>
-                      <span className={`badge ${STATUS_BADGE[s.status] ?? "gray"}`}>{s.status}</span>
-                      {(s.status === "failed" || s.status === "ready_degraded" || s.error?.startsWith("re-index failed:")) && s.error && (
-                        <div className="kb-source-sub" style={{ marginTop: 4, maxWidth: 260 }} title={s.error}>
-                          {s.error}
-                        </div>
-                      )}
-                    </td>
-                    <td className="kb-source-sub">{timeAgo(s.created_at)}</td>
-                    <td className="mono">
-                      {s.status === "ready" || s.status === "ready_degraded" ? `${(s.chunk_count ?? 0).toLocaleString()} chunks` : "—"}
-                    </td>
-                    <td>
-                      {s.agents === null
-                        ? <span className="kb-source-sub">Couldn&apos;t check</span>
-                        : s.agents.length === 0
-                        ? <span className="kb-source-sub">Not used yet</span>
-                        : s.agents.length === 1
-                          ? s.agents[0].agent_name
-                          : `${s.agents.length} agents`}
-                    </td>
-                    <td>
-                      {canManage && (
-                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          {(s.status === "failed" || s.retryable) && (
-                            <>
-                              {s.retryable && (
-                                <button
-                                  className="btn btn-ghost btn-sm"
-                                  disabled={retryingSource === s.id || replacingSource === s.id}
-                                  onClick={() => handleRetry(s)}
-                                  title="Re-run ingestion without uploading again"
-                                >
-                                  <RefreshCw size={12} />
-                                  {retryingSource === s.id ? "Retrying…" : "Retry"}
-                                </button>
-                              )}
-                              {s.status === "failed" && (
-                                <button
-                                  className="btn btn-ghost btn-sm"
-                                  disabled={retryingSource === s.id || replacingSource === s.id}
-                                  onClick={() => handleReplaceClick(s)}
-                                  title="Upload a different file to replace this one"
-                                >
-                                  <Upload size={12} />
-                                  {replacingSource === s.id ? "Replacing…" : "Replace"}
-                                </button>
-                              )}
-                            </>
-                          )}
-                          <button
-                            className="btn btn-danger btn-sm"
-                            disabled={removingSource === s.id}
-                            onClick={() => setDeleteTarget(s)}
-                          >
-                            {removingSource === s.id ? "Deleting…" : "Delete"}
-                          </button>
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
-          )}
-        </div>
+          </div>
+        )}
+      </div>
+      {emptyKbs.length > 0 && (
+        <details className="knowledge-empty-folders">
+          <summary>Empty folders ({emptyKbs.length})</summary>
+          {emptyKbs.map((kb) => (
+            <div className="kb-row" key={kb.id}>
+              <div style={{ flex: 1 }}>
+                <Link href={folderHref(kb.id)}>{kb.name}</Link>
+                <div className="kb-source-sub">
+                  No files yet{isAllTenants ? ` · ${kb.tenantName}` : ""}
+                </div>
+              </div>
+              {canManage && (
+                <button
+                  className="btn btn-danger btn-sm"
+                  disabled={removingKb === kb.id}
+                  onClick={() => removeEmptyKb(kb)}
+                >
+                  {removingKb === kb.id ? "Removing…" : "Remove folder"}
+                </button>
+              )}
+            </div>
+          ))}
+        </details>
       )}
+      <p className="form-hint knowledge-handoff">
+        To let an agent use these files,{" "}
+        <Link href="/agents">open the agent</Link> → Knowledge → turn the folder
+        on.
+      </p>
+
+      <Modal
+        open={!!managed && !deleteTarget}
+        title={managed?.title ?? "Manage file"}
+        onClose={() => {
+          if (!busy) setManagedId(null);
+        }}
+        trapFocus
+        className="knowledge-dialog knowledge-manage-dialog"
+        footer={
+          <>
+            <button
+              className="btn btn-ghost btn-sm"
+              disabled={busy}
+              onClick={() => setManagedId(null)}
+            >
+              Close
+            </button>
+            {canManage && (
+              <button
+                className="btn btn-primary btn-sm"
+                disabled={busy || !displayName.trim()}
+                onClick={saveName}
+              >
+                {saving ? "Saving…" : "Save"}
+              </button>
+            )}
+          </>
+        }
+      >
+        {managed && (
+          <>
+            {tenantErrors.map((message, i) => (
+              <div key={i} className="error-banner" role="alert">
+                {message}
+              </div>
+            ))}
+            <div className="knowledge-manage-meta">
+              <div className="knowledge-manage-folder">
+                <FolderOpen size={17} />
+                <div>
+                  <span>Folder</span>
+                  <Link href={folderHref(managed.kb_id)}>{managed.kbName}</Link>
+                </div>
+              </div>
+              <span className={`badge ${FILE_STATUS[managed.status].color}`}>
+                {FILE_STATUS[managed.status].label}
+              </span>
+            </div>
+            <div className="knowledge-manage-section">
+              <label className="form-label" htmlFor="file-display-name">
+                Display name
+              </label>
+              <input
+                id="file-display-name"
+                className="form-input"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                disabled={!canManage || busy}
+              />
+            </div>
+            <div className="knowledge-manage-section">
+              <h3 className="knowledge-manage-label">Used by</h3>
+              <div className="knowledge-manage-agents">
+                {managed.agents === null ? (
+                  <p>Couldn’t check which agents use this folder.</p>
+                ) : managed.agents.some((a) => a.enabled) ? (
+                  managed.agents
+                    .filter((a) => a.enabled)
+                    .map((a) => {
+                      const kb = kbs.find((kb) => kb.id === managed.kb_id);
+                      return (
+                        <Link
+                          className="knowledge-manage-agent"
+                          key={a.agent_id}
+                          href={`/agents/${kb?.tenantSlug}/${a.agent_slug}?section=knowledge`}
+                        >
+                          <span className="knowledge-manage-agent-icon">
+                            <Users size={15} />
+                          </span>
+                          <span>{a.agent_name}</span>
+                          <ArrowUpRight size={14} />
+                        </Link>
+                      );
+                    })
+                ) : (
+                  <p>No agents use this file yet.</p>
+                )}
+              </div>
+              <p className="knowledge-manage-hint">
+                Turn this folder on or off in the agent’s Knowledge settings.
+              </p>
+              <Link
+                className="knowledge-manage-folder-link"
+                href={folderHref(managed.kb_id)}
+              >
+                Manage this folder’s files and agents <ArrowUpRight size={13} />
+              </Link>
+            </div>
+            {(managed.status === "pending" ||
+              managed.status === "processing") && (
+              <p className="knowledge-manage-preparing">
+                We’re preparing this file. You can replace it once preparation
+                finishes.
+              </p>
+            )}
+            {(managed.status === "failed" ||
+              managed.status === "ready_degraded") && (
+              <p className="knowledge-file-warning">
+                {managed.status === "failed"
+                  ? "We couldn’t prepare this file. Replace it, or try again when available."
+                  : "Some of this file may be unreadable. Check the original and replace it if needed."}
+              </p>
+            )}
+            {canManage && (
+              <div className="knowledge-manage-file-actions">
+                <h3 className="knowledge-manage-label">File actions</h3>
+                <div className="knowledge-manage-actions">
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    disabled={
+                      busy ||
+                      managed.status === "pending" ||
+                      managed.status === "processing"
+                    }
+                    onClick={() => handleReplaceClick(managed)}
+                  >
+                    {replacingSource ? "Replacing…" : "Replace file"}
+                  </button>
+                  {managed.retryable && (
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      disabled={busy}
+                      onClick={() => handleRetry(managed)}
+                    >
+                      {retryingSource ? "Trying again…" : "Try again"}
+                    </button>
+                  )}
+                  <button
+                    className="btn btn-danger btn-sm"
+                    disabled={busy}
+                    onClick={() => setDeleteTarget(managed)}
+                  >
+                    Remove
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </Modal>
 
       <input
         ref={replaceInputRef}
@@ -442,28 +717,10 @@ export default function KnowledgeBasesPage() {
         onChange={handleReplaceFile}
       />
 
-      {tab === "apis" && (
-        !tenant ? (
-          <div className="empty-state">
-            {isAllTenants
-              ? "Pick a single tenant from the header switcher to manage its APIs."
-              : "No account selected."}
-          </div>
-        ) : (
-          <CustomApisPanel tenantId={tenant.id} />
-        )
-      )}
-
-      <div className="form-hint" style={{ marginTop: 12 }}>
-        A <strong>knowledge base</strong> is the container a source is filed in; adding your first
-        source creates one, and several sources can share it. Embeddings live in this account&apos;s
-        own namespace and are never readable by another account — detaching a source from an agent
-        does not delete it, remove it here.
-      </div>
-
       {(addSourceOpen || (canManage && searchParams.get("add") === "1")) && (
         <AddSourceModal
           tenants={allTenants}
+          defaultTenantId={tenant?.id}
           knowledgeBases={kbs}
           canManage={canManage}
           onClose={() => {
@@ -476,34 +733,55 @@ export default function KnowledgeBasesPage() {
 
       <Modal
         open={!!deleteTarget}
-        title={`Delete "${deleteTarget?.title}"?`}
+        trapFocus
+        className="knowledge-dialog"
+        title={`Remove "${deleteTarget?.title}"?`}
         onClose={() => setDeleteTarget(null)}
         footer={
           <>
-            <button className="btn btn-ghost btn-sm" onClick={() => setDeleteTarget(null)}>Cancel</button>
-            <button className="btn btn-danger btn-sm" onClick={confirmDelete}>Delete document</button>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => setDeleteTarget(null)}
+            >
+              Cancel
+            </button>
+            <button className="btn btn-danger btn-sm" onClick={confirmDelete}>
+              Remove file
+            </button>
           </>
         }
       >
         {deleteTarget && (
-          <div style={{ fontSize: ".82rem", color: "var(--text-2)", lineHeight: 1.6 }}>
+          <div
+            style={{
+              fontSize: ".82rem",
+              color: "var(--text-2)",
+              lineHeight: 1.6,
+            }}
+          >
             {deleteTarget.agents === null ? (
               <p style={{ margin: 0 }}>
-                Couldn&apos;t check which agents use this document. Any agent using it will lose
-                it permanently.
+                Couldn&apos;t check which agents use this file. Any agent using
+                it will lose it permanently.
               </p>
             ) : deleteTarget.agents.length === 0 ? (
               <p style={{ margin: 0 }}>
-                This document is not currently used by any agents. Deleting it will remove it
-                from the knowledge base permanently.
+                This file is not currently used by any agents. Removing it will
+                remove it from the folder permanently.
               </p>
             ) : (
               <>
                 <p style={{ margin: "0 0 10px" }}>
-                  This document is currently used by{" "}
-                  <strong>{deleteTarget.agents.length} agent{deleteTarget.agents.length !== 1 ? "s" : ""}</strong>.
-                  Deleting it will remove it from{" "}
-                  {deleteTarget.agents.length === 1 ? "that agent" : "all of them"} permanently.
+                  This file is currently used by{" "}
+                  <strong>
+                    {deleteTarget.agents.length} agent
+                    {deleteTarget.agents.length !== 1 ? "s" : ""}
+                  </strong>
+                  . Removing it will remove it from{" "}
+                  {deleteTarget.agents.length === 1
+                    ? "that agent"
+                    : "all of them"}{" "}
+                  permanently.
                 </p>
                 <div
                   style={{
@@ -514,7 +792,9 @@ export default function KnowledgeBasesPage() {
                     gap: 4,
                   }}
                 >
-                  <div style={{ fontWeight: 600, marginBottom: 2 }}>Agents affected:</div>
+                  <div style={{ fontWeight: 600, marginBottom: 2 }}>
+                    Agents affected:
+                  </div>
                   {deleteTarget.agents.map((a) => (
                     <div key={a.agent_id}>{a.agent_name}</div>
                   ))}

@@ -2,6 +2,7 @@
 
 import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
+import { CustomApisPanel } from "@/components/CustomApisPanel";
 import { ConnectorsPanel } from "@/components/ConnectorsPanel";
 import { ConnectedAppsHeading } from "@/components/ConnectedAppsHeading";
 import { useActiveTenant } from "@/lib/useActiveTenant";
@@ -64,6 +65,7 @@ function Integrations() {
               : "No account selected."}
         </div>
       )}
+      {tenant && !loading && <details id="custom-tools" className="knowledge-custom-tools"><summary>Custom API tools</summary><p className="form-hint">Manage custom tools here, then turn them on from the agent’s Tools settings.</p><CustomApisPanel tenantId={tenant.id} /></details>}
     </>
   );
 }

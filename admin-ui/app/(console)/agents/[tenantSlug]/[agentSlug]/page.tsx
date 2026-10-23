@@ -7,7 +7,7 @@ import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   AlertCircle, ArrowLeft, ArrowRight, BookOpen, Check, Copy, FileText, Mic, MoreHorizontal,
-  Loader2, Settings2, SlidersHorizontal, Sparkles, Trash2, Undo2,
+  Loader2, Settings2, SlidersHorizontal, Sparkles, Trash2, Undo2, Wrench,
 } from "lucide-react";
 import {
   Agent, AgentUpdate, ApiError, Call, LanguageMode, PhoneNumber, ProviderConfig, createAgent, deleteAgent, getAgent,
@@ -30,12 +30,13 @@ import { normalizeDialTarget } from "@/lib/dialTargets";
 import { useMenuKeys } from "@/lib/useMenuKeys";
 import { hasInboundNumber, isChatAgent } from "@/lib/agentReadiness";
 
-type Section = "instructions" | "voice" | "knowledge" | "settings" | "advanced";
+type Section = "instructions" | "voice" | "knowledge" | "tools" | "settings" | "advanced";
 
 const SECTIONS: { key: Section; label: string; hint: string; icon: typeof FileText }[] = [
   { key: "instructions", label: "Instructions", hint: "What the agent says first and how it handles the call.", icon: FileText },
   { key: "voice", label: "Language & voice", hint: "What callers speak and how the agent sounds.", icon: Mic },
-  { key: "knowledge", label: "Knowledge", hint: "Documents and tools the agent can use to answer.", icon: BookOpen },
+  { key: "knowledge", label: "Knowledge", hint: "Files the agent can use to answer questions.", icon: BookOpen },
+  { key: "tools", label: "Tools", hint: "Actions and API tools this agent can use.", icon: Wrench },
   { key: "settings", label: "Settings", hint: "Phone number, how it thinks, and call behaviour.", icon: Settings2 },
 ];
 
@@ -89,6 +90,13 @@ export default function AgentDetailPage() {
   const [numbers, setNumbers] = useState<PhoneNumber[] | null>(null);
   const [recentCalls, setRecentCalls] = useState<Call[]>([]);
   const [section, setSection] = useState<Section>("instructions");
+  useEffect(() => {
+    const requested = searchParams.get("section");
+    if (SECTIONS.some((s) => s.key === requested)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSection(requested as Section);
+    }
+  }, [searchParams]);
   const [justCreated] = useState(() => searchParams.get("new") === "1");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -708,14 +716,8 @@ export default function AgentDetailPage() {
             </>
           )}
 
-          {section === "knowledge" && (
-            <>
-              <KnowledgeBasePanel tenantId={agent.tenant_id} agentId={agent.id} />
-              <div style={{ marginTop: 16 }}>
-                <AgentCustomApisPanel tenantId={agent.tenant_id} agentId={agent.id} />
-              </div>
-            </>
-          )}
+          {section === "knowledge" && <KnowledgeBasePanel tenantId={agent.tenant_id} agentId={agent.id} />}
+          {section === "tools" && <AgentCustomApisPanel tenantId={agent.tenant_id} agentId={agent.id} />}
 
           {section === "advanced" && (
             <>

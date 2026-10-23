@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Check, FileText, Upload } from "lucide-react";
+import { Check, FolderOpen, Upload } from "lucide-react";
 import { ApiError } from "@/lib/api";
 import {
   AgentKnowledgeBase,
@@ -19,6 +19,7 @@ import {
   setRetrievalPolicy,
   uploadDocument,
 } from "@/lib/knowledgeApi";
+import { FILE_STATUS } from "@/lib/knowledgePresentation";
 import { ACCEPTED_DOC_ACCEPT, rejectionReasonFor } from "@/components/AddSourceModal";
 
 interface PolicyForm {
@@ -31,20 +32,12 @@ interface PolicyForm {
 const DEFAULT_POLICY: PolicyForm = { top_k: 5, minimum_score: 0, max_tokens: 1000, include_citations: true };
 const POLL_MS = 4000;
 
-const STATUS_LABEL: Record<KbDocument["status"], { text: string; cls: string }> = {
-  ready: { text: "Ready", cls: "green" },
-  ready_degraded: { text: "Ready (partly readable)", cls: "amber" },
-  pending: { text: "Getting ready…", cls: "amber" },
-  processing: { text: "Getting ready…", cls: "amber" },
-  failed: { text: "Couldn't read this file", cls: "red" },
-};
-
 function slugFor(fileName: string): string {
   const base = fileName.replace(/\.[^.]+$/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   return `${base || "doc"}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-// Agent-scoped picker: every document in the account with an on/off switch for this agent.
+// Agent-scoped picker: folders in the account with an on/off switch for this agent.
 export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; agentId: string }) {
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [assignments, setAssignments] = useState<AgentKnowledgeBase[]>([]);
@@ -180,14 +173,14 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
   const usedCount = rows.filter((r) => r.on).length;
 
   return (
-    <div className="card">
+    <div className="card knowledge-agent-panel">
       <div className="card-hdr">
         <div>
-          <div className="card-title">Documents</div>
+          <div className="card-title">Folders this agent can use</div>
           <div className="card-sub" style={{ marginLeft: 0 }}>
             {rows.length === 0
-              ? "Upload a file and the agent will answer callers from it."
-              : `Switch on what the agent should answer from. Using ${usedCount} of ${rows.length}.`}
+              ? "Add a file or turn on a folder for this agent."
+              : `Turn on the folders the agent should answer from. Using ${usedCount} of ${rows.length}.`}
           </div>
         </div>
         <button
@@ -196,7 +189,7 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
           disabled={uploading}
           onClick={() => fileInput.current?.click()}
         >
-          <Upload size={13} /> {uploading ? "Uploading…" : "Upload document"}
+          <Upload size={13} /> {uploading ? "Uploading…" : "Add file"}
         </button>
         <input
           ref={fileInput}
@@ -211,27 +204,32 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
 
       {rows.length === 0 ? (
         <div className="empty-state">
-          No documents yet. Upload a price list, FAQ or policy as a text, Markdown, HTML or CSV file (PDF and Office files too, if your administrator has enabled them).
+          No files yet. Upload a price list, FAQ or policy as a text, Markdown, HTML or CSV file (PDF and Office files too, if your administrator has enabled them).
         </div>
       ) : (
         rows.map((row) => {
           const single = row.docs.length === 1 ? row.docs[0] : null;
-          const status = single ? STATUS_LABEL[single.status] : null;
+          const statusDoc = row.docs.find((d) => d.status === "failed")
+            ?? row.docs.find((d) => d.status === "pending" || d.status === "processing")
+            ?? row.docs.find((d) => d.status === "ready_degraded")
+            ?? row.docs[0];
+          const status = statusDoc ? FILE_STATUS[statusDoc.status] : null;
           return (
             <div key={row.id} className="kb-row">
-              <FileText size={16} style={{ color: "var(--text-3)", flexShrink: 0 }} />
+              <FolderOpen size={16} style={{ color: "var(--text-3)", flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontWeight: 500, overflowWrap: "anywhere" }}>{single ? single.title : row.name}</div>
+                <div style={{ fontWeight: 500, overflowWrap: "anywhere" }}>{row.name}</div>
                 <div style={{ fontSize: ".7rem", color: "var(--text-3)", display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-                  {status && <span className={`badge ${status.cls}`}>{status.text}</span>}
+                  {status && <span className={`badge ${status.color}`}>{status.label}</span>}
                   {single?.usage_mode === "prompt" && <span>Read on every call</span>}
-                  {!single && `${row.docs.length} files: ${row.docs.map((d) => d.title).join(", ") || "none yet"}`}
+                  {`${row.docs.length} ${row.docs.length === 1 ? "file" : "files"}: ${row.docs.map((d) => d.title).join(", ") || "none yet"}`}
                 </div>
-                {single?.error && <div style={{ color: "var(--red)", fontSize: ".68rem" }}>{single.error}</div>}
               </div>
+              <span className={`badge ${row.on ? "green" : "gray"}`}>{row.on ? "On" : "Off"}</span>
               <label className="toggle-switch" title={row.on ? "The agent uses this" : "The agent ignores this"}>
                 <input
                   type="checkbox"
+                  aria-label={`Use folder ${row.name}`}
                   checked={row.on}
                   disabled={busyKb === row.id}
                   onChange={(e) => handleToggle(row.id, e.target.checked)}
@@ -316,7 +314,7 @@ export function KnowledgeBasePanel({ tenantId, agentId }: { tenantId: string; ag
           </details>
         )}
         <Link href="/knowledge-bases" style={{ fontSize: ".76rem", color: "var(--cyan)" }}>
-          Manage all documents →
+          Manage all files →
         </Link>
       </div>
     </div>

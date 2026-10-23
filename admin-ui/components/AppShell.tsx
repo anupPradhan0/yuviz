@@ -179,7 +179,7 @@ const PAGE_SUBTITLE: Record<string, string> = {
 const PAGE_CTA: Record<string, { label: string; href: string }> = {
   "/agents": { label: "+ Create Agent", href: "/agents/new" },
   "/ivr-call": { label: "+ New IVR-Call", href: "/ivr-call/new" },
-  "/knowledge-bases": { label: "+ Add Document", href: "/knowledge-bases?add=1" },
+  "/knowledge-bases": { label: "+ Add file", href: "/knowledge-bases?add=1" },
   "/telephony": { label: "+ Add Number", href: "/telephony?add=1" },
   "/integrations": { label: "+ Connect App", href: "/integrations?add=1" },
   "/campaigns": { label: "+ New Campaign", href: "/campaigns/new" },

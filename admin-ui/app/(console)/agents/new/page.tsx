@@ -661,7 +661,7 @@ export default function NewAgentPage() {
               {customApis.length === 0 ? (
                 <div className="form-hint">
                   No connections yet in this account.{" "}
-                  <a href="/knowledge-bases?tab=apis" target="_blank" rel="noopener noreferrer" style={{ color: "var(--cyan)" }}>
+                  <a href="/integrations#custom-tools" target="_blank" rel="noopener noreferrer" style={{ color: "var(--cyan)" }}>
                     Add a connection ↗
                   </a>{" "}
                   It opens in a new tab and shows up here when you come back.

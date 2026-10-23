@@ -241,7 +241,7 @@ export function AgentCustomApisPanel({ tenantId, agentId }: { tenantId: string; 
             </div>
           </details>
         )}
-        <Link href="/integrations" style={{ fontSize: ".76rem", color: "var(--cyan)" }}>
+        <Link href="/integrations#custom-tools" style={{ fontSize: ".76rem", color: "var(--cyan)" }}>
           {customApis.length > 0 ? "Manage connections →" : "Set up a connection →"}
         </Link>
       </div>

@@ -1,19 +1,50 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useRef, useState } from "react";
 import { ApiError, Tenant } from "@/lib/api";
-import { createKnowledgeBase, deleteKnowledgeBase, KnowledgeBase, uploadDocument } from "@/lib/knowledgeApi";
+import {
+  createKnowledgeBase,
+  deleteKnowledgeBase,
+  KnowledgeBase,
+  uploadDocument,
+} from "@/lib/knowledgeApi";
 import { Modal } from "@/components/Modal";
 
-// Only "Upload files" is wired up; the other cards are placeholders.
+// Upload uses the existing document API; other methods are not available yet.
 const SOURCE_CARDS = [
-  { key: "upload", label: "Upload files", hint: "text, Markdown, HTML, CSV (PDF and Office only if enabled)", enabled: true },
-  { key: "website", label: "Sync a website", hint: "coming soon", enabled: false },
-  { key: "text", label: "Write text", hint: "coming soon", enabled: false },
-  { key: "integration", label: "Connect an integration", hint: "coming soon", enabled: false },
+  {
+    key: "upload",
+    label: "Upload a file",
+    hint: "PDF, Word, text, Markdown, CSV…",
+    enabled: true,
+  },
+  {
+    key: "website",
+    label: "From a website",
+    hint: "Coming soon",
+    enabled: false,
+  },
+  { key: "text", label: "Paste text", hint: "Coming soon", enabled: false },
+  {
+    key: "integration",
+    label: "From Connected Apps",
+    hint: "Coming soon",
+    enabled: false,
+  },
 ] as const;
 
-export const ACCEPTED_DOC_EXTENSIONS = [".txt", ".md", ".pdf", ".docx", ".pptx", ".xlsx", ".html", ".htm", ".csv", ".tsv"];
+export const ACCEPTED_DOC_EXTENSIONS = [
+  ".txt",
+  ".md",
+  ".pdf",
+  ".docx",
+  ".pptx",
+  ".xlsx",
+  ".html",
+  ".htm",
+  ".csv",
+  ".tsv",
+];
 export const ACCEPTED_DOC_ACCEPT = ACCEPTED_DOC_EXTENSIONS.join(",");
 
 // A cheap first filter only (drag-and-drop bypasses <input accept>): the server detects the real type from the
@@ -21,7 +52,9 @@ export const ACCEPTED_DOC_ACCEPT = ACCEPTED_DOC_EXTENSIONS.join(",");
 
 export function rejectionReasonFor(file: File): string | null {
   const name = file.name.toLowerCase();
-  const hasAcceptedExtension = ACCEPTED_DOC_EXTENSIONS.some((ext) => name.endsWith(ext));
+  const hasAcceptedExtension = ACCEPTED_DOC_EXTENSIONS.some((ext) =>
+    name.endsWith(ext),
+  );
   if (!hasAcceptedExtension) {
     return `"${file.name}" isn't a supported file type (text, Markdown, HTML or CSV; PDF, Word, Excel and PowerPoint only if your administrator has turned on document parsing).`;
   }
@@ -42,31 +75,32 @@ export function AddSourceModal({
   canManage,
   onClose,
   onCreated,
+  defaultTenantId,
 }: {
   tenants: Tenant[];
   knowledgeBases: KnowledgeBase[];
   canManage: boolean;
   onClose: () => void;
   onCreated: () => void;
+  defaultTenantId?: string;
 }) {
-  const [card, setCard] = useState<(typeof SOURCE_CARDS)[number]["key"] | null>(null);
+  const [card, setCard] = useState<(typeof SOURCE_CARDS)[number]["key"] | null>(
+    null,
+  );
 
-  const [tenantId, setTenantId] = useState(tenants.length === 1 ? tenants[0].id : "");
+  const [tenantId, setTenantId] = useState(
+    defaultTenantId ?? (tenants.length === 1 ? tenants[0].id : ""),
+  );
+  const fieldId = useId();
+  const fileInput = useRef<HTMLInputElement>(null);
   const [target, setTarget] = useState<"new" | string>("new");
   const [newName, setNewName] = useState("");
-  const [newSlug, setNewSlug] = useState("");
-  const [slugTouched, setSlugTouched] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   const tenantKbs = knowledgeBases.filter((kb) => kb.tenant_id === tenantId);
-
-  const handleNameChange = (value: string) => {
-    setNewName(value);
-    if (!slugTouched) setNewSlug(deriveSlug(value));
-  };
 
   const handleFileChange = (f: File | null) => {
     setFile(null);
@@ -81,10 +115,14 @@ export function AddSourceModal({
   };
 
   const canSubmit =
-    canManage && !!tenantId && !!file && !fileError && (target !== "new" || (!!newName && !!newSlug));
+    canManage &&
+    !!tenantId &&
+    !!file &&
+    !fileError &&
+    (target !== "new" || !!newName.trim());
 
   const handleSubmit = async () => {
-    if (!file) return;
+    if (!file || !canSubmit || submitting) return;
     setSubmitting(true);
     setSubmitError(null);
     // A newly created KB is rolled back if the upload fails, so no empty KB is left behind.
@@ -92,7 +130,10 @@ export function AddSourceModal({
     try {
       const kb =
         target === "new"
-          ? await createKnowledgeBase(tenantId, { slug: newSlug, name: newName })
+          ? await createKnowledgeBase(tenantId, {
+              slug: `${deriveSlug(newName).slice(0, 60) || "folder"}-${crypto.randomUUID().slice(0, 8)}`,
+              name: newName.trim(),
+            })
           : { id: target };
       if (target === "new") createdKbId = kb.id;
       await uploadDocument(kb.id, file, file.name);
@@ -113,13 +154,23 @@ export function AddSourceModal({
 
   if (card === null) {
     return (
-      <Modal open title="Add source" onClose={onClose}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+      <Modal
+        open
+        key="method"
+        title="Add a file"
+        onClose={onClose}
+        trapFocus
+        className="knowledge-dialog"
+      >
+        <div className="knowledge-methods">
           {SOURCE_CARDS.map((c) => (
             <button
               key={c.key}
               className="agent-template-card"
-              style={{ opacity: c.enabled ? 1 : 0.5, cursor: c.enabled ? "pointer" : "not-allowed" }}
+              style={{
+                opacity: c.enabled ? 1 : 0.5,
+                cursor: c.enabled ? "pointer" : "not-allowed",
+              }}
               disabled={!c.enabled}
               onClick={() => setCard(c.key)}
             >
@@ -135,97 +186,143 @@ export function AddSourceModal({
   return (
     <Modal
       open
-      title="Upload files"
-      onClose={onClose}
+      key="upload"
+      title="Upload a file"
+      onClose={() => {
+        if (!submitting) onClose();
+      }}
+      trapFocus
+      className="knowledge-dialog"
       footer={
         <>
-          <button className="btn btn-ghost btn-sm" onClick={() => setCard(null)}>
+          <button
+            className="btn btn-ghost btn-sm"
+            disabled={submitting}
+            onClick={() => setCard(null)}
+          >
             Back
           </button>
-          <button className="btn btn-primary btn-sm" onClick={handleSubmit} disabled={!canSubmit || submitting}>
-            {submitting ? "Uploading…" : "Upload"}
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={handleSubmit}
+            disabled={!canSubmit || submitting}
+          >
+            {submitting ? "Adding…" : "Add file"}
           </button>
         </>
       }
     >
       {submitError && <div className="error-banner">{submitError}</div>}
 
-      {tenants.length > 1 && (
+      <fieldset className="knowledge-fields" disabled={submitting}>
+        {tenants.length > 1 && (
+          <div className="form-group">
+            <label className="form-label" htmlFor={`${fieldId}-account`}>
+              Account
+            </label>
+            <select
+              id={`${fieldId}-account`}
+              className="form-select"
+              value={tenantId}
+              onChange={(e) => {
+                setTenantId(e.target.value);
+                setTarget("new");
+              }}
+            >
+              <option value="">— select —</option>
+              {tenants.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
         <div className="form-group">
-          <label className="form-label">Account</label>
+          <label className="form-label" htmlFor={`${fieldId}-folder`}>
+            Put it in this folder
+          </label>
           <select
+            id={`${fieldId}-folder`}
             className="form-select"
-            value={tenantId}
-            onChange={(e) => {
-              setTenantId(e.target.value);
-              setTarget("new");
-            }}
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
           >
-            <option value="">— select —</option>
-            {tenants.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}
+            <option value="new">+ Create a new folder</option>
+            {tenantKbs.map((kb) => (
+              <option key={kb.id} value={kb.id}>
+                {kb.name}
               </option>
             ))}
           </select>
         </div>
-      )}
 
-      <div className="form-group">
-        <label className="form-label">Knowledge base</label>
-        <select className="form-select" value={target} onChange={(e) => setTarget(e.target.value)}>
-          <option value="new">+ Create new</option>
-          {tenantKbs.map((kb) => (
-            <option key={kb.id} value={kb.id}>
-              {kb.name}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {target === "new" && (
-        <>
+        {target === "new" && (
           <div className="form-group">
-            <label className="form-label">
-              Name <span className="required">*</span>
+            <label className="form-label" htmlFor={`${fieldId}-name`}>
+              New folder name <span className="required">*</span>
             </label>
             <input
+              id={`${fieldId}-name`}
               className="form-input"
               value={newName}
-              onChange={(e) => handleNameChange(e.target.value)}
+              onChange={(e) => setNewName(e.target.value)}
               placeholder="Reception FAQ"
             />
+            <div className="form-hint">
+              Group related files in a folder. You can turn it on for an agent
+              later.
+            </div>
           </div>
-          <div className="form-group">
-            <label className="form-label">
-              Slug <span className="required">*</span>
-            </label>
-            <input
-              className="form-input"
-              style={{ fontFamily: "var(--mono)" }}
-              value={newSlug}
-              onChange={(e) => {
-                setSlugTouched(true);
-                setNewSlug(e.target.value);
-              }}
-              placeholder="reception-faq"
-            />
-          </div>
-        </>
-      )}
+        )}
 
-      <div className="form-group">
-        <label className="form-label">
-          File <span className="hint">text, Markdown, HTML or CSV; PDF and Office files only if enabled</span>
-        </label>
-        <input
-          className="form-input"
-          type="file"
-          accept={ACCEPTED_DOC_ACCEPT}
-          onChange={(e) => handleFileChange(e.target.files?.[0] || null)}
-        />
-        {fileError && <div style={{ color: "var(--red)", fontSize: ".76rem", marginTop: 4 }}>{fileError}</div>}
-      </div>
+        <div className="form-group">
+          <label className="form-label" htmlFor={`${fieldId}-file`}>
+            File <span className="required">*</span>
+          </label>
+          <div
+            className="knowledge-drop"
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault();
+              if (!submitting)
+                handleFileChange(e.dataTransfer.files[0] ?? null);
+            }}
+          >
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => fileInput.current?.click()}
+            >
+              {file
+                ? "Choose another file"
+                : "Drop a file here or click to choose"}
+            </button>
+            <input
+              ref={fileInput}
+              id={`${fieldId}-file`}
+              hidden
+              type="file"
+              accept={ACCEPTED_DOC_ACCEPT}
+              onChange={(e) => handleFileChange(e.target.files?.[0] || null)}
+            />
+            {file && <div className="knowledge-selected-file">{file.name}</div>}
+            <div className="form-hint">
+              Text, Markdown, HTML, CSV or TSV. PDF, Word, Excel and PowerPoint
+              when enabled for your account.
+            </div>
+          </div>
+          {fileError && (
+            <div className="error-banner" role="alert">
+              {fileError}
+            </div>
+          )}
+        </div>
+        <div className="form-hint">
+          We’ll prepare your file, then show when it’s ready for agents.
+        </div>
+      </fieldset>
     </Modal>
   );
 }
