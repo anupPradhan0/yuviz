@@ -181,6 +181,14 @@ start_webcall() {
   python3 -m services.webcall
 }
 
+# ── Block 8c: Clinic Service (REST API, port 8700) — appointments, SMS, reminders ─
+# Toolexec reaches its tool API only if TOOLEXEC_INTERNAL_ENDPOINTS lists localhost:8700.
+start_clinic_service() {
+  _require JWT_SECRET || return 0
+  cd "$REPO"
+  PORT=8700 python3 -m services.clinic
+}
+
 # ── Block 14: Admin UI (Next.js, port 3000) ───────────────────────────────────
 start_admin_ui() {
   cd "$REPO/admin-ui"
@@ -194,7 +202,7 @@ verify() {
       "$(_url_port "${CONFIG_SERVICE_URL:-}" 8000)" "$(_url_port "${KNOWLEDGE_SERVICE_URL:-}" 8100)" \
       "$(_url_port "${NEXT_PUBLIC_DID_SERVICE_URL:-}" 8200)" \
       "$(_url_port "${CAMPAIGNS_SERVICE_URL:-}" 8400)" "$(_url_port "${TOOLEXEC_SERVICE_URL:-}" 8600)" \
-      "$(_url_port "${TELEPHONY_SERVICE_URL:-}" 8750)" 50051 50052 10000 "${GATEWAY_LISTEN_PORT:-8080}" 3000; do
+      "$(_url_port "${CLINIC_SERVICE_URL:-}" 8700)" "$(_url_port "${TELEPHONY_SERVICE_URL:-}" 8750)" 50051 50052 10000 "${GATEWAY_LISTEN_PORT:-8080}" 3000; do
     nc -z localhost "$port" 2>/dev/null && echo "  :$port  OPEN" || echo "  :$port  CLOSED"
   done
 
@@ -207,6 +215,8 @@ verify() {
   curl -sf "${CAMPAIGNS_SERVICE_URL:-http://localhost:8400}/health" || echo "  Campaigns Service not reachable"
   echo ""
   curl -s "${TOOLEXEC_SERVICE_URL:-http://localhost:8600}/health" || echo "  Tool Execution Service not reachable"
+  echo ""
+  curl -s "${CLINIC_SERVICE_URL:-http://localhost:8700}/health" || echo "  Clinic Service not reachable"
 
   echo ""
   echo "=== Envoy upstream health ==="
@@ -233,6 +243,7 @@ portmap() {
   :8200   DID Service       — REST API (carrier number purchase/release)
   :8400   Campaigns Service — REST API (outbound calling)
   :8600   Tool Execution Service — REST API (custom API chains)
+  :8700   Clinic Service    — REST API (appointments, SMS, reminder calls)
   :8750   Telephony Service — REST API (Vobiz/Cloudonix webhooks + outbound)
   :50051  ConvSvc-1  — gRPC ConversationService
   :50052  ConvSvc-2  — gRPC ConversationService
@@ -244,4 +255,4 @@ portmap() {
 EOF
 }
 
-echo "start_local.sh loaded. Functions: start_mysql, start_kamailio, start_data, start_ollama, start_config_service, start_knowledge_service, start_knowledge_worker, start_campaigns_service, start_toolexec_service, start_telephony_service, start_conv1, start_conv2, start_envoy, start_gateway, start_freeswitch, start_admin_ui, install_network_sync, remove_network_sync, verify, portmap"
+echo "start_local.sh loaded. Functions: start_mysql, start_kamailio, start_data, start_ollama, start_config_service, start_knowledge_service, start_knowledge_worker, start_campaigns_service, start_toolexec_service, start_clinic_service, start_telephony_service, start_conv1, start_conv2, start_envoy, start_gateway, start_freeswitch, start_admin_ui, install_network_sync, remove_network_sync, verify, portmap"

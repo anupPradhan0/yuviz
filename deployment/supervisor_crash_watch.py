@@ -344,6 +344,7 @@ def default_probes() -> dict:
         "knowledge": lambda: probe_http(f"http://{host}:{url_port('KNOWLEDGE_SERVICE_URL', 8100)}/health"),
         "campaigns": lambda: probe_http(f"http://{host}:{url_port('CAMPAIGNS_SERVICE_URL', 8400)}/health"),
         "toolexec": lambda: probe_http(f"http://{host}:{url_port('TOOLEXEC_SERVICE_URL', 8600)}/health"),
+        "clinic": lambda: probe_http(f"http://{host}:{url_port('CLINIC_SERVICE_URL', 8700)}/health"),
         "telephony": lambda: probe_http(f"http://{host}:{url_port('TELEPHONY_SERVICE_URL', 8750)}/health"),
         "did": lambda: probe_http(f"http://{host}:{url_port('NEXT_PUBLIC_DID_SERVICE_URL', 8200)}/health"),
         "webcall": lambda: probe_http(f"http://{host}:{url_port('NEXT_PUBLIC_WEBCALL_URL', 8300)}/health"),

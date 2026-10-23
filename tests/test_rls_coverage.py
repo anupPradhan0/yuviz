@@ -238,6 +238,9 @@ _EXPLICIT_OVERRIDE_REASONS = {
     # Retrieval hot path: parallel search branches and the post-response log writer have no request context
     # of their own (separate tasks), so they name the tenant the resolved plan belongs to.
     "retrieval-search", "retrieval-log",
+    # Clinic workers act for the row's own tenant after a cross-tenant claim; the seed script names its tenant.
+    "clinic-reminder-dial", "clinic-tool-call", "clinic-outbox-deliver", "clinic-outbox-done", "clinic-outbox-failed",
+    "seed-clinic-demo",
 }
 
 # Every platform_conn(reason=...) literal; a new bypass must be added here.
@@ -281,6 +284,9 @@ _BYPASS_REASONS = {
     # request field, and the only thing that escapes the connection is a
     # boolean the caller never sees — disconnect returns a constant body.
     "oauth-shared-grant-check",
+    # Clinic: one worker leases due rows across tenants; the bearer key is what names the tenant;
+    # originate results are matched by FreeSWITCH job uuid, never by tenant-supplied input.
+    "clinic-outbox-claim", "clinic-reminder-claim", "clinic-reminder-job-event", "clinic-tool-key-lookup",
 }
 
 # Platform-branch mutations with genuinely no tenant to stamp.

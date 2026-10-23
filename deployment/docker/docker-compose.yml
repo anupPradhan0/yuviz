@@ -166,7 +166,9 @@ services:
       TOOLEXEC_ARGS_HMAC_KEY: ${TOOLEXEC_ARGS_HMAC_KEY:?run deployment/sh/dev.sh to generate deployment/.env}
       TOOLEXEC_ARGS_HMAC_KEY_REF: env:TOOLEXEC_ARGS_HMAC_KEY
       TOOLEXEC_EXECUTE_SUBJECTS: ${CONFIG_SERVICE_EMAIL}
-      TOOLEXEC_HTTP_HOST_ALLOWLIST: ${TOOLEXEC_HTTP_HOST_ALLOWLIST:-}
+      TOOLEXEC_HTTP_HOST_ALLOWLIST: ${TOOLEXEC_HTTP_HOST_ALLOWLIST:-clinic}
+      TOOLEXEC_INTERNAL_ENDPOINTS: ${TOOLEXEC_INTERNAL_ENDPOINTS:-clinic:8700}
+      TOOLEXEC_CALENDAR_SUBJECTS: ${CLINIC_SERVICE_EMAIL:-clinic-service@internal.yuviz.ai}
       TOOLEXEC_OAUTH_REDIRECT_URI: ${TOOLEXEC_OAUTH_REDIRECT_URI:-}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${TOOLEXEC_PORT:-8600}:8600"
@@ -182,12 +184,44 @@ services:
       retries: 30
       start_period: 20s
 
+  clinic:
+    <<: *python-service
+    command: ["python", "-m", "services.clinic"]
+    environment:
+      CLINIC_SERVICE_URL: http://clinic:8700
+      LISTEN_HOST: "0.0.0.0"
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      JWT_SECRET: ${JWT_SECRET}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
+      ADMIN_UI_ORIGINS: ${ADMIN_UI_URL:-http://localhost:3000}
+      CONFIG_SERVICE_URL: http://config:8000
+      TOOLEXEC_SERVICE_URL: http://toolexec:8600
+      CLINIC_SERVICE_EMAIL: ${CLINIC_SERVICE_EMAIL:-clinic-service@internal.yuviz.ai}
+      CLINIC_SERVICE_PASSWORD: ${CLINIC_SERVICE_PASSWORD:-}
+      FREESWITCH_ESL_HOST: ${FREESWITCH_ESL_HOST:-freeswitch}
+      FREESWITCH_ESL_PORT: ${FREESWITCH_ESL_PORT:-8021}
+      FREESWITCH_ESL_PASSWORD: ${FREESWITCH_ESL_PASSWORD:-}
+      CLINIC_REMINDER_SIP_GATEWAY: ${CLINIC_REMINDER_SIP_GATEWAY:-}
+      CLINIC_DIAL_FORMAT: ${CLINIC_DIAL_FORMAT:-national0}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${CLINIC_PORT:-8700}:8700"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8700/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
   conversation:
     <<: *python-service
     command: ["python", "-m", "services.conversation",
               "--port", "50051", "--mode", "pipeline", "--log-level", "INFO"]
     environment:
       POSTGRES_DSN: ${POSTGRES_DSN}
+      VOICEAI_BUSINESS_TIMEZONE: ${VOICEAI_BUSINESS_TIMEZONE:-}
       REDIS_URL: ${REDIS_URL}
       CONFIG_SERVICE_URL: http://config:8000
       CONFIG_SERVICE_EMAIL: ${CONFIG_SERVICE_EMAIL}

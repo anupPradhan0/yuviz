@@ -3,7 +3,7 @@
 set -euo pipefail
 
 echo "→ applying schemas"
-for f in schema knowledge_schema telephony_schema; do
+for f in schema knowledge_schema telephony_schema clinic_schema; do
     psql "$POSTGRES_DSN" -v ON_ERROR_STOP=1 -q -f "/app/database/${f}.sql" >/dev/null
     echo "  ✓ ${f}.sql"
 done

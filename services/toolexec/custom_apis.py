@@ -46,7 +46,28 @@ def _host_allowlist() -> frozenset[str]:
     )
 
 
-def _ip_is_denied(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+def _internal_endpoints() -> frozenset[tuple[str, int]]:
+    """Operator-listed `host:port` pairs of platform services built to be called as custom
+    APIs (the clinic service), which may resolve to loopback or private addresses. Exact
+    host AND port, so listing one service never opens the rest of the internal network.
+    Such a service must authenticate each call itself and scope it to one tenant."""
+    pairs = set()
+    for item in os.environ.get("TOOLEXEC_INTERNAL_ENDPOINTS", "").split(","):
+        host, sep, port = item.strip().lower().rpartition(":")
+        if sep and host and port.isdigit():
+            pairs.add((host, int(port)))
+    return frozenset(pairs)
+
+
+_INTERNAL_ALLOWED_NETS = [ipaddress.ip_network(n) for n in (
+    "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7",
+)]
+
+
+def _ip_is_denied(ip: ipaddress.IPv4Address | ipaddress.IPv6Address, *, internal: bool = False) -> bool:
+    if internal:
+        # Loopback/private only: never link-local (cloud metadata) or anything else.
+        return not any(ip in net for net in _INTERNAL_ALLOWED_NETS)
     return any(ip in net for net in _DENIED_NETS) or not ip.is_global
 
 
@@ -90,6 +111,7 @@ async def resolve_and_validate_endpoint(url: str) -> tuple[str, list[str]]:
     if parts.port is not None and parts.port != default_port and not allowlisted:
         raise ValueError("invalid_endpoint_url: non-default port requires an allow-listed host")
     port = parts.port or default_port
+    internal = (hostname, port) in _internal_endpoints()
 
     raw_addresses = await _resolve_addresses(hostname, port)
     if not raw_addresses:
@@ -99,7 +121,7 @@ async def resolve_and_validate_endpoint(url: str) -> tuple[str, list[str]]:
     allowed_ips: list[str] = []
     for raw_ip in raw_addresses:
         ip = ipaddress.ip_address(raw_ip.split("%")[0])  # strip an IPv6 zone id, if present
-        if _ip_is_denied(ip):
+        if _ip_is_denied(ip, internal=internal):
             # Host/IP logged only: returning them would be an internal-network recon channel.
             log.warning(
                 "resolve_and_validate_endpoint: %r resolves to a denied address (%s)", hostname, ip,

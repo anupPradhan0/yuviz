@@ -496,6 +496,28 @@ BEGIN
     ALTER TABLE call_flow_versions FORCE  ROW LEVEL SECURITY;
 END $$;
 
+-- ── Clinic appointments (database/clinic_schema.sql) ────────────────────────
+-- Every clinic table carries tenant_id. Skipped when clinic_schema.sql was not applied.
+DO $$
+DECLARE t TEXT;
+BEGIN
+    FOREACH t IN ARRAY ARRAY[
+        'clinic_settings', 'clinic_api_keys', 'clinic_departments', 'clinic_doctors',
+        'clinic_doctor_schedules', 'clinic_doctor_leaves', 'clinic_appointments',
+        'clinic_slot_holds', 'clinic_outbox', 'clinic_reminder_calls'
+    ] LOOP
+        CONTINUE WHEN to_regclass(t) IS NULL;
+        EXECUTE format('DROP POLICY IF EXISTS %I ON %I', t || '_tenant_isolation', t);
+        EXECUTE format(
+            'CREATE POLICY %I ON %I FOR ALL TO yuviz_app '
+            'USING (tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid) '
+            'WITH CHECK (tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid)',
+            t || '_tenant_isolation', t);
+        EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
+        EXECUTE format('ALTER TABLE %I FORCE  ROW LEVEL SECURITY', t);
+    END LOOP;
+END $$;
+
 -- ── Intentionally without RLS ───────────────────────────────────────────────
 -- tenants: it IS the tenant, and tenant_conn()'s own resolver reads it.
 -- conversation_node_heartbeats: infrastructure, not tenant-owned.

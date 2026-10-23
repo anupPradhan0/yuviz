@@ -74,6 +74,7 @@ createdb voiceai
 psql voiceai -v ON_ERROR_STOP=1 -f database/schema.sql
 psql voiceai -f database/knowledge_schema.sql
 psql voiceai -f database/telephony_schema.sql
+psql voiceai -f database/clinic_schema.sql
 ```
 
 `schema.sql` seeds a `default` tenant row — the seed script in step 6

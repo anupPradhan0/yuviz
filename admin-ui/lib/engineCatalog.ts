@@ -37,6 +37,7 @@ export const ENGINES_BY_ROLE: Record<ProviderRole, EngineOption[]> = {
     { value: "elevenlabs", label: "ElevenLabs (cloud)" },
     { value: "cartesia", label: "Cartesia (cloud)" },
     { value: "deepgram", label: "Deepgram Aura (cloud)" },
+    { value: "sarvam", label: "Sarvam Bulbul (cloud, Indian languages)" },
   ],
   embedding: [
     { value: "ollama", label: "Ollama (local)" },
@@ -61,6 +62,8 @@ export const MODELS_BY_ENGINE: Record<string, string[] | null> = {
   cohere: ["command-r7b-12-2024", "command-r-08-2024", "command-a-03-2025"],
   // "-latest" aliases survive Google deprecating pinned versions for new callers.
   gemini: ["gemini-flash-latest", "gemini-pro-latest", "gemini-2.5-flash", "gemini-2.5-pro"],
+  // The voice list below is bulbul:v4-flash's; speakers differ between Bulbul models.
+  sarvam: ["bulbul:v4-flash"],
 };
 
 // Separate from MODELS_BY_ENGINE because engine names overlap with the llm role.
@@ -117,6 +120,16 @@ export const VOICES_BY_ENGINE: Record<string, VoiceOption[] | null> = {
   ],
   elevenlabs: null, // account-specific voice_id — never guessed, always free text
   cartesia: null,   // voice id is a UUID from the account's Cartesia voice list
+  // bulbul:v4-flash personas for code-mixed Hindi + English ("enhi"); the full catalog
+  // (other languages and styles) is in Sarvam's voices guide and can be typed in.
+  sarvam: [
+    { id: "simran_enhi_customer",  label: "Simran (customer)",  gender: "female" },
+    { id: "ishita_enhi_customer",  label: "Ishita (customer)",  gender: "female" },
+    { id: "shalini_enhi_customer", label: "Shalini (customer)", gender: "female" },
+    { id: "sunny_enhi_customer",   label: "Sunny (customer)",   gender: "male" },
+    { id: "shubh_enhi_ads",        label: "Shubh (default)",    gender: "male" },
+    { id: "shubh_enhi_banking",    label: "Shubh (banking)",    gender: "male" },
+  ],
 };
 
 // Suggested values for agents.language; not enforced (free text via "Other").

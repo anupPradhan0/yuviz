@@ -122,6 +122,9 @@ def tts_languages(engine: str, model: str | None, voice: str | None = None) -> f
     if engine == "elevenlabs":
         m = (model or "eleven_turbo_v2_5").lower()
         return frozenset({"en"}) if m in _ELEVENLABS_ENGLISH_ONLY_MODELS else _ELEVENLABS_MULTILINGUAL
+    if engine == "sarvam":
+        # Bulbul speaks Indian languages and Indian English; of ours, English and Hindi.
+        return frozenset({"en", "hi"})
     if engine == "kokoro":
         # A Kokoro voice speaks its own language only: an English voice reading Hindi
         # phonemes comes out barely intelligible.
@@ -152,6 +155,8 @@ def tts_model_of(engine: str, model: str | None, extra: dict | None) -> str | No
         return extra.get("model") or model
     if engine == "elevenlabs":
         return extra.get("model_id") or model
+    if engine == "sarvam":
+        return extra.get("model") or model
     return model
 
 

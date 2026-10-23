@@ -175,6 +175,9 @@ class ToolCallOrchestrator:
                         turn_id, event.tool_name, dropped,
                     )
                     event = replace(event, arguments=clean_args)
+                fixed_args = strip_api_namespace(event.tool_name, event.arguments)
+                if fixed_args is not event.arguments:
+                    event = replace(event, arguments=fixed_args)
                 log.info(
                     "tool call turn=%s: %s(%s)",
                     turn_id, event.tool_name,
@@ -428,6 +431,21 @@ def _log_background_tool_result(task: "asyncio.Task[ToolResult]") -> None:
     exc = task.exception()
     if exc is not None:
         log.warning("ToolCallOrchestrator: backgrounded tool call (post-cancel) failed: %r", exc)
+
+
+_TOOL_NAMESPACE_PREFIX = "functions."
+
+
+def strip_api_namespace(tool_name: str, arguments: Any) -> Any:
+    """OpenAI models sometimes write execute_api's api_name as "functions.<name>", leaking the
+    namespace they see their own tools under; the enum then refuses an API the agent has.
+    Returns the arguments with the prefix dropped, or the same object when there is none."""
+    if tool_name != "execute_api" or not isinstance(arguments, dict):
+        return arguments
+    api_name = arguments.get("api_name")
+    if isinstance(api_name, str) and api_name.startswith(_TOOL_NAMESPACE_PREFIX):
+        return {**arguments, "api_name": api_name[len(_TOOL_NAMESPACE_PREFIX):]}
+    return arguments
 
 
 def _is_side_effecting(event: ToolCallEvent, policy: Any, definition: ToolDefinition | None) -> bool:

@@ -342,6 +342,19 @@ async def _make_elevenlabs_tts(cfg: ProviderConfig, api_key: str | None) -> Any:
     )
 
 
+async def _make_sarvam_tts(cfg: ProviderConfig, api_key: str | None) -> Any:
+    from .providers.tts.sarvam import DEFAULT_MODEL, DEFAULT_SPEAKER, SarvamTTS
+
+    # The voice is a Sarvam speaker name (lowercase, and it must belong to the model).
+    return SarvamTTS(
+        api_key=_require_api_key(cfg, api_key),
+        speaker=(cfg.voice or "").strip().lower() or DEFAULT_SPEAKER,
+        model=cfg.extra.get("model") or cfg.model or DEFAULT_MODEL,
+        pace=voice_speed(cfg),
+        language=cfg.language,
+    )
+
+
 async def _make_deepgram_tts(cfg: ProviderConfig, api_key: str | None) -> Any:
     from .providers.tts.deepgram import DeepgramTTS
 
@@ -398,6 +411,7 @@ _DEFAULT_REGISTRY: dict[tuple[str, str], ProviderFactory] = {
     ("tts", "kokoro"):         _make_kokoro_tts,
     ("tts", "elevenlabs"):     _make_elevenlabs_tts,
     ("tts", "deepgram"):       _make_deepgram_tts,
+    ("tts", "sarvam"):         _make_sarvam_tts,
     ("tts", "cartesia"):       _make_cartesia_tts,
 }
 

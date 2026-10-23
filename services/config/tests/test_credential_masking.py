@@ -307,6 +307,7 @@ _WIRED_REF_COLUMNS = {
 # Ref-shaped columns that are not Config credential refs, and why.
 _CLASSIFIED_REF_COLUMNS = {
     ("calls", "recording_ref"),                   # storage path, never decrypted
+    ("clinic_settings", "twilio_auth_token_ref"), # clinic service only; no API returns it, resolve_secret takes tenant-bound enc: or env:
     ("kb_documents", "source_ref"),               # StorageProvider path
     ("carriers", "carrier_account_ref"),          # account identifier; no code decrypts it
     ("oauth_connections", "access_token_ref"),    # toolexec, sealed enc:t1. per tenant

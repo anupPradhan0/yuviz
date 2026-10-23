@@ -16,7 +16,6 @@ import signal
 import socket
 import sys
 from collections.abc import Coroutine
-from datetime import datetime, timezone
 from typing import Any
 
 import grpc.aio
@@ -42,7 +41,7 @@ from .callflow.resolver import resolve_call_flow
 from .callflow.runner import CallFlowRunner
 from .echo import EchoConversationHandler
 from .fillers import FillerSelector
-from .pipeline import PipelineConversationHandler
+from .pipeline import PipelineConversationHandler, business_now
 from . import rejection
 from .rejection import RejectionHandler
 from .pipeline_config import PipelineConfig
@@ -422,7 +421,7 @@ async def serve(port: int, args: argparse.Namespace) -> None:
                 return await _build_pipeline_handler(ctx, runtime_config, bundle)
             graph, flow = resolved_flow
 
-            now = datetime.now(timezone.utc)
+            now = business_now()
             call_context_variables = {
                 "caller_number": ctx.caller_did,
                 "called_number": ctx.called_did,

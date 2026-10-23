@@ -1,0 +1,13 @@
+<!-- Clinic reminder calls (services/clinic/reminders.py): the answered patient leg is sent to
+     the internal-only extension `clinic-reminders`, which phone_numbers routes to the reminder
+     agent. The second condition admits only channels the clinic service originated, which carry
+     yuviz_remote_ani; no SIP caller can set a channel variable, so nobody can dial in to it.
+     Install into the public dialplan context, e.g. dialplan/public/02_clinic_reminders.xml. -->
+<include>
+  <extension name="yuviz_clinic_reminders">
+    <condition field="destination_number" expression="^clinic-reminders$"/>
+    <condition field="${yuviz_remote_ani}" expression="^[0-9]{8,15}$">
+      <action application="lua" data="start_voice_ai.lua"/>
+    </condition>
+  </extension>
+</include>

@@ -28,9 +28,14 @@ end
 -- (transfer, hangup) to the correct node in a multi-node deployment.
 local fs_host = session:getVariable("local_ip_v4") or ""
 
+-- A reminder call placed by the clinic service sets yuviz_remote_ani in its originate command
+-- (server side; a SIP INVITE cannot set it), so the agent sees the patient it dialled rather
+-- than the hospital's own caller ID. Every other call has no such variable.
+local ani = session:getVariable("yuviz_remote_ani") or session:getVariable("caller_id_number")
+
 local meta = string.format('{"did":"%s","ani":"%s","direction":"inbound","freeswitch_host":"%s"}',
     sip_token(session:getVariable("destination_number")),
-    sip_token(session:getVariable("caller_id_number")),
+    sip_token(ani),
     sip_token(fs_host))
 
 local result = freeswitch.API():execute("uuid_audio_fork",

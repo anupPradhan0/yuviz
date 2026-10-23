@@ -12,6 +12,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any, AsyncGenerator
 
 from libs.config_sdk import RuntimeConfig, validate_transfer_timeout_ms
@@ -111,11 +112,24 @@ _END_CALL_CONDITION_DEFAULT = (
 )
 
 
+def business_now() -> datetime:
+    """Now in VOICEAI_BUSINESS_TIMEZONE (an IANA name, default UTC): the deployment's local
+    time, so "today" and "tomorrow" match the callers' calendar, not UTC's."""
+    name = os.environ.get("VOICEAI_BUSINESS_TIMEZONE", "UTC")
+    try:
+        tz = ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        log.warning("VOICEAI_BUSINESS_TIMEZONE=%r is not a known timezone; using UTC", name)
+        tz = timezone.utc
+    return datetime.now(tz)
+
+
 def _build_current_date_context() -> str:
-    """Today's date (UTC) so the LLM can resolve relative dates; computed per call."""
-    now = datetime.now(timezone.utc)
+    """Today's date in the business timezone so the LLM can resolve relative dates; computed per call."""
+    now = business_now()
     return (
-        f"\n\nToday's date is {now.strftime('%Y-%m-%d')} ({now.strftime('%A')}), UTC. "
+        f"\n\nToday's date is {now.strftime('%Y-%m-%d')} ({now.strftime('%A')}), "
+        f"and the local time is {now.strftime('%H:%M')} ({now.tzname()}). "
         "Use this to resolve any relative date the caller mentions (e.g. \"tomorrow\", "
         "\"next Monday\", \"in two weeks\") into an exact date yourself before calling any tool."
     )
@@ -460,7 +474,7 @@ class PipelineConversationHandler:
         self._booking_fabrication_counter = GuardrailCounter()
         self._sessions: dict[str, _SessionState] = {}
         # Conversation workflow — graph_for() falls back to starter, never None.
-        now = datetime.now(timezone.utc)
+        now = business_now()
         self._extractor = VariableExtractor(self._llm, self._on_variables_extracted)
         # Threshold from this pipeline's trim cap so summarization and trim
         # stay aligned (see summary_threshold_for).

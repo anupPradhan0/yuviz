@@ -17,7 +17,8 @@ from fastapi.responses import JSONResponse
 
 from . import custom_apis, db, executor, presets
 from .routers import (
-    agent_apis, chain_runs, connector_presets, custom_apis as custom_apis_router, execute, oauth_connections,
+    agent_apis, calendar_events, chain_runs, connector_presets, custom_apis as custom_apis_router, execute,
+    oauth_connections,
 )
 
 log = logging.getLogger(__name__)
@@ -70,6 +71,7 @@ app.include_router(connector_presets.router)
 app.include_router(agent_apis.router)
 app.include_router(chain_runs.router)
 app.include_router(execute.router)
+app.include_router(calendar_events.router)
 
 
 @app.exception_handler(custom_apis.DependentApiExists)
