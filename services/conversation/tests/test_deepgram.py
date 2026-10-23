@@ -73,27 +73,38 @@ async def test_transcribe_returns_empty_on_unexpected_response_shape():
 
 
 class _FakeLiveWs:
-    """Fake live WebSocket — records everything sent, yields a scripted
-    sequence of incoming Results messages when iterated."""
+    """Fake live WebSocket. Scripted Results are delivered in order; a Finalize message is answered with a
+    from_finalize Results, like Deepgram. The connection stays open until close() is called."""
 
-    def __init__(self, incoming: list[dict]) -> None:
-        self._incoming = list(incoming)
+    def __init__(self, incoming: list[dict], *, ack_finalize: bool = True) -> None:
+        self._q: asyncio.Queue = asyncio.Queue()
+        for message in incoming:
+            self._q.put_nowait(json.dumps(message))
+        self._ack_finalize = ack_finalize
         self.sent: list = []
         self.closed = False
 
+    def push(self, message: dict) -> None:
+        self._q.put_nowait(json.dumps(message))
+
     async def send(self, data):
         self.sent.append(data)
+        if self._ack_finalize and isinstance(data, str) and json.loads(data).get("type") == "Finalize":
+            self.push({"type": "Results", "is_final": True, "from_finalize": True,
+                       "channel": {"alternatives": [{"transcript": ""}]}})
 
     async def close(self):
         self.closed = True
+        self._q.put_nowait(None)
 
     def __aiter__(self):
         return self
 
     async def __anext__(self):
-        if not self._incoming:
+        item = await self._q.get()
+        if item is None:
             raise StopAsyncIteration
-        return json.dumps(self._incoming.pop(0))
+        return item
 
 
 def _make_streaming_stt(incoming: list[dict]) -> tuple[DeepgramSTT, _FakeLiveWs]:
@@ -124,8 +135,10 @@ async def test_feed_stream_then_finalize_returns_concatenated_final_segments():
     assert result.confidence == pytest.approx(0.8)  # last is_final segment's confidence
     assert fake_ws.sent[0] == b"\x01\x02"
     assert fake_ws.sent[1] == b"\x03\x04"
-    assert json.loads(fake_ws.sent[2]) == {"type": "CloseStream"}
-    assert fake_ws.closed
+    assert json.loads(fake_ws.sent[2]) == {"type": "Finalize"}
+    # The connection outlives the utterance: it is flushed, not closed, so the next turn pays no connect time.
+    assert not fake_ws.closed
+    assert "s1" in stt._streams
 
 
 async def test_finalize_stream_with_no_prior_feed_returns_empty_without_opening_a_connection():
@@ -336,3 +349,309 @@ async def test_underscore_language_tag_is_canonicalised_for_rest_and_live():
     stt._ws_connect = _fake_connect
     await stt.feed_stream("s1", b"\x01\x02", 16000, language="en_US")
     assert "language=en-US" in urls[0]
+
+
+# ── Persistent connection, prewarm, endpointing ──────────────────────────────
+
+def _final(text, conf=0.9, **extra):
+    return {"type": "Results", "is_final": True, "channel": {"alternatives": [{"transcript": text, "confidence": conf}]}, **extra}
+
+
+async def test_one_connection_serves_consecutive_utterances_with_clean_text_each_time():
+    connects = []
+    ws = _FakeLiveWs([])
+
+    async def _connect(url, **kwargs):
+        connects.append(url)
+        return ws
+
+    stt = DeepgramSTT(api_key="test-key")
+    stt._ws_connect = _connect
+
+    await stt.feed_stream("s1", b"\x01", 16000)
+    ws.push(_final("first question"))
+    await asyncio.sleep(0)
+    first = await stt.finalize_stream("s1", b"", 16000)
+
+    await stt.feed_stream("s1", b"\x02", 16000)
+    ws.push(_final("second one"))
+    await asyncio.sleep(0)
+    second = await stt.finalize_stream("s1", b"", 16000)
+
+    assert (first.text, second.text) == ("first question", "second one")
+    assert len(connects) == 1
+    assert [m for m in ws.sent if isinstance(m, str) and json.loads(m)["type"] == "Finalize"].__len__() == 2
+    assert not ws.closed
+    await stt.cancel_stream("s1")
+
+
+async def test_prewarm_opens_the_connection_before_any_audio_and_the_first_chunk_reuses_it():
+    connects = []
+    ws = _FakeLiveWs([])
+
+    async def _connect(url, **kwargs):
+        connects.append(url)
+        return ws
+
+    stt = DeepgramSTT(api_key="test-key")
+    stt._ws_connect = _connect
+
+    await stt.prewarm_stream("s1", 16000)
+    assert len(connects) == 1 and ws.sent == []
+
+    await stt.feed_stream("s1", b"\x01", 16000)
+    assert len(connects) == 1 and ws.sent == [b"\x01"]
+    await stt.cancel_stream("s1")
+
+
+async def test_a_prewarm_racing_the_first_chunk_opens_only_one_connection():
+    connects = []
+    gate = asyncio.Event()
+    ws = _FakeLiveWs([])
+
+    async def _slow_connect(url, **kwargs):
+        connects.append(url)
+        await gate.wait()
+        return ws
+
+    stt = DeepgramSTT(api_key="test-key")
+    stt._ws_connect = _slow_connect
+
+    warm = asyncio.create_task(stt.prewarm_stream("s1", 16000))
+    feed = asyncio.create_task(stt.feed_stream("s1", b"\x01", 16000))
+    await asyncio.sleep(0.01)
+    gate.set()
+    await asyncio.gather(warm, feed)
+
+    assert len(connects) == 1
+    assert ws.sent == [b"\x01"]
+    await stt.cancel_stream("s1")
+
+
+async def test_prewarm_swallows_a_failed_connect():
+    async def _boom(url, **kwargs):
+        raise OSError("no route")
+
+    stt = DeepgramSTT(api_key="test-key")
+    stt._ws_connect = _boom
+    await stt.prewarm_stream("s1", 16000)  # must not raise
+    assert "s1" not in stt._streams
+
+
+async def test_finalize_uses_what_arrived_when_the_flush_acknowledgement_is_late(monkeypatch):
+    monkeypatch.setattr("services.conversation.providers.stt.deepgram._FINALIZE_TIMEOUT_S", 0.05)
+    ws = _FakeLiveWs([_final("already final")], ack_finalize=False)
+
+    async def _connect(url, **kwargs):
+        return ws
+
+    stt = DeepgramSTT(api_key="test-key")
+    stt._ws_connect = _connect
+    await stt.feed_stream("s1", b"\x01", 16000)
+    await asyncio.sleep(0)
+
+    result = await stt.finalize_stream("s1", b"", 16000)
+
+    assert result.text == "already final"
+    await stt.cancel_stream("s1")
+
+
+async def test_a_connection_closed_by_the_server_is_dropped_and_the_next_chunk_reconnects():
+    connects = []
+    sockets = []
+
+    async def _connect(url, **kwargs):
+        connects.append(url)
+        sockets.append(_FakeLiveWs([]))
+        return sockets[-1]
+
+    stt = DeepgramSTT(api_key="test-key")
+    stt._ws_connect = _connect
+    await stt.feed_stream("s1", b"\x01", 16000)
+    await sockets[0].close()          # server hangs up
+    await asyncio.sleep(0.01)         # read loop ends and evicts
+    assert "s1" not in stt._streams
+
+    await stt.feed_stream("s1", b"\x02", 16000)
+    assert len(connects) == 2
+    await stt.cancel_stream("s1")
+
+
+async def test_finalize_on_a_dead_connection_falls_back_to_rest_with_the_buffered_audio():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["bytes"] = request.content
+        return httpx.Response(200, json={"results": {"channels": [{"alternatives": [{"transcript": "from rest", "confidence": 0.7}]}]}})
+
+    stt = _make_stt(handler)
+    result = await stt.finalize_stream("never-opened", b"\x00\x01" * 100, 16000)
+
+    assert result.text == "from rest"
+    assert seen["bytes"] == b"\x00\x01" * 100
+
+
+async def test_finalize_whose_send_fails_evicts_and_falls_back_to_rest():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": {"channels": [{"alternatives": [{"transcript": "recovered", "confidence": 0.7}]}]}})
+
+    class _BrokenOnFinalize(_FakeLiveWs):
+        async def send(self, data):
+            if isinstance(data, str) and json.loads(data).get("type") == "Finalize":
+                raise OSError("closed")
+            await super().send(data)
+
+    stt = _make_stt(handler)
+    ws = _BrokenOnFinalize([])
+
+    async def _connect(url, **kwargs):
+        return ws
+
+    stt._ws_connect = _connect
+    await stt.feed_stream("s1", b"\x01", 16000)
+    result = await stt.finalize_stream("s1", b"\x01" * 64, 16000)
+
+    assert result.text == "recovered"
+    assert "s1" not in stt._streams and ws.closed
+
+
+async def test_endpointing_is_sent_only_when_configured():
+    urls = []
+
+    async def _connect(url, **kwargs):
+        urls.append(url)
+        return _FakeLiveWs([])
+
+    plain = DeepgramSTT(api_key="test-key")
+    plain._ws_connect = _connect
+    await plain.feed_stream("s1", b"\x01", 16000)
+    tuned = DeepgramSTT(api_key="test-key", endpointing_ms=350)
+    tuned._ws_connect = _connect
+    await tuned.feed_stream("s1", b"\x01", 16000)
+
+    assert "endpointing" not in urls[0]
+    assert "endpointing=350" in urls[1]
+    await plain.cancel_stream("s1")
+    await tuned.cancel_stream("s1")
+
+
+async def test_a_different_language_reopens_the_connection():
+    connects = []
+    sockets = []
+
+    async def _connect(url, **kwargs):
+        connects.append(url)
+        sockets.append(_FakeLiveWs([]))
+        return sockets[-1]
+
+    stt = DeepgramSTT(api_key="test-key", language="en")
+    stt._ws_connect = _connect
+    await stt.feed_stream("s1", b"\x01", 16000)
+    await stt.feed_stream("s1", b"\x02", 16000, language="hi")
+
+    assert len(connects) == 2 and "language=hi" in connects[1]
+    assert sockets[0].closed
+    await stt.cancel_stream("s1")
+
+
+async def test_finalize_skips_the_flush_when_deepgram_already_reported_the_endpoint():
+    ws = _FakeLiveWs([])
+
+    async def _connect(url, **kwargs):
+        return ws
+
+    stt = DeepgramSTT(api_key="test-key")
+    stt._ws_connect = _connect
+    await stt.feed_stream("s1", b"\x01", 16000)
+    ws.push({**_final("what is article fifteen"), "speech_final": True})
+    await asyncio.sleep(0.01)
+
+    result = await stt.finalize_stream("s1", b"", 16000)
+
+    assert result.text == "what is article fifteen"
+    assert not [m for m in ws.sent if isinstance(m, str) and json.loads(m)["type"] == "Finalize"]
+    await stt.cancel_stream("s1")
+
+
+async def test_finalize_still_flushes_when_words_arrived_after_the_endpoint():
+    ws = _FakeLiveWs([])
+
+    async def _connect(url, **kwargs):
+        return ws
+
+    stt = DeepgramSTT(api_key="test-key")
+    stt._ws_connect = _connect
+    await stt.feed_stream("s1", b"\x01", 16000)
+    ws.push({**_final("what is article fifteen"), "speech_final": True})
+    ws.push({"type": "Results", "is_final": False, "channel": {"alternatives": [{"transcript": "and also"}]}})
+    await asyncio.sleep(0.01)
+
+    await stt.finalize_stream("s1", b"", 16000)
+
+    assert [m for m in ws.sent if isinstance(m, str) and json.loads(m)["type"] == "Finalize"]
+    await stt.cancel_stream("s1")
+
+
+async def test_the_skip_does_not_leak_into_the_next_utterance():
+    ws = _FakeLiveWs([])
+
+    async def _connect(url, **kwargs):
+        return ws
+
+    stt = DeepgramSTT(api_key="test-key")
+    stt._ws_connect = _connect
+    await stt.feed_stream("s1", b"\x01", 16000)
+    ws.push({**_final("first"), "speech_final": True})
+    await asyncio.sleep(0.01)
+    await stt.finalize_stream("s1", b"", 16000)
+
+    await stt.feed_stream("s1", b"\x02", 16000)
+    ws.push(_final("second"))          # a final segment but no endpoint yet
+    await asyncio.sleep(0.01)
+    result = await stt.finalize_stream("s1", b"", 16000)
+
+    assert result.text == "second"
+    assert len([m for m in ws.sent if isinstance(m, str) and json.loads(m)["type"] == "Finalize"]) == 1
+    await stt.cancel_stream("s1")
+
+
+async def test_a_late_flush_reply_cannot_leak_into_the_next_utterance(monkeypatch):
+    monkeypatch.setattr("services.conversation.providers.stt.deepgram._FINALIZE_TIMEOUT_S", 0.05)
+    sockets = [_FakeLiveWs([_final("first")], ack_finalize=False), _FakeLiveWs([])]
+    connects = iter(sockets)
+
+    async def _connect(url, **kwargs):
+        return next(connects)
+
+    stt = DeepgramSTT(api_key="test-key")
+    stt._ws_connect = _connect
+    await stt.feed_stream("s1", b"\x01", 16000)
+    await asyncio.sleep(0)
+    assert (await stt.finalize_stream("s1", b"", 16000)).text == "first"
+    assert sockets[0].closed                      # dropped, so its late reply has nowhere to land
+
+    sockets[0].push(_final("late tail"))
+    await stt.feed_stream("s1", b"\x01", 16000)   # a fresh connection for the next utterance
+    sockets[1].push(_final("second"))
+    await asyncio.sleep(0.01)
+    assert (await stt.finalize_stream("s1", b"", 16000)).text == "second"
+    await stt.cancel_stream("s1")
+
+
+async def test_a_prewarm_still_connecting_when_the_call_ends_is_closed():
+    ws = _FakeLiveWs([])
+    gate = asyncio.Event()
+
+    async def _connect(url, **kwargs):
+        await gate.wait()
+        return ws
+
+    stt = DeepgramSTT(api_key="test-key")
+    stt._ws_connect = _connect
+    prewarm = asyncio.create_task(stt.prewarm_stream("s1", 16000))
+    await asyncio.sleep(0)
+    await stt.cancel_stream("s1")                 # the caller hung up before the connection opened
+    gate.set()
+    await prewarm
+
+    assert ws.closed and "s1" not in stt._streams

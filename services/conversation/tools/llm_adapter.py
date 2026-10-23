@@ -52,6 +52,8 @@ class ToolCallStartedEvent(TurnEvent):
     # True = a progress signal for a slow local tool (speak a filler), not a tool call to count: the
     # fabricated-booking guard must not be satisfied by a lookup that merely ran long.
     filler_only: bool = False
+    # True = the tool finished within the filler delay, so no filler is wanted. The call is still counted.
+    silent: bool = False
 
 
 @dataclass(frozen=True)

@@ -141,7 +141,7 @@ async def test_tool_call_executes_folds_result_and_continues_to_final_answer():
     events = [e async for e in orchestrator.run_turn("agent1", "t1", "c1", "s1", history)]
 
     assert events == [
-        ToolCallStartedEvent(tool_name="execute_api"),
+        ToolCallStartedEvent(tool_name="execute_api", silent=True),
         TokenEvent(text="You're booked!"),
     ]
     assert llm.call_count == 2
@@ -246,7 +246,7 @@ async def test_deterministic_response_short_circuits_llm_narration():
     )]
 
     assert events == [
-        ToolCallStartedEvent(tool_name="execute_api"),
+        ToolCallStartedEvent(tool_name="execute_api", silent=True),
         DeterministicSpokenEvent(text="You're all set — I've booked your appointment for Friday at 3 PM."),
     ]
     assert llm.call_count == 1  # never asked to narrate the result
@@ -274,8 +274,8 @@ async def test_max_tool_iterations_forces_final_generation_without_tools():
     events = [e async for e in orchestrator.run_turn("agent1", "t1", "c1", "s1", [ChatMessage(role="user", content="book")])]
 
     assert events == [
-        ToolCallStartedEvent(tool_name="execute_api"),
-        ToolCallStartedEvent(tool_name="execute_api"),
+        ToolCallStartedEvent(tool_name="execute_api", silent=True),
+        ToolCallStartedEvent(tool_name="execute_api", silent=True),
         TokenEvent(text="Sorry, having trouble booking that."),
     ]
     assert llm.call_count == 3
@@ -299,7 +299,7 @@ async def test_unknown_tool_name_is_a_failed_result_not_a_crash():
     events = [e async for e in orchestrator.run_turn("agent1", "t1", "c1", "s1", history)]
 
     assert events == [
-        ToolCallStartedEvent(tool_name="send_email"),
+        ToolCallStartedEvent(tool_name="send_email", silent=True),
         TokenEvent(text="I can't do that."),
     ]
     assert json.loads(history[2].content)["status"] == "error"
@@ -351,7 +351,7 @@ async def test_cancel_event_stops_waiting_on_an_in_flight_tool_call():
     cancel_event.set()
     events = await asyncio.wait_for(task, timeout=1.0)
 
-    assert events == [ToolCallStartedEvent(tool_name="execute_api")]
+    assert events == [ToolCallStartedEvent(tool_name="execute_api", silent=True)]
     assert json.loads(history[2].content)["status"] == "error"
     assert json.loads(history[2].content)["error"]["code"] == "cancelled"
     assert llm.call_count == 1  # never asked the LLM what to do next — the turn is stale
@@ -385,7 +385,7 @@ async def test_cancel_event_set_before_the_tool_call_even_starts_still_stops_the
         "agent1", "t1", "c1", "s1", history, cancel_event=cancel_event,
     )]
 
-    assert events == [ToolCallStartedEvent(tool_name="execute_api")]
+    assert events == [ToolCallStartedEvent(tool_name="execute_api", silent=True)]
     assert json.loads(history[2].content)["error"]["code"] == "cancelled"
 
     executor.release_event.set()
@@ -413,7 +413,7 @@ async def test_no_cancel_event_behaves_exactly_as_before():
     events = [e async for e in orchestrator.run_turn("agent1", "t1", "c1", "s1", history)]
 
     assert events == [
-        ToolCallStartedEvent(tool_name="execute_api"),
+        ToolCallStartedEvent(tool_name="execute_api", silent=True),
         TokenEvent(text="You're booked!"),
     ]
 
@@ -864,3 +864,77 @@ async def test_trailing_message_ends_every_llm_call_and_never_enters_history():
     assert after_tool[0].content == folded and after_tool[-1].role == "tool"
     assert all(m.content != directive.content for m in after_tool)
     assert directive not in history and history[0].content == "book it" and len(history) == 3
+
+
+# ── Filler delay for remote tools ────────────────────────────────────────────
+
+def _orchestrator_for(executor, llm):
+    registry = ExecutorRegistry()
+    registry.register("execute_api", lambda provider: executor)
+    return ToolCallOrchestrator(
+        llm_adapter=LLMAdapter(llm),
+        policy_resolver=_FakePolicyResolver([_policy()]),
+        provider_manager=_FakeProviderManager(),
+        executor_registry=registry,
+    )
+
+
+def _call_then_answer():
+    return _ScriptedLLM([
+        [ToolCallEvent(tool_call_id="c1", tool_name="execute_api", arguments={"api_name": "x"})],
+        [TokenEvent(text="Done.")],
+    ])
+
+
+async def test_a_remote_tool_still_running_after_the_delay_asks_for_a_filler(monkeypatch):
+    from services.conversation.tools import orchestrator as orchestrator_module
+    monkeypatch.setattr(orchestrator_module, "SLOW_TOOL_FILLER_AFTER_S", 0.05)
+    executor = _SlowExecutor(ToolResult(status=ToolStatus.SUCCESS, payload={"ok": True}))
+    orchestrator = _orchestrator_for(executor, _call_then_answer())
+    history = [ChatMessage(role="user", content="check it")]
+
+    started: list[float] = []
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    events = []
+    async for event in orchestrator.run_turn("agent1", "t1", "c1", "s1", history):
+        events.append(event)
+        if isinstance(event, ToolCallStartedEvent):
+            started.append(loop.time() - t0)
+            executor.release_event.set()          # the tool finishes once the filler was requested
+
+    started_events = [e for e in events if isinstance(e, ToolCallStartedEvent)]
+    assert started_events == [ToolCallStartedEvent(tool_name="execute_api", silent=False)]
+    assert started[0] >= 0.045                     # waited out the delay before asking
+
+
+async def test_a_remote_tool_that_finishes_within_the_delay_is_counted_but_stays_silent(monkeypatch):
+    from services.conversation.tools import orchestrator as orchestrator_module
+    monkeypatch.setattr(orchestrator_module, "SLOW_TOOL_FILLER_AFTER_S", 0.5)
+    executor = _FixedExecutor(ToolResult(status=ToolStatus.SUCCESS, payload={"ok": True}))
+    orchestrator = _orchestrator_for(executor, _call_then_answer())
+    history = [ChatMessage(role="user", content="check it")]
+
+    events = [e async for e in orchestrator.run_turn("agent1", "t1", "c1", "s1", history)]
+
+    started_events = [e for e in events if isinstance(e, ToolCallStartedEvent)]
+    assert started_events == [ToolCallStartedEvent(tool_name="execute_api", silent=True)]
+    assert len(executor.calls) == 1
+
+
+async def test_a_zero_delay_asks_for_the_filler_before_the_tool_can_finish(monkeypatch):
+    from services.conversation.tools import orchestrator as orchestrator_module
+    monkeypatch.setattr(orchestrator_module, "SLOW_TOOL_FILLER_AFTER_S", 0.0)
+    executor = _SlowExecutor(ToolResult(status=ToolStatus.SUCCESS, payload={"ok": True}))
+    orchestrator = _orchestrator_for(executor, _call_then_answer())
+    history = [ChatMessage(role="user", content="check it")]
+
+    events = []
+    async for event in orchestrator.run_turn("agent1", "t1", "c1", "s1", history):
+        events.append(event)
+        if isinstance(event, ToolCallStartedEvent):
+            executor.release_event.set()
+
+    assert [e for e in events if isinstance(e, ToolCallStartedEvent)] == [
+        ToolCallStartedEvent(tool_name="execute_api", silent=False)
+    ]

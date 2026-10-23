@@ -10,6 +10,7 @@ import uuid
 from dataclasses import replace
 from typing import Any, AsyncGenerator, Awaitable, Callable, TypeAlias
 
+from ..pipeline_config import env_ms
 from ..metrics import IMetrics
 from ..providers.interfaces import ChatMessage, with_directive
 from ..tool_latency import ToolLatencyStore
@@ -38,9 +39,9 @@ DEFAULT_TOOL_TIMEOUT_MS = 6000
 DEFAULT_MAX_TOOL_ITERATIONS = 2
 # Separate from remote iterations: a cyclic workflow can otherwise spin forever inside one turn.
 DEFAULT_MAX_LOCAL_TOOL_CALLS = 8
-# A tool still running after this long gets a spoken filler (ToolCallStartedEvent -> the pipeline's
-# filler path). Remote tools signal at dispatch instead, sized by their measured latency.
-SLOW_TOOL_FILLER_AFTER_S = 0.8
+# Any tool, local or remote, still running after this long gets a spoken filler (ToolCallStartedEvent ->
+# the pipeline's filler path); one that finishes sooner stays silent. The phrase is sized by measured latency.
+SLOW_TOOL_FILLER_AFTER_S = env_ms("VOICEAI_TOOL_FILLER_DELAY_MS", 400) / 1000.0
 _HELD_WRITE_TTL_S = 600.0   # a held write can be confirmed for this long
 _MAX_HELD_WRITES = 16
 _MAX_TRACKED_CALLS = 256
@@ -262,7 +263,10 @@ class ToolCallOrchestrator:
                         iteration, caller_number, called_number, call_direction, cancel_event, trace_id,
                     ))
                     try:
-                        yield ToolCallStartedEvent(tool_name=event.tool_name)
+                        # A filler is wanted only if the tool is still running after the delay; a call that
+                        # finishes sooner is counted but stays silent.
+                        done, _ = await asyncio.wait({execute_task}, timeout=SLOW_TOOL_FILLER_AFTER_S)
+                        yield ToolCallStartedEvent(tool_name=event.tool_name, silent=bool(done))
                         result = await execute_task
                     except BaseException:
                         execute_task.cancel()

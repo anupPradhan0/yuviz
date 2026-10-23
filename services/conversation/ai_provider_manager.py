@@ -231,6 +231,19 @@ def _require_api_key(cfg: ProviderConfig, api_key: str | None) -> str:
     return api_key
 
 
+def _optional_ms(cfg: ProviderConfig, key: str, *, low: int, high: int) -> int | None:
+    """A whole-number millisecond setting from provider extra, or None when unset."""
+    value = (cfg.extra or {}).get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+        raise ValueError(
+            f"provider_config id={cfg.id!r} engine={cfg.engine!r} has an invalid extra.{key} {value!r} "
+            f"— expected whole milliseconds between {low} and {high}"
+        )
+    return int(value)
+
+
 async def _make_deepgram(cfg: ProviderConfig, api_key: str | None) -> Any:
     from .providers.stt.deepgram import DeepgramSTT
 
@@ -238,6 +251,7 @@ async def _make_deepgram(cfg: ProviderConfig, api_key: str | None) -> Any:
         api_key=_require_api_key(cfg, api_key),
         model=cfg.model or "nova-3",
         language=cfg.language,
+        endpointing_ms=_optional_ms(cfg, "endpointing_ms", low=10, high=5000),
     )
 
 

@@ -43,14 +43,37 @@ def _env(key: str) -> str | None:
     return val if val else None   # empty string → None
 
 
+def _env_number(key: str, default, cast, *, lenient: bool = False):
+    """The one env-number parser. Blank means default. A bad value raises, or with lenient falls back."""
+    raw = os.environ.get(key)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return cast(raw)
+    except ValueError:
+        if lenient:
+            return default
+        raise
+
+
 def _env_float(key: str, default: float) -> float:
-    val = os.environ.get(key)
-    return float(val) if val else default
+    return _env_number(key, default, float)
 
 
 def _env_int(key: str, default: int) -> int:
-    val = os.environ.get(key)
-    return int(val) if val else default
+    return _env_number(key, default, int)
+
+
+def env_ms(key: str, default_ms: float) -> float:
+    """A millisecond setting. Blank or unusable values fall back to the default, because .env.example documents
+    these as blank and a typo must not stop the service importing."""
+    value = _env_number(key, float(default_ms), float, lenient=True)
+    return value if value >= 0 else float(default_ms)
+
+
+def env_count(key: str, default: int, *, minimum: int = 1) -> int:
+    value = _env_number(key, None, int, lenient=True)
+    return default if value is None else max(minimum, value)
 
 
 @dataclass

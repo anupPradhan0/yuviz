@@ -556,7 +556,7 @@ async def test_cancel_event_mid_call_yields_failed_cancelled_and_never_folds_the
     cancel_event.set()
     events = await asyncio.wait_for(task, timeout=1.0)
 
-    assert events == [ToolCallStartedEvent(tool_name="execute_api")]
+    assert events == [ToolCallStartedEvent(tool_name="execute_api", silent=True)]
     folded = json.loads(history[2].content)
     assert folded["status"] == "error"
     assert folded["error"]["code"] == "cancelled"

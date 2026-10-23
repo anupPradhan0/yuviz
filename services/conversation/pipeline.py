@@ -4,6 +4,7 @@ on_cancel() sets an event checked between stages to stop a turn early."""
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -30,12 +31,14 @@ from .directives import (
     TransferRequest,
     strip_markdown_chars,
 )
+from . import phrase_audio
 from .fillers import FillerSelector
-from .i18n import t
+from .i18n import t, tool_fillers
 from .guardrails import GuardrailCounter, GuardrailDetector
 from . import language as lang_state
 from .language import LanguageTracker, fixed_language_instruction, reply_language_instruction, script_language, utterance_language
 from .metrics import IMetrics, NullMetrics
+from .pipeline_config import env_ms
 from .provider_bundle import ProviderBundle
 from .tool_latency import ToolLatencyStore
 from .providers.interfaces import ChatMessage, SttResult, with_directive
@@ -239,6 +242,13 @@ _MAX_DURATION_GOODBYE = t("max_duration_goodbye", "en")
 _FALLBACK_LLM_ERROR = t("fallback_llm_error", "en")
 
 _TOOL_CALL_FILLER_MIN_GAP_S = 4.0
+# A first-turn filler is played only if the model has produced nothing for this long; a model that answers
+# sooner needs none. The filler's audio is cached, so it starts at once when the delay passes.
+_FILLER_DELAY_S = env_ms("VOICEAI_FILLER_DELAY_MS", 400) / 1000.0
+# Items the model/voice producer may run ahead of the consumer: enough to keep it busy, small enough that a
+# caller's interruption does not leave seconds of unsent audio synthesized.
+_TURN_QUEUE_MAX = 16
+_STREAM_END = object()
 # Hard ceiling on retrieved text handed to the LLM, in the knowledge service's own token unit (words).
 # The agent's token budget is enforced server-side (prompt-mode documents get at most half of it); this
 # ceiling is the backstop for what a word count cannot bound and for a service with a larger budget.
@@ -565,6 +575,60 @@ class PipelineConversationHandler:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
+    def _spawn(self, coro) -> None:
+        """Run a best-effort background coroutine, keeping a reference so it is not collected mid-flight."""
+        try:
+            task = asyncio.get_running_loop().create_task(coro)
+        except RuntimeError:
+            coro.close()
+            return
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    def _prewarm_stt(self, session_id: str) -> None:
+        prewarm = getattr(self._stt, "prewarm_stream", None)
+        if prewarm is None or not inspect.iscoroutinefunction(prewarm):
+            return
+        try:
+            warm = prewarm(session_id, self._sample_rate, **self._stt_kwargs)
+        except Exception:
+            log.exception("STT prewarm could not start session=%s", session_id)
+            return
+        self._spawn(warm)
+
+    def _first_turn_filler(self, session_id: str) -> str:
+        state = self._session(session_id)
+        average_ms = (
+            self._latency_store.agent_average_ms(self._tenant_id, self._agent_id or "")
+            if self._latency_store is not None else None
+        )
+        phrase = self._filler_selector.select_tool_filler(
+            "first_turn", state.tool_call_filler_last_phrase, average_ms,
+            language=self._spoken_language(session_id),
+        )
+        state.tool_call_filler_last_phrase = phrase
+        return phrase
+
+    def _filler_languages(self) -> list[str | None]:
+        return list(self._supported_languages) if self._multilingual else [None]
+
+    def _prewarm_phrases(self, session_id: str) -> None:
+        """Synthesize the filler phrases once per voice, after the greeting, so a filler plays the instant it is
+        wanted. A phrase already cached for this TTS instance costs nothing."""
+        async def _run() -> None:
+            for language in self._filler_languages():
+                spoken = language or self._strings_language
+                phrases = [phrase for phrase, _ms in tool_fillers(spoken)]
+                for phrase in phrases:
+                    try:
+                        async for _chunk in self._synthesize_sentence_stream(
+                            phrase, session_id, cache=True, language=language,
+                        ):
+                            pass
+                    except Exception:
+                        log.exception("filler prewarm failed phrase=%r session=%s", phrase, session_id)
+        self._spawn(_run())
+
     def _greeting_text(self) -> str | None:
         """The per-language greeting for the starting language when the agent has one,
         rendered like the workflow's; otherwise the workflow start node's greeting."""
@@ -617,14 +681,21 @@ class PipelineConversationHandler:
                 self._agent_id, self._agent_config_version,
             )
         self._prewarm_knowledge()
+        # Connect to the speech-to-text service now, while the greeting plays, so its connect time is not paid
+        # on the caller's first sentence.
+        self._prewarm_stt(session_id)
         # Speaking the instant the line opens gets the first syllable
         # clipped on some outbound carriers — the start node can hold off.
         if self._workflow.delayed_start_ms > 0:
             await asyncio.sleep(self._workflow.delayed_start_ms / 1000)
         text = self._greeting_text() or ""
-        if not text:
-            return []
-        return [chunk async for chunk in self._synthesize_sentence_stream(text, session_id)]
+        try:
+            if not text:
+                return []
+            # Cached: a repeat call with the same voice plays its greeting without waiting on the voice service.
+            return [chunk async for chunk in self._synthesize_sentence_stream(text, session_id, cache=True)]
+        finally:
+            self._prewarm_phrases(session_id)
 
     async def on_audio(self, session_id: str, payload: bytes) -> HandlerResponse:
         # Lets streaming STT transcribe continuously; no-op for batch providers.
@@ -778,20 +849,11 @@ class PipelineConversationHandler:
         self._refresh_node_prompt(history, session_id)
         history.append(ChatMessage(role="user", content=stt_result.text))
 
-        if is_first_turn and not self._session(session_id).first_turn_filler_spoken:
-            state = self._session(session_id)
-            state.first_turn_filler_spoken = True
-            average_ms = (
-                self._latency_store.agent_average_ms(self._tenant_id, self._agent_id or "")
-                if self._latency_store is not None else None
-            )
-            first_turn_filler = self._filler_selector.select_tool_filler(
-                "first_turn", state.tool_call_filler_last_phrase, average_ms,
-                language=self._spoken_language(session_id),
-            )
-            state.tool_call_filler_last_phrase = first_turn_filler
-            async for chunk in self._synthesize_sentence_stream(first_turn_filler, session_id):
-                yield HandlerResponse(tts_payloads=[chunk])
+        # The first turn may start with a short filler, but only if the model is slow to answer: the model
+        # call starts at once and the filler plays from cached audio when _FILLER_DELAY_S passes without a token.
+        filler_pending = is_first_turn and not self._session(session_id).first_turn_filler_spoken
+        if is_first_turn:
+            self._session(session_id).first_turn_filler_spoken = True
 
         # Knowledge retrieval is the `search_knowledge` local tool, called only when needed.
         messages_for_llm = history
@@ -804,11 +866,44 @@ class PipelineConversationHandler:
         llm_t0 = time.monotonic()
         first_token_at: float | None = None
         first_audio_at: float | None = None
+
+        # The model and voice run in their own task and hand results over a small queue, so the filler
+        # (played from here) never holds the model back, and a slow consumer still pushes back on the producer.
+        items: asyncio.Queue = asyncio.Queue(maxsize=_TURN_QUEUE_MAX)
+
+        async def _produce() -> None:
+            try:
+                async for item in self._llm_to_tts(
+                    messages_for_llm, cancel_event, session_id, directives, tool_calls_made, store=history,
+                ):
+                    await items.put(item)
+                await items.put(_STREAM_END)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await items.put(exc)
+
+        producer = asyncio.create_task(_produce())
         try:
-            async for chunk, tts_audio, marker_seen in self._llm_to_tts(
-                messages_for_llm, cancel_event, session_id, directives, tool_calls_made,
-                store=history,
-            ):
+            while True:
+                if filler_pending and first_token_at is None:
+                    remaining = max(_FILLER_DELAY_S - (time.monotonic() - llm_t0), 0.001)
+                    try:
+                        item = await asyncio.wait_for(items.get(), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        filler_pending = False
+                        filler = self._first_turn_filler(session_id)
+                        async for chunk in self._synthesize_sentence_stream(filler, session_id, cache=True):
+                            yield HandlerResponse(tts_payloads=[chunk])
+                        continue
+                else:
+                    item = await items.get()
+                if item is _STREAM_END:
+                    break
+                if isinstance(item, Exception):
+                    log.error("LLM/TTS pipeline failed session=%s", session_id, exc_info=item)
+                    break
+                chunk, tts_audio, marker_seen = item
                 now = time.monotonic()
                 if first_token_at is None:
                     first_token_at = now
@@ -821,8 +916,11 @@ class PipelineConversationHandler:
                     yield HandlerResponse(tts_payloads=[tts_audio])
                 if cancel_event.is_set():
                     break
-        except Exception:
-            log.exception("LLM/TTS pipeline failed session=%s", session_id)
+        finally:
+            # Stop the model/voice task without awaiting it: awaiting here could swallow a cancellation aimed
+            # at this turn itself. The callback reads its outcome so nothing is logged as never retrieved.
+            producer.cancel()
+            producer.add_done_callback(lambda task: task.cancelled() or task.exception())
 
         # Transitions queue extract/summarize; start after the live generate.
         # on_speech_ended/on_cancel interrupt them before the next turn.
@@ -981,6 +1079,9 @@ class PipelineConversationHandler:
         self._guardrail_counter.reset(session_id)
         self._booking_fabrication_counter.reset(session_id)
         self._sessions.pop(session_id, None)
+        # One handler per call: its prewarms (phrase audio, STT, retrieval) are worthless once the call ends.
+        for task in list(self._background_tasks):
+            task.cancel()
         try:
             await self._stt.cancel_stream(session_id)
         except Exception:
@@ -1317,6 +1418,8 @@ class PipelineConversationHandler:
                             first = False
                     continue
                 if isinstance(item, ToolCallStartedEvent):
+                    if item.silent:
+                        continue  # the tool finished before a filler was due
                     now = time.monotonic()
                     state = self._session(session_id)
                     last_spoken = state.tool_call_filler_last_spoken
@@ -1333,7 +1436,7 @@ class PipelineConversationHandler:
                         )
                         state.tool_call_filler_last_phrase = phrase
                         any_filler_chunk = False
-                        async for chunk in self._synthesize_sentence_stream(phrase, session_id):
+                        async for chunk in self._synthesize_sentence_stream(phrase, session_id, cache=True):
                             if not any_filler_chunk:
                                 any_filler_chunk = True
                                 log.info(
@@ -1471,10 +1574,15 @@ class PipelineConversationHandler:
 
         return handler
 
-    async def _synthesize_sentence_stream(self, text: str, session_id: str) -> AsyncGenerator[bytes, None]:
+    async def _synthesize_sentence_stream(
+        self, text: str, session_id: str, *, cache: bool = False, language: str | None = None,
+    ) -> AsyncGenerator[bytes, None]:
+        """cache=True is for fixed phrases (the greeting, fillers): the audio is kept on the TTS instance and
+        replayed with no synthesis the next time. `language` forces one, for prewarming a language the session
+        has not switched to yet."""
         # Every text source reaches TTS here, so strip markdown once for all of them.
         text = strip_markdown_chars(text)
-        language = self._session_language(session_id) or self._tts_fixed_language
+        language = language or self._session_language(session_id) or self._tts_fixed_language
         if self._multilingual:
             # The LLM sometimes answers in another supported language than the session's;
             # voice the sentence in the language its script says it's in.
@@ -1485,11 +1593,29 @@ class PipelineConversationHandler:
                 language = written_in
         tts = self._tts_for(language)
         kwargs = {"language": language} if language and getattr(tts, "accepts_language", False) is True else {}
+        key = (language, self._sample_rate, text)
+        if cache:
+            hit = phrase_audio.lookup(tts, key)
+            if hit is None and (pending := phrase_audio.in_flight(tts, key)) is not None:
+                hit = await asyncio.shield(pending)    # None: that attempt failed, so synthesize it here
+            if hit is not None:
+                for chunk in hit:
+                    yield chunk
+                return
+        flight = phrase_audio.begin(tts, key) if cache else None
+        collected: list[bytes] = []
+        complete = False
         try:
             async for chunk in tts.synthesize_stream(text, self._sample_rate, **kwargs):
+                if cache:
+                    collected.append(chunk)
                 yield chunk
+            complete = True
         except Exception:
             log.exception("TTS streaming failed text=%r session=%s", text, session_id)
+        finally:
+            if cache:
+                phrase_audio.finish(tts, key, flight, collected if complete else None)
 
     def _session(self, session_id: str) -> _SessionState:
         state = self._sessions.get(session_id)
