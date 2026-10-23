@@ -396,7 +396,9 @@ export default function KnowledgeBasesPage() {
         <div className="card-hdr">
           <h2 className="card-title">Your files</h2>
           <span className="card-sub">
-            {loading || tenantLoading ? "Loading…" : (
+            {loading || tenantLoading ? (
+              "Loading…"
+            ) : (
               <>
                 {sources.length} {sources.length === 1 ? "file" : "files"}
                 {" · "}
@@ -446,25 +448,35 @@ export default function KnowledgeBasesPage() {
           <div className="empty-state">No files match your search.</div>
         ) : (
           <div className="knowledge-table-wrap">
-            <table className="tbl">
-              <thead>
-                <tr>
-                  <th>File</th>
-                  <th>Folder</th>
-                  <th>Status</th>
-                  <th>Used by</th>
-                  <th>Added</th>
-                  <th>
+            <table className="tbl" role="table" aria-label="Your files">
+              <thead role="rowgroup">
+                <tr role="row">
+                  <th scope="col" role="columnheader">
+                    File
+                  </th>
+                  <th scope="col" role="columnheader">
+                    Folder
+                  </th>
+                  <th scope="col" role="columnheader">
+                    Status
+                  </th>
+                  <th scope="col" role="columnheader">
+                    Used by
+                  </th>
+                  <th scope="col" role="columnheader">
+                    Added
+                  </th>
+                  <th scope="col" role="columnheader">
                     <span className="sr-only">Manage</span>
                   </th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody role="rowgroup">
                 {filtered.map((s) => {
                   const agents = s.agents?.filter((a) => a.enabled);
                   return (
-                    <tr key={s.id}>
-                      <td>
+                    <tr key={s.id} role="row">
+                      <td role="cell" data-label="File">
                         <div className="knowledge-library-file">
                           <span className="knowledge-library-file-icon">
                             <FileText size={18} />
@@ -480,7 +492,7 @@ export default function KnowledgeBasesPage() {
                           </div>
                         </div>
                       </td>
-                      <td>
+                      <td role="cell" data-label="Folder">
                         <Link
                           className="knowledge-library-folder"
                           href={folderHref(s.kb_id)}
@@ -492,14 +504,14 @@ export default function KnowledgeBasesPage() {
                           <div className="kb-source-sub">{s.tenantName}</div>
                         )}
                       </td>
-                      <td>
+                      <td role="cell" data-label="Status">
                         <span
                           className={`badge ${FILE_STATUS[s.status].color}`}
                         >
                           {FILE_STATUS[s.status].label}
                         </span>
                       </td>
-                      <td>
+                      <td role="cell" data-label="Used by">
                         {agents == null ? (
                           <span className="knowledge-library-muted">
                             Couldn’t check
@@ -522,8 +534,14 @@ export default function KnowledgeBasesPage() {
                           </span>
                         )}
                       </td>
-                      <td className="kb-source-sub">{timeAgo(s.created_at)}</td>
-                      <td>
+                      <td
+                        className="kb-source-sub"
+                        role="cell"
+                        data-label="Added"
+                      >
+                        {timeAgo(s.created_at)}
+                      </td>
+                      <td role="cell" data-label="Manage">
                         <button
                           className="btn btn-ghost btn-sm"
                           disabled={removingSource === s.id}
