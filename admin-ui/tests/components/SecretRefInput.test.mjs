@@ -9,11 +9,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(here, "SecretRefInput.tsx"), "utf8");
+const source = readFileSync(join(here, "../../components/SecretRefInput.tsx"), "utf8");
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
 });
-// Beside the source so `react` resolves from admin-ui/node_modules.
+// Keep compiled fixtures under admin-ui so `react` resolves from its node_modules.
 const dir = mkdtempSync(join(here, ".secretpayload-"));
 writeFileSync(join(dir, "SecretRefInput.mjs"), outputText);
 const { secretPayload } = await import(pathToFileURL(join(dir, "SecretRefInput.mjs")).href);

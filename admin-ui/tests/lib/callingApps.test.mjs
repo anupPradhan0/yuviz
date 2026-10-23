@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CALLING_APPS, callingAppLabel, cloudonixCredentials, hasAccountId } from "./callingApps.ts";
+import { CALLING_APPS, callingAppLabel, cloudonixCredentials, hasAccountId } from "../../lib/callingApps.ts";
 
 test("Cloudonix edits preserve every existing key without echoing credentials", () => {
   const existing = ["[stored]", "env:ROTATING_KEY", "enc:private"];

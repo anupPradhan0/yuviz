@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { hasInboundNumber, isChatAgent } from "./agentReadiness.ts";
+import { hasInboundNumber, isChatAgent } from "../../lib/agentReadiness.ts";
 
 const agent = { id: "agent-1", template_id: null };
 const number = { agent_id: agent.id, status: "active" };

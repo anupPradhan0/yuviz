@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { availabilityLabel, filterApps, oauthAuthorizationUrl, workAppCards } from "./connectedApps.ts";
+import { availabilityLabel, filterApps, oauthAuthorizationUrl, workAppCards } from "../../lib/connectedApps.ts";
 
 const providers = [{ key: "google", label: "Google", auth_kind: "oauth2" }, { key: "zoho", label: "Zoho", auth_kind: "oauth2" }];
 const presets = [

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { replaceKnowledgeFile } from "./replaceKnowledgeFile.ts";
+import { replaceKnowledgeFile } from "../../lib/replaceKnowledgeFile.ts";
 
 const original = { id: "old", kb_id: "folder", title: "prices.pdf", language: "en", tags: { team: "sales" }, usage_mode: "prompt" };
 const file = { name: "new.pdf" };

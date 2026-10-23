@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { pauseOutcomes, resumeMissing } from "./agentStatusImpact.ts";
+import { pauseOutcomes, resumeMissing } from "../../lib/agentStatusImpact.ts";
 
 const agent = { id: "a", slug: "support", name: "Support", status: "active" };
 const fallback = { id: "b", slug: "backup", name: "Backup", status: "active" };

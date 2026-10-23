@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { draftSetup, makePresetDraft, presetDraftKey, readPresetDraft } from "./connectorDraft.ts";
-import { carrierAccountLabel } from "./callingApps.ts";
+import { draftSetup, makePresetDraft, presetDraftKey, readPresetDraft } from "../../lib/connectorDraft.ts";
+import { carrierAccountLabel } from "../../lib/callingApps.ts";
 
 test("blank carrier labels are omitted on create and explicitly cleared on edit", () => {
   assert.equal(JSON.stringify({ carrier_account_ref: carrierAccountLabel("  ", false) }), "{}");

@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test components/*.test.mjs lib/*.test.mjs"
+    "test": "node --test tests/components/*.test.mjs tests/lib/*.test.mjs"
   },
   "dependencies": {
     "@xyflow/react": "^12.11.5",

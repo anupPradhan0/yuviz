@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(here, "callFlowScaffold.ts"), "utf8");
+const source = readFileSync(join(here, "../../lib/callFlowScaffold.ts"), "utf8");
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 });
